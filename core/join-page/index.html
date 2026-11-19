@@ -46,18 +46,30 @@
 
 <script>
 (() => {
-  const link = location.href;
   const q = new URLSearchParams(location.hash.slice(1));
   const err = m => { const e = document.getElementById('err'); e.textContent = m; e.hidden = false;
                      document.getElementById('what').textContent = ''; };
   // Keep the secret out of browser history once read.
   history.replaceState(null, '', location.pathname);
-  if (!(q.get('t') || q.get('k')) || !q.get('fp')) {
+  const t = q.get('t');
+  const k = q.get('k');
+  const fp = q.get('fp');
+  if (!(t || k) || !fp) {
     return err('This link is incomplete. Ask whoever sent it for a fresh one, and copy it whole.');
   }
-  const kind = q.get('t') ? 'invite' : 'device';
+  if (t && k) {
+    return err('This link is invalid. Ask whoever sent it for a fresh one.');
+  }
   const host = location.host;
-  const quoted = "'" + link.replace(/'/g, '') + "'";
+  if ((t && !/^[a-zA-Z0-9._-]+$/.test(t)) ||
+      (k && !/^[a-zA-Z0-9._-]+$/.test(k)) ||
+      !/^[0-9a-fA-F:]+$/.test(fp) ||
+      !/^[a-zA-Z0-9._:-]+$/.test(host)) {
+    return err('This link contains unexpected characters. Ask whoever sent it for a fresh one.');
+  }
+  const kind = t ? 'invite' : 'device';
+  const cleanLink = `https://${host}/join#${t ? 't=' + t : 'k=' + k}&fp=${fp}`;
+  const quoted = `'${cleanLink}'`;
   const cmds = {
     unix: `curl -fsSLo hogman-join "https://${host}/join/dl/hogman-join-$(uname -s)-$(uname -m)" && chmod +x hogman-join && ./hogman-join ${quoted}`,
     win:  `iwr https://${host}/join/dl/hogman-join-windows-amd64.exe -OutFile hogman-join.exe; .\\hogman-join.exe ${quoted}`,

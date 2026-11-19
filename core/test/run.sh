@@ -245,7 +245,11 @@ from_internet() {  # from_internet <curl args...>
   docker run --rm --network "${COMPOSE_PROJECT_NAME}_outside" -v "$WORK/data/edge-trust:/t:ro" \
     nicolaka/netshoot:v0.14 curl -sf --cacert /t/root.crt "$@"
 }
-page_ok()  { from_internet "https://$PUBLIC_HOST/join" | grep -q 'hogman-join'; }
+page_ok() {
+  local html
+  html="$(from_internet "https://$PUBLIC_HOST/join")" || return 1
+  grep -q 'hogman-join' <<<"$html"
+}
 net_ok()   { from_internet "https://$PUBLIC_HOST/hogman/v1/network" | grep -q '"zone":"bobo.hogman"'; }
 check "https://<host>/join serves the join page" page_ok
 sums="$(from_internet "https://$PUBLIC_HOST/join/dl/SHA256SUMS")"
