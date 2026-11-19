@@ -18,6 +18,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Use unique temp files via `os.CreateTemp` in `writeZone()` and emit `AAAA` DNS records alongside `A` records for dual-stack servers.
 - Run `go test` in `core/registrar/Dockerfile` and add registrar unit tests (`core/registrar/http_test.go`, `core/registrar/service_test.go`) plus server-device and CSRF checks in `core/test/run.sh`.
 
+### Changed
+- Redirect `www.hogman.network` permanently (`301`) to `https://hogman.network{uri}` in `site/Caddyfile` while keeping `hogman.fly.dev` as a direct fallback.
+- Configure RFC1918 `trusted_proxies` CIDRs in `core/templates/headscale.yaml` so Headscale honors `X-Real-IP` forwarded by Caddy `edge`.
+
 ### Added
 - `REVIEW.md` documenting project review findings, DNS/Cloudflare operational notes, and security rationale.
 - `LICENSE`: the project's code is now licensed under AGPL-3.0; README gains status and license sections.

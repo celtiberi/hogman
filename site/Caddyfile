@@ -5,6 +5,8 @@
 }
 
 :8080 {
+	@www host www.hogman.network
+	redir @www https://hogman.network{uri} permanent
 	root * /srv
 	encode zstd gzip
 	header {
