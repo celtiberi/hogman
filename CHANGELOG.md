@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - `REVIEW.md` documenting project review findings, DNS/Cloudflare operational notes, and security rationale.
+- `LICENSE`: the project's code is now licensed under AGPL-3.0; README gains status and license sections.
 
 ## [Baseline] - 2026-11-19
 
