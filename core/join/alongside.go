@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,13 +34,24 @@ func hasAlongside(zone string) bool {
 	return err == nil
 }
 
-func freeLocalAddr() (string, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", err
+// pickLocalAddr chooses a deterministic port outside the OS ephemeral range
+// (17000-26999) from the zone name, scanning forward if that port is in use.
+func pickLocalAddr(zone string) (string, error) {
+	const basePort = 17000
+	const span = 10000
+	sum := sha256.Sum256([]byte(zone))
+	start := int(binary.BigEndian.Uint32(sum[:4]) % span)
+	for i := 0; i < span; i++ {
+		port := basePort + (start+i)%span
+		addr := fmt.Sprintf("127.0.0.1:%d", port)
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			continue
+		}
+		_ = l.Close()
+		return l.Addr().String(), nil
 	}
-	defer l.Close()
-	return l.Addr().String(), nil
+	return "", fmt.Errorf("no free local port in %d-%d", basePort, basePort+span-1)
 }
 
 func agentState(c *agentConfig) (*agentStatus, error) {
@@ -130,7 +143,7 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 			key, handle = en.AuthKey, en.Handle
 			note("welcome, %s", handle)
 		}
-		addr, err := freeLocalAddr()
+		addr, err := pickLocalAddr(n.Zone)
 		if err != nil {
 			return err
 		}

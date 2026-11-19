@@ -164,7 +164,7 @@ join, a second device via a device link, and leaving.
 
 Plus side-by-side mode on a machine with no Tailscale at all.
 
-About six minutes. Last result: **89 passed, 0 failed** (Docker Desktop on macOS, arm64).
+About six minutes. Last result: **97 passed, 0 failed** (Docker Desktop on macOS, arm64).
 Suspension cut access in 3–5 seconds; resume restored it within 2 seconds; a kick cut
 access in 3 seconds. On the real Mac mini (direct connection over the LAN): suspend 2.0 s,
 resume 0.8 s, kick 2.1 s.
@@ -178,7 +178,7 @@ containers), a real public server with a Let's Encrypt cert, and real NAT.
 compose.yaml        services
 hogman              operator tool (setup; passes member/invite/device/name/audit to the registrar)
 registrar/          the registrar (Go): ledger, Headscale client, policy, zone, APIs, CLI
-join/               the join tool (Go, no dependencies), cross-compiled at `up`
+join/               the join tool (Go, embeds tsnet for side-by-side mode), cross-compiled at `up`
 join-page/          the page an invite link opens
 config/             Caddyfiles (env-substituted at runtime)
 templates/          rendered into data/ by ./hogman

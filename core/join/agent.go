@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 )
 
@@ -130,10 +131,7 @@ func runAgent(dir string) error {
 	node := newNode(dir, c, strings.TrimSpace(string(key)))
 	defer node.Close()
 
-	a := &agent{cfg: c, node: node}
-	a.resolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return node.Dial(ctx, network, net.JoinHostPort(c.DNSServer, "53"))
-	}}
+	a := newAgent(c, node)
 
 	// Serve the proxy straight away, so the setup step can watch us come up.
 	ln, err := net.Listen("tcp", c.ProxyAddr)
@@ -172,14 +170,94 @@ func runAgent(dir string) error {
 }
 
 type agent struct {
-	cfg      *agentConfig
-	node     *tsnet.Server
-	resolver *net.Resolver
+	cfg        *agentConfig
+	node       *tsnet.Server
+	resolver   *net.Resolver
+	rp         *httputil.ReverseProxy
+	dialMesh   func(ctx context.Context, network, addr string) (net.Conn, error)
+	lookupDNS  func(ctx context.Context, host string) ([]string, error)
+	peerLookup func(ctx context.Context, host string) ([]string, error)
 
 	mu  sync.Mutex
 	up  bool
 	err string
 	ips []string
+}
+
+func newAgent(c *agentConfig, node *tsnet.Server) *agent {
+	a := &agent{cfg: c, node: node}
+	if node != nil {
+		a.resolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return node.Dial(ctx, network, net.JoinHostPort(c.DNSServer, "53"))
+		}}
+		a.dialMesh = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return node.Dial(ctx, network, addr)
+		}
+		a.lookupDNS = func(ctx context.Context, host string) ([]string, error) {
+			return a.resolver.LookupHost(ctx, host)
+		}
+		a.peerLookup = func(ctx context.Context, host string) ([]string, error) {
+			lc, err := node.LocalClient()
+			if err != nil {
+				return nil, err
+			}
+			st, err := lc.Status(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return peerIPsForHost(st, host), nil
+		}
+	}
+	a.rp = &httputil.ReverseProxy{
+		Director: func(*http.Request) {},
+		Transport: &http.Transport{
+			DialContext:     func(ctx context.Context, _, addr string) (net.Conn, error) { return a.dial(ctx, addr) },
+			IdleConnTimeout: 30 * time.Second,
+		},
+	}
+	return a
+}
+
+func peerIPsForHost(st *ipnstate.Status, host string) []string {
+	if st == nil {
+		return nil
+	}
+	want := strings.ToLower(strings.TrimSuffix(host, ".")) + "."
+	match := func(p *ipnstate.PeerStatus) []string {
+		if p == nil || strings.ToLower(p.DNSName) != want {
+			return nil
+		}
+		out := make([]string, 0, len(p.TailscaleIPs))
+		for _, ip := range p.TailscaleIPs {
+			out = append(out, ip.String())
+		}
+		return out
+	}
+	if ips := match(st.Self); len(ips) > 0 {
+		return ips
+	}
+	for _, p := range st.Peer {
+		if ips := match(p); len(ips) > 0 {
+			return ips
+		}
+	}
+	return nil
+}
+
+func orderIPs(ips []string) []string {
+	var v4, v6 []string
+	for _, raw := range ips {
+		addr, err := netip.ParseAddr(raw)
+		if err != nil {
+			continue
+		}
+		if addr.Is4() {
+			v4 = append(v4, raw)
+		} else {
+			v6 = append(v6, raw)
+		}
+	}
+	return append(v4, v6...)
 }
 
 type agentStatus struct {
@@ -199,7 +277,7 @@ func (a *agent) dial(ctx context.Context, hostport string) (net.Conn, error) {
 	if ip, err := netip.ParseAddr(host); err == nil {
 		for _, r := range meshRanges {
 			if r.Contains(ip) {
-				return a.node.Dial(ctx, "tcp", hostport)
+				return a.dialMesh(ctx, "tcp", hostport)
 			}
 		}
 		return nil, errOutside
@@ -207,11 +285,29 @@ func (a *agent) dial(ctx context.Context, hostport string) (net.Conn, error) {
 	if !a.cfg.inZone(host) {
 		return nil, errOutside
 	}
-	ips, err := a.resolver.LookupHost(ctx, host)
-	if err != nil || len(ips) == 0 {
+	var ips []string
+	if a.lookupDNS != nil {
+		ips, _ = a.lookupDNS(ctx, host)
+	}
+	norm := strings.ToLower(strings.TrimSuffix(host, "."))
+	if len(ips) == 0 && strings.HasSuffix(norm, ".nodes."+a.cfg.Zone) && a.peerLookup != nil {
+		if pips, perr := a.peerLookup(ctx, host); perr == nil {
+			ips = pips
+		}
+	}
+	ordered := orderIPs(ips)
+	if len(ordered) == 0 {
 		return nil, fmt.Errorf("no such name in the pen: %s", host)
 	}
-	return a.node.Dial(ctx, "tcp", net.JoinHostPort(ips[0], port))
+	var lastErr error
+	for _, ip := range ordered {
+		conn, derr := a.dialMesh(ctx, "tcp", net.JoinHostPort(ip, port))
+		if derr == nil {
+			return conn, nil
+		}
+		lastErr = derr
+	}
+	return nil, lastErr
 }
 
 var errOutside = fmt.Errorf("this proxy only serves the pen")
@@ -235,6 +331,8 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}
 }
+
+type closeWriter interface{ CloseWrite() error }
 
 // connect handles "CONNECT host:443", which is how browsers reach HTTPS sites
 // through a proxy. The proxy only moves bytes; TLS stays end to end.
@@ -262,10 +360,27 @@ func (a *agent) connect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer down.Close()
 	_, _ = io.WriteString(down, "HTTP/1.1 200 Connection established\r\n\r\n")
-	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(up, buf); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(down, up); done <- struct{}{} }()
-	<-done
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(up, buf)
+		if cw, ok := up.(closeWriter); ok {
+			_ = cw.CloseWrite()
+		} else {
+			_ = up.Close()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(down, up)
+		if cw, ok := down.(closeWriter); ok {
+			_ = cw.CloseWrite()
+		} else {
+			_ = down.Close()
+		}
+	}()
+	wg.Wait()
 }
 
 // forward handles plain-HTTP requests sent through the proxy.
@@ -280,13 +395,7 @@ func (a *agent) forward(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	rp := &httputil.ReverseProxy{
-		Director: func(*http.Request) {},
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) { return a.dial(ctx, addr) },
-		},
-	}
-	rp.ServeHTTP(w, r)
+	a.rp.ServeHTTP(w, r)
 }
 
 // agentLogout tells the pen this device is leaving. Best effort. Runs in its

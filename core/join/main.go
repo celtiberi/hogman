@@ -275,7 +275,7 @@ func join(raw string, o options) error {
 		return joinAlongside(link, n, root, client, o, "this computer already has a side-by-side connection to "+n.Zone)
 	case tsErr != nil:
 		return joinAlongside(link, n, root, client, o, "Tailscale is not installed or not running here, which is fine")
-	case st.OnOtherNetwork(n.Zone) != "" && !o.switchNet && !o.yes:
+	case st.OnOtherNetwork(n.Zone) != "" && !o.switchNet:
 		return joinAlongside(link, n, root, client, o,
 			"this computer's Tailscale is on another network ("+st.OnOtherNetwork(n.Zone)+"); leaving it alone")
 	}

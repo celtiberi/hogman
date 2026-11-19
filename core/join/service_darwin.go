@@ -27,17 +27,10 @@ func startAgent(dir string, c *agentConfig, o options) error {
 	if o.noService {
 		return startDetached(bin, dir)
 	}
-	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>%s</string>
-  <key>ProgramArguments</key><array><string>%s</string><string>agent</string><string>%s</string></array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>%s</string>
-  <key>StandardErrorPath</key><string>%s</string>
-</dict></plist>
-`, launchLabel(c.Zone), bin, dir, filepath.Join(dir, "agent.log"), filepath.Join(dir, "agent.log"))
+	plist, err := renderLaunchPlist(launchLabel(c.Zone), bin, dir, filepath.Join(dir, "agent.log"))
+	if err != nil {
+		return err
+	}
 	path := launchPlist(c.Zone)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -92,32 +85,23 @@ func networkServices() []string {
 	return svcs
 }
 
-func autoProxyURL(svc string) string {
+func autoProxyState(svc string) (string, bool) {
 	out, _ := run(false, "networksetup", "-getautoproxyurl", svc)
-	for _, l := range strings.Split(out, "\n") {
-		if strings.HasPrefix(l, "URL:") {
-			u := strings.TrimSpace(strings.TrimPrefix(l, "URL:"))
-			if u == "(null)" {
-				return ""
-			}
-			return u
-		}
-	}
-	return ""
+	return parseAutoProxyOutput(out)
 }
 
 // setSystemProxy points the Mac's automatic proxy setting at the agent's
 // rules file, which sends only pen names through the pen. It never replaces
-// a setting someone else put there.
+// an enabled setting someone else put there.
 func setSystemProxy(c *agentConfig) (string, error) {
 	manual := "set System Settings → Network → (your network) → Proxies → Automatic proxy configuration to " + c.pacURL()
 	var done []string
 	for _, svc := range networkServices() {
-		cur := autoProxyURL(svc)
-		if cur != "" && cur != c.pacURL() && !strings.Contains(cur, "/proxy.pac") {
+		cur, enabled := autoProxyState(svc)
+		if shouldLeaveAutoProxy(cur, enabled, c.pacURL()) {
 			return "this Mac already uses an automatic proxy (" + cur + "), so it was left alone. To use the pen in browsers, " + manual, nil
 		}
-		if cur == c.pacURL() {
+		if enabled && cur == c.pacURL() {
 			done = append(done, svc)
 			continue
 		}
@@ -135,7 +119,8 @@ func setSystemProxy(c *agentConfig) (string, error) {
 func clearSystemProxy(c *agentConfig) string {
 	cleared := false
 	for _, svc := range networkServices() {
-		if autoProxyURL(svc) == c.pacURL() {
+		cur, enabled := autoProxyState(svc)
+		if enabled && cur == c.pacURL() {
 			if _, err := run(true, "networksetup", "-setautoproxystate", svc, "off"); err == nil {
 				cleared = true
 			}
