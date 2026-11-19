@@ -102,6 +102,23 @@ services:
     <<: *fresh-computer
     hostname: carol-desktop
 
+  # A computer with no Tailscale at all. Dave joins side by side: the join
+  # tool brings its own connection and a local proxy for pen names only.
+  dave-laptop:
+    image: nicolaka/netshoot:v0.14
+    hostname: dave-laptop
+    networks: [outside]
+    profiles: [clients]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        cp /edge-trust/root.crt /usr/local/share/ca-certificates/control-host.crt &&
+        update-ca-certificates >/dev/null 2>&1;
+        exec sleep infinity
+    volumes:
+      - ./data/edge-trust:/edge-trust:ro
+      - ./data/join-dl:/dl:ro
+
   # Alice's website, running on her server exactly as a member would run it.
   alice-web:
     image: caddy:2.11.9

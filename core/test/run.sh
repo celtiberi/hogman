@@ -267,6 +267,36 @@ check "leave removed the root from the system store" \
 logged_out() { [ "$(run carol-desktop tailscale status --json | jq -r .BackendState)" != Running ]; }
 check "leave logged the device out" logged_out
 
+step "Side by side: a computer with no Tailscale at all"
+dc up -d dave-laptop
+retry 20 run dave-laptop test -s /etc/ssl/certs/ca-certificates.crt
+DAVE_LINK="$($H invite create --note dave | awk '/^link:/ {print $2}')"
+out="$(join_tool dave-laptop --handle dave --hostname dave-laptop "$DAVE_LINK" 2>&1)"; rc=$?
+echo "$out" | sed 's/^/        | /'
+check "the join tool succeeds without Tailscale installed (exit $rc)" test $rc = 0
+check "it chose side-by-side mode by itself" grep -q "joining side by side" <<<"$out"
+check "it reports dave is in" grep -q "You're in. You are dave on bobo.hogman" <<<"$out"
+check "the registrar recorded dave's laptop" retry 10 sh -c "$H device list | grep -q 'dave.*dave-laptop'"
+PROXY="$(run dave-laptop sh -c 'grep -o "127.0.0.1:[0-9]*" /root/.config/hogman/bobo.hogman/config.json | head -1' | tr -d '\r')"
+via_pen()   { run dave-laptop curl -sf -m10 --proxy "http://$PROXY" "$1"; }
+alice_via() { via_pen https://alice.$ZONE | grep -q "hello from alice.$ZONE"; }
+check "dave loads alice's site through the pen, trusted by the system store" retry 20 alice_via
+outside_code() { run dave-laptop curl -s -m10 -o /dev/null -w '%{http_code}' --proxy "http://$PROXY" http://example.com | tr -d '\r'; }
+check "the pen's proxy refuses anything outside the pen (HTTP $(outside_code))" test "$(outside_code)" = 403
+pac_ok() { run dave-laptop curl -sf "http://$PROXY/proxy.pac" | grep -q 'dnsDomainIs(host, ".bobo.hogman")'; }
+check "its rules file sends only pen names through the pen" pac_ok
+no_tun() { ! run dave-laptop ip -o link | grep -qi tailscale; }
+check "no network interface was added to the computer" no_tun
+direct_ok() { run dave-laptop curl -sf -m10 -o /dev/null https://example.com; }
+check "dave's ordinary internet is untouched" direct_ok
+out="$(join_tool dave-laptop leave "$DAVE_LINK" 2>&1)"; rc=$?
+[ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
+check "leave works (exit $rc)" grep -q "Left bobo.hogman" <<<"$out"
+gone() { ! run dave-laptop test -e /root/.config/hogman/bobo.hogman; }
+check "leave removed the connection and its settings" gone
+proxy_closed() { ! run dave-laptop curl -s -m3 -o /dev/null "http://$PROXY/status"; }
+check "the proxy is no longer running" retry 10 proxy_closed
+
 step "Suspend and resume"
 check "alice (admin) cannot suspend the owner" expect 403 alice-laptop-tools POST /api/admin/members/root/suspend
 $H member suspend bob "testing" >/dev/null

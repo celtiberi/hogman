@@ -60,6 +60,18 @@ The join tool ([join/](join/)) then:
 5. checks `https://home.<network>.hogman` loads using only the computer's own DNS and
    trust store, exactly as a browser would, and opens it.
 
+**Two ways in, chosen automatically.**
+
+- *Whole device:* if Tailscale is installed and not in use, the tool joins with it, and
+  every app on the device can reach the pen.
+- *Side by side:* if Tailscale is missing, or already on another network, the tool
+  runs its own small connection (Tailscale's embeddable library, no network interface,
+  no admin rights) and a local proxy that carries **only** names in the pen. The
+  computer's Tailscale and everything else are left alone, so a member can be in a pen
+  and on their own tailnet at once. Browsers use it through a proxy rules file the tool
+  serves; curl, git and ssh need one line of proxy config, which the tool prints.
+  Force it with `--alongside`; force the whole-device way with `--switch`.
+
 Trust is added before the invite is redeemed, so if that step fails the invite is still
 unused. More devices: `./hogman device key <handle> personal` (or `POST /api/devices` from
 the portal) prints a device link for the same tool. `hogman-join leave '<link>'` removes
@@ -70,7 +82,12 @@ Tested end to end on Linux (containers) and on a real Mac mini (macOS 14.6, Home
 Tailscale) joining a network hosted on another Mac over the LAN: invite redeemed, two
 approvals on screen, joined as a second Tailscale profile, Safari and system curl trusted
 the portal, ordinary browsing unaffected; then `leave` removed the certificate and the
-saved profile. Windows: compiled only.
+saved profile. Side-by-side mode:
+tested end to end on Linux with no Tailscale installed, and on the Mac mini while it
+stayed on another tailnet: both networks worked at the same moment, and a kick cut the
+pen off in 1.8 s without disturbing the tailnet. Not yet exercised on a Mac: the login
+item that restarts the agent, and setting the system's automatic proxy (both were
+switched off for the remote test). Windows: compiled only.
 
 **macOS needs a person at the screen.** macOS only lets someone approve a new trusted
 certificate on screen, even for an administrator, so the tool must run in Terminal on the
@@ -145,7 +162,9 @@ Also covers the join page and downloads, and the join tool on two fresh Linux ma
 with only Tailscale installed: a tampered link refused before the invite is used, a full
 join, a second device via a device link, and leaving.
 
-About five minutes. Last result: **77 passed, 0 failed** (Docker Desktop on macOS, arm64).
+Plus side-by-side mode on a machine with no Tailscale at all.
+
+About six minutes. Last result: **89 passed, 0 failed** (Docker Desktop on macOS, arm64).
 Suspension cut access in 3–5 seconds; resume restored it within 2 seconds; a kick cut
 access in 3 seconds. On the real Mac mini (direct connection over the LAN): suspend 2.0 s,
 resume 0.8 s, kick 2.1 s.

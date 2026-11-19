@@ -115,11 +115,14 @@ type NetworkInfo struct {
 	RootCA          string `json:"root_ca"`
 	RootFingerprint string `json:"root_fingerprint"`
 	Portal          string `json:"portal"`
+	// Mesh address of the pen's DNS server. Only reachable from inside the
+	// mesh; side-by-side clients resolve pen names through it.
+	DNSServer string `json:"dns_server"`
 }
 
 func (s *Service) NetworkInfo() NetworkInfo {
 	return NetworkInfo{Zone: s.cfg.Zone, LoginServer: s.LoginServer(), RootCA: s.rootPEM,
-		RootFingerprint: s.rootFP, Portal: "https://home." + s.cfg.Zone}
+		RootFingerprint: s.rootFP, Portal: "https://home." + s.cfg.Zone, DNSServer: s.cfg.CoreIP}
 }
 
 // Links handed to people. The part after # never reaches any server: the

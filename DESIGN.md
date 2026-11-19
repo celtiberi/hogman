@@ -275,7 +275,7 @@ The owner-facing API is reachable only from the mesh, and only by owner and admi
 3. **Kick latency.** Measure time from kick to loss of connectivity for direct and relayed connections. *Real Mac mini on a LAN, direct connection: suspend 2.0 s, resume 0.8 s, kick 2.1 s. Local test measurements: removing one device by deleting it, 6–7 seconds; suspending a member, 3–5 seconds; kicking a member, 3 seconds (the policy change lands before the device deletions). Still to measure on a real public server, over the relay, and with real NAT.*
 4. **Headscale version specifics.** Policy syntax, tagged-device ownership and the user-deletion behaviour differ between releases; pin a version and verify.
 5. **Whether the public hostname can be avoided,** for example with a cert issued to a bare IP address.
-6. **Belonging to two networks.** The stock client is on one network at a time and switches between them; the root certs coexist. Confirm the switching experience is tolerable.
+6. **Belonging to two networks.** *Resolved by side-by-side mode (core/join): the join tool can run its own embedded connection (tsnet) with a local proxy for pen names only, leaving the device's Tailscale alone. Proven on a Mac that stayed on another tailnet throughout. The cost: only apps that use the proxy reach the pen (browsers via a PAC file; curl, git, ssh with one line of config). The whole-device way still switches Tailscale profiles.*
 
 ## 14. Operations
 

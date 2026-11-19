@@ -19,6 +19,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,7 +46,13 @@ usage:
 options:
   --handle NAME     the name you want on the network (invite links only; asked if missing)
   --hostname NAME   what this device is called on the network (default: this computer's name)
-  --yes             don't ask before switching away from another Tailscale network
+  --alongside       join side by side: a small agent of its own, leaving this computer's
+                    Tailscale (and everything else) alone. Chosen automatically when
+                    Tailscale is missing or already on another network.
+  --switch          use this computer's Tailscale even if it is on another network
+                    (that network is paused until you switch back)
+  --no-service      side by side: don't register a login item, just run in the background
+  --no-system-proxy side by side: don't change this computer's automatic proxy setting
   --dry-run         check the link and the network, then stop without changing anything
   --no-trust        don't add the network's certificate to this computer
   --no-open         don't open the portal in a browser at the end
@@ -59,6 +66,8 @@ Quote the link: it contains '#' and '&'.
 type options struct {
 	handle, hostname, controlCA  string
 	yes, dryRun, noTrust, noOpen bool
+	alongside, switchNet         bool
+	noService, noSystemProxy     bool
 }
 
 func main() {
@@ -73,6 +82,10 @@ func main() {
 	fs.BoolVar(&o.noTrust, "no-trust", false, "")
 	fs.BoolVar(&o.noOpen, "no-open", false, "")
 	fs.BoolVar(&verbose, "verbose", false, "")
+	fs.BoolVar(&o.alongside, "alongside", false, "")
+	fs.BoolVar(&o.switchNet, "switch", false, "")
+	fs.BoolVar(&o.noService, "no-service", false, "")
+	fs.BoolVar(&o.noSystemProxy, "no-system-proxy", false, "")
 	showVersion := fs.Bool("version", false, "")
 
 	// Allow options before or after the link.
@@ -105,6 +118,16 @@ func main() {
 		}
 		fmt.Println(who)
 		return
+	case len(pos) == 2 && pos[0] == "__agent-logout":
+		agentLogout(pos[1])
+		return
+	case len(pos) == 2 && pos[0] == "agent":
+		// Internal: the long-running side-by-side connection.
+		if aerr := runAgent(pos[1]); aerr != nil {
+			fmt.Fprintln(os.Stderr, aerr.Error())
+			os.Exit(1)
+		}
+		return
 	case len(pos) == 1:
 		err = join(pos[0], o)
 	case len(pos) == 2 && pos[0] == "leave":
@@ -132,6 +155,7 @@ type networkInfo struct {
 	RootCA          string `json:"root_ca"`
 	RootFingerprint string `json:"root_fingerprint"`
 	Portal          string `json:"portal"`
+	DNSServer       string `json:"dns_server"`
 }
 
 type enrolment struct {
@@ -238,23 +262,27 @@ func join(raw string, o options) error {
 	note("its certificate matches the link (%s)", short(root.Fingerprint))
 	note("and can only vouch for names ending in .%s", n.Zone)
 
-	ts, err := findTailscale()
-	if err != nil {
-		return err
+	// Which way in? Side by side unless this computer's Tailscale is free to use.
+	ts, tsErr := findTailscale()
+	var st *TSStatus
+	if tsErr == nil {
+		st, tsErr = ts.Status()
 	}
-	st, err := ts.Status()
-	if err != nil {
-		return err
+	switch {
+	case o.alongside:
+		return joinAlongside(link, n, root, client, o, "side-by-side mode was asked for")
+	case hasAlongside(n.Zone):
+		return joinAlongside(link, n, root, client, o, "this computer already has a side-by-side connection to "+n.Zone)
+	case tsErr != nil:
+		return joinAlongside(link, n, root, client, o, "Tailscale is not installed or not running here, which is fine")
+	case st.OnOtherNetwork(n.Zone) != "" && !o.switchNet && !o.yes:
+		return joinAlongside(link, n, root, client, o,
+			"this computer's Tailscale is on another network ("+st.OnOtherNetwork(n.Zone)+"); leaving it alone")
 	}
 	already := st.BackendState == "Running" && st.OnNetwork(n.Zone)
 	if other := st.OnOtherNetwork(n.Zone); other != "" {
 		note("this device is currently on another Tailscale network: %s", other)
-		note("joining switches to %s; switch back any time with: tailscale switch --list", n.Zone)
-		if !o.yes && !o.dryRun {
-			if !isTerminal() || !confirm("  Switch now?") {
-				return errorf("not switching. Run again with --yes to switch.")
-			}
-		}
+		note("switching it to %s, as asked; switch back any time with: tailscale switch --list", n.Zone)
 	}
 
 	hostname := o.hostname
@@ -390,7 +418,12 @@ func checkPortalFresh(portal string) (string, error) {
 // checkPortal loads the portal using this computer's own trust store and DNS:
 // exactly what a browser will do. It returns the member's handle.
 func checkPortal(portal string, d time.Duration) (string, error) {
-	c := &http.Client{Timeout: 5 * time.Second}
+	c := &http.Client{Timeout: 8 * time.Second}
+	if p := os.Getenv("HOGMAN_CHECK_PROXY"); p != "" {
+		if pu, err := url.Parse(p); err == nil {
+			c.Transport = &http.Transport{Proxy: http.ProxyURL(pu)}
+		}
+	}
 	deadline := time.Now().Add(d)
 	var last error
 	for time.Now().Before(deadline) {
@@ -453,6 +486,7 @@ func leave(raw string, o options) error {
 	} else {
 		note("the %s certificate was not installed", n.Zone)
 	}
+	leaveAlongside(n.Zone)
 	if ts, err := findTailscale(); err == nil {
 		if st, err := ts.Status(); err == nil && st.OnNetwork(n.Zone) {
 			if err := ts.Logout(); err != nil {
