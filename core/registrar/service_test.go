@@ -1,0 +1,443 @@
+package main
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+type fakeHeadscale struct {
+	mu            sync.Mutex
+	nextUserID    int
+	nextKeyID     int
+	users         map[string]HSUser
+	keys          map[string]HSPreAuthKey
+	nodes         []HSNode
+	policy        string
+	failCreateKey bool
+	srv           *httptest.Server
+}
+
+func newFakeHeadscale(t *testing.T) *fakeHeadscale {
+	t.Helper()
+	f := &fakeHeadscale{
+		users: map[string]HSUser{},
+		keys:  map[string]HSPreAuthKey{},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/user", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		name := r.URL.Query().Get("name")
+		var out []HSUser
+		for _, u := range f.users {
+			if name == "" || u.Name == name {
+				out = append(out, u)
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"users": out})
+	})
+	mux.HandleFunc("POST /api/v1/user", func(w http.ResponseWriter, r *http.Request) {
+		var in struct{ Name string }
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.nextUserID++
+		u := HSUser{ID: strconv.Itoa(f.nextUserID), Name: in.Name}
+		f.users[u.ID] = u
+		_ = json.NewEncoder(w).Encode(map[string]any{"user": u})
+	})
+	mux.HandleFunc("DELETE /api/v1/user/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		delete(f.users, r.PathValue("id"))
+		w.WriteHeader(200)
+	})
+	mux.HandleFunc("POST /api/v1/preauthkey", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.failCreateKey {
+			http.Error(w, "headscale down", http.StatusServiceUnavailable)
+			return
+		}
+		var in struct {
+			ACLTags []string `json:"aclTags"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		f.nextKeyID++
+		id := strconv.Itoa(f.nextKeyID)
+		k := HSPreAuthKey{ID: id, Key: "hskey-test-" + id, ACLTags: in.ACLTags}
+		f.keys[id] = k
+		_ = json.NewEncoder(w).Encode(map[string]any{"preAuthKey": k})
+	})
+	mux.HandleFunc("POST /api/v1/preauthkey/expire", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	})
+	mux.HandleFunc("GET /api/v1/node", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"nodes": f.nodes})
+	})
+	mux.HandleFunc("DELETE /api/v1/node/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		id := r.PathValue("id")
+		kept := f.nodes[:0]
+		for _, n := range f.nodes {
+			if n.ID != id {
+				kept = append(kept, n)
+			}
+		}
+		f.nodes = kept
+		w.WriteHeader(200)
+	})
+	mux.HandleFunc("GET /api/v1/policy", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]string{"policy": f.policy})
+	})
+	mux.HandleFunc("PUT /api/v1/policy", func(w http.ResponseWriter, r *http.Request) {
+		var in struct{ Policy string }
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		f.mu.Lock()
+		f.policy = in.Policy
+		f.mu.Unlock()
+		w.WriteHeader(200)
+	})
+	f.srv = httptest.NewServer(mux)
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *fakeHeadscale) userExists(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.users[id]
+	return ok
+}
+
+type testEnv struct {
+	svc *Service
+	st  *Store
+	hs  *fakeHeadscale
+	dir string
+}
+
+func writeTestRootCA(t *testing.T, path string) {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "bobo.hogman Root CA"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		IsCA:         true,
+		KeyUsage:     x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &k.PublicKey, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newTestEnv(t *testing.T) *testEnv {
+	t.Helper()
+	dir := t.TempDir()
+	rootPath := filepath.Join(dir, "root_ca.crt")
+	writeTestRootCA(t, rootPath)
+	st, err := OpenStore(filepath.Join(dir, "registrar.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.db.Close() })
+	hs := newFakeHeadscale(t)
+	cfg := Config{
+		Zone:         "bobo.hogman",
+		PublicHost:   "hs.example.com",
+		CoreIP:       "100.64.0.1",
+		CAIP:         "100.64.0.2",
+		ZoneFile:     filepath.Join(dir, "db.zone"),
+		RootCAFile:   rootPath,
+		NameHold:     90 * 24 * time.Hour,
+		InviteTTL:    7 * 24 * time.Hour,
+		DeviceKeyTTL: time.Hour,
+	}
+	svc, err := NewService(cfg, st, NewHeadscale(hs.srv.URL, "test-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &testEnv{svc: svc, st: st, hs: hs, dir: dir}
+}
+
+func (e *testEnv) addDevice(t *testing.T, handle, kind, name, ipv4, ipv6 string) (*Member, *Device) {
+	t.Helper()
+	m, err := e.st.MemberByHandle(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Device{
+		MemberID: m.ID,
+		Kind:     kind,
+		HSNodeID: fmt.Sprintf("node-%d-%s", m.ID, name),
+		Name:     name,
+		IPv4:     ipv4,
+		IPv6:     ipv6,
+	}
+	if err := e.st.InsertDevice(d); err != nil {
+		t.Fatal(err)
+	}
+	return m, d
+}
+
+func TestRedeemRollbackOnPreAuthKeyFailure(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+
+	inv, err := e.svc.MintInvite(cli, "member", "alice invite", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e.hs.mu.Lock()
+	e.hs.failCreateKey = true
+	e.hs.mu.Unlock()
+
+	if _, err := e.svc.Redeem(ctx, inv.Token, "alice"); err == nil {
+		t.Fatal("expected Redeem to fail when Headscale key creation fails")
+	}
+
+	gotInv, err := e.st.InviteByID(inv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotInv.State() != "open" {
+		t.Fatalf("invite state = %q, want open after rollback", gotInv.State())
+	}
+	if _, err := e.st.MemberByHandle("alice"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("member alice should have been rolled back, got err=%v", err)
+	}
+	if e.hs.userExists("1") {
+		t.Fatal("Headscale user 1 should have been deleted on rollback")
+	}
+
+	e.hs.mu.Lock()
+	e.hs.failCreateKey = false
+	e.hs.mu.Unlock()
+
+	enr, err := e.svc.Redeem(ctx, inv.Token, "alice")
+	if err != nil {
+		t.Fatalf("retry Redeem after Headscale recovery failed: %v", err)
+	}
+	if enr.Handle != "alice" || enr.AuthKey == "" {
+		t.Fatalf("unexpected enrolment: %+v", enr)
+	}
+}
+
+func TestRedeemRejectsSuspendedMinter(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+
+	alice, err := e.svc.AddMember(ctx, cli, "alice", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, err := e.svc.MintInvite(Actor{Member: alice}, "member", "", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.Suspend(ctx, cli, "alice", "timeout"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = e.svc.Redeem(ctx, inv.Token, "bob")
+	var prob *Problem
+	if !errors.As(err, &prob) || prob.Status != 403 {
+		t.Fatalf("want 403 forbidden for suspended minter, got %v", err)
+	}
+	gotInv, _ := e.st.InviteByID(inv.ID)
+	if gotInv.State() != "open" {
+		t.Fatalf("invite state = %q, want open", gotInv.State())
+	}
+}
+
+func TestClaimOwnerSeizeAndConcurrency(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+
+	owner, err := e.svc.AddMember(ctx, cli, "root", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice, err := e.svc.AddMember(ctx, cli, "alice", "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := e.svc.AddMember(ctx, cli, "bob", "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ownerSrv := e.addDevice(t, "root", "server", "root-srv", "100.64.0.10", "")
+	_, aliceSrv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.11", "")
+	_, bobSrv := e.addDevice(t, "bob", "server", "bob-srv", "100.64.0.12", "")
+
+	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "alice", aliceSrv.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Claim(Actor{Member: bob}, "bob", "alice", bobSrv.ID); err == nil {
+		t.Fatal("bob should not be able to claim alice's name")
+	}
+
+	if _, err := e.svc.Claim(cli, "root", "alice", ownerSrv.ID); err != nil {
+		t.Fatalf("owner should be able to seize active name: %v", err)
+	}
+	n, err := e.st.NameByName("alice")
+	if err != nil || n.MemberID != owner.ID || n.DeviceID == nil || *n.DeviceID != ownerSrv.ID {
+		t.Fatalf("expected name alice to belong to root server, got %+v (err=%v)", n, err)
+	}
+
+	// Concurrent claims for the same unclaimed name: exactly one succeeds, one gets 409.
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err := e.svc.Claim(Actor{Member: alice}, "alice", "contested", aliceSrv.ID)
+		errs <- err
+	}()
+	go func() {
+		defer wg.Done()
+		_, err := e.svc.Claim(Actor{Member: bob}, "bob", "contested", bobSrv.ID)
+		errs <- err
+	}()
+	wg.Wait()
+	close(errs)
+
+	var successes, conflicts int
+	for err := range errs {
+		if err == nil {
+			successes++
+			continue
+		}
+		var prob *Problem
+		if errors.As(err, &prob) && prob.Status == 409 {
+			conflicts++
+		} else {
+			t.Fatalf("unexpected concurrent claim error: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("want 1 success and 1 conflict, got successes=%d conflicts=%d", successes, conflicts)
+	}
+}
+
+func TestWriteZoneIPv6AndConcurrency(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+
+	alice, err := e.svc.AddMember(ctx, cli, "alice", "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, srv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.20", "fd7a:115c:a1e0::20")
+	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "alice", srv.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(e.svc.cfg.ZoneFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zone := string(raw)
+	if !strings.Contains(zone, "alice IN A 100.64.0.20") {
+		t.Fatalf("zone file missing A record:\n%s", zone)
+	}
+	if !strings.Contains(zone, "alice IN AAAA fd7a:115c:a1e0::20") {
+		t.Fatalf("zone file missing AAAA record:\n%s", zone)
+	}
+
+	// Simulate concurrent zone writers (e.g., daemon + CLI processes) writing to the same directory.
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			svc2, err := NewService(e.svc.cfg, e.st, e.svc.hs)
+			if err != nil {
+				errs <- err
+				return
+			}
+			errs <- svc2.writeZone()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent writeZone failed: %v", err)
+		}
+	}
+
+	entries, err := os.ReadDir(e.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ent := range entries {
+		if strings.HasPrefix(ent.Name(), ".db.zone.") {
+			t.Fatalf("leftover temp file after writeZone: %s", ent.Name())
+		}
+	}
+
+	// Sequential writes within the same second must strictly bump SOA serial.
+	readSerial := func() int64 {
+		b, err := os.ReadFile(e.svc.cfg.ZoneFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := serialRE.FindSubmatch(b)
+		if m == nil {
+			t.Fatalf("SOA serial not found in:\n%s", b)
+		}
+		s, _ := strconv.ParseInt(string(m[1]), 10, 64)
+		return s
+	}
+	s1 := readSerial()
+	svc2, err := NewService(e.svc.cfg, e.st, e.svc.hs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc2.writeZone(); err != nil {
+		t.Fatal(err)
+	}
+	s2 := readSerial()
+	if s2 <= s1 {
+		t.Fatalf("expected SOA serial to increase (%d -> %d)", s1, s2)
+	}
+}

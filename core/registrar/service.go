@@ -348,7 +348,10 @@ func (s *Service) Kick(ctx context.Context, a Actor, handle, reason string) (*Ki
 		log.Printf("kick %s: policy: %v", handle, err)
 	}
 	// 3. Unused device keys and invites they minted.
-	keys, _ := s.st.OpenDeviceKeys(m.ID)
+	keys, err := s.st.OpenDeviceKeys(m.ID)
+	if err != nil {
+		log.Printf("kick %s: list device keys: %v", handle, err)
+	}
 	for _, k := range keys {
 		if err := s.hs.ExpireKey(ctx, k.HSKeyID); err != nil {
 			log.Printf("kick %s: expire key %s: %v", handle, k.HSKeyID, err)
@@ -356,10 +359,16 @@ func (s *Service) Kick(ctx context.Context, a Actor, handle, reason string) (*Ki
 		_ = s.st.RevokeDeviceKey(k.ID)
 		rep.Keys++
 	}
-	n, _ := s.st.RevokeOpenInvitesBy(m.ID)
+	n, err := s.st.RevokeOpenInvitesBy(m.ID)
+	if err != nil {
+		log.Printf("kick %s: revoke invites: %v", handle, err)
+	}
 	rep.Invites = int(n)
 	// 4. Delete every device they own, personal and server.
-	devs, _ := s.st.MemberDevices(m.ID)
+	devs, err := s.st.MemberDevices(m.ID)
+	if err != nil {
+		log.Printf("kick %s: list devices: %v", handle, err)
+	}
 	for _, d := range devs {
 		if err := s.hs.DeleteNode(ctx, d.HSNodeID); err != nil {
 			log.Printf("kick %s: delete node %s: %v (sync will retry)", handle, d.HSNodeID, err)
@@ -374,7 +383,10 @@ func (s *Service) Kick(ctx context.Context, a Actor, handle, reason string) (*Ki
 	}
 	// 6. Withdraw their names and hold them so nobody can impersonate their sites.
 	rep.HeldUntil = time.Now().Add(s.cfg.NameHold).Unix()
-	held, _ := s.st.HoldNames(m.ID, rep.HeldUntil)
+	held, err := s.st.HoldNames(m.ID, rep.HeldUntil)
+	if err != nil {
+		log.Printf("kick %s: hold names: %v", handle, err)
+	}
 	rep.NamesHeld = int(held)
 	if err := s.writeZone(); err != nil {
 		log.Printf("kick %s: zone: %v", handle, err)
@@ -474,6 +486,8 @@ type Enrolment struct {
 // Redeem turns an invite into a membership plus a key for the first device.
 // This is the only operation reachable from the public internet.
 func (s *Service) Redeem(ctx context.Context, token, handle string) (*Enrolment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	inv, err := s.st.InviteByHash(hashToken(strings.TrimSpace(token)))
 	if errors.Is(err, ErrNotFound) {
 		return nil, forbidden("invite not valid")
@@ -488,22 +502,33 @@ func (s *Service) Redeem(ctx context.Context, token, handle string) (*Enrolment,
 			return nil, forbidden("invite not valid")
 		}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	m, err := s.createMember(ctx, handle, inv.Role, inv.MintedBy)
 	if err != nil {
 		return nil, err
 	}
 	if ok, err := s.st.ClaimInvite(inv.ID, m.ID); err != nil || !ok {
-		_ = s.st.SetMemberStatus(m.ID, "removed")
-		_ = s.hs.DeleteUser(ctx, m.HSUserID)
+		if derr := s.st.DeleteMember(m.ID); derr != nil {
+			log.Printf("redeem rollback member %d: %v", m.ID, derr)
+		}
+		if herr := s.hs.DeleteUser(ctx, m.HSUserID); herr != nil {
+			log.Printf("redeem rollback headscale user %s: %v", m.HSUserID, herr)
+		}
 		return nil, forbidden("invite not valid")
 	}
-	s.st.Audit(handle, "invite.redeem", fmt.Sprintf("invite#%d", inv.ID), "")
 	key, exp, err := s.issueKey(ctx, m, "personal")
 	if err != nil {
+		if uerr := s.st.UnclaimInvite(inv.ID, m.ID); uerr != nil {
+			log.Printf("redeem rollback invite %d: %v", inv.ID, uerr)
+		}
+		if derr := s.st.DeleteMember(m.ID); derr != nil {
+			log.Printf("redeem rollback member %d: %v", m.ID, derr)
+		}
+		if herr := s.hs.DeleteUser(ctx, m.HSUserID); herr != nil {
+			log.Printf("redeem rollback headscale user %s: %v", m.HSUserID, herr)
+		}
 		return nil, err
 	}
+	s.st.Audit(handle, "invite.redeem", fmt.Sprintf("invite#%d", inv.ID), "")
 	return &Enrolment{
 		Handle: handle, Zone: s.cfg.Zone, LoginServer: s.LoginServer(),
 		AuthKey: key, AuthKeyExpires: exp, RootCA: s.rootPEM, RootFingerprint: s.rootFP,
@@ -549,6 +574,7 @@ func (s *Service) issueKey(ctx context.Context, m *Member, kind string) (string,
 	}
 	dk := &DeviceKey{MemberID: m.ID, Kind: kind, HSKeyID: k.ID, ExpiresAt: time.Now().Add(s.cfg.DeviceKeyTTL).Unix()}
 	if err := s.st.InsertDeviceKey(dk); err != nil {
+		_ = s.hs.ExpireKey(ctx, k.ID)
 		return "", 0, err
 	}
 	return k.Key, dk.ExpiresAt, nil
@@ -601,6 +627,8 @@ func (s *Service) WhoIs(ip string) (*Member, *Device, error) {
 // ----------------------------------------------------------------- names --
 
 func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	m, err := s.member(handle)
 	if err != nil {
 		return "", err
@@ -619,7 +647,7 @@ func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64) (string
 		if existing.HeldUntil != nil && *existing.HeldUntil > now() && !a.IsOwner() {
 			return "", conflict("%s is held until %s", name, time.Unix(*existing.HeldUntil, 0).UTC().Format("2006-01-02"))
 		}
-		if existing.HeldUntil == nil && existing.MemberID != m.ID {
+		if existing.HeldUntil == nil && existing.MemberID != m.ID && !a.IsOwner() {
 			return "", conflict("%s belongs to %s", name, existing.Member)
 		}
 	}
@@ -636,8 +664,6 @@ func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64) (string
 	if d.Kind != "server" {
 		return "", bad("device %d is a personal device; names point at servers (personal devices accept no connections)", deviceID)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.st.UpsertName(name, m.ID, &d.ID); err != nil {
 		return "", err
 	}
@@ -872,6 +898,9 @@ func (s *Service) writeZone() error {
 		if n.IPv4 != "" {
 			fmt.Fprintf(&b, "%s IN A %s ; %s\n", n.Name, n.IPv4, n.Member)
 		}
+		if n.IPv6 != "" {
+			fmt.Fprintf(&b, "%s IN AAAA %s ; %s\n", n.Name, n.IPv6, n.Member)
+		}
 	}
 	body := b.String()
 	if body == s.lastZone {
@@ -891,11 +920,27 @@ func (s *Service) writeZone() error {
 	}
 	head := fmt.Sprintf("$ORIGIN %s.\n@     IN SOA ns.%s. owner.%s. ( %d 3600 600 86400 60 )\n",
 		s.cfg.Zone, s.cfg.Zone, s.cfg.Zone, serial)
-	tmp := filepath.Join(filepath.Dir(s.cfg.ZoneFile), ".db.zone.tmp")
-	if err := os.WriteFile(tmp, []byte(head+body), 0o644); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(s.cfg.ZoneFile), ".db.zone.*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.WriteString(head + body); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Chmod(0o644); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, s.cfg.ZoneFile); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	s.lastZone = body

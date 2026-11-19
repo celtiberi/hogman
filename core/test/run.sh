@@ -87,6 +87,11 @@ api_status() {  # api_status <tools-container> <METHOD> <path> [json] -> HTTP st
   run "$1" curl -s -m5 -o /dev/null -w '%{http_code}' --cacert $ROOT -X "$2" "https://home.$ZONE$3" \
     -H 'content-type: application/json' ${4:+-d "$4"}
 }
+api_raw_status() {  # api_raw_status <tools-container> <METHOD> <path> <curl args...> -> HTTP status
+  local c="$1" m="$2" p="$3"; shift 3
+  run "$c" curl -s -m5 -o /dev/null -w '%{http_code}' --cacert $ROOT -X "$m" "https://home.$ZONE$p" "$@" \
+    | tr -d '\r' | tail -c 3
+}
 status_is() { [ "$(api_status "$@" 2>/dev/null | tail -c 3)" = "$EXPECT" ]; }
 expect() { EXPECT="$1"; shift; status_is "$@"; }
 
@@ -210,6 +215,17 @@ check "alice's server cannot reach bob's laptop"         not can_ping alice-tool
 check "members cannot reach other ports on the core (22)" not port_open bob-tools "$CORE_MESH_IP" 22
 check "bob can't use the admin API"   expect 403 bob-tools GET /api/admin/members
 check "alice (admin) can"             expect 200 alice-laptop-tools GET /api/admin/members
+check "alice's server can read /api/me"        expect 200 alice-tools GET /api/me
+check "alice's server can read /api/directory" expect 200 alice-tools GET /api/directory
+check "alice's server cannot use the admin API"   expect 403 alice-tools GET /api/admin/members
+check "alice's server cannot issue device keys"   expect 403 alice-tools POST /api/devices '{"kind":"personal"}'
+check "alice's server cannot claim names"         expect 403 alice-tools POST /api/names '{"name":"x","device_id":1}'
+check "mesh API rejects text/plain CSRF attempts (415)" \
+  test "$(api_raw_status alice-laptop-tools POST /api/devices -H 'Content-Type: text/plain' -d '{"kind":"personal"}')" = 415
+check "mesh API rejects cross-origin requests (403)" \
+  test "$(api_raw_status alice-laptop-tools POST /api/devices -H 'Content-Type: application/json' -H "Origin: https://alice.$ZONE" -d '{"kind":"personal"}')" = 403
+check "mesh API rejects same-site browser requests (403)" \
+  test "$(api_raw_status alice-laptop-tools POST /api/devices -H 'Content-Type: application/json' -H 'Sec-Fetch-Site: same-site' -d '{"kind":"personal"}')" = 403
 
 step "A device that bypassed the registrar gets nothing"
 check "it is not recorded as anyone's device" not has_device stray-device
