@@ -1,0 +1,20 @@
+# The Hogman website: static files, nothing else.
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	root * /srv
+	encode zstd gzip
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		# Everything is served from here. No trackers, no third parties.
+		Content-Security-Policy "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'"
+		-Server
+	}
+	@assets path *.css *.js *.svg *.webp
+	header @assets Cache-Control "public, max-age=3600"
+	file_server
+}

@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hogman: your own private internet. Clean pigs only.</title>
+<meta name="description" content="Hogman lets you run a private internet for the people you invite. You hold the gate. Clean pigs get in. The filthy horde stays outside the fence.">
+<meta property="og:title" content="Hogman: your own private internet">
+<meta property="og:description" content="You hold the gate. Clean pigs get in. The filthy horde stays outside the fence.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://hogman.fly.dev/hero.webp">
+<meta name="theme-color" content="#0e080c">
+<link rel="icon" href="/favicon.svg?v=metal2" type="image/svg+xml">
+<link rel="stylesheet" href="/styles.css?v=metal2">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <g id="pig" stroke="#120b10" stroke-width="4" stroke-linejoin="round" stroke-linecap="round">
+      <path class="tail" d="M28 64c-22-4-26-30-8-31 13 0 11 17 0 15" fill="none"/>
+      <rect x="52" y="102" width="20" height="40" rx="8" fill="var(--shade)"/>
+      <rect x="122" y="102" width="20" height="40" rx="8" fill="var(--shade)"/>
+      <ellipse cx="95" cy="80" rx="72" ry="48" fill="var(--skin)"/>
+      <rect x="76" y="106" width="20" height="40" rx="8" fill="var(--skin)"/>
+      <rect x="144" y="106" width="20" height="40" rx="8" fill="var(--skin)"/>
+      <g fill="#120b10" stroke="none">
+        <rect x="52" y="134" width="20" height="9" rx="4"/><rect x="122" y="134" width="20" height="9" rx="4"/>
+        <rect x="76" y="138" width="20" height="9" rx="4"/><rect x="144" y="138" width="20" height="9" rx="4"/>
+      </g>
+      <path d="M136 36l4-27 23 19z" fill="var(--shade)"/>
+      <circle cx="160" cy="64" r="38" fill="var(--skin)"/>
+      <path d="M150 38l1-29 25 18z" fill="var(--shade)"/>
+      <ellipse cx="193" cy="72" rx="15" ry="18" fill="var(--shade)"/>
+      <g fill="#120b10" stroke="none">
+        <ellipse cx="189" cy="72" rx="2.6" ry="4.6"/><ellipse cx="198" cy="72" rx="2.6" ry="4.6"/>
+        <circle cx="169" cy="54" r="5"/>
+      </g>
+      <circle cx="170.5" cy="52.5" r="1.6" fill="#fff" stroke="none"/>
+      <circle cx="160" cy="82" r="7" fill="var(--shade)" stroke="none" opacity=".75"/>
+      <path d="M170 93q10 8 20 0" fill="none"/>
+    </g>
+    <path id="post" d="M0 12 13 0l13 12v104H0z" fill="#4a2c1a" stroke="#120b10" stroke-width="4" stroke-linejoin="round"/>
+    <linearGradient id="dusk" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a1040"/><stop offset=".45" stop-color="#8a1f2a"/><stop offset=".8" stop-color="#f0641a"/><stop offset="1" stop-color="#ffc233"/>
+    </linearGradient>
+  </defs>
+</svg>
+
+<header class="top">
+  <a class="brand" href="/" aria-label="Hogman home">H&Ouml;GMAN</a>
+  <nav>
+    <a href="#farm">The farm</a>
+    <a href="#inside">Inside the fence</a>
+    <a href="#boot">The boot</a>
+    <a href="#run">Raise a pen</a>
+  </nav>
+</header>
+
+<main>
+
+<!-- ============================== HERO ============================== -->
+<section class="hero">
+  <img class="logo" src="/logo.webp" width="2000" height="900" alt="HÖGMAN">
+  <p class="eyebrow">A private internet &middot; By invitation &middot; No mercy</p>
+  <figure class="poster">
+    <img src="/hero.webp" width="1168" height="784"
+         alt="A heavy metal painting. The Top Hog Farmer, in studded black leather, a trucker cap and goggles, plants a boot on a wooden fence under a burning sunset. Behind her, clean pink pigs in sunglasses stand calmly by a red barn. In front of the fence a horde of filthy, snarling pigs claws at the rails. A sign on the fence reads: Clean Pigs Only!">
+  </figure>
+  <div class="hero-text">
+    <h1>Your pen. Your rules. <em>Clean pigs only.</em></h1>
+    <p class="lede">Hogman lets you run your own private internet for the people you choose.
+      You hold the gate. Your swine get real names, real websites and real padlocks.
+      The filthy horde stays outside the fence, howling.</p>
+    <p class="cta">
+      <a class="btn primary" href="#farm">Meet the farm</a>
+      <a class="btn" href="#run">Raise your own pen</a>
+    </p>
+  </div>
+</section>
+
+<div class="studs" aria-hidden="true"></div>
+
+<!-- ============================== THE FARM ============================== -->
+<section id="farm">
+  <h2>Meet the farm</h2>
+  <p class="sub">Four things to know. That's the whole idea.</p>
+  <div class="cards four">
+    <article class="card">
+      <div class="crop keeper" role="img" aria-label="The Top Hog Farmer"></div>
+      <h3>The Top Hog</h3>
+      <p class="means">That's you</p>
+      <p>The keeper. You run the pen on your own server. You decide who gets in, what they're called, and who gets the boot.</p>
+    </article>
+    <article class="card">
+      <div class="crop sign" role="img" aria-label="The fence, with its sign: Clean Pigs Only"></div>
+      <h3>The fence</h3>
+      <p class="means">The network</p>
+      <p>An encrypted mesh that only exists for those inside it. From the outside there is nothing to see, nothing to knock on and no way in but the gate.</p>
+    </article>
+    <article class="card">
+      <div class="crop clean" role="img" aria-label="Clean pigs in sunglasses"></div>
+      <h3>The clean pigs</h3>
+      <p class="means">Your people and their devices</p>
+      <p>Everyone you invited, each one known by name. They browse, they host sites, they visit each other. It works like the internet, minus the internet.</p>
+    </article>
+    <article class="card">
+      <div class="crop horde" role="img" aria-label="The filthy horde"></div>
+      <h3>The horde</h3>
+      <p class="means">Everything else</p>
+      <p>Strangers, scrapers, bots, anything you didn't invite. They can scream at the fence all night. Nothing inside can hear them.</p>
+    </article>
+  </div>
+</section>
+
+<div class="studs" aria-hidden="true"></div>
+
+<!-- ============================== INSIDE ============================== -->
+<section id="inside">
+  <h2>What your swine get inside the fence</h2>
+  <p class="sub">Stock browsers. Stock tools. Nothing special to learn.</p>
+  <div class="cards three">
+    <article class="feature">
+      <h3>Proper names</h3>
+      <p>Every pen has its own name, and so does everything in it: <code>alice.yourpen.hogman</code>, <code>blog.alice.yourpen.hogman</code>. First come, first served. Nobody outside can look them up.</p>
+    </article>
+    <article class="feature">
+      <h3>The padlock, without the paperwork</h3>
+      <p>Your pen runs its own certificate authority. Sites get HTTPS automatically, and browsers show the padlock. That authority can only vouch for names inside your pen. We checked, by trying to make it vouch for Google. It refused.</p>
+    </article>
+    <article class="feature">
+      <h3>Invitation only</h3>
+      <p>You hand out single-use invite links. No link, no entry. How someone earns a link is up to you: a form, a vouch, trial by combat.</p>
+    </article>
+    <article class="feature">
+      <h3>Laptops mind their own business</h3>
+      <p>Personal devices accept no visitors at all. Only machines a member sets up as a server can be reached, so nobody's laptop is ever on show by accident.</p>
+    </article>
+    <article class="feature">
+      <h3>Nobody upstream</h3>
+      <p>The whole thing runs on one small server that you control. No company in the middle holding the keys, and the keeper never sees what your swine say to each other.</p>
+    </article>
+    <article class="feature">
+      <h3>Sneaking in gets you nowhere</h3>
+      <p>A device that wriggles under the fence without an invite isn't on the list, so it can't reach a single thing. It just stands there, looking guilty.</p>
+    </article>
+  </div>
+</section>
+
+<div class="studs" aria-hidden="true"></div>
+
+<!-- ============================== THE BOOT ============================== -->
+<section id="boot" class="boot">
+  <div class="boot-text">
+    <h2>The boot</h2>
+    <p class="lede">Sometimes a clean pig goes bad. Rolls in something. Starts selling crypto.
+      One command and they're back outside the fence, with their sites gone and their names
+      held so nobody can pretend to be them.</p>
+    <dl class="stats">
+      <div><dt>Suspend</dt><dd>2.0<small>s</small></dd></div>
+      <div><dt>Let back in</dt><dd>0.8<small>s</small></dd></div>
+      <div><dt>The boot</dt><dd>2.1<small>s</small></dd></div>
+    </dl>
+    <p class="fine">Measured on a real Mac over an ordinary home network, from pressing enter to the door closing.</p>
+    <p><button class="btn primary" id="kick" type="button">Give Gary the boot</button>
+       <span id="kick-note" class="fine" role="status" aria-live="polite"></span></p>
+  </div>
+  <svg class="boot-scene" viewBox="0 0 560 360" role="img" aria-label="Gary the pig, in sunglasses, standing inside the fence, about to be booted over it.">
+    <rect width="560" height="360" fill="url(#dusk)"/>
+    <circle cx="430" cy="252" r="46" fill="#ffe08a" opacity=".9"/>
+    <rect y="250" width="560" height="110" fill="#3c5a2a"/>
+    <rect x="330" y="250" width="230" height="110" fill="#2b1a10"/>
+    <ellipse cx="460" cy="312" rx="72" ry="14" fill="#1a0f08"/>
+    <g id="splat" opacity="0" fill="#1a0f08"><circle cx="400" cy="270" r="9"/><circle cx="520" cy="262" r="7"/><circle cx="430" cy="244" r="6"/><circle cx="498" cy="236" r="8"/><circle cx="548" cy="290" r="6"/></g>
+    <!-- Gary -->
+    <g id="gary" style="--skin:#f9b9c6;--shade:#f08ea2">
+      <use href="#pig" transform="translate(60 176) scale(.9)"/>
+      <path d="M176 222l22 0" stroke="#120b10" stroke-width="4" stroke-linecap="round"/>
+      <path d="M196 215h38a3 3 0 0 1 3 3v6a10 10 0 0 1-10 10h-24a10 10 0 0 1-10-10v-6a3 3 0 0 1 3-3z" fill="#120b10"/>
+      <path d="M202 219l8 0" stroke="#fff" stroke-width="2.5" stroke-linecap="round" opacity=".7"/>
+      <path id="gary-mud" opacity="0" d="M120 220q14-12 26 2 2 12-12 14-14 0-14-16zM170 262q12-8 20 4-2 10-12 10-10-2-8-14zM92 252q10-6 16 4-2 8-10 8-8-2-6-12z" fill="#2b1a10"/>
+    </g>
+    <!-- fence -->
+    <g fill="#5a3620" stroke="#120b10" stroke-width="4"><rect x="296" y="226" width="80" height="14"/><rect x="296" y="266" width="80" height="14"/></g>
+    <use href="#post" x="300" y="200"/><use href="#post" x="346" y="200"/>
+    <!-- the boot itself: black leather, spiked -->
+    <g id="theboot" transform="translate(-160 250)">
+      <g fill="#c9ced6" stroke="#120b10" stroke-width="2.5" stroke-linejoin="round">
+        <path d="M-2-50l-16 6 16 6zM-2-32l-16 6 16 6zM42-50l16 6-16 6z"/>
+        <path d="M52-20l8-14 6 16zM68-12l10-12 4 16z"/>
+      </g>
+      <path d="M0-62h40v40q30 0 44 14 6 8 0 8H0z" fill="#17131a" stroke="#120b10" stroke-width="4" stroke-linejoin="round"/>
+      <path d="M0-30h40M0-44h40" stroke="#3a3440" stroke-width="5"/>
+      <g fill="#ffc233" stroke="#120b10" stroke-width="2"><rect x="14" y="-49" width="12" height="10" rx="2"/><rect x="14" y="-35" width="12" height="10" rx="2"/></g>
+      <rect x="-4" y="-70" width="48" height="12" rx="4" fill="#2a2430" stroke="#120b10" stroke-width="4"/>
+    </g>
+    <text id="oink" class="oink" x="30" y="84" opacity="0">OINK!</text>
+  </svg>
+</section>
+
+<div class="studs" aria-hidden="true"></div>
+
+<!-- ============================== JOINING ============================== -->
+<section id="join">
+  <h2>Getting in, if you're on the list</h2>
+  <p class="sub">One link, one command, about a minute.</p>
+  <div class="split">
+    <ol class="steps">
+      <li><strong>You get a link.</strong> It carries your invitation and the fingerprint of the pen's certificate, so you know you're at the right gate.</li>
+      <li><strong>You run one command.</strong> It checks that fingerprint, asks what you'd like to be called, and adds the pen's certificate to your computer. That certificate can only ever vouch for the pen.</li>
+      <li><strong>You're in.</strong> Open your ordinary browser and go. If you already use Tailscale for something else, that's kept, and you can switch back whenever you like.</li>
+    </ol>
+    <pre class="term" aria-label="Example of joining a pen"><span class="p">$</span> ./hogman-join 'https://hs.example.com/join#t=…'
+
+<span class="b">•</span> Checking the network at hs.example.com
+  network: bobo.hogman
+  its certificate matches the link
+  and can only vouch for names ending in .bobo.hogman
+
+<span class="b">•</span> Redeeming the invite
+  welcome, alice
+
+<span class="ok">✓ You're in. You are alice on bobo.hogman.</span></pre>
+  </div>
+</section>
+
+<div class="studs" aria-hidden="true"></div>
+
+<!-- ============================== RUN A PEN ============================== -->
+<section id="run">
+  <h2>Raise your own pen</h2>
+  <p class="sub">One small server. A handful of commands.</p>
+  <div class="split">
+    <pre class="term" aria-label="Commands for the keeper"><span class="c"># build the pen</span>
+<span class="p">$</span> ./hogman init
+<span class="p">$</span> ./hogman up
+
+<span class="c"># let a clean one in</span>
+<span class="p">$</span> ./hogman invite create --note "alice, clean pig"
+
+<span class="c"># show a filthy one out</span>
+<span class="p">$</span> ./hogman member kick gary "rolled in something"
+removed gary: 2 devices deleted, 0 keys and 1 invites
+revoked, 1 names held until 2027-02-17 20:54</pre>
+    <div>
+      <h3>On tour now</h3>
+      <ul class="status">
+        <li class="yes">The pen itself: server, names, certificates, invites, the boot</li>
+        <li class="yes">Joining from Linux and from a Mac</li>
+        <li class="yes">A test that plays out a whole pen's life: 77 checks, all passing</li>
+      </ul>
+      <h3>Not on the bill yet</h3>
+      <ul class="status">
+        <li class="notyet">Windows: built, never tried</li>
+        <li class="notyet">Phones</li>
+        <li class="notyet">Public release. The code is still in the barn.</li>
+      </ul>
+      <p class="fine">Forged from good open-source steel: Headscale, the Tailscale client, CoreDNS, step-ca and Caddy.</p>
+    </div>
+  </div>
+</section>
+
+<div class="studs" aria-hidden="true"></div>
+
+<!-- ============================== HONEST ============================== -->
+<section id="honest" class="honest">
+  <h2>The honest bit</h2>
+  <div class="cards three">
+    <article class="feature plain">
+      <h3>A pen is not a hiding place</h3>
+      <p>Hogman is private, not anonymous. The keeper knows who is in the pen, what devices they have, and which pen names get looked up.</p>
+    </article>
+    <article class="feature plain">
+      <h3>What the keeper can't see</h3>
+      <p>What your swine say to each other. Traffic is encrypted from one device to the other. Your ordinary browsing outside the pen never touches it either.</p>
+    </article>
+    <article class="feature plain">
+      <h3>Choose your Top Hog</h3>
+      <p>The keeper holds the gate and the name book. Joining a pen means trusting the person who runs it. Pick a good one, or be one.</p>
+    </article>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <img class="foot-logo" src="/logo.webp" width="2000" height="900" alt="HÖGMAN" loading="lazy">
+  <p>Keep a clean pen.</p>
+  <p class="fine">No pigs were excluded in the making of this website, except the filthy ones.</p>
+</footer>
+
+<script src="/boot.js?v=metal2" defer></script>
+</body>
+</html>
