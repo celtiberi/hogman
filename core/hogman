@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# hogman: deploy and operate one Hogman network (the core node).
+#
+# Setup commands live here. Everything about members, invites, devices and
+# names is passed through to the registrar, which is the source of truth.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+cd "$HERE"
+
+DATA="$HERE/data"
+STATE="$DATA/state.env"
+STEP_IMAGE="smallstep/step-ca:0.30.2"
+
+die()  { echo "hogman: $*" >&2; exit 1; }
+info() { echo "==> $*" >&2; }
+
+usage() {
+  cat <<'EOF'
+usage: hogman <command> [args]
+
+Setup
+  init                         Generate the network's CA and configs (once)
+  up                           Bootstrap on first run, then start everything
+  down                         Stop everything
+  status                       Containers, members and devices
+  logs [service]               Follow logs
+
+Members (run by the owner on this server; see `hogman help-registrar`)
+  member add <handle> --role owner     Create the owner (first thing after `up`)
+  member list | suspend | resume | kick | role
+  invite create | list | revoke
+  device key <handle> personal|server  | device list | device rm <id>
+  name list | claim | release
+  audit [count]
+
+Other
+  headscale <args...>          Run the Headscale CLI directly
+EOF
+}
+
+# ---------------------------------------------------------------- config ----
+
+load_env() {
+  [ -f .env ] || die "no .env. Copy .env.example to .env and edit it."
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  [ -f "$STATE" ] && . "$STATE"
+  set +a
+  : "${NETWORK:?set NETWORK in .env}"
+  : "${PUBLIC_HOST:?set PUBLIC_HOST in .env}"
+  case "$NETWORK" in
+    *[!a-z0-9-]*|-*|*-) die "NETWORK must be lowercase letters, digits and dashes" ;;
+  esac
+  export ZONE="${NETWORK}.hogman"
+  export TEST_MODE="${TEST_MODE:-false}"
+  if [ "$TEST_MODE" = true ]; then
+    export EDGE_TLS_MODE="local_certs"
+  else
+    export EDGE_TLS_MODE=""
+  fi
+}
+
+dc() {
+  local args=(--env-file .env)
+  [ -f "$STATE" ] && args+=(--env-file "$STATE")
+  local files=(-f compose.yaml)
+  [ "$TEST_MODE" = true ] && [ -f test/compose.test.yaml ] && files+=(-f test/compose.test.yaml)
+  ZONE="$ZONE" EDGE_TLS_MODE="$EDGE_TLS_MODE" docker compose "${args[@]}" "${files[@]}" "$@"
+}
+
+hs()  { dc exec -T headscale headscale "$@"; }
+reg() { dc exec -T registrar registrar "$@"; }
+
+set_state() {   # set_state KEY VALUE
+  touch "$STATE"
+  grep -v "^$1=" "$STATE" > "$STATE.tmp" || true
+  echo "$1=$2" >> "$STATE.tmp"
+  mv "$STATE.tmp" "$STATE"
+  export "$1=$2"
+}
+
+# Replace @@NAME@@ with the value of environment variable NAME.
+render() {
+  awk '{
+    while (match($0, /@@[A-Z0-9_]+@@/)) {
+      name = substr($0, RSTART + 2, RLENGTH - 4)
+      $0 = substr($0, 1, RSTART - 1) ENVIRON[name] substr($0, RSTART + RLENGTH)
+    }
+    print
+  }' "$1" > "$2"
+}
+
+wait_for() {    # wait_for <description> <seconds> <command...>
+  local what="$1" tries="$2"; shift 2
+  for _ in $(seq "$tries"); do
+    if "$@" >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  die "timed out waiting for $what"
+}
+
+json_field() {  # json_field <field>  (reads one JSON object on stdin)
+  sed -n "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/p" | head -1
+}
+
+randpw() { head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | head -c 40; }
+
+# ------------------------------------------------------------------ init ----
+
+cmd_init() {
+  load_env
+  [ -f "$DATA/pki/public/root_ca.crt" ] && die "already initialised (data/pki exists)."
+
+  info "Network $NETWORK, zone $ZONE, control host $PUBLIC_HOST"
+  mkdir -p "$DATA"/{pki/public,pki/offline,step/config,step/secrets,step/db} \
+           "$DATA"/{headscale/config,headscale/lib,coredns,mesh/core,mesh/ca} \
+           "$DATA"/{edge,edge-trust,portal,registrar,secrets/registrar,join-dl,tmp}
+
+  set_state HOGMAN_UID "$(id -u)"
+  set_state HOGMAN_GID "$(id -g)"
+
+  info "Generating the network's certificate authority (restricted to .$ZONE)"
+  randpw > "$DATA/pki/offline/root_password"
+  randpw > "$DATA/step/secrets/intermediate_password"
+  render templates/root_ca.tpl "$DATA/tmp/root_ca.tpl"
+  render templates/intermediate_ca.tpl "$DATA/tmp/intermediate_ca.tpl"
+  docker run --rm --user "$(id -u):$(id -g)" \
+    -v "$DATA/pki:/pki" -v "$DATA/step/secrets:/secrets" -v "$DATA/tmp:/tpl:ro" \
+    --entrypoint sh "$STEP_IMAGE" -c "
+      set -e
+      step certificate create '$ZONE Root CA' \
+        /pki/public/root_ca.crt /pki/offline/root_ca_key \
+        --template /tpl/root_ca.tpl --kty EC --curve P-256 --not-after 87600h \
+        --password-file /pki/offline/root_password
+      step certificate create '$ZONE Intermediate CA' \
+        /pki/public/intermediate_ca.crt /secrets/intermediate_ca_key \
+        --ca /pki/public/root_ca.crt --ca-key /pki/offline/root_ca_key \
+        --ca-password-file /pki/offline/root_password \
+        --template /tpl/intermediate_ca.tpl --kty EC --curve P-256 --not-after 43800h \
+        --password-file /secrets/intermediate_password
+    "
+  rm -rf "$DATA/tmp"
+  chmod 600 "$DATA"/pki/offline/* "$DATA"/step/secrets/*
+
+  render templates/ca.json "$DATA/step/config/ca.json"
+  render templates/Corefile "$DATA/coredns/Corefile"
+  render templates/policy.hujson "$DATA/headscale/config/policy.hujson"
+
+  local fp
+  fp="$(openssl x509 -in "$DATA/pki/public/root_ca.crt" -noout -fingerprint -sha256 | cut -d= -f2)"
+  set_state ROOT_FINGERPRINT "$fp"
+
+  cat >&2 <<EOF
+
+Initialised. Root certificate fingerprint (SHA-256):
+  $fp
+
+IMPORTANT: data/pki/offline/ holds the root key and its password. The network
+runs without them. Move that folder somewhere offline (encrypted USB, password
+manager) once you have checked the network works, and delete it from this server.
+You will need it only to replace the intermediate CA.
+
+Next: ./hogman up
+EOF
+}
+
+# -------------------------------------------------------------------- up ----
+
+render_headscale() {
+  if [ -n "${CORE_MESH_IP:-}" ]; then
+    SPLIT_DNS="      \"$ZONE\":
+        - $CORE_MESH_IP"
+  else
+    SPLIT_DNS="      {}"
+  fi
+  if [ -n "${PUBLIC_IPV4:-}" ]; then
+    DERP_IPV4_LINE="    ipv4: $PUBLIC_IPV4"
+  else
+    DERP_IPV4_LINE=""
+  fi
+  export SPLIT_DNS DERP_IPV4_LINE
+  render templates/headscale.yaml "$DATA/headscale/config/config.yaml"
+}
+
+# Core services only. From here on the registrar owns the zone file.
+render_bootstrap_zone() {
+  cat > "$DATA/coredns/db.zone" <<EOF
+\$ORIGIN $ZONE.
+\$TTL 60
+@     IN SOA ns.$ZONE. owner.$ZONE. ( $(date +%s) 3600 600 86400 60 )
+@     IN NS  ns.$ZONE.
+ns    IN A   $CORE_MESH_IP
+home  IN A   $CORE_MESH_IP
+ca    IN A   $CA_MESH_IP
+EOF
+}
+
+mesh_env() {    # mesh_env <name> <authkey>
+  {
+    echo "TS_AUTHKEY=$2"
+    echo "TS_HOSTNAME=$1"
+    echo "TS_STATE_DIR=/var/lib/tailscale"
+    echo "TS_USERSPACE=false"
+    echo "TS_ACCEPT_DNS=false"
+    echo "TS_AUTH_ONCE=true"
+    echo "TS_EXTRA_ARGS=--login-server=https://$PUBLIC_HOST"
+    [ "$TEST_MODE" = true ] && echo "SSL_CERT_FILE=/edge-trust/root.crt"
+  } > "$DATA/mesh/$1.env"
+  chmod 600 "$DATA/mesh/$1.env"
+}
+
+infra_key() {
+  hs preauthkeys create --tags tag:infra --expiration 15m --output json | json_field key
+}
+
+mesh_ip() { dc exec -T "$1" tailscale ip -4 2>/dev/null | head -1 | tr -d '\r'; }
+has_mesh_ip() { [ -n "$(mesh_ip "$1")" ]; }
+
+cmd_up() {
+  load_env
+  [ -f "$DATA/pki/public/root_ca.crt" ] || die "run ./hogman init first."
+
+  if [ -z "${CORE_MESH_IP:-}" ]; then
+    info "First start: bootstrapping"
+    render_headscale
+    dc up -d headscale edge
+    wait_for "headscale" 60 hs health
+
+    # Default-deny from the first moment: nothing but the core may talk.
+    hs policy set --file /etc/headscale/policy.hujson >/dev/null
+
+    if [ "$TEST_MODE" = true ]; then
+      local root="$DATA/edge/caddy/pki/authorities/local/root.crt"
+      wait_for "edge test certificate" 60 test -s "$root"
+      cp "$root" "$DATA/edge-trust/root.crt"
+    fi
+
+    info "Joining the core services to the mesh"
+    mesh_env core "$(infra_key)"
+    mesh_env ca   "$(infra_key)"
+    dc up -d core-mesh ca-mesh
+    wait_for "core mesh IP" 90 has_mesh_ip core-mesh
+    wait_for "ca mesh IP"   90 has_mesh_ip ca-mesh
+    set_state CORE_MESH_IP "$(mesh_ip core-mesh)"
+    set_state CA_MESH_IP   "$(mesh_ip ca-mesh)"
+    # The keys are spent. Remove them so they are not lying around.
+    sed -i.bak '/^TS_AUTHKEY=/d' "$DATA/mesh/core.env" "$DATA/mesh/ca.env"
+    rm -f "$DATA"/mesh/*.bak
+    info "core = $CORE_MESH_IP, ca = $CA_MESH_IP"
+
+    info "Creating the registrar's Headscale API key"
+    hs apikeys create --expiration 3650d | tail -1 | tr -d '\r\n' > "$DATA/secrets/registrar/headscale_api_key"
+    chmod 600 "$DATA/secrets/registrar/headscale_api_key"
+
+    render_headscale
+    render_bootstrap_zone
+    dc restart headscale
+    wait_for "headscale" 60 hs health
+  else
+    render_headscale
+  fi
+
+  info "Building the join tool for download"
+  docker build -q --output "type=local,dest=$DATA/join-dl" join >/dev/null
+
+  dc up -d --build
+  wait_for "registrar" 60 reg sync
+  info "Up. Control server: https://$PUBLIC_HOST   Portal (on the mesh): https://home.$ZONE"
+  if ! reg member list 2>/dev/null | awk 'NR>1 && $3=="owner" {found=1} END {exit !found}'; then
+    info "Next: create yourself as owner:  ./hogman member add <handle> --role owner"
+    info "      then join your device:      ./hogman device key <handle> personal"
+  fi
+}
+
+# ------------------------------------------------------------------- main ----
+
+main() {
+  local cmd="${1:-}"; [ $# -gt 0 ] && shift
+  case "$cmd" in
+    init)      cmd_init ;;
+    up)        cmd_up ;;
+    down)      load_env
+               if [ "$TEST_MODE" = true ]; then dc --profile clients down "$@"; else dc down "$@"; fi ;;
+    status)    load_env; dc ps; echo; reg member list; echo; reg device list ;;
+    logs)      load_env; dc logs -f "$@" ;;
+    member|invite|device|name|audit|sync)
+               load_env; reg "$cmd" "$@" ;;
+    help-registrar) load_env; reg help ;;
+    headscale) load_env; hs "$@" ;;
+    ""|-h|--help|help) usage ;;
+    *) usage; exit 1 ;;
+  esac
+}
+
+main "$@"

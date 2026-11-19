@@ -1,0 +1,72 @@
+# Rendered by ./hogman from templates/headscale.yaml. Edit the template, not this file.
+server_url: https://@@PUBLIC_HOST@@
+listen_addr: 0.0.0.0:8080
+metrics_listen_addr: 127.0.0.1:9090
+grpc_listen_addr: 127.0.0.1:50443
+grpc_allow_insecure: false
+trusted_proxies: []
+
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+  allocation: sequential
+
+# Our own relay only. Tailscale Inc's relays are not used.
+derp:
+  server:
+    enabled: true
+    region_id: 999
+    region_code: hogman
+    region_name: "@@NETWORK@@ relay"
+    verify_clients: true          # relay serves only this network's devices
+    stun_listen_addr: 0.0.0.0:3478
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    automatically_add_embedded_derp_region: true
+@@DERP_IPV4_LINE@@
+  urls: []
+  paths: []
+  auto_update_enabled: false
+
+disable_check_updates: true
+
+node:
+  expiry: 0
+  ephemeral:
+    inactivity_timeout: 30m
+
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+    write_ahead_log: true
+
+log:
+  level: info
+  format: text
+
+# The registrar owns the access policy and writes it through the API.
+# ./hogman sets the bootstrap policy (templates/policy.hujson) before anything joins.
+policy:
+  mode: database
+
+dns:
+  magic_dns: true
+  # Device names: laptop.nodes.<zone>
+  base_domain: nodes.@@ZONE@@
+  # Leave members' normal DNS alone. Only the network's zone is routed to us,
+  # so the owner never sees members' ordinary lookups.
+  override_local_dns: false
+  nameservers:
+    global: []
+    split:
+@@SPLIT_DNS@@
+  search_domains: []
+
+unix_socket: /var/run/headscale/headscale.sock
+unix_socket_permission: "0770"
+
+logtail:
+  enabled: false

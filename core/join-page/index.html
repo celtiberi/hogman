@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Join</title>
+<style>
+  body { font: 17px/1.55 system-ui, sans-serif; max-width: 44rem; margin: 3.5rem auto; padding: 0 1.25rem; color: #1d1d1f; }
+  h1 { font-size: 1.7rem; margin-bottom: .2rem; }
+  .sub { color: #666; margin-top: 0; }
+  pre { background: #f2f2f2; padding: .9rem 1rem; border-radius: 6px; white-space: pre-wrap; word-break: break-all; font-size: .9rem; }
+  button { font: inherit; padding: .35rem .9rem; border-radius: 6px; border: 1px solid #bbb; background: #fff; cursor: pointer; }
+  .tabs button[aria-pressed=true] { background: #1d1d1f; color: #fff; border-color: #1d1d1f; }
+  .warn { color: #a33; }
+  .muted { color: #777; font-size: .9rem; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #111; color: #eee; } .sub, .muted { color: #999; }
+    pre { background: #222; } button { background: #222; color: #eee; border-color: #444; }
+    .tabs button[aria-pressed=true] { background: #eee; color: #111; }
+  }
+</style>
+</head>
+<body>
+<h1 id="title">Join the network</h1>
+<p class="sub" id="what">Checking your link…</p>
+
+<div id="main" hidden>
+  <p>You need <a href="https://tailscale.com/download" rel="noreferrer">Tailscale</a> installed first.
+     Then copy this into a terminal on the device you want to join:</p>
+  <div class="tabs">
+    <button data-os="unix">Mac / Linux</button>
+    <button data-os="win">Windows</button>
+  </div>
+  <pre id="cmd"></pre>
+  <p><button id="copy">Copy</button> <span class="muted" id="copied"></span></p>
+
+  <p class="muted">The tool checks the network's certificate against the
+  fingerprint in your link, <span id="redeem"></span> adds the certificate to this
+  computer (you'll be asked for your password once), and joins. The certificate can
+  only vouch for names ending in <b id="zone"></b>; it cannot be used to read your
+  other traffic.</p>
+  <p class="muted">Windows: run the terminal as administrator.
+  <a href="/join/dl/SHA256SUMS">Checksums</a>.</p>
+</div>
+<p class="warn" id="err" hidden></p>
+
+<script>
+(() => {
+  const link = location.href;
+  const q = new URLSearchParams(location.hash.slice(1));
+  const err = m => { const e = document.getElementById('err'); e.textContent = m; e.hidden = false;
+                     document.getElementById('what').textContent = ''; };
+  // Keep the secret out of browser history once read.
+  history.replaceState(null, '', location.pathname);
+  if (!(q.get('t') || q.get('k')) || !q.get('fp')) {
+    return err('This link is incomplete. Ask whoever sent it for a fresh one, and copy it whole.');
+  }
+  const kind = q.get('t') ? 'invite' : 'device';
+  const host = location.host;
+  const quoted = "'" + link.replace(/'/g, '') + "'";
+  const cmds = {
+    unix: `curl -fsSLo hogman-join "https://${host}/join/dl/hogman-join-$(uname -s)-$(uname -m)" && chmod +x hogman-join && ./hogman-join ${quoted}`,
+    win:  `iwr https://${host}/join/dl/hogman-join-windows-amd64.exe -OutFile hogman-join.exe; .\\hogman-join.exe ${quoted}`,
+  };
+  const show = os => {
+    document.getElementById('cmd').textContent = cmds[os];
+    document.querySelectorAll('.tabs button').forEach(b => b.setAttribute('aria-pressed', b.dataset.os === os));
+  };
+  document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => show(b.dataset.os));
+  show(/Windows/.test(navigator.userAgent) ? 'win' : 'unix');
+  document.getElementById('copy').onclick = async () => {
+    await navigator.clipboard.writeText(document.getElementById('cmd').textContent);
+    document.getElementById('copied').textContent = 'Copied.';
+  };
+  document.getElementById('redeem').textContent = kind === 'invite' ? 'asks you to pick your name,' : '';
+  fetch('/hogman/v1/network').then(r => r.json()).then(n => {
+    document.getElementById('zone').textContent = '.' + n.zone;
+    document.getElementById('title').textContent = 'Join ' + n.zone;
+    document.getElementById('what').textContent = kind === 'invite'
+      ? 'You have been invited. This link works once.'
+      : 'Add another device. This link works once, for an hour.';
+    if (n.root_fingerprint !== q.get('fp').replace(/:/g, '').toUpperCase()) {
+      return err('Warning: this network’s certificate does not match your link. Do not continue; tell whoever sent it.');
+    }
+    document.getElementById('main').hidden = false;
+  }).catch(() => err('Could not reach the network. Try again shortly.'));
+})();
+</script>
+</body>
+</html>

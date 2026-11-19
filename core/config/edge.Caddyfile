@@ -1,0 +1,43 @@
+# Public edge: the network's single public hostname.
+# Serves the Headscale control plane, its embedded relay (/derp), and invite
+# redemption (/hogman/). Nothing else of the network is reachable from here.
+# EDGE_TLS_MODE is empty in production (public cert from Let's Encrypt)
+# and "local_certs" for local testing.
+{
+	{$EDGE_TLS_MODE}
+}
+
+http://{$PUBLIC_HOST} {
+	# Tailscale captive portal detection
+	handle /generate_204 {
+		respond 204
+	}
+	handle {
+		redir https://{host}{uri}
+	}
+}
+
+{$PUBLIC_HOST} {
+	# The page an invite link opens, and the join tool downloads.
+	handle /join {
+		root * /srv/join-page
+		rewrite * /index.html
+		header Cache-Control no-store
+		file_server
+	}
+	handle_path /join/dl/* {
+		root * /srv/join-dl
+		file_server
+	}
+	handle /hogman/* {
+		request_body {
+			max_size 16KB
+		}
+		reverse_proxy core-mesh:8081
+	}
+	handle {
+		reverse_proxy headscale:8080 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+}

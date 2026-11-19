@@ -1,0 +1,147 @@
+# Hogman core node. Do not run `docker compose up` directly the first time:
+# use `./hogman up`, which bootstraps the mesh nodes and renders configs.
+
+name: hogman
+
+x-mesh-node: &mesh-node
+  image: tailscale/tailscale:v1.104.7
+  restart: unless-stopped
+  cap_add: [NET_ADMIN, NET_RAW]
+  devices: [/dev/net/tun:/dev/net/tun]
+  networks: [core]
+  depends_on: [edge]
+
+services:
+  # --- Public foothold: the only things reachable from the internet ---------
+
+  headscale:
+    image: headscale/headscale:0.29.7
+    restart: unless-stopped
+    command: serve
+    read_only: true
+    tmpfs: [/var/run/headscale]
+    volumes:
+      - ./data/headscale/config:/etc/headscale:ro
+      - ./data/headscale/lib:/var/lib/headscale
+    ports:
+      - "3478:3478/udp"          # STUN for the embedded relay
+    networks: [core]
+    healthcheck:
+      test: ["CMD", "headscale", "health"]
+      interval: 5s
+      retries: 20
+
+  edge:
+    image: caddy:2.11.9
+    restart: unless-stopped
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST}
+      EDGE_TLS_MODE: ${EDGE_TLS_MODE:-}
+    volumes:
+      - ./config/edge.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/edge:/data
+      - ./join-page:/srv/join-page:ro
+      - ./data/join-dl:/srv/join-dl:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      core:
+        # Mesh nodes on this host reach the control server without hairpin NAT.
+        aliases: ["${PUBLIC_HOST}"]
+    depends_on:
+      headscale: { condition: service_healthy }
+
+  # --- Mesh identities for the core services --------------------------------
+
+  core-mesh:            # mesh IP serves DNS + the portal (home.<zone>)
+    <<: *mesh-node
+    hostname: core
+    env_file: [{ path: ./data/mesh/core.env, required: false }]
+    volumes:
+      - ./data/mesh/core:/var/lib/tailscale
+      - ./data/edge-trust:/edge-trust:ro
+
+  ca-mesh:              # mesh IP serves the CA (ca.<zone>)
+    <<: *mesh-node
+    hostname: ca
+    env_file: [{ path: ./data/mesh/ca.env, required: false }]
+    volumes:
+      - ./data/mesh/ca:/var/lib/tailscale
+      - ./data/edge-trust:/edge-trust:ro
+    networks:
+      core:
+        # Core services reach the CA by its real name over the local network.
+        aliases: ["ca.${ZONE}"]
+
+  # --- Services living on those mesh IPs ------------------------------------
+
+  coredns:
+    image: coredns/coredns:1.15.0
+    restart: unless-stopped
+    command: ["-conf", "/etc/coredns/Corefile"]
+    network_mode: service:core-mesh
+    volumes:
+      - ./data/coredns:/etc/coredns:ro
+
+  portal:
+    image: caddy:2.11.9
+    restart: unless-stopped
+    network_mode: service:core-mesh
+    environment:
+      ZONE: ${ZONE}
+    volumes:
+      - ./config/portal.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./portal:/srv/portal:ro
+      - ./data/pki/public:/pki:ro
+      - ./data/portal:/data
+    depends_on:
+      coredns: { condition: service_started }
+      step-ca: { condition: service_healthy }   # else the first cert request fails and Caddy backs off
+
+  # The registrar: members, invites, devices, names, removal. Owns the access
+  # policy (in Headscale) and the zone file (read by CoreDNS).
+  #   public  :8081  invite redemption only, via edge at https://<public host>/hogman/
+  #   mesh    127.0.0.1:8082  member/admin API, via the portal at https://home.<zone>/api/
+  registrar:
+    build: ./registrar
+    image: hogman/registrar:dev
+    restart: unless-stopped
+    network_mode: service:core-mesh
+    environment:
+      ZONE: ${ZONE}
+      PUBLIC_HOST: ${PUBLIC_HOST}
+      CORE_MESH_IP: ${CORE_MESH_IP:-}
+      CA_MESH_IP: ${CA_MESH_IP:-}
+      MEMBERS_CAN_INVITE: ${MEMBERS_CAN_INVITE:-false}
+      NAME_HOLD: ${NAME_HOLD:-2160h}
+    volumes:
+      - ./data/registrar:/var/lib/registrar
+      - ./data/secrets/registrar:/secrets:ro
+      - ./data/coredns:/zone
+      - ./data/pki/public:/pki:ro
+    depends_on:
+      headscale: { condition: service_healthy }
+
+  step-ca:
+    image: smallstep/step-ca:0.30.2
+    restart: unless-stopped
+    network_mode: service:ca-mesh
+    user: "${HOGMAN_UID:-1000}:${HOGMAN_GID:-1000}"
+    entrypoint: ["step-ca"]
+    command:
+      - --password-file=/home/step/secrets/intermediate_password
+      - --resolver=${CORE_MESH_IP:-127.0.0.1}:53
+      - /home/step/config/ca.json
+    healthcheck:
+      test: ["CMD", "step", "ca", "health", "--ca-url", "https://ca.${ZONE}", "--root", "/home/step/certs/root_ca.crt"]
+      interval: 10s
+      retries: 10
+    volumes:
+      - ./data/step/config:/home/step/config:ro
+      - ./data/step/secrets:/home/step/secrets:ro
+      - ./data/pki/public:/home/step/certs:ro
+      - ./data/step/db:/home/step/db
+
+networks:
+  core: {}

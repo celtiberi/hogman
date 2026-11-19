@@ -1,0 +1,133 @@
+# Local end-to-end test: simulated member devices on a separate "outside"
+# network that can reach only the public edge, like devices on the internet.
+# They cannot reach the core services except through the mesh.
+
+x-device: &device
+  image: tailscale/tailscale:v1.104.7
+  cap_add: [NET_ADMIN, NET_RAW]
+  devices: [/dev/net/tun:/dev/net/tun]
+  networks: [outside]
+  profiles: [clients]
+  volumes:
+    - ./data/edge-trust:/edge-trust:ro
+
+x-device-env: &device-env
+  TS_STATE_DIR: /var/lib/tailscale
+  TS_USERSPACE: "false"
+  TS_ACCEPT_DNS: "true"           # members take the network's split DNS
+  TS_EXTRA_ARGS: --login-server=https://${PUBLIC_HOST}
+  SSL_CERT_FILE: /edge-trust/root.crt
+
+x-fresh-computer: &fresh-computer
+  image: tailscale/tailscale:v1.104.7
+  cap_add: [NET_ADMIN, NET_RAW]
+  devices: [/dev/net/tun:/dev/net/tun]
+  networks: [outside]
+  profiles: [clients]
+  entrypoint: ["/bin/sh", "-c"]
+  command:
+    - >-
+      cp /edge-trust/root.crt /usr/local/share/ca-certificates/control-host.crt &&
+      update-ca-certificates >/dev/null 2>&1;
+      exec tailscaled --state=/var/lib/tailscale/tailscaled.state --tun=tailscale0
+  volumes:
+    - ./data/edge-trust:/edge-trust:ro
+    - ./data/join-dl:/dl:ro
+
+services:
+  edge:
+    networks:
+      outside:
+        aliases: ["${PUBLIC_HOST}"]
+
+  alice-laptop:
+    <<: *device
+    hostname: alice-laptop
+    environment:
+      <<: *device-env
+      TS_AUTHKEY: ${ALICE_LAPTOP_KEY:-}
+      TS_HOSTNAME: alice-laptop
+
+  bob-laptop:
+    <<: *device
+    hostname: bob-laptop
+    environment:
+      <<: *device-env
+      TS_AUTHKEY: ${BOB_LAPTOP_KEY:-}
+      TS_HOSTNAME: bob-laptop
+
+  alice-server:
+    <<: *device
+    hostname: alice-server
+    environment:
+      <<: *device-env
+      TS_AUTHKEY: ${ALICE_SERVER_KEY:-}
+      TS_HOSTNAME: alice-server
+
+  # A device joined straight through Headscale, bypassing the registrar.
+  # It must get no access at all.
+  stray-device:
+    <<: *device
+    hostname: stray-device
+    environment:
+      <<: *device-env
+      TS_AUTHKEY: ${STRAY_KEY:-}
+      TS_HOSTNAME: stray-device
+
+  stray-tools:
+    image: nicolaka/netshoot:v0.14
+    profiles: [clients]
+    network_mode: service:stray-device
+    command: ["sleep", "infinity"]
+    volumes:
+      - ./data/pki/public:/pki:ro
+
+  # Tools on Alice's laptop: she uses the portal API from here.
+  alice-laptop-tools:
+    image: nicolaka/netshoot:v0.14
+    profiles: [clients]
+    network_mode: service:alice-laptop
+    command: ["sleep", "infinity"]
+    volumes:
+      - ./data/pki/public:/pki:ro
+
+  # Fresh computers with nothing but Tailscale installed. Carol joins them
+  # with the join tool alone. At start they trust the control host's test
+  # certificate, as a real machine trusts the public cert of a real server.
+  carol-laptop:
+    <<: *fresh-computer
+    hostname: carol-laptop
+
+  carol-desktop:
+    <<: *fresh-computer
+    hostname: carol-desktop
+
+  # Alice's website, running on her server exactly as a member would run it.
+  alice-web:
+    image: caddy:2.11.9
+    profiles: [clients]
+    network_mode: service:alice-server
+    environment:
+      ZONE: ${ZONE}
+    volumes:
+      - ./test/alice.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/pki/public:/pki:ro
+
+  # Tools on Bob's laptop: curl, dig, openssl.
+  bob-tools:
+    image: nicolaka/netshoot:v0.14
+    profiles: [clients]
+    network_mode: service:bob-laptop
+    command: ["sleep", "infinity"]
+    volumes:
+      - ./data/pki/public:/pki:ro
+
+  # Tools on Alice's server, for checking what a server can reach.
+  alice-tools:
+    image: nicolaka/netshoot:v0.14
+    profiles: [clients]
+    network_mode: service:alice-server
+    command: ["sleep", "infinity"]
+
+networks:
+  outside: {}

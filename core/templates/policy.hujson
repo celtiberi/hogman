@@ -1,0 +1,22 @@
+// Bootstrap access policy, applied by ./hogman before any device joins.
+// The registrar replaces it within seconds of starting and keeps it current:
+//
+//   personal devices  - accept nothing inbound
+//   servers           - reachable by every active member's devices
+//   core (tag:infra)  - DNS, HTTP, HTTPS for every active member's devices
+//
+// Suspended and removed members' devices appear in no rule, so they reach
+// nothing. Devices not enrolled through the registrar get no access either.
+{
+  "tagOwners": {
+    "tag:infra": [],
+    "tag:server": []
+  },
+  "grants": [
+    {
+      "src": ["tag:infra"],
+      "dst": ["tag:infra"],
+      "ip": ["53", "80", "443"]
+    }
+  ]
+}

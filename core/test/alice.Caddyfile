@@ -1,0 +1,10 @@
+# What a member puts on their server to host a site. The only network-specific
+# lines are the two in the global block.
+{
+	acme_ca https://ca.{$ZONE}/acme/acme/directory
+	acme_ca_root /pki/root_ca.crt
+}
+
+alice.{$ZONE}, blog.alice.{$ZONE} {
+	respond "hello from {host}"
+}

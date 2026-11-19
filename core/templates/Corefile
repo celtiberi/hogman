@@ -1,0 +1,9 @@
+# Authoritative for the network's zone only. Every other name gets REFUSED,
+# so this is never an open resolver.
+@@ZONE@@ {
+    file /etc/coredns/db.zone {
+        reload 5s
+    }
+    errors
+    log
+}

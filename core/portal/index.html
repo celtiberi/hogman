@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home</title>
+<style>
+  body { font: 17px/1.55 system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1.25rem; color: #1d1d1f; }
+  h1 { font-size: 1.8rem; margin-bottom: .25rem; }
+  .sub { color: #666; margin-top: 0; }
+  code { background: #f2f2f2; padding: .1rem .35rem; border-radius: 4px; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #111; color: #eee; } .sub { color: #999; } code { background: #222; }
+  }
+</style>
+</head>
+<body>
+<h1>You're in.</h1>
+<p class="sub">This page is only reachable from inside the network.</p>
+
+<p>If you can read this over HTTPS without a warning, your device has joined the
+mesh, resolves the network's names and trusts its certificate authority.</p>
+
+<h2>Host something</h2>
+<p>Ask the owner for a server key and a name, then run Caddy with:</p>
+<pre><code>{
+	acme_ca https://ca.&lt;network&gt;.hogman/acme/acme/directory
+}
+yourname.&lt;network&gt;.hogman {
+	respond "hello"
+}</code></pre>
+
+<h2>Root certificate</h2>
+<p>Download it again: <a href="/root_ca.crt">root_ca.crt</a>. It can only vouch
+for names inside this network.</p>
+</body>
+</html>

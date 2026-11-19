@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+# End-to-end test of the core stack and registrar on one machine.
+# Needs Docker and jq.
+#
+# Deploys a throwaway network "bobo" in a temporary copy of core/, then plays
+# out the life of a small network: the owner invites alice (admin) and bob,
+# they redeem the invites from "the internet", alice adds a server and claims
+# names for it, someone sneaks a device in around the registrar, bob gets
+# suspended and resumed, and alice gets kicked.
+#
+# usage: test/run.sh [--keep]     --keep leaves the stack running afterwards
+set -uo pipefail
+
+SRC="$(cd "$(dirname "$0")/.." && pwd)"
+KEEP=false; [ "${1:-}" = --keep ] && KEEP=true
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/hogman-test.XXXXXX")"
+export COMPOSE_PROJECT_NAME=hogman-test
+ROOT=/pki/root_ca.crt
+ZONE=bobo.hogman
+PUBLIC_HOST=control.bobo-test.example
+
+pass=0; fail=0
+step()  { echo; echo "== $*"; }
+check() {   # check <description> <command...>
+  local d="$1"; shift
+  if "$@" >/dev/null 2>&1; then echo "  PASS  $d"; pass=$((pass + 1))
+  else echo "  FAIL  $d"; fail=$((fail + 1)); fi
+}
+retry() {   # retry <seconds> <command...>
+  local n="$1"; shift
+  for _ in $(seq "$n"); do "$@" >/dev/null 2>&1 && return 0; sleep 1; done
+  return 1
+}
+timed() {   # timed <var> <seconds> <command...>: retry, store elapsed seconds in <var>
+  local var="$1" n="$2" t0 rc; shift 2
+  t0="$(date +%s)"; retry "$n" "$@"; rc=$?
+  printf -v "$var" '%s' "$(( $(date +%s) - t0 ))"
+  return $rc
+}
+not() { ! "$@"; }
+
+cleanup() {
+  if [ "$KEEP" = true ]; then
+    echo; echo "Stack left running in $WORK"
+    echo "  cd there, export COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME, then ./hogman <command>; ./hogman down -v to stop"
+  else
+    dc down -v --remove-orphans >/dev/null 2>&1
+    rm -rf "$WORK"
+  fi
+}
+trap cleanup EXIT
+
+rsync -a --exclude data --exclude .env "$SRC/" "$WORK/"
+cd "$WORK"
+cat > .env <<EOF
+NETWORK=bobo
+PUBLIC_HOST=$PUBLIC_HOST
+PUBLIC_IPV4=
+TEST_MODE=true
+EOF
+
+H=./hogman
+dc() {
+  local envs=(--env-file .env)
+  [ -f data/state.env ] && envs+=(--env-file data/state.env)
+  ZONE=$ZONE EDGE_TLS_MODE=local_certs docker compose "${envs[@]}" \
+    -f compose.yaml -f test/compose.test.yaml --profile clients "$@"
+}
+run()   { local c="$1"; shift; dc exec -T "$c" "$@"; }
+ip_of() { run "$1" tailscale ip -4 2>/dev/null | head -1 | tr -d '\r'; }
+has_ip(){ [ -n "$(ip_of "$1")" ]; }
+
+# --- from "the internet": a machine that can reach only the public edge ---
+redeem() {  # redeem <token> <handle>  -> prints "<http status> <json>"
+  docker run --rm --network "${COMPOSE_PROJECT_NAME}_outside" \
+    -v "$WORK/data/edge-trust:/t:ro" nicolaka/netshoot:v0.14 \
+    curl -s -w ' %{http_code}' --cacert /t/root.crt -X POST "https://$PUBLIC_HOST/hogman/v1/redeem" \
+      -H 'content-type: application/json' -d "{\"token\":\"$1\",\"handle\":\"$2\"}"
+}
+
+# --- the portal API, called from a device on the mesh ----------------------
+api() {     # api <tools-container> <METHOD> <path> [json]  -> body; fails on non-2xx
+  run "$1" curl -sf -m5 --cacert $ROOT -X "$2" "https://home.$ZONE$3" \
+    -H 'content-type: application/json' ${4:+-d "$4"}
+}
+api_status() {  # api_status <tools-container> <METHOD> <path> [json] -> HTTP status
+  run "$1" curl -s -m5 -o /dev/null -w '%{http_code}' --cacert $ROOT -X "$2" "https://home.$ZONE$3" \
+    -H 'content-type: application/json' ${4:+-d "$4"}
+}
+status_is() { [ "$(api_status "$@" 2>/dev/null | tail -c 3)" = "$EXPECT" ]; }
+expect() { EXPECT="$1"; shift; status_is "$@"; }
+
+resolves_to()  { run bob-tools dig +short "$1" | tr -d '\r' | grep -qx "$2"; }
+resolves_none(){ [ -z "$(run bob-tools dig +short "$1" | tr -d '\r')" ]; }
+resolves_any() { run bob-tools dig +short "$1" | grep -q .; }
+refused()      { run bob-tools dig "@$CORE_MESH_IP" "$1" | grep -q REFUSED; }
+fetch()        { run "${FROM:-bob-tools}" curl -sf -m3 --cacert $ROOT "https://$1" | grep -q "$2"; }
+can_ping()     { run "$1" ping -c2 -W2 "$2"; }
+port_open()    { run "$1" nc -z -w3 "$2" "$3"; }
+verify_cert()  { openssl verify -CAfile data/pki/public/root_ca.crt \
+                   -untrusted data/pki/public/intermediate_ca.crt "$1"; }
+has_device()   { $H device list | grep -q "$1"; }
+no_device_of() { ! $H device list | awk '{print $2}' | grep -qx "$1"; }
+
+site_cert() { run bob-tools sh -c "echo | openssl s_client -connect $1:443 -servername $1 \
+                -CAfile $ROOT 2>/dev/null | openssl x509"; }
+expires_within() {
+  local pem; pem="$(site_cert "$1")" || return 1
+  [ -n "$pem" ] || return 1
+  openssl x509 -noout -checkend 0 <<<"$pem" >/dev/null || return 1
+  ! openssl x509 -noout -checkend $(( $2 * 3600 )) <<<"$pem" >/dev/null
+}
+
+# ===========================================================================
+
+step "Deploy"
+$H init || exit 1
+$H up   || exit 1
+. ./data/state.env
+check "the registrar is up and in sync" $H sync
+check "the owner is created" $H member add root --role owner
+
+step "Invites, redeemed from the internet"
+token_of() { awk '/^token:/ {print $2}'; }
+ALICE_TOKEN="$($H invite create --role admin --note "alice, colleague" | token_of)"
+BOB_TOKEN="$($H invite create --note "bob" | token_of)"
+check "owner minted two invites" test -n "$ALICE_TOKEN" -a -n "$BOB_TOKEN"
+
+r="$(redeem "$ALICE_TOKEN" alice)"; alice_json="${r% *}"
+check "alice redeems her invite (HTTP ${r##* })" test "${r##* }" = 201
+ALICE_LAPTOP_KEY="$(jq -r .auth_key <<<"$alice_json")"
+fp="$(jq -r .root_fingerprint <<<"$alice_json")"
+check "the enrolment carries the network's root (fingerprint matches)" test "$fp" = "$(tr -d ':' <<<"$ROOT_FINGERPRINT")"
+check "the enrolment carries the control server" test "$(jq -r .login_server <<<"$alice_json")" = "https://$PUBLIC_HOST"
+r="$(redeem "$ALICE_TOKEN" mallory)"
+check "an invite works only once (HTTP ${r##* })" test "${r##* }" = 403
+r="$(redeem "hmi_notarealtoken" mallory)"
+check "a made-up invite is refused (HTTP ${r##* })" test "${r##* }" = 403
+r="$(redeem "$BOB_TOKEN" alice)"
+check "a taken handle is refused (HTTP ${r##* })" test "${r##* }" = 409
+r="$(redeem "$BOB_TOKEN" bob)"; BOB_LAPTOP_KEY="$(jq -r .auth_key <<<"${r% *}")"
+check "bob redeems his invite (HTTP ${r##* })" test "${r##* }" = 201
+check "both invites now show as redeemed" test "$($H invite list | grep -c redeemed)" = 2
+
+step "Devices join; the registrar recognises them"
+# A device added straight through Headscale, around the registrar.
+STRAY_KEY="$($H headscale preauthkeys create --tags tag:server --expiration 1h --output json | jq -r .key)"
+export ALICE_LAPTOP_KEY BOB_LAPTOP_KEY STRAY_KEY
+dc up -d alice-laptop bob-laptop stray-device alice-laptop-tools bob-tools stray-tools
+for d in alice-laptop bob-laptop stray-device; do retry 90 has_ip $d; done
+ALICE_LAPTOP_IP="$(ip_of alice-laptop)"; BOB_LAPTOP_IP="$(ip_of bob-laptop)"; STRAY_IP="$(ip_of stray-device)"
+check "alice's and bob's laptops are recorded as theirs" retry 20 sh -c "$H device list | grep -q 'alice.*personal' && $H device list | grep -q 'bob.*personal'"
+retry 30 api alice-laptop-tools GET /api/me
+me="$(api alice-laptop-tools GET /api/me)"
+check "the portal knows alice from her mesh address (alice, admin)" \
+  test "$(jq -r '.member.handle + "/" + .member.role' <<<"$me")" = alice/admin
+me="$(api bob-tools GET /api/me)"
+check "... and bob from his (bob, member)" test "$(jq -r '.member.handle + "/" + .member.role' <<<"$me")" = bob/member
+
+step "Alice adds a server and names it"
+srv="$(api alice-laptop-tools POST /api/devices '{"kind":"server"}')"
+ALICE_SERVER_KEY="$(jq -r .auth_key <<<"$srv")"
+check "alice gets a server key from the portal" test -n "$ALICE_SERVER_KEY" -a "$ALICE_SERVER_KEY" != null
+export ALICE_SERVER_KEY
+dc up -d alice-server alice-web alice-tools
+retry 90 has_ip alice-server; ALICE_SERVER_IP="$(ip_of alice-server)"
+check "her server is recorded as hers" retry 20 sh -c "$H device list | grep -q 'alice.*server'"
+SERVER_ID="$(api alice-laptop-tools GET /api/me | jq -r '.devices[] | select(.kind=="server") | .id')"
+echo "  core=$CORE_MESH_IP alice-laptop=$ALICE_LAPTOP_IP bob-laptop=$BOB_LAPTOP_IP alice-server=$ALICE_SERVER_IP (#$SERVER_ID) stray=$STRAY_IP"
+LAPTOP_ID="$(api alice-laptop-tools GET /api/me | jq -r '.devices[] | select(.kind=="personal") | .id')"
+check "a name can't point at a personal device"  expect 400 alice-laptop-tools POST /api/names "{\"name\":\"alice\",\"device_id\":$LAPTOP_ID}"
+check "a sub-name needs its parent claimed first" expect 403 alice-laptop-tools POST /api/names "{\"name\":\"blog.alice\",\"device_id\":$SERVER_ID}"
+check "alice claims alice.$ZONE"      expect 201 alice-laptop-tools POST /api/names "{\"name\":\"alice\",\"device_id\":$SERVER_ID}"
+check "alice claims blog.alice.$ZONE" expect 201 alice-laptop-tools POST /api/names "{\"name\":\"blog.alice\",\"device_id\":$SERVER_ID}"
+check "reserved names are refused"    expect 403 alice-laptop-tools POST /api/names "{\"name\":\"home\",\"device_id\":$SERVER_ID}"
+check "bob can't take alice's name"   expect 409 bob-tools POST /api/names "{\"name\":\"alice\",\"device_id\":$SERVER_ID}"
+check "bob can't point a name at alice's server" expect 400 bob-tools POST /api/names "{\"name\":\"bobsite\",\"device_id\":$SERVER_ID}"
+
+step "Naming"
+check "bob resolves alice.$ZONE to alice's server" retry 30 resolves_to alice.$ZONE "$ALICE_SERVER_IP"
+check "bob resolves home.$ZONE to the core node"   resolves_to home.$ZONE "$CORE_MESH_IP"
+check "device names work (alice-server.nodes.$ZONE)" resolves_to alice-server.nodes.$ZONE "$ALICE_SERVER_IP"
+check "ordinary names still resolve (example.com)" resolves_any example.com
+check "the network's DNS refuses outside names (not an open resolver)" refused example.com
+in_directory() { api bob-tools GET /api/directory | grep -q "$1"; }
+check "the directory lists alice's sites" in_directory "blog.alice.$ZONE"
+
+step "HTTPS with the network's own CA"
+check "portal https://home.$ZONE is trusted"                    retry 60 fetch home.$ZONE "You're in"
+check "alice's site https://alice.$ZONE is trusted (ACME cert)" retry 150 fetch alice.$ZONE "hello from alice.$ZONE"
+check "sub-names work (https://blog.alice.$ZONE)"               retry 150 fetch blog.alice.$ZONE "hello from blog.alice"
+check "site certs are short-lived (expire within 7 days)" retry 10 expires_within alice.$ZONE 168
+check "the CA is healthy" retry 30 sh -c "[ \"\$(docker inspect -f '{{.State.Health.Status}}' $COMPOSE_PROJECT_NAME-step-ca-1)\" = healthy ]"
+
+step "Name constraints: the CA cannot vouch for outside names"
+docker run --rm --user "$(id -u):$(id -g)" -v "$WORK/data:/d" --entrypoint sh smallstep/step-ca:0.30.2 -c '
+  for n in www.google.com inside.bobo.hogman; do
+    step certificate create "$n" "/d/$n.crt" "/d/$n.key" --profile leaf \
+      --ca /d/pki/public/intermediate_ca.crt --ca-key /d/step/secrets/intermediate_ca_key \
+      --ca-password-file /d/step/secrets/intermediate_password \
+      --not-after 1h --no-password --insecure --force >/dev/null
+  done'
+check "a cert for inside.$ZONE verifies"                         verify_cert data/inside.bobo.hogman.crt
+check "a cert for www.google.com from our own CA key is rejected" not verify_cert data/www.google.com.crt
+
+step "Default-deny access policy"
+check "bob's laptop can reach alice's server"            can_ping bob-tools "$ALICE_SERVER_IP"
+check "bob's laptop cannot reach alice's laptop"         not can_ping bob-tools "$ALICE_LAPTOP_IP"
+check "alice's server cannot reach bob's laptop"         not can_ping alice-tools "$BOB_LAPTOP_IP"
+check "members cannot reach other ports on the core (22)" not port_open bob-tools "$CORE_MESH_IP" 22
+check "bob can't use the admin API"   expect 403 bob-tools GET /api/admin/members
+check "alice (admin) can"             expect 200 alice-laptop-tools GET /api/admin/members
+
+step "A device that bypassed the registrar gets nothing"
+check "it is not recorded as anyone's device" not has_device stray-device
+check "it cannot reach the portal"     not port_open stray-tools "$CORE_MESH_IP" 443
+check "it cannot reach alice's server" not can_ping stray-tools "$ALICE_SERVER_IP"
+check "bob cannot reach it"            not can_ping bob-tools "$STRAY_IP"
+
+step "Relay"
+relay="$(run bob-laptop tailscale ping -c 3 "$CORE_MESH_IP" 2>&1 | tr -d '\r')"
+echo "$relay" | head -1 | sed 's/^/        /'
+check "traffic with no direct path is carried by the network's own relay" grep -q 'DERP(hogman)' <<<"$relay"
+regions="$(run bob-laptop tailscale debug derp-map 2>/dev/null | grep '"RegionCode"' | sort -u | tr -d ' \t\r')"
+check "only our relay region is offered, none of Tailscale's" test "$regions" = '"RegionCode":"hogman",'
+
+step "The join page and downloads"
+from_internet() {  # from_internet <curl args...>
+  docker run --rm --network "${COMPOSE_PROJECT_NAME}_outside" -v "$WORK/data/edge-trust:/t:ro" \
+    nicolaka/netshoot:v0.14 curl -sf --cacert /t/root.crt "$@"
+}
+page_ok()  { from_internet "https://$PUBLIC_HOST/join" | grep -q 'hogman-join'; }
+net_ok()   { from_internet "https://$PUBLIC_HOST/hogman/v1/network" | grep -q '"zone":"bobo.hogman"'; }
+check "https://<host>/join serves the join page" page_ok
+sums="$(from_internet "https://$PUBLIC_HOST/join/dl/SHA256SUMS")"
+check "the join tool is downloadable for 5 platforms" test "$(grep -c hogman-join <<<"$sums")" = 5
+check "the network info endpoint is public" net_ok
+
+step "The join tool, on a fresh computer"
+dc up -d carol-laptop carol-desktop
+retry 30 run carol-laptop tailscale status --json
+join_tool() {  # join_tool <container> <args...>
+  local c="$1"; shift
+  run "$c" sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open "$@"' _ "$@"
+}
+CAROL_LINK="$($H invite create --note carol | awk '/^link:/ {print $2}')"
+BAD_LINK="${CAROL_LINK%fp=*}fp=$(printf '%064d' 0)"
+out="$(join_tool carol-laptop --handle carol "$BAD_LINK" 2>&1)"
+check "a link with the wrong fingerprint is refused" grep -q 'fingerprint mismatch' <<<"$out"
+check "... before the invite is used" sh -c "$H invite list | grep carol | grep -q open"
+out="$(join_tool carol-laptop --handle carol --hostname carol-laptop "$CAROL_LINK" 2>&1)"; rc=$?
+echo "$out" | sed 's/^/        | /'
+check "the join tool succeeds (exit $rc)" test $rc = 0
+check "it reports carol is in" grep -q "You're in. You are carol on bobo.hogman" <<<"$out"
+check "it installed the network's root in the system store" \
+  run carol-laptop test -s /usr/local/share/ca-certificates/hogman-bobo.hogman.crt
+check "the registrar recorded carol's laptop" retry 10 sh -c "$H device list | grep -q 'carol.*carol-laptop'"
+DEVICE_LINK="$($H device key carol personal | awk '/^link:/ {print $2}')"
+out="$(join_tool carol-desktop --hostname carol-desktop "$DEVICE_LINK" 2>&1)"; rc=$?
+check "a device link adds a second device (exit $rc)" grep -q "You're in. You are carol" <<<"$out"
+check "the registrar recorded it as carol's" retry 10 sh -c "$H device list | grep -q 'carol.*carol-desktop'"
+out="$(join_tool carol-desktop leave "$DEVICE_LINK" 2>&1)"; rc=$?
+[ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
+check "leave works (exit $rc)" grep -q "Left bobo.hogman" <<<"$out"
+check "leave removed the root from the system store" \
+  run carol-desktop sh -c '! test -e /usr/local/share/ca-certificates/hogman-bobo.hogman.crt'
+logged_out() { [ "$(run carol-desktop tailscale status --json | jq -r .BackendState)" != Running ]; }
+check "leave logged the device out" logged_out
+
+step "Suspend and resume"
+check "alice (admin) cannot suspend the owner" expect 403 alice-laptop-tools POST /api/admin/members/root/suspend
+$H member suspend bob "testing" >/dev/null
+timed t 30 not fetch alice.$ZONE "hello"
+check "suspended bob loses access (${t}s)" not fetch alice.$ZONE "hello"
+check "suspended bob can't reach the portal" not api bob-tools GET /api/me
+check "his device is still registered" has_device bob-laptop
+$H member resume bob >/dev/null
+timed t 30 fetch alice.$ZONE "hello"
+check "resumed bob has access again (${t}s)" fetch alice.$ZONE "hello"
+
+step "Kick"
+check "nobody can kick the owner" not $H member kick root
+check "bob can load alice's site before the kick" fetch alice.$ZONE "hello"
+t0="$(date +%s)"
+kick_out="$($H member kick alice "test kick")"
+echo "        $kick_out"
+timed t 60 not fetch alice.$ZONE "hello"
+check "bob can no longer reach alice's site (${t}s after the kick)" not fetch alice.$ZONE "hello"
+check "alice.$ZONE no longer resolves" retry 20 resolves_none alice.$ZONE
+check "all of alice's devices are gone from the mesh" no_device_of alice
+check "alice's laptop can no longer reach the portal" retry 30 not port_open alice-laptop-tools "$CORE_MESH_IP" 443
+check "alice's server can no longer reach anyone" retry 30 not can_ping alice-tools "$BOB_LAPTOP_IP"
+check "her name is held: bob can't claim alice" expect 409 bob-tools POST /api/names '{"name":"alice","device_id":1}'
+check "the kick is in the audit log" sh -c "$H audit | grep -q 'member.kick.*alice'"
+check "bob is unaffected" fetch home.$ZONE "You're in"
+
+echo
+echo "Result: $pass passed, $fail failed"
+[ "$fail" -eq 0 ]
