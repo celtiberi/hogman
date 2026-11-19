@@ -172,6 +172,11 @@ func (s *Store) CountOwners() (int, error) {
 	return n, err
 }
 
+func (s *Store) DeleteMember(id int64) error {
+	_, err := s.db.Exec(`DELETE FROM members WHERE id = ?`, id)
+	return err
+}
+
 // ---------------------------------------------------------------- invites --
 
 type Invite struct {
@@ -257,6 +262,11 @@ func (s *Store) ClaimInvite(id, memberID int64) (bool, error) {
 	}
 	n, _ := res.RowsAffected()
 	return n == 1, nil
+}
+
+func (s *Store) UnclaimInvite(id, memberID int64) error {
+	_, err := s.db.Exec(`UPDATE invites SET redeemed_by = NULL, redeemed_at = NULL WHERE id = ? AND redeemed_by = ?`, id, memberID)
+	return err
 }
 
 func (s *Store) RevokeInvite(id int64) error {
@@ -441,11 +451,12 @@ type Name struct {
 	Member    string `json:"member"`
 	DeviceID  *int64 `json:"device_id,omitempty"`
 	IPv4      string `json:"ipv4,omitempty"`
+	IPv6      string `json:"ipv6,omitempty"`
 	HeldUntil *int64 `json:"held_until,omitempty"`
 }
 
 func (s *Store) queryNames(where string, args ...any) ([]*Name, error) {
-	rows, err := s.db.Query(`SELECT n.name, n.member_id, m.handle, n.device_id, COALESCE(d.ipv4, ''), n.held_until
+	rows, err := s.db.Query(`SELECT n.name, n.member_id, m.handle, n.device_id, COALESCE(d.ipv4, ''), COALESCE(d.ipv6, ''), n.held_until
 		FROM names n JOIN members m ON m.id = n.member_id
 		LEFT JOIN devices d ON d.id = n.device_id AND d.removed_at IS NULL `+where+` ORDER BY n.name`, args...)
 	if err != nil {
@@ -455,7 +466,7 @@ func (s *Store) queryNames(where string, args ...any) ([]*Name, error) {
 	var out []*Name
 	for rows.Next() {
 		var n Name
-		if err := rows.Scan(&n.Name, &n.MemberID, &n.Member, &n.DeviceID, &n.IPv4, &n.HeldUntil); err != nil {
+		if err := rows.Scan(&n.Name, &n.MemberID, &n.Member, &n.DeviceID, &n.IPv4, &n.IPv6, &n.HeldUntil); err != nil {
 			return nil, err
 		}
 		out = append(out, &n)

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"strconv"
@@ -57,9 +59,13 @@ func (c caller) actor() Actor { return Actor{Member: c.member} }
 // address their request came from: no passwords, no sessions.
 func MeshHandler(s *Service) http.Handler {
 	mux := http.NewServeMux()
-	h := func(pattern string, admin bool, fn func(w http.ResponseWriter, r *http.Request, c caller)) {
+	h := func(pattern string, admin, allowServer bool, fn func(w http.ResponseWriter, r *http.Request, c caller)) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			c := r.Context().Value(ctxKey{}).(caller)
+			if !allowServer && c.device.Kind == "server" {
+				fail(w, forbidden("server devices cannot perform this action; use a personal device"))
+				return
+			}
 			if admin && !c.actor().IsAdmin() {
 				fail(w, forbidden("admins only"))
 				return
@@ -70,7 +76,13 @@ func MeshHandler(s *Service) http.Handler {
 
 	// --- member ---------------------------------------------------------
 
-	h("GET /api/me", false, func(w http.ResponseWriter, r *http.Request, c caller) {
+	h("GET /api/me", false, true, func(w http.ResponseWriter, r *http.Request, c caller) {
+		if c.device.Kind == "server" {
+			writeJSON(w, 200, map[string]any{
+				"member": c.member, "this_device": c.device, "zone": s.cfg.Zone,
+			})
+			return
+		}
 		devs, _ := s.st.MemberDevices(c.member.ID)
 		names, _ := s.st.Names()
 		mine := []*Name{}
@@ -86,7 +98,7 @@ func MeshHandler(s *Service) http.Handler {
 		})
 	})
 
-	h("POST /api/devices", false, func(w http.ResponseWriter, r *http.Request, c caller) {
+	h("POST /api/devices", false, false, func(w http.ResponseWriter, r *http.Request, c caller) {
 		var in struct {
 			Kind string `json:"kind"`
 		}
@@ -102,14 +114,14 @@ func MeshHandler(s *Service) http.Handler {
 			"kind": in.Kind, "join_link": s.DeviceLink(key)})
 	})
 
-	h("DELETE /api/devices/{id}", false, func(w http.ResponseWriter, r *http.Request, c caller) {
+	h("DELETE /api/devices/{id}", false, false, func(w http.ResponseWriter, r *http.Request, c caller) {
 		id, ok := pathID(w, r)
 		if ok {
 			done(w, s.RemoveDevice(r.Context(), c.actor(), id))
 		}
 	})
 
-	h("POST /api/names", false, func(w http.ResponseWriter, r *http.Request, c caller) {
+	h("POST /api/names", false, false, func(w http.ResponseWriter, r *http.Request, c caller) {
 		var in struct {
 			Name     string `json:"name"`
 			DeviceID int64  `json:"device_id"`
@@ -125,11 +137,11 @@ func MeshHandler(s *Service) http.Handler {
 		writeJSON(w, 201, map[string]string{"name": fqdn})
 	})
 
-	h("DELETE /api/names/{name}", false, func(w http.ResponseWriter, r *http.Request, c caller) {
+	h("DELETE /api/names/{name}", false, false, func(w http.ResponseWriter, r *http.Request, c caller) {
 		done(w, s.Release(c.actor(), r.PathValue("name")))
 	})
 
-	h("GET /api/directory", false, func(w http.ResponseWriter, r *http.Request, c caller) {
+	h("GET /api/directory", false, true, func(w http.ResponseWriter, r *http.Request, c caller) {
 		names, err := s.st.ResolvableNames()
 		if err != nil {
 			fail(w, err)
@@ -142,7 +154,7 @@ func MeshHandler(s *Service) http.Handler {
 		writeJSON(w, 200, out)
 	})
 
-	h("POST /api/invites", false, func(w http.ResponseWriter, r *http.Request, c caller) {
+	h("POST /api/invites", false, false, func(w http.ResponseWriter, r *http.Request, c caller) {
 		var in struct {
 			Role     string  `json:"role"`
 			Note     string  `json:"note"`
@@ -159,7 +171,7 @@ func MeshHandler(s *Service) http.Handler {
 		writeJSON(w, 201, inv)
 	})
 
-	h("DELETE /api/invites/{id}", false, func(w http.ResponseWriter, r *http.Request, c caller) {
+	h("DELETE /api/invites/{id}", false, false, func(w http.ResponseWriter, r *http.Request, c caller) {
 		id, ok := pathID(w, r)
 		if ok {
 			done(w, s.RevokeInvite(c.actor(), id))
@@ -168,7 +180,7 @@ func MeshHandler(s *Service) http.Handler {
 
 	// --- admin ----------------------------------------------------------
 
-	h("GET /api/admin/members", true, func(w http.ResponseWriter, r *http.Request, c caller) {
+	h("GET /api/admin/members", true, false, func(w http.ResponseWriter, r *http.Request, c caller) {
 		ms, err := s.st.Members()
 		if err != nil {
 			fail(w, err)
@@ -177,12 +189,12 @@ func MeshHandler(s *Service) http.Handler {
 		writeJSON(w, 200, ms)
 	})
 
-	h("POST /api/admin/members/{handle}/{action}", true, func(w http.ResponseWriter, r *http.Request, c caller) {
+	h("POST /api/admin/members/{handle}/{action}", true, false, func(w http.ResponseWriter, r *http.Request, c caller) {
 		var in struct {
 			Reason string `json:"reason"`
 			Role   string `json:"role"`
 		}
-		if r.ContentLength > 0 && !readJSON(w, r, &in) {
+		if !readOptionalJSON(w, r, &in) {
 			return
 		}
 		handle := r.PathValue("handle")
@@ -205,7 +217,7 @@ func MeshHandler(s *Service) http.Handler {
 		}
 	})
 
-	h("GET /api/admin/devices", true, func(w http.ResponseWriter, r *http.Request, c caller) {
+	h("GET /api/admin/devices", true, false, func(w http.ResponseWriter, r *http.Request, c caller) {
 		ds, err := s.st.LiveDevices()
 		if err != nil {
 			fail(w, err)
@@ -214,7 +226,7 @@ func MeshHandler(s *Service) http.Handler {
 		writeJSON(w, 200, ds)
 	})
 
-	h("GET /api/admin/invites", true, func(w http.ResponseWriter, r *http.Request, c caller) {
+	h("GET /api/admin/invites", true, false, func(w http.ResponseWriter, r *http.Request, c caller) {
 		invs, err := s.st.Invites(nil)
 		if err != nil {
 			fail(w, err)
@@ -223,7 +235,7 @@ func MeshHandler(s *Service) http.Handler {
 		writeJSON(w, 200, inviteViews(invs))
 	})
 
-	h("GET /api/admin/audit", true, func(w http.ResponseWriter, r *http.Request, c caller) {
+	h("GET /api/admin/audit", true, false, func(w http.ResponseWriter, r *http.Request, c caller) {
 		n, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		if n <= 0 || n > 1000 {
 			n = 100
@@ -236,7 +248,35 @@ func MeshHandler(s *Service) http.Handler {
 		writeJSON(w, 200, log)
 	})
 
-	return identify(s, mux)
+	return identify(s, requireSameOriginAndJSON(s.cfg.Zone, mux))
+}
+
+// requireSameOriginAndJSON blocks cross-site browser requests (CSRF) against the
+// IP-authenticated mesh API. Because .hogman is not on the Public Suffix List,
+// member sites like bob.<zone> share a "site" with home.<zone>, so Sec-Fetch-Site
+// "same-site" must also be rejected.
+func requireSameOriginAndJSON(zone string, next http.Handler) http.Handler {
+	portalOrigin := "https://home." + zone
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+			if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "none" {
+				fail(w, forbidden("cross-origin request refused"))
+				return
+			}
+			if origin := r.Header.Get("Origin"); origin != "" && origin != portalOrigin {
+				fail(w, forbidden("cross-origin request refused"))
+				return
+			}
+			if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
+				mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+				if err != nil || mt != "application/json" {
+					fail(w, &Problem{http.StatusUnsupportedMediaType, "Content-Type must be application/json"})
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // identify resolves the calling device from its mesh address. The portal's
@@ -280,15 +320,26 @@ func inviteViews(in []*Invite) []inviteView {
 	return out
 }
 
-func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any, allowEmpty bool) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
+		if allowEmpty && errors.Is(err, io.EOF) {
+			return true
+		}
 		fail(w, bad("bad request body: %v", err))
 		return false
 	}
 	return true
+}
+
+func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	return decodeJSON(w, r, v, false)
+}
+
+func readOptionalJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	return decodeJSON(w, r, v, true)
 }
 
 func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {

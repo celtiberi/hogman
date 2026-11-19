@@ -145,6 +145,8 @@ services:
     profiles: [clients]
     network_mode: service:alice-server
     command: ["sleep", "infinity"]
+    volumes:
+      - ./data/pki/public:/pki:ro
 
 networks:
   outside: {}
