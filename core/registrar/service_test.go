@@ -668,3 +668,46 @@ func TestQuotasAndSuspendExpiresKeys(t *testing.T) {
 		t.Fatal("expected 3rd name to hit quota")
 	}
 }
+
+func TestCASharesCoreMeshIPAndPort9000(t *testing.T) {
+	dir := t.TempDir()
+	rootPath := filepath.Join(dir, "root_ca.crt")
+	writeTestRootCA(t, rootPath)
+	st, err := OpenStore(filepath.Join(dir, "registrar.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.db.Close() })
+	hs := newFakeHeadscale(t)
+	cfg := Config{
+		Zone:       "bobo.hogman",
+		PublicHost: "hs.example.com",
+		CoreIP:     "100.64.0.10",
+		ZoneFile:   filepath.Join(dir, "db.zone"),
+		RootCAFile: rootPath,
+	}
+	svc, err := NewService(cfg, st, NewHeadscale(hs.srv.URL, "test-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svc.cfg.CAIP != "100.64.0.10" {
+		t.Fatalf("CAIP=%q want 100.64.0.10", svc.cfg.CAIP)
+	}
+	if err := svc.writeZone(); err != nil {
+		t.Fatal(err)
+	}
+	zoneBytes, err := os.ReadFile(cfg.ZoneFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(zoneBytes), "ca    IN A   100.64.0.10") {
+		t.Fatalf("zone missing ca -> CoreIP record:\n%s", zoneBytes)
+	}
+	pol, err := svc.buildPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(pol, `"9000"`) {
+		t.Fatalf("policy missing CA port 9000:\n%s", pol)
+	}
+}

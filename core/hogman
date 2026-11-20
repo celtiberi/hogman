@@ -141,7 +141,7 @@ cmd_init() {
 
   info "Network $NETWORK, zone $ZONE, control host $PUBLIC_HOST"
   mkdir -p "$DATA"/{pki/public,pki/offline,step/config,step/secrets,step/db} \
-           "$DATA"/{headscale/config,headscale/lib,coredns,mesh/core,mesh/ca} \
+           "$DATA"/{headscale/config,headscale/lib,coredns,mesh/core} \
            "$DATA"/{edge,edge-trust,portal,registrar,secrets/registrar,join-dl,tmp}
   chmod 700 "$DATA/pki/offline" "$DATA/step/secrets" "$DATA/secrets/registrar" \
             "$DATA/mesh" "$DATA/registrar" "$DATA/headscale/lib"
@@ -224,7 +224,7 @@ render_bootstrap_zone() {
 @     IN NS  ns.$ZONE.
 ns    IN A   $CORE_MESH_IP
 home  IN A   $CORE_MESH_IP
-ca    IN A   $CA_MESH_IP
+ca    IN A   $CORE_MESH_IP
 EOF
 }
 
@@ -303,20 +303,17 @@ cmd_up() {
 
     info "Joining the core services to the mesh"
     mesh_env core "$(infra_key)"
-    mesh_env ca   "$(infra_key)"
-    dc up -d core-mesh ca-mesh
+    dc up -d core-mesh
     wait_for "core mesh IP" 90 has_mesh_ip core-mesh
-    wait_for "ca mesh IP"   90 has_mesh_ip ca-mesh
     set_state CORE_MESH_IP "$(mesh_ip core-mesh)"
-    set_state CA_MESH_IP   "$(mesh_ip ca-mesh)"
     # The keys are spent. Remove them so they are not lying around.
     (
       umask 077
-      sed -i.bak '/^TS_AUTHKEY=/d' "$DATA/mesh/core.env" "$DATA/mesh/ca.env"
+      sed -i.bak '/^TS_AUTHKEY=/d' "$DATA/mesh/core.env"
     )
-    chmod 600 "$DATA/mesh/core.env" "$DATA/mesh/ca.env"
+    chmod 600 "$DATA/mesh/core.env"
     rm -f "$DATA"/mesh/*.bak
-    info "core = $CORE_MESH_IP, ca = $CA_MESH_IP"
+    info "core = $CORE_MESH_IP"
 
     info "Creating the registrar's Headscale API key"
     (
@@ -333,9 +330,10 @@ cmd_up() {
     render_headscale
   fi
 
+  render templates/ca.json "$DATA/step/config/ca.json"
   use_prebuilt_or_build
 
-  dc up -d --build
+  dc up -d --build --remove-orphans
   wait_for "registrar" 60 reg sync
   info "Up. Control server: https://$PUBLIC_HOST   Portal (on the mesh): https://home.$ZONE"
   if ! reg member list 2>/dev/null | awk 'NR>1 && $3=="owner" {found=1} END {exit !found}'; then

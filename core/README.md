@@ -11,8 +11,7 @@ its registrar, and the join tool, deployable with one command on a small server.
 | `coredns` | CoreDNS 1.15.0 | `core` mesh IP, port 53; authoritative for `<network>.hogman` |
 | `portal` | Caddy 2.11.9 | `https://home.<network>.hogman`, mesh only; fronts the registrar's API |
 | `registrar` | built from [registrar/](registrar/) | Owns members, invites, devices, names, policy, DNS |
-| `ca-mesh` | Tailscale 1.104.7 | Mesh identity `ca` (tag:infra) |
-| `step-ca` | step-ca 0.30.2 | `https://ca.<network>.hogman`, mesh only; ACME |
+| `step-ca` | step-ca 0.30.2 | `https://ca.<network>.hogman:9000`, mesh only (`core` mesh IP); ACME |
 
 Not built yet: a portal UI (the portal API exists), a way to earn an invite (that part
 is yours to build), mobile enrolment, webhooks, the invite-tree cascade.

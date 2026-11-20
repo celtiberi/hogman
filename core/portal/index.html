@@ -77,7 +77,7 @@
 <h2>Host something</h2>
 <p>Add a server above, give it a name, then run Caddy on it with:</p>
 <pre><code>{
-	acme_ca https://ca.<span class="zone">&lt;network&gt;.hogman</span>/acme/acme/directory
+	acme_ca https://ca.<span class="zone">&lt;network&gt;.hogman</span>:9000/acme/acme/directory
 }
 yourname.<span class="zone">&lt;network&gt;.hogman</span> {
 	respond "hello"

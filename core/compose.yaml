@@ -68,20 +68,12 @@ services:
 
   # --- Mesh identities for the core services --------------------------------
 
-  core-mesh:            # mesh IP serves DNS + the portal (home.<zone>)
+  core-mesh:            # mesh IP serves DNS, the portal (home.<zone>) and the CA (ca.<zone>:9000)
     <<: *mesh-node
     hostname: core
     env_file: [{ path: ./data/mesh/core.env, required: false }]
     volumes:
       - ./data/mesh/core:/var/lib/tailscale
-      - ./data/edge-trust:/edge-trust:ro
-
-  ca-mesh:              # mesh IP serves the CA (ca.<zone>)
-    <<: *mesh-node
-    hostname: ca
-    env_file: [{ path: ./data/mesh/ca.env, required: false }]
-    volumes:
-      - ./data/mesh/ca:/var/lib/tailscale
       - ./data/edge-trust:/edge-trust:ro
     networks:
       core:
@@ -147,7 +139,6 @@ services:
       ZONE: ${ZONE}
       PUBLIC_HOST: ${PUBLIC_HOST}
       CORE_MESH_IP: ${CORE_MESH_IP:-}
-      CA_MESH_IP: ${CA_MESH_IP:-}
       MEMBERS_CAN_INVITE: ${MEMBERS_CAN_INVITE:-false}
       NAME_HOLD: ${NAME_HOLD:-2160h}
       GOGC: "25"
@@ -163,7 +154,7 @@ services:
   step-ca:
     image: smallstep/step-ca:0.30.2
     restart: unless-stopped
-    network_mode: service:ca-mesh
+    network_mode: service:core-mesh
     user: "${HOGMAN_UID:-1000}:${HOGMAN_GID:-1000}"
     mem_limit: 128m
     pids_limit: 128
@@ -176,7 +167,7 @@ services:
       - --resolver=${CORE_MESH_IP:-127.0.0.1}:53
       - /home/step/config/ca.json
     healthcheck:
-      test: ["CMD", "step", "ca", "health", "--ca-url", "https://ca.${ZONE}", "--root", "/home/step/certs/root_ca.crt"]
+      test: ["CMD", "step", "ca", "health", "--ca-url", "https://ca.${ZONE}:9000", "--root", "/home/step/certs/root_ca.crt"]
       interval: 10s
       retries: 10
     volumes:

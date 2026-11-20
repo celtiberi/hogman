@@ -194,6 +194,7 @@ check "bob can't point a name at alice's server" expect 400 bob-tools POST /api/
 step "Naming"
 check "bob resolves alice.$ZONE to alice's server" retry 30 resolves_to alice.$ZONE "$ALICE_SERVER_IP"
 check "bob resolves home.$ZONE to the core node"   resolves_to home.$ZONE "$CORE_MESH_IP"
+check "bob resolves ca.$ZONE to the core node"     resolves_to ca.$ZONE "$CORE_MESH_IP"
 check "device names work (alice-server.nodes.$ZONE)" resolves_to alice-server.nodes.$ZONE "$ALICE_SERVER_IP"
 check "ordinary names still resolve (example.com)" resolves_any example.com
 check "the network's DNS refuses outside names (not an open resolver)" refused example.com
@@ -257,6 +258,7 @@ check "mesh API rejects same-site browser requests (403)" \
 step "A device that bypassed the registrar gets nothing"
 check "it is not recorded as anyone's device" not has_device stray-device
 check "it cannot reach the portal"     not port_open stray-tools "$CORE_MESH_IP" 443
+check "it cannot reach the CA"         not port_open stray-tools "$CORE_MESH_IP" 9000
 check "it cannot reach alice's server" not can_ping stray-tools "$ALICE_SERVER_IP"
 check "bob cannot reach it"            not can_ping bob-tools "$STRAY_IP"
 
