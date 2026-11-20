@@ -474,10 +474,13 @@ check "and it stops cleanly (exit $rc)" grep -q "app.$ZONE is down" <<<"$out"
 
 out="$(join_tool dave-laptop update --dry-run 2>&1)"; rc=$?
 check "hogman-join update --dry-run checks SHA256SUMS cleanly (exit $rc)" bash -c 'test "$1" = 0 && grep -q "already up to date" <<<"$2"' _ "$rc" "$out"
-run dave-laptop sh -c 'printf "#!/bin/sh\nexit 1\n" > /root/.config/hogman/bobo.hogman/hogman-join && chmod 755 /root/.config/hogman/bobo.hogman/hogman-join'
+BEFORE_PID="$(run dave-laptop cat /root/.config/hogman/bobo.hogman/agent.pid 2>/dev/null | tr -d '\r')"
+run dave-laptop sh -c 'printf "#!/bin/sh\nexit 1\n" > /root/.config/hogman/bobo.hogman/.stale-join && chmod 755 /root/.config/hogman/bobo.hogman/.stale-join && mv /root/.config/hogman/bobo.hogman/.stale-join /root/.config/hogman/bobo.hogman/hogman-join'
 out="$(join_tool dave-laptop update 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
 check "hogman-join update repairs stale pen copy and restarts agent (exit $rc)" bash -c 'test "$1" = 0 && grep -q "Updated " <<<"$2"' _ "$rc" "$out"
+AFTER_PID="$(run dave-laptop cat /root/.config/hogman/bobo.hogman/agent.pid 2>/dev/null | tr -d '\r')"
+check "... restarted agent with a new process" test -n "$BEFORE_PID" -a -n "$AFTER_PID" -a "$BEFORE_PID" != "$AFTER_PID"
 check "... and installed binary matches /join/dl exactly" run dave-laptop sh -c 'cmp -s /root/.config/hogman/bobo.hogman/hogman-join "/dl/hogman-join-$(uname -s)-$(uname -m)"'
 check "... and restarted agent still loads alice.$ZONE" retry 20 alice_via
 
