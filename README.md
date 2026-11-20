@@ -133,12 +133,14 @@ to the end of the command.
   offline, encrypted.
 - **Access:** default deny. Hogman's registrar keeps the member list and writes the access
   policy. A *personal* device is a member's laptop or phone; a *server* is anything set up to
-  host sites (a share, say). Members' devices can reach servers and the pen's services;
-  personal devices accept no incoming connections; a device that joins without an invite gets nothing.
+  host sites (a share, say). Members' devices can reach servers (on 443, and 80 to
+  redirect, only) and the pen's services; personal devices accept no incoming connections; a
+  device that joins without an invite gets nothing. A pen carries HTTPS and nothing else: no
+  ssh, no other ports (decision D-11: the best fix for a surface is to delete it).
 - **Invites:** a single-use token in a link that also carries the SHA-256 fingerprint of the
-  pen's root. `hogman-join` checks it before trusting anything, installs the root, and joins
-  with Tailscale (its own profile) or side by side through a built-in client that only handles
-  the pen's names.
+  pen's root. `hogman-join` checks it before trusting anything, installs the root, and starts
+  a small built-in client, running as you (never as administrator), whose local proxy carries
+  only HTTPS to the pen's names.
 - **The boot:** deletes all of a member's devices, revokes their keys and invites, rewrites the
   policy, and holds their names for 90 days. About two seconds.
 - **Hosted pens:** five containers per pen (Headscale, registrar, step-ca, Caddy for the home
@@ -208,9 +210,11 @@ $ curl -fsSLo hogman-join https://smith.pens.hogman.network/join/dl/hogman-join-
 ✓ You're in. You are alice on smith.hogman.
 ```
 
-**No Tailscale needed, and it won't fight yours.** If you already use Tailscale for
-something else, the join tool notices and joins **side by side**: its own small connection
-carries only the pen's names, and your other network keeps running.
+**No Tailscale needed, and it won't fight yours.** The join tool runs its own small
+connection, as you, never as administrator. It carries only HTTPS to the pen's names, and
+leaves everything else on your computer, including any Tailscale of your own, alone. (Joining
+through your own Tailscale app instead is possible, but less safe: see
+[Advanced](https://hogman.network/docs/advanced.html).)
 
 **More devices:** your pen's home page has *Add a device*: a one-time link and QR code. The
 new device joins as you, under your name.
@@ -295,7 +299,7 @@ Try it, break it, tell us what you find. Don't trust it with anything that matte
 | On tour now | Not on the bill yet |
 |---|---|
 | The pen: server, names, certificates, invites, the boot | Phones (the app is in the works) |
-| Joining from Linux and a Mac, side by side with Tailscale | Windows (built, never tried) |
+| Joining from Linux and a Mac: HTTPS only, never as administrator, alongside your own Tailscale | Windows (built, never tried) |
 | Many pens on one server, kept apart | Open sign-ups for everyone |
 | A one-line installer for servers; updates in under a minute | A security audit |
 | A real pen live on the internet: `farm.hogman`, joined from a Mac | |

@@ -49,10 +49,10 @@ usage:
 options:
   --handle NAME     the name you want on the network (invite links only; asked if missing)
   --hostname NAME   what this device is called on the network (default: this computer's name)
-  --alongside       join side by side: a small agent of its own, leaving this computer's
-                    Tailscale (and everything else) alone. Chosen automatically when
-                    Tailscale is missing or already on another network.
-  --switch          use this computer's Tailscale even if it is on another network
+  --tailscale       ADVANCED, less safe: join through this computer's Tailscale app, so
+                    every app and port reaches the pen (not just HTTPS), instead of the
+                    usual small agent that carries HTTPS only. See hogman.network/docs/advanced.html
+  --switch          with --tailscale: use it even if it is on another network
                     (that network is paused until you switch back)
   --no-service      side by side: don't register a login item, just run in the background
   --no-system-proxy side by side: don't change this computer's automatic proxy setting
@@ -70,6 +70,7 @@ type options struct {
 	handle, hostname, controlCA  string
 	yes, dryRun, noTrust, noOpen bool
 	alongside, switchNet         bool
+	useTailscale                 bool // advanced: join through the system Tailscale
 	noService, noSystemProxy     bool
 	pen                          string // share: which pen
 	background                   bool   // share: keep running after the window closes
@@ -96,6 +97,7 @@ func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err 
 	fs.BoolVar(&verbose, "verbose", false, "")
 	fs.BoolVar(&o.alongside, "alongside", false, "")
 	fs.BoolVar(&o.switchNet, "switch", false, "")
+	fs.BoolVar(&o.useTailscale, "tailscale", false, "")
 	fs.BoolVar(&o.noService, "no-service", false, "")
 	fs.BoolVar(&o.noSystemProxy, "no-system-proxy", false, "")
 	fs.StringVar(&o.pen, "pen", "", "")
@@ -334,22 +336,29 @@ func join(raw string, o options) error {
 	note("its certificate matches the link (%s)", short(root.Fingerprint))
 	note("and can only vouch for names ending in .%s", n.Zone)
 
-	// Which way in? Side by side unless this computer's Tailscale is free to use.
+	// One way in (D-11): the side-by-side agent, which carries HTTPS to pen
+	// names and nothing else. Joining through this computer's Tailscale app
+	// (every app and port reaches the pen) is advanced and opt-in.
 	ts, tsErr := findTailscale()
 	var st *TSStatus
 	if tsErr == nil {
 		st, tsErr = ts.Status()
 	}
+	onPenViaTailscale := tsErr == nil && st.BackendState == "Running" && st.OnNetwork(n.Zone)
 	switch {
-	case o.alongside:
-		return joinAlongside(link, n, root, client, o, "side-by-side mode was asked for")
-	case hasAlongside(n.Zone):
-		return joinAlongside(link, n, root, client, o, "this computer already has a side-by-side connection to "+n.Zone)
-	case tsErr != nil:
-		return joinAlongside(link, n, root, client, o, "Tailscale is not installed or not running here, which is fine")
-	case st.OnOtherNetwork(n.Zone) != "" && !o.switchNet:
-		return joinAlongside(link, n, root, client, o,
-			"this computer's Tailscale is on another network ("+st.OnOtherNetwork(n.Zone)+"); leaving it alone")
+	case o.useTailscale && tsErr != nil:
+		return errorf("--tailscale needs this computer's Tailscale installed and running: %v", tsErr)
+	case o.useTailscale && st.OnOtherNetwork(n.Zone) != "" && !o.switchNet:
+		return errorf("this computer's Tailscale is on another network (%s). Add --switch to move it to %s, or leave out --tailscale",
+			st.OnOtherNetwork(n.Zone), n.Zone)
+	case o.useTailscale:
+		note("advanced: joining through this computer's Tailscale; every app and port reaches the pen")
+	case onPenViaTailscale && !hasAlongside(n.Zone):
+		// Joined this way before D-11: keep it working rather than add a second device.
+		note("this computer is already on %s through Tailscale; keeping that", n.Zone)
+		note("to switch to the usual HTTPS-only way: hogman-join leave '<link>', then join again")
+	default:
+		return joinAlongside(link, n, root, client, o, "the usual way: a small agent that carries HTTPS to the pen and nothing else")
 	}
 	already := st.BackendState == "Running" && st.OnNetwork(n.Zone)
 	if other := st.OnOtherNetwork(n.Zone); other != "" {

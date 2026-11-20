@@ -19,9 +19,8 @@
   laptop or phone is a <em>personal</em> device and never accepts those connections. That's why
   this machine joins with <strong>Add a server</strong> rather than <strong>Add a device</strong>.</p>
 <p>Why do this instead of sharing? You want your own web server's features: several sites or
-  apps behind one server, your own redirects or headers, other ports besides the website (SSH,
-  a game server; these need the machine to join with its own Tailscale, see step 5), or a setup
-  you already run elsewhere.</p>
+  apps behind one server, your own redirects or headers, or a setup you already run elsewhere.
+  It's still HTTPS only: members reach the server on ports 443 and 80, nothing else.</p>
 
 <h2 class="docs-h2" id="need">What you need</h2>
 <ul>
@@ -50,7 +49,7 @@
     authority (CA), the service that hands out the padlock certificates. Caddy normally asks
     Let's Encrypt; here it asks your pen instead. The Caddyfile:
 <pre class="term">{
-	acme_ca https://ca.smith.hogman:9000/acme/acme/directory
+	acme_ca https://ca.smith.hogman/acme/acme/directory
 }
 
 blog.smith.hogman {
@@ -63,18 +62,12 @@ blog.smith.hogman {
 	root * /var/www/blog
 	file_server
 }</pre></li>
-  <li><strong>Start Caddy.</strong> How depends on how the machine joined (step 2 told you):
-    <ul>
-      <li><em>With its own Tailscale</em> (it had Tailscale installed and not already connected to
-        another network): start Caddy as usual, for example <code>sudo caddy run</code>.</li>
-      <li><em>Side by side</em> (a separate background connection that leaves any other Tailscale
-        alone): Caddy needs to reach the pen's CA through the join tool's local proxy. The join
-        output printed the exact line, for example:
+  <li><strong>Start Caddy.</strong> Caddy reaches the pen's CA through the join tool's local
+    proxy. The join output printed the exact line, for example:
 <pre class="term"><span class="p">$</span> sudo HTTPS_PROXY=http://127.0.0.1:21234 caddy run</pre>
-        Set that proxy only for Caddy, not for the whole machine: it only works for names inside
-        the pen. The join tool passes visitors on the pen's ports 80 and 443 to the same ports on
-        this machine, where Caddy is listening.</li>
-    </ul>
+    Set that proxy only for Caddy, not for the whole machine: it only works for names inside the
+    pen. The join tool passes visitors on the pen's ports 80 and 443 to the same ports on this
+    machine, where Caddy is listening.
     On Linux, only root may use ports 80 and 443, hence <code>sudo</code>. To run Caddy as a
     normal user instead, allow it once:
     <code>sudo setcap cap_net_bind_service=+ep "$(command -v caddy)"</code>.</li>
@@ -95,7 +88,7 @@ blog.smith.hogman {
     always works but isn't the one you'd give people.</dd>
   <dt>Other ACME tools</dt>
   <dd>Anything that can get certificates the way it would from Let's Encrypt (ACME) works: point
-    it at <code>https://ca.smith.hogman:9000/acme/acme/directory</code>. It proves it controls the
+    it at <code>https://ca.smith.hogman/acme/acme/directory</code>. It proves it controls the
     name over port 80 (HTTP) or 443 (TLS), as on the public internet, but only inside the pen.</dd>
   <dt>Certificates in containers</dt>
   <dd>When the machine joined, Hogman installed your pen's root certificate on it, so Caddy
@@ -103,7 +96,7 @@ blog.smith.hogman {
     <code>root_ca.crt</code> from your home page and add <code>acme_ca_root /path/to/root_ca.crt</code>
     to the first block.</dd>
   <dt>Who can reach the server</dt>
-  <dd>Any active member's device, on any port. A server can't add devices, invite people or run
+  <dd>Any active member's device, on ports 443 and 80 only. A server can't add devices, invite people or run
     the pen; do that from a personal device.</dd>
   <dt>If the owner is suspended or removed</dt>
   <dd>Suspended: the server is cut off until they're resumed. Removed: the server is deleted and

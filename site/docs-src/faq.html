@@ -29,8 +29,8 @@
     zone, and your browser and operating system refuse it for anything else. Leaving the pen
     removes it.</dd>
   <dt>Can I be in more than one pen?</dt>
-  <dd>Yes. Join each with its own link. With Tailscale, each pen is its own profile; side by side,
-    each pen gets its own background connection and proxy, and they run at the same time.</dd>
+  <dd>Yes. Join each with its own link. Each pen gets its own background connection and proxy,
+    and they run at the same time.</dd>
   <dt>Phones?</dt>
   <dd>Not yet. A phone app is in the works.</dd>
   <dt>What does it cost?</dt>
@@ -43,18 +43,16 @@
   <dd>macOS only lets a person at the Mac approve a new trusted certificate, even for an
     administrator. Run the join command in Terminal on the Mac itself, not over SSH.</dd>
 
-  <dt>The browser can't find pen sites (side by side)</dt>
-  <dd>In side-by-side mode only programs that use the pen's proxy reach the pen. On a Mac the
+  <dt>The browser can't find pen sites</dt>
+  <dd>Only programs that use the pen's proxy reach the pen. On a Mac the
     join sets your automatic proxy setting; if another tool already set one, it leaves yours
     alone and prints the address to use. On Linux and Windows, set your browser's or desktop's
     automatic proxy configuration URL to the <code>proxy.pac</code> address the join printed
     (it's <code>http://127.0.0.1:&lt;port&gt;/proxy.pac</code>). For command-line tools, see
-    <a href="/docs/join.html#side">side by side, in practice</a>.</dd>
+    <a href="/docs/join.html#side">joining, in practice</a>.</dd>
 
   <dt>"This computer cannot find the network's names yet"</dt>
-  <dd>With Tailscale, check its DNS setting is on (<code>tailscale set --accept-dns=true</code>)
-    and that the pen's profile is the active one (<code>tailscale switch --list</code>). Then run
-    the same join command again. Your invite was already used to add this device, so the rerun
+  <dd>Run the same join command again. Your invite was already used to add this device, so the rerun
     sees the device is in, skips the invite, and goes on to check your home page. (The link
     won't work on another computer: ask for a device link instead.)</dd>
 

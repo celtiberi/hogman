@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- HTTPS only (decision D-11): members reach servers on ports 443 and 80 only (the access policy no longer grants `*`); the join agent's proxy carries only ports 443 (CONNECT) and 80 (HTTP); computers join through the agent by default, with joining through the system Tailscale app moved behind `--tailscale` and documented on a new Advanced page. The advanced web-server docs and the home page's Caddy snippet use the pen's CA on port 443. The own-connection design (root daemon, TUN, DNS changes) will not be built.
 - `hogman-join` side-by-side agent (and `share`) now dials only devices the pen's own node knows (`WhoIs`), whatever the pen's DNS answers. tsnet's `Dial` falls back to the computer's own network for non-peer addresses, so a hostile pen's DNS could have pointed a pen name at `127.0.0.1`, the LAN, or another tailnet's 100.x address and had the agent connect there (found in the red team of the own-connection design).
 - Enforce same-origin (`Origin` / `Sec-Fetch-Site`) and `Content-Type: application/json` checks on mutating mesh API endpoints to block CSRF from member-hosted or external sites.
 - Restrict `server` devices on the mesh API to `GET /api/me` (minimal `{member, this_device, zone, network}` payload), `GET /api/directory`, and acting on themselves only (claim a free name or one already pointing at them, release names that point only at them, remove themselves), returning `403` on everything else, including `/api/admin/*`.

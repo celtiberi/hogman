@@ -1134,7 +1134,9 @@ func (s *Service) buildPolicy() (string, error) {
 	}
 	grants := []grant{{Src: src, Dst: []string{"tag:infra"}, IP: []string{"53", "80", "443", "9000"}}}
 	if len(servers) > 0 {
-		grants = append(grants, grant{Src: src, Dst: servers, IP: []string{"*"}})
+		// HTTPS only (D-11): members reach servers on 443, and 80 only so it
+		// can redirect to HTTPS. Nothing else: no ssh, no raw ports.
+		grants = append(grants, grant{Src: src, Dst: servers, IP: []string{"80", "443"}})
 	}
 	pol := map[string]any{
 		"tagOwners": map[string][]string{"tag:infra": {}, "tag:server": {}},

@@ -205,7 +205,7 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 	// https_proxy would break everything else in that shell.
 	say("    curl / most CLIs:  https_proxy=%s curl https://<site>.%s", cfg.proxyURL(), n.Zone)
 	say("    git:               git config --global http.https://%s/.proxy %s   (per site)", "<site>."+n.Zone, cfg.proxyURL())
-	say("    ssh:               ssh -o ProxyCommand='nc -X connect -x %s %%h %%p' <host>.%s", cfg.ProxyAddr, n.Zone)
+	say("  The pen carries HTTPS only (and HTTP to redirect).")
 	if st.Server {
 		say("")
 		say("  This is a server: the pen's ports 80 and 443 now reach this computer.")

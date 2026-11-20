@@ -179,6 +179,25 @@ func TestAgentConnectAndForwardZoneGuards(t *testing.T) {
 		}
 	}
 
+	// HTTPS only (D-11): pen names on any port but 443 (CONNECT) or 80 (HTTP) are refused.
+	for _, target := range []string{"alice.bobo.hogman:22", "alice.bobo.hogman:8080", "alice.bobo.hogman:9000"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodConnect, target, nil)
+		req.Host = target
+		a.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("CONNECT %s status=%d want 403", target, rec.Code)
+		}
+	}
+	if resp, err := client.Get("http://alice.bobo.hogman:8080/"); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("GET :8080 status=%d want 403", resp.StatusCode)
+		}
+	}
+
 	// Plain HTTP forward to alice.bobo.hogman succeeds and reuses the single Transport on a.rp.
 	trBefore := a.rp.Transport
 	for i := 0; i < 2; i++ {

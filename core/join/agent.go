@@ -393,6 +393,15 @@ func (a *agent) dial(ctx context.Context, hostport string) (net.Conn, error) {
 
 var errOutside = fmt.Errorf("this proxy only serves the pen")
 
+var errPort = fmt.Errorf("this proxy only carries HTTPS (port 443) and HTTP (port 80) to the pen")
+
+// webPort: Hogman carries HTTPS to pen names, and HTTP only so a site can
+// redirect to HTTPS (decision D-11). Nothing else goes through the proxy.
+func webPort(hostport string) bool {
+	_, port, err := net.SplitHostPort(hostport)
+	return err == nil && (port == "443" || port == "80")
+}
+
 // allowed: a mesh address of a device this pen's node knows (with no node,
 // as in tests, the mesh ranges alone).
 func (a *agent) allowed(ctx context.Context, ip netip.Addr) bool {
@@ -431,6 +440,10 @@ type closeWriter interface{ CloseWrite() error }
 // connect handles "CONNECT host:443", which is how browsers reach HTTPS sites
 // through a proxy. The proxy only moves bytes; TLS stays end to end.
 func (a *agent) connect(w http.ResponseWriter, r *http.Request) {
+	if !webPort(r.Host) {
+		http.Error(w, errPort.Error(), http.StatusForbidden)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	up, err := a.dial(ctx, r.Host)
 	cancel()
@@ -486,6 +499,10 @@ func (a *agent) forward(w http.ResponseWriter, r *http.Request) {
 	host := r.URL.Host
 	if _, _, err := net.SplitHostPort(host); err != nil {
 		host = net.JoinHostPort(host, "80")
+	}
+	if !webPort(host) {
+		http.Error(w, errPort.Error(), http.StatusForbidden)
+		return
 	}
 	if h, _, _ := net.SplitHostPort(host); !a.cfg.inZone(h) {
 		if ip, err := netip.ParseAddr(h); err != nil || !inMeshRanges(ip) {

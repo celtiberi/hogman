@@ -15,7 +15,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="theme-color" content="#0e080c">
 <link rel="icon" href="/favicon.svg?v=metal5" type="image/svg+xml">
-<link rel="stylesheet" href="/styles.css?v=metal9">
+<link rel="stylesheet" href="/styles.css?v=metal10">
 </head>
 <body>
 <header class="top">
@@ -127,13 +127,16 @@
         <dd>Each pen has a private DNS zone (<code>smith.hogman</code>) answered only inside the mesh,
           and its own certificate authority whose root is name-constrained to that zone, so it can't
           vouch for any other site.</dd>
-        <dt>Who can reach what: default deny</dt>
-        <dd>Hogman's registrar keeps the member list and writes the access policy. Members can
-          reach servers; personal devices accept no connections; anything uninvited gets nothing.
+        <dt>HTTPS only, default deny</dt>
+        <dd>A pen carries HTTPS to its own names and nothing else: no ssh, no other ports. Hogman's
+          registrar keeps the member list and writes the access policy. Members reach servers on
+          443 only (80 to redirect); personal devices accept no connections; anything uninvited
+          gets nothing.
           The boot deletes every device a member has, in about two seconds.</dd>
         <dt>Joining: a link that carries a fingerprint</dt>
         <dd>Invite links carry the SHA-256 fingerprint of the pen's root. <code>hogman-join</code>
-          checks it before trusting anything, then joins with Tailscale or side by side.</dd>
+          checks it before trusting anything, then starts a small connection, running as you, never
+          as administrator, that carries only HTTPS to the pen's names.</dd>
       </dl>
       <p><a class="btn" href="/docs/how-it-works.html">The full how it works</a></p>
     </div>
@@ -384,7 +387,7 @@
       <li><strong>You get a link.</strong> It carries your invitation and the fingerprint of the pen's certificate, so you know you're at the right gate.</li>
       <li><strong>You run one command.</strong> It checks that fingerprint, asks what you'd like to be called, and adds the pen's certificate to your computer. That certificate can only ever vouch for the pen.</li>
       <li><strong>Bring your other devices.</strong> In your pen's home page, press <em>Add a device</em> for a one-time link and QR code. The new device joins as you, under your name.</li>
-      <li><strong>You're in.</strong> Open your ordinary browser and go. Nothing else to install. Already use Tailscale for something else? The tool notices and joins side by side, with its own small connection, so your other network keeps running untouched.</li>
+      <li><strong>You're in.</strong> Open your ordinary browser and go. Nothing else to install. Already use Tailscale for something else? Hogman leaves it alone: its own small connection carries only HTTPS to the pen.</li>
     </ol>
     <pre class="term" aria-label="Example of joining a pen"><span class="c"># the command your invite page gives you: copy, paste, enter</span>
 <span class="p">$</span> curl -fsSLo hogman-join https://smith.pens.hogman.network/join/dl/hogman-join-Darwin-arm64 \
@@ -444,7 +447,7 @@
       <ul class="status">
         <li class="yes">The pen itself: server, names, certificates, invites, the boot</li>
         <li class="yes">Joining from Linux and from a Mac</li>
-        <li class="yes">Side by side with Tailscale: both at once, proven on a real Mac</li>
+        <li class="yes">HTTPS only: one small connection that never runs as administrator and never touches your own Tailscale</li>
         <li class="yes">Many pens on one server, kept apart</li>
         <li class="yes">A one-line installer for servers; updates in under a minute</li>
         <li class="yes">A real pen live on the internet, joined from a Mac</li>

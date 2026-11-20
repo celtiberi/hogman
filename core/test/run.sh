@@ -271,9 +271,15 @@ check "a cert for inside.$ZONE verifies"                         verify_cert dat
 check "a cert for www.google.com from our own CA key is rejected" not verify_cert data/www.google.com.crt
 
 step "Default-deny access policy"
-check "bob's laptop can reach alice's server"            can_ping bob-tools "$ALICE_SERVER_IP"
-check "bob's laptop cannot reach alice's laptop"         not can_ping bob-tools "$ALICE_LAPTOP_IP"
-check "alice's server cannot reach bob's laptop"         not can_ping alice-tools "$BOB_LAPTOP_IP"
+# HTTPS only (D-11): members reach servers on 443 (and 80, to redirect), nothing else.
+docker exec -d "$(dc ps -q alice-tools)" sh -c 'nc -lk -p 2222 -e cat >/dev/null 2>&1 || nc -lk 2222'
+check "bob's laptop can reach alice's server on 443"     retry 20 port_open bob-tools "$ALICE_SERVER_IP" 443
+check "... and on 80, to be redirected"                  port_open bob-tools "$ALICE_SERVER_IP" 80
+check "... but on no other port (2222 is open there)"    not port_open bob-tools "$ALICE_SERVER_IP" 2222
+check "... and not with ping"                            not can_ping bob-tools "$ALICE_SERVER_IP"
+check "the server itself has 2222 open (so the above means something)" run alice-tools nc -z -w3 127.0.0.1 2222
+check "bob's laptop cannot reach alice's laptop"         not port_open bob-tools "$ALICE_LAPTOP_IP" 443
+check "alice's server cannot reach bob's laptop"         not port_open alice-tools "$BOB_LAPTOP_IP" 443
 check "members cannot reach other ports on the core (22)" not port_open bob-tools "$CORE_MESH_IP" 22
 check "bob can't use the admin API"   expect 403 bob-tools GET /api/admin/members
 check "alice (admin) can"             expect 200 alice-laptop-tools GET /api/admin/members
@@ -311,7 +317,7 @@ step "A device that bypassed the registrar gets nothing"
 check "it is not recorded as anyone's device" no_match stray-device $H device list
 check "it cannot reach the portal"     not port_open stray-tools "$CORE_MESH_IP" 443
 check "it cannot reach the CA"         not port_open stray-tools "$CORE_MESH_IP" 9000
-check "it cannot reach alice's server" not can_ping stray-tools "$ALICE_SERVER_IP"
+check "it cannot reach alice's server" not port_open stray-tools "$ALICE_SERVER_IP" 443
 check "bob cannot reach it"            not can_ping bob-tools "$STRAY_IP"
 
 step "Relay"
@@ -367,12 +373,16 @@ out="$(join_tool carol-laptop --handle carol --hostname carol-laptop "$CAROL_LIN
 echo "$out" | sed 's/^/        | /'
 check "the join tool succeeds (exit $rc)" test $rc = 0
 check "it reports carol is in" grep -q "You're in. You are carol on bobo.hogman" <<<"$out"
+check "with Tailscale installed, it still joins the usual HTTPS-only way" grep -q "the usual way" <<<"$out"
+ts_untouched() { [ "$(run carol-laptop tailscale status --json | jq -r .BackendState)" != Running ]; }
+check "... and leaves this computer's Tailscale alone" ts_untouched
 check "it installed the network's root in the system store" \
   run carol-laptop test -s /usr/local/share/ca-certificates/hogman-bobo.hogman.crt
 check "the registrar recorded carol's laptop" retry 10 match 'carol.*carol-laptop' $H device list
 DEVICE_LINK="$($H device key carol personal | awk '/^link:/ {print $2}')"
-out="$(join_tool carol-desktop --hostname carol-desktop "$DEVICE_LINK" 2>&1)"; rc=$?
-check "a device link adds a second device (exit $rc)" grep -q "You're in. You are carol" <<<"$out"
+out="$(join_tool carol-desktop --tailscale --hostname carol-desktop "$DEVICE_LINK" 2>&1)"; rc=$?
+check "a device link adds a second device, the advanced way (--tailscale) (exit $rc)" grep -q "You're in. You are carol" <<<"$out"
+check "... which warns that every app and port reaches the pen" grep -q "every app and port reaches the pen" <<<"$out"
 check "the registrar recorded it as carol's" retry 10 match 'carol.*carol-desktop' $H device list
 out="$(join_tool carol-desktop leave "$DEVICE_LINK" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
@@ -389,7 +399,7 @@ DAVE_LINK="$($H invite create --note dave | awk '/^link:/ {print $2}')"
 out="$(join_tool dave-laptop --handle dave --hostname dave-laptop "$DAVE_LINK" 2>&1)"; rc=$?
 echo "$out" | sed 's/^/        | /'
 check "the join tool succeeds without Tailscale installed (exit $rc)" test $rc = 0
-check "it chose side-by-side mode by itself" grep -q "joining side by side" <<<"$out"
+check "it joined the usual way (side by side)" grep -q "joining side by side" <<<"$out"
 check "it reports dave is in" grep -q "You're in. You are dave on bobo.hogman" <<<"$out"
 check "the registrar recorded dave's laptop" retry 10 match 'dave.*dave-laptop' $H device list
 PROXY="$(run dave-laptop sh -c 'grep -o "127.0.0.1:[0-9]*" /root/.config/hogman/bobo.hogman/config.json | head -1' | tr -d '\r')"
@@ -498,7 +508,7 @@ check "bob can no longer reach alice's site (${t}s after the kick)" not fetch al
 check "alice.$ZONE no longer resolves" retry 20 resolves_none alice.$ZONE
 check "all of alice's devices are gone from the mesh" no_device_of alice
 check "alice's laptop can no longer reach the portal" retry 30 not port_open alice-laptop-tools "$CORE_MESH_IP" 443
-check "alice's server can no longer reach anyone" retry 30 not can_ping alice-tools "$BOB_LAPTOP_IP"
+check "alice's server can no longer reach anyone" retry 30 not port_open alice-tools "$CORE_MESH_IP" 443
 check "her name is held: bob can't claim alice" expect 409 bob-tools POST /api/names '{"name":"alice","device_id":1}'
 check "the kick is in the audit log" match 'member.kick.*alice' $H audit
 match 'member.kick.*alice' $H audit || { $H audit | tail -8; dc logs --tail 20 registrar 2>&1 | grep -i audit; } | sed 's/^/        audit| /'
