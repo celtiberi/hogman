@@ -224,6 +224,12 @@ check "inviting from the list makes a working code and the message to send" invi
 check "and marks them invited" sh -c "'$HOST' waitlist | grep -q 'invited $wcode.*wanda@example.com'"
 "$HOST" waitlist remove 2 >/dev/null 2>&1
 check "the keeper can remove someone" sh -c "! '$HOST' waitlist | grep -q xavier"
+wl '{"email":"yolanda@example.com"}' >/dev/null
+self_leave() {
+  docker exec client-signup curl -s -H 'content-type: application/json' -d '{"email":"yolanda@example.com"}' https://get.example/api/waitlist/leave | jq -e '.ok' \
+    && ! "$HOST" waitlist | grep -q yolanda
+}
+check "someone can take themselves off the list" self_leave
 mail_setup() {  # a sender with <...> must not break the host settings file
   echo re_testkeyonly_not_real | "$HOST" signup-mail "Hogman <pens@example.com>" >/dev/null 2>&1 \
     && "$HOST" capacity | jq -e '.max == 3' && grep -q "^SIGNUP_FROM='Hogman <pens@example.com>'$" "$HOGMAN_HOME/host.env"

@@ -217,3 +217,70 @@ func (b *broker) dropInvited(code string) error {
 	}
 	return os.Rename(tmp, b.waitPath())
 }
+
+// leaveWaitlist removes every waiting entry for this email. It answers the
+// same whether or not the address was there, so nobody can use it to learn
+// who is on the list.
+func (b *broker) leaveWaitlist(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Email string `json:"email"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		jsonOut(w, 400, map[string]string{"error": "bad request"})
+		return
+	}
+	email := strings.ToLower(strings.TrimSpace(in.Email))
+	if !validEmail(email) {
+		jsonOut(w, 400, map[string]string{"error": "that doesn't look like an email address"})
+		return
+	}
+	if err := b.removeWaiting(email); err != nil {
+		log.Printf("waitlist leave: %v", err)
+		jsonOut(w, 500, map[string]string{"error": "internal error"})
+		return
+	}
+	jsonOut(w, 200, map[string]bool{"ok": true})
+}
+
+func (b *broker) removeWaiting(email string) error {
+	unlock, err := b.lock(b.waitPath() + ".lock")
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	data, err := os.ReadFile(b.waitPath())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var keep []string
+	removed := false
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		p := strings.Split(line, "\t")
+		if len(p) >= 4 && p[2] == "waiting" && strings.EqualFold(p[3], email) {
+			removed = true
+			continue
+		}
+		if line != "" {
+			keep = append(keep, line)
+		}
+	}
+	if !removed {
+		return nil
+	}
+	out := strings.Join(keep, "\n")
+	if out != "" {
+		out += "\n"
+	}
+	tmp := b.waitPath() + ".new"
+	if err := os.WriteFile(tmp, []byte(out), 0o600); err != nil {
+		return err
+	}
+	log.Printf("waitlist: someone took themselves off")
+	return os.Rename(tmp, b.waitPath())
+}

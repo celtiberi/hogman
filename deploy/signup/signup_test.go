@@ -290,3 +290,19 @@ func TestSignupClearsWaitlistEntry(t *testing.T) {
 		t.Fatalf("after dan signed up, the waiting list is %q", data)
 	}
 }
+
+func TestWaitlistLeave(t *testing.T) {
+	b, home := newTestBroker(t, "")
+	h := b.handler()
+	call(h, "POST", "/waitlist", `{"email":"a@example.com"}`, auth)
+	call(h, "POST", "/waitlist", `{"email":"b@example.com"}`, auth)
+	for _, e := range []string{`{"email":"A@example.com"}`, `{"email":"nobody@example.com"}`} {
+		if code, out := call(h, "POST", "/waitlist/leave", e, auth); code != 200 || out["ok"] != true {
+			t.Fatalf("leave %s: %d %v", e, code, out)
+		}
+	}
+	data, _ := os.ReadFile(filepath.Join(home, "signup", "waitlist"))
+	if strings.Contains(string(data), "a@example.com") || !strings.Contains(string(data), "b@example.com") {
+		t.Fatalf("after a left: %q", data)
+	}
+}

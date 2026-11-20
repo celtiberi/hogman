@@ -45,15 +45,18 @@
     <div class="suffix"><input id="w-pen" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30"><span>.hogman</span></div>
     <label for="w-note">Anything you'd like us to know <span class="opt">(optional)</span></label>
     <input id="w-note" maxlength="280" autocomplete="off" placeholder="who it's for, how you heard of us">
-    <p class="hint">We keep your email only to send you a code, and delete it once you've signed up or when you ask.</p>
+    <p class="hint">We keep your email only to send you a code, and delete it once you've signed up,
+      or right away if you take yourself off the list (the button below, with the same email).</p>
     <button class="btn" id="w-go" type="submit">Put me on the list</button>
+    <button class="btn small ghost" id="w-leave" type="button">Take me off the list</button>
     <p class="error" id="w-err" role="alert" hidden></p>
     <p class="hint"><a href="#" id="to-form">I have a code</a></p>
   </form>
 
   <section id="waited" class="panel" hidden aria-live="polite">
-    <h2>You're on the list</h2>
+    <h2 id="waited-title">You're on the list</h2>
     <p id="waited-text"></p>
+    <p class="hint"><a href="#" id="waited-back">Back</a> · <a href="#" id="waited-code">I have a code</a></p>
   </section>
 
   <section id="working" class="panel" hidden aria-live="polite">

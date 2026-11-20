@@ -48,6 +48,7 @@ func (b *broker) handler() http.Handler {
 	mux.HandleFunc("GET /check", b.check)
 	mux.HandleFunc("POST /provision", b.provision)
 	mux.HandleFunc("POST /waitlist", b.waitlist)
+	mux.HandleFunc("POST /waitlist/leave", b.leaveWaitlist)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(got), []byte(b.token)) != 1 {

@@ -31,6 +31,7 @@ type web struct {
 	checks    *limiter // name checks while typing
 	creates   *limiter // sign-up attempts, which also bounds guessing codes
 	waits     *limiter // waiting-list joins
+	leaves    *limiter // taking yourself off the list (its own allowance)
 	jobs      *jobStore
 }
 
@@ -49,6 +50,7 @@ func newWeb(brokerURL, token, domain string) *web {
 		checks:  newLimiter(60, time.Minute),
 		creates: newLimiter(5, time.Hour),
 		waits:   newLimiter(5, time.Hour),
+		leaves:  newLimiter(5, time.Hour),
 		jobs:    &jobStore{jobs: map[string]*job{}},
 	}
 }
@@ -62,6 +64,7 @@ func (wb *web) handler() http.Handler {
 	mux.HandleFunc("POST /api/create", wb.create)
 	mux.HandleFunc("GET /api/job", wb.job)
 	mux.HandleFunc("POST /api/waitlist", wb.waitlist)
+	mux.HandleFunc("POST /api/waitlist/leave", wb.leaveWaitlist)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
@@ -326,5 +329,27 @@ func (wb *web) waitlist(w http.ResponseWriter, r *http.Request) {
 	}
 	code, out := wb.ask(r.Context(), "POST", "/waitlist", map[string]string{
 		"email": in.Email, "pen": strings.ToLower(strings.TrimSpace(in.Pen)), "note": cleanField(in.Note, 280)})
+	jsonOut(w, code, out)
+}
+
+func (wb *web) leaveWaitlist(w http.ResponseWriter, r *http.Request) {
+	if !wb.leaves.allow(clientIP(r), time.Now()) {
+		jsonOut(w, 429, map[string]string{"error": "too many tries from here; wait an hour"})
+		return
+	}
+	var in struct {
+		Email string `json:"email"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		jsonOut(w, 400, map[string]string{"error": "bad request"})
+		return
+	}
+	in.Email = strings.ToLower(strings.TrimSpace(in.Email))
+	if !validEmail(in.Email) {
+		jsonOut(w, 400, map[string]string{"error": "that doesn't look like an email address"})
+		return
+	}
+	code, out := wb.ask(r.Context(), "POST", "/waitlist/leave", map[string]string{"email": in.Email})
 	jsonOut(w, code, out)
 }

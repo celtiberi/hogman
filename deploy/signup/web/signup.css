@@ -60,3 +60,4 @@ ol { padding-left: 1.3rem; } ol li { margin-bottom: .9rem; }
 footer { margin-top: 2.4rem; text-align: center; color: var(--ash); font-size: .88rem; }
 .opt { font-weight: 400; color: var(--ash); }
 #wait h2, #waited h2 { margin-top: 0; }
+.btn.ghost { background: none; color: var(--bone); border: 1px solid #ffc23355; box-shadow: none; margin-left: .4rem; }

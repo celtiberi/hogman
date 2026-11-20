@@ -50,6 +50,19 @@
   // The waiting list: for when the farm is full, or there's no code.
   $('to-wait').addEventListener('click', ev => { ev.preventDefault(); show('wait'); $('w-email').focus(); });
   $('to-form').addEventListener('click', ev => { ev.preventDefault(); show('form'); });
+  $('waited-back').addEventListener('click', ev => { ev.preventDefault(); history.replaceState(null, '', location.pathname); show('wait'); });
+  $('waited-code').addEventListener('click', ev => { ev.preventDefault(); history.replaceState(null, '', location.pathname); show('form'); });
+  $('w-leave').addEventListener('click', async () => {
+    $('w-err').hidden = true;
+    const email = $('w-email').value.trim();
+    if (!email.includes('@')) { $('w-err').textContent = 'Type the email you joined with, then press this again.'; $('w-err').hidden = false; return; }
+    try {
+      await api('POST', '/waitlist/leave', { email });
+      $('waited-title').textContent = "You're off the list";
+      $('waited-text').textContent = `If ${email} was on the waiting list, it isn't any more, and we've deleted it.`;
+      show('waited');
+    } catch (e) { $('w-err').textContent = e.message; $('w-err').hidden = false; }
+  });
   $('wait').addEventListener('submit', async ev => {
     ev.preventDefault();
     $('w-err').hidden = true;
@@ -58,9 +71,8 @@
     $('w-go').disabled = true;
     try {
       const r = await api('POST', '/waitlist', { email, pen: $('w-pen').value.trim(), note: $('w-note').value.trim() });
-      $('waited-text').textContent = r.already
-        ? `You were already on it. You're number ${r.place}. We'll email ${email} when there's room.`
-        : `You're number ${r.place}. We'll email ${email} a sign-up code when there's room.`;
+      $('waited-title').textContent = r.already ? "You're already on the list" : "You're on the list";
+      $('waited-text').textContent = `You're number ${r.place}. We'll email ${email} a sign-up code when there's room.`;
       show('waited');
     } catch (e) { $('w-err').textContent = e.message; $('w-err').hidden = false; }
     finally { $('w-go').disabled = false; }
