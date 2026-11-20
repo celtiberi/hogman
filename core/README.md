@@ -108,9 +108,9 @@ address it comes from. No passwords: a device is its owner's identity.
 | `GET /api/me` | Your membership, devices, names, invites |
 | `POST /api/devices {"kind":"personal"\|"server"}` | One-time key and join link for another device |
 | `DELETE /api/devices/{id}` | Remove one of your devices |
-| `POST /api/names {"name":"alice","device_id":3}` | Claim a name for one of your servers |
+| `POST /api/names {"name":"alice","device_id":3,"note":"..."}` | Claim a name (with optional note) for a server |
 | `DELETE /api/names/{name}` | Release a name and everything under it |
-| `GET /api/directory` | Every name on the network |
+| `GET /api/directory` | Every site on the network, its owner and note |
 | `POST /api/invites` | Mint an invite (admins; members if `MEMBERS_CAN_INVITE=true`) |
 | `GET /api/admin/members`, `/devices`, `/invites`, `/audit` | Admins |
 | `POST /api/admin/members/{handle}/suspend\|resume\|kick\|role` | Admins |

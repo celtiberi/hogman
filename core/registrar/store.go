@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS names (
 	name        TEXT PRIMARY KEY,        -- relative to the zone: "alice", "blog.alice"
 	member_id   INTEGER NOT NULL REFERENCES members(id),
 	device_id   INTEGER REFERENCES devices(id),
+	note        TEXT NOT NULL DEFAULT '',
 	held_until  INTEGER,                 -- set when the owner is removed; nobody may claim it until then
 	created_at  INTEGER NOT NULL
 );
@@ -80,15 +81,53 @@ CREATE TABLE IF NOT EXISTS audit (
 `
 
 func OpenStore(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1) // SQLite: one writer; keeps transactions simple
 	if _, err := db.Exec(schema); err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("schema: %w", err)
 	}
+	if err := migrateNamesNote(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate names.note: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+func hasColumn(db *sql.DB, table, col string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == col {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+func migrateNamesNote(db *sql.DB) error {
+	if has, err := hasColumn(db, "names", "note"); err != nil || has {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE names ADD COLUMN note TEXT NOT NULL DEFAULT ''`); err != nil {
+		if has, checkErr := hasColumn(db, "names", "note"); checkErr == nil && has {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 var ErrNotFound = errors.New("not found")
@@ -545,13 +584,14 @@ type Name struct {
 	MemberID  int64  `json:"member_id"`
 	Member    string `json:"member"`
 	DeviceID  *int64 `json:"device_id,omitempty"`
+	Note      string `json:"note,omitempty"`
 	IPv4      string `json:"ipv4,omitempty"`
 	IPv6      string `json:"ipv6,omitempty"`
 	HeldUntil *int64 `json:"held_until,omitempty"`
 }
 
 func (s *Store) queryNames(where string, args ...any) ([]*Name, error) {
-	rows, err := s.db.Query(`SELECT n.name, n.member_id, m.handle, n.device_id, COALESCE(d.ipv4, ''), COALESCE(d.ipv6, ''), n.held_until
+	rows, err := s.db.Query(`SELECT n.name, n.member_id, m.handle, n.device_id, n.note, COALESCE(d.ipv4, ''), COALESCE(d.ipv6, ''), n.held_until
 		FROM names n JOIN members m ON m.id = n.member_id
 		LEFT JOIN devices d ON d.id = n.device_id AND d.removed_at IS NULL `+where+` ORDER BY n.name`, args...)
 	if err != nil {
@@ -561,7 +601,7 @@ func (s *Store) queryNames(where string, args ...any) ([]*Name, error) {
 	var out []*Name
 	for rows.Next() {
 		var n Name
-		if err := rows.Scan(&n.Name, &n.MemberID, &n.Member, &n.DeviceID, &n.IPv4, &n.IPv6, &n.HeldUntil); err != nil {
+		if err := rows.Scan(&n.Name, &n.MemberID, &n.Member, &n.DeviceID, &n.Note, &n.IPv4, &n.IPv6, &n.HeldUntil); err != nil {
 			return nil, err
 		}
 		out = append(out, &n)
@@ -582,10 +622,10 @@ func (s *Store) NameByName(name string) (*Name, error) {
 	return ns[0], nil
 }
 
-func (s *Store) UpsertName(name string, memberID int64, deviceID *int64) error {
-	_, err := s.db.Exec(`INSERT INTO names (name, member_id, device_id, created_at) VALUES (?,?,?,?)
-		ON CONFLICT(name) DO UPDATE SET member_id = excluded.member_id, device_id = excluded.device_id, held_until = NULL`,
-		name, memberID, deviceID, now())
+func (s *Store) UpsertName(name string, memberID int64, deviceID *int64, note string) error {
+	_, err := s.db.Exec(`INSERT INTO names (name, member_id, device_id, note, created_at) VALUES (?,?,?,?,?)
+		ON CONFLICT(name) DO UPDATE SET member_id = excluded.member_id, device_id = excluded.device_id, note = excluded.note, held_until = NULL`,
+		name, memberID, deviceID, note, now())
 	return err
 }
 
@@ -596,7 +636,7 @@ func (s *Store) DeleteName(name string) error {
 
 // HoldNames unpoints all of a member's names and blocks anyone claiming them until `until`.
 func (s *Store) HoldNames(memberID, until int64) (int64, error) {
-	res, err := s.db.Exec(`UPDATE names SET device_id = NULL, held_until = ? WHERE member_id = ?`, until, memberID)
+	res, err := s.db.Exec(`UPDATE names SET device_id = NULL, held_until = ?, note = '' WHERE member_id = ?`, until, memberID)
 	if err != nil {
 		return 0, err
 	}

@@ -102,7 +102,11 @@ resolves_to()  { run bob-tools dig +short "$1" | tr -d '\r' | grep -qx "$2"; }
 resolves_none(){ [ -z "$(run bob-tools dig +short "$1" | tr -d '\r')" ]; }
 resolves_any() { run bob-tools dig +short "$1" | grep -q .; }
 refused()      { run bob-tools dig "@$CORE_MESH_IP" "$1" | grep -q REFUSED; }
-fetch()        { run "${FROM:-bob-tools}" curl -sf -m3 --cacert $ROOT "https://$1" | grep -q "$2"; }
+fetch() {
+  local body
+  body="$(run "${FROM:-bob-tools}" curl -sf -m3 --cacert $ROOT "https://$1")" || return 1
+  grep -q "$2" <<<"$body"
+}
 can_ping()     { run "$1" ping -c2 -W2 "$2"; }
 port_open()    { run "$1" nc -z -w3 "$2" "$3"; }
 verify_cert()  { openssl verify -CAfile data/pki/public/root_ca.crt \
@@ -170,7 +174,11 @@ srv="$(api alice-laptop-tools POST /api/devices '{"kind":"server"}')"
 ALICE_SERVER_KEY="$(jq -r .auth_key <<<"$srv")"
 check "alice gets a server key from the portal" test -n "$ALICE_SERVER_KEY" -a "$ALICE_SERVER_KEY" != null
 check "the device link comes with a QR code drawn inside the pen" grep -q '^<svg ' <<<"$(jq -r .join_qr_svg <<<"$srv")"
-portal_has_ui() { run alice-laptop-tools curl -sf -m5 --cacert $ROOT "https://home.$ZONE/" | grep -q 'id="add-personal"'; }
+portal_has_ui() {
+  local body
+  body="$(run alice-laptop-tools curl -sf -m5 --cacert $ROOT "https://home.$ZONE/")" || return 1
+  grep -q 'id="add-personal"' <<<"$body"
+}
 check "the portal offers 'Add a device'" portal_has_ui
 portal_hdrs="$(run alice-laptop-tools curl -sI -m5 --cacert $ROOT "https://home.$ZONE/" | tr -d '\r')"
 check "the portal sets anti-framing headers" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\"" _ "$portal_hdrs"
@@ -247,6 +255,7 @@ check "the ledger lists it as open"   invite_open
 check "the home page offers alice the keeper controls" offers_keeper alice-laptop-tools
 check "and offers bob neither"        offers_none bob-tools
 check "the home page has the herd"    fetch "home.$ZONE" 'The herd'
+check "the home page has the pen directory" fetch "home.$ZONE" 'Sites in this pen'
 herd_finds_bob() {  # searched on the registrar, with his devices counted
   api alice-laptop-tools GET '/api/admin/herd?q=bo' | jq -e '.total >= 1 and any(.members[]; .handle == "bob" and .devices >= 1)'
 }
@@ -364,13 +373,15 @@ check "dave's ordinary internet is untouched" direct_ok
 
 # One command puts a folder on the pen, from a laptop that only joined side by side.
 run dave-laptop sh -c 'mkdir -p /tmp/notes && echo "notes from dave" > /tmp/notes/index.html'
-out="$(join_tool dave-laptop share notes /tmp/notes --background 2>&1)"; rc=$?
+out="$(join_tool dave-laptop share notes /tmp/notes --note "Dave's test notes" --background 2>&1)"; rc=$?
 echo "$out" | sed 's/^/        | /'
 check "share puts a folder on the pen in one command (exit $rc)" grep -q "https://notes.$ZONE is up" <<<"$out"
 notes_via() { via_pen https://notes.$ZONE | grep -q "notes from dave"; }
 check "dave's laptop loads https://notes.$ZONE" retry 20 notes_via
 check "bob loads it too (with Tailscale)" retry 30 fetch notes.$ZONE "notes from dave"
 check "the name is dave's" sh -c "$H name list | grep notes | grep -q dave"
+share_dir_note() { api bob-tools GET /api/directory | jq -e --arg n "notes.$ZONE" --arg desc "Dave's test notes" 'any(.[]; .name == $n and .member == "dave" and .note == $desc)'; }
+check "the directory shows the share's note" share_dir_note
 notes_listed() { join_tool dave-laptop share list | grep -q "notes.*running"; }
 check "share list shows it running" notes_listed
 notes_device() { $H device list | awk '$2 == "dave" && $4 == "notes"' | grep -q .; }

@@ -73,11 +73,12 @@ type options struct {
 	noService, noSystemProxy     bool
 	pen                          string // share: which pen
 	background                   bool   // share: keep running after the window closes
+	note                         string // share: one-line note for the pen directory
+	noteSet                      bool
 }
 
-func main() {
+func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err error) {
 	fs := flag.NewFlagSet("hogman-join", flag.ContinueOnError)
-	var pos []string
 	fs.Usage = func() {
 		if len(pos) > 0 && pos[0] == "share" {
 			fmt.Print(shareUsage)
@@ -85,7 +86,6 @@ func main() {
 			fmt.Print(usageText)
 		}
 	}
-	var o options
 	fs.StringVar(&o.handle, "handle", "", "")
 	fs.StringVar(&o.hostname, "hostname", "", "")
 	fs.StringVar(&o.controlCA, "control-ca", "", "")
@@ -100,26 +100,38 @@ func main() {
 	fs.BoolVar(&o.noSystemProxy, "no-system-proxy", false, "")
 	fs.StringVar(&o.pen, "pen", "", "")
 	fs.BoolVar(&o.background, "background", false, "")
-	showVersion := fs.Bool("version", false, "")
+	fs.StringVar(&o.note, "note", "", "")
+	ver := fs.Bool("version", false, "")
 
-	// Allow options before or after the link.
-	args := os.Args[1:]
+	// Allow options before or after the link / share target.
+	args := raw
 	for len(args) > 0 {
 		if err := fs.Parse(args); err != nil {
-			os.Exit(2)
+			return nil, o, false, err
 		}
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "note" {
+				o.noteSet = true
+			}
+		})
 		if fs.NArg() == 0 {
 			break
 		}
 		pos = append(pos, fs.Arg(0))
 		args = fs.Args()[1:]
 	}
-	if *showVersion {
+	return pos, o, *ver, nil
+}
+
+func main() {
+	pos, o, showVersion, err := parseCLIArgs(os.Args[1:])
+	if err != nil {
+		os.Exit(2)
+	}
+	if showVersion {
 		fmt.Println("hogman-join", version, runtime.GOOS+"/"+runtime.GOARCH)
 		return
 	}
-
-	var err error
 	switch {
 	case len(pos) == 2 && pos[0] == "__check-portal":
 		// Internal: runs in a fresh process so the trust store is read anew

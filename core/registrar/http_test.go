@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -498,5 +502,171 @@ func TestHerdPagedAndSearched(t *testing.T) {
 	e.addDevice(t, "pig102", "personal", "d", "100.64.1.4", "")
 	if rec := doMeshReq(h, "GET", "/api/admin/herd", "100.64.1.4", "", nil); rec.Code != 403 {
 		t.Fatalf("a member listed the herd: %d", rec.Code)
+	}
+}
+
+func TestNameDirectoryNoteAndMigration(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+	for h, r := range map[string]string{"root": "owner", "alice": "member", "bob": "member"} {
+		if _, err := e.svc.AddMember(ctx, cli, h, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.addDevice(t, "alice", "personal", "alice-laptop", "100.64.0.10", "")
+	e.addDevice(t, "alice", "server", "srvA", "100.64.0.11", "")
+	_, bobSrv := e.addDevice(t, "bob", "server", "bobSrv", "100.64.0.12", "")
+	_, srvA2 := e.addDevice(t, "alice", "server", "srvA2", "100.64.0.13", "")
+	_, rootSrv := e.addDevice(t, "root", "server", "rootSrv", "100.64.0.14", "")
+	h := MeshHandler(e.svc)
+	js := map[string]string{"Content-Type": "application/json"}
+
+	// Control characters / newlines are stripped and whitespace collapsed.
+	body := `{"name":"photos","note":"  Summer\n\ttrip\u0000\u001b[31m   photos  "}`
+	if rec := doMeshReq(h, "POST", "/api/names", "100.64.0.11", body, js); rec.Code != 201 {
+		t.Fatalf("server claim with note: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Rune cap is 140 runes for multi-byte UTF-8 text.
+	longNote := strings.Repeat("é", 150)
+	if _, err := e.svc.Claim(cli, "bob", "blog", bobSrv.ID, &longNote); err != nil {
+		t.Fatalf("claim long note: %v", err)
+	}
+
+	type dirEntry struct {
+		Name   string `json:"name"`
+		Member string `json:"member"`
+		Note   string `json:"note"`
+	}
+	readDir := func(src string) []dirEntry {
+		t.Helper()
+		rec := doMeshReq(h, "GET", "/api/directory", src, "", nil)
+		if rec.Code != 200 {
+			t.Fatalf("GET /api/directory: %d %s", rec.Code, rec.Body.String())
+		}
+		var out []dirEntry
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	got := readDir("100.64.0.10")
+	if len(got) != 2 {
+		t.Fatalf("directory len=%d want 2: %+v", len(got), got)
+	}
+	byName := map[string]dirEntry{}
+	for _, d := range got {
+		byName[d.Name] = d
+	}
+	if byName["photos.bobo.hogman"].Member != "alice" || byName["photos.bobo.hogman"].Note != "Summer trip[31m photos" {
+		t.Fatalf("photos directory entry = %+v", byName["photos.bobo.hogman"])
+	}
+	if gotRunes := len([]rune(byName["blog.bobo.hogman"].Note)); gotRunes != 140 {
+		t.Fatalf("capped rune len = %d want 140", gotRunes)
+	}
+
+	// Server cannot alter note on a name owned by another server, leaving note intact.
+	if rec := doMeshReq(h, "POST", "/api/names", "100.64.0.12", `{"name":"photos","note":"hijacked"}`, js); rec.Code != 409 {
+		t.Fatalf("bobSrv overwrote alice's note: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got = readDir("100.64.0.11")
+	for _, d := range got {
+		if d.Name == "photos.bobo.hogman" && d.Note != "Summer trip[31m photos" {
+			t.Fatalf("photos note mutated after 409: %+v", d)
+		}
+	}
+
+	// Server updates its own note; bare re-claim from personal device omitting note preserves it and re-points to srvA2.
+	if rec := doMeshReq(h, "POST", "/api/names", "100.64.0.11", `{"name":"photos","note":"updated note"}`, js); rec.Code != 201 {
+		t.Fatalf("update note: %d %s", rec.Code, rec.Body.String())
+	}
+	repointBody := fmt.Sprintf(`{"name":"photos","device_id":%d}`, srvA2.ID)
+	if rec := doMeshReq(h, "POST", "/api/names", "100.64.0.10", repointBody, js); rec.Code != 201 {
+		t.Fatalf("repoint without note: %d %s", rec.Code, rec.Body.String())
+	}
+	rec := doMeshReq(h, "GET", "/api/me", "100.64.0.10", "", nil)
+	var me struct {
+		Names []Name `json:"names"`
+	}
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &me) != nil || len(me.Names) != 1 ||
+		me.Names[0].Note != "updated note" || me.Names[0].DeviceID == nil || *me.Names[0].DeviceID != srvA2.ID {
+		t.Fatalf("/api/me after bare repoint = %+v (body=%s)", me.Names, rec.Body.String())
+	}
+	if rec := doMeshReq(h, "POST", "/api/names", "100.64.0.13", `{"name":"photos","note":""}`, js); rec.Code != 201 {
+		t.Fatalf("clear note from srvA2: %d %s", rec.Code, rec.Body.String())
+	}
+	n, err := e.st.NameByName("photos")
+	if err != nil || n.Note != "" {
+		t.Fatalf("cleared note: %+v err=%v", n, err)
+	}
+
+	// Owner takeover with nil note clears the previous owner's note instead of keeping it.
+	if _, err := e.svc.Claim(cli, "root", "blog", rootSrv.ID, nil); err != nil {
+		t.Fatalf("owner takeover with nil note: %v", err)
+	}
+	if n, err := e.st.NameByName("blog"); err != nil || n.Member != "root" || n.Note != "" {
+		t.Fatalf("after takeover: %+v err=%v", n, err)
+	}
+
+	// Legacy SQLite database without names.note column migrates cleanly across concurrent OpenStore calls.
+	legacyPath := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", "file:"+legacyPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE members (id INTEGER PRIMARY KEY, handle TEXT NOT NULL UNIQUE, role TEXT NOT NULL, status TEXT NOT NULL, invited_by INTEGER, hs_user_id TEXT NOT NULL, created_at INTEGER NOT NULL, removed_at INTEGER);
+		CREATE TABLE devices (id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL, kind TEXT NOT NULL, hs_node_id TEXT NOT NULL, name TEXT NOT NULL, ipv4 TEXT NOT NULL DEFAULT '', ipv6 TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, removed_at INTEGER);
+		CREATE TABLE names (name TEXT PRIMARY KEY, member_id INTEGER NOT NULL, device_id INTEGER, held_until INTEGER, created_at INTEGER NOT NULL);
+		INSERT INTO members (id, handle, role, status, hs_user_id, created_at) VALUES (1, 'alice', 'member', 'active', 'hs1', 1);
+		INSERT INTO devices (id, member_id, kind, hs_node_id, name, ipv4, created_at) VALUES (1, 1, 'server', 'n1', 'srv', '100.64.0.99', 1);
+		INSERT INTO names (name, member_id, device_id, created_at) VALUES ('old', 1, 1, 1);
+	`)
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const openers = 8
+	start := make(chan struct{})
+	type openRes struct {
+		st  *Store
+		err error
+	}
+	resCh := make(chan openRes, openers)
+	var wg sync.WaitGroup
+	for i := 0; i < openers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			st, err := OpenStore(legacyPath)
+			resCh <- openRes{st: st, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(resCh)
+	for res := range resCh {
+		if res.st != nil {
+			defer res.st.db.Close()
+		}
+		if res.err != nil {
+			t.Fatalf("concurrent OpenStore legacy migrate: %v", res.err)
+		}
+	}
+	st, err := OpenStore(legacyPath)
+	if err != nil {
+		t.Fatalf("OpenStore after concurrent migrate: %v", err)
+	}
+	defer st.db.Close()
+	gotOld, err := st.NameByName("old")
+	if err != nil || gotOld.Note != "" {
+		t.Fatalf("legacy row after migrate: %+v err=%v", gotOld, err)
+	}
+	devID := int64(1)
+	if err := st.UpsertName("newsite", 1, &devID, "hello"); err != nil {
+		t.Fatalf("UpsertName after migrate: %v", err)
 	}
 }

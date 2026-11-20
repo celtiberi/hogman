@@ -190,7 +190,7 @@ const usage = `registrar: members, invites, devices and names for one Hogman net
   device rm <id>
 
   name list
-  name claim <handle> <name> <device-id>
+  name claim <handle> <name> <device-id> [--note text]
   name release <name>
 
   audit [count]
@@ -384,7 +384,7 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		if err != nil {
 			return err
 		}
-		rows := [][]string{{"NAME", "MEMBER", "POINTS AT", "STATE"}}
+		rows := [][]string{{"NAME", "MEMBER", "POINTS AT", "STATE", "NOTE"}}
 		for _, n := range ns {
 			state, at := "active", n.IPv4
 			if n.HeldUntil != nil {
@@ -393,15 +393,19 @@ func cli(ctx context.Context, s *Service, args []string) error {
 			if at == "" {
 				at = "-"
 			}
-			rows = append(rows, []string{n.Name + "." + s.cfg.Zone, n.Member, at, state})
+			rows = append(rows, []string{n.Name + "." + s.cfg.Zone, n.Member, at, state, n.Note})
 		}
 		table(rows)
 	case "name claim":
-		if err := need(rest, 3, "name claim <handle> <name> <device-id>"); err != nil {
+		if err := need(rest, 3, "name claim <handle> <name> <device-id> [--note text]"); err != nil {
 			return err
 		}
 		id, _ := strconv.ParseInt(rest[2], 10, 64)
-		fqdn, err := s.Claim(a, rest[0], rest[1], id)
+		var note *string
+		if v, ok := flags["note"]; ok {
+			note = &v
+		}
+		fqdn, err := s.Claim(a, rest[0], rest[1], id, note)
 		if err != nil {
 			return err
 		}
