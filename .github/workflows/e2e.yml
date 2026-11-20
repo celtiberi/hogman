@@ -1,0 +1,48 @@
+# End-to-end tests on GitHub's runners, so they don't need Docker on our own
+# machines. Each suite raises real pens in Docker (Headscale, the registrar,
+# step-ca, Caddy, Tailscale clients) and plays out a pen's life against them.
+name: e2e
+
+on:
+  pull_request:
+    paths-ignore: ["site/**", "docs/**", "**/*.md"]
+  push:
+    branches: [main]
+    paths-ignore: ["site/**", "docs/**", "**/*.md"]
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pen:
+    name: pen (core/test/run.sh)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          docker version --format 'docker {{.Server.Version}}'
+          docker compose version
+          jq --version
+      - name: Run the pen suite
+        run: core/test/run.sh
+
+  host:
+    name: shared host (deploy/test-host.sh)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          docker version --format 'docker {{.Server.Version}}'
+          docker compose version
+          jq --version
+      - name: Run the shared-host suite
+        run: deploy/test-host.sh
