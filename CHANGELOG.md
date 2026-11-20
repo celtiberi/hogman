@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security (audit quick wins, docs/security/audit-2026-11.md)
+- The pen's CA offers only TLS-ALPN on 443 (`http-01` removed, matching HTTPS-only) and refuses certificates for IP addresses or wildcard names (step-ca issuance policy). The portal asks for TLS-ALPN explicitly.
+- HSTS (one year) on the website, every pen's public host, the sign-up page and the home page.
+- CI: e2e always reports (a docs-only change skips the suites), so its checks can be required on main; GitHub Actions pinned to commit SHAs; `govulncheck` on every module for PRs, main and weekly; Dependabot for Go modules, base images and Actions. Secret scanning, push protection and Dependabot security updates are on for the repository.
+
 ### Changed
 - `hogman-join share`: background shares (`--background`) now register per-share login services on macOS (`LaunchAgent`) and Linux (`systemd --user`, printing a `loginctl enable-linger` hint when linger is off) so shares survive restarts; `--no-service` keeps them temporary, foreground `share` / `share stop` / `leave` clean up the service, `share list` shows autostart status, and `hogman-join update` restarts managed shares cleanly with rollback on failed binary swap. Updated share, join, and README docs.
 - `hogman-join`: support multiple simultaneous pens in browsers with a combined `/proxy.pac` served dynamically by each running pen agent across all installed pens; macOS updates Hogman-managed automatic proxy settings with a versioned `?v=` URL when joining or leaving (still leaving foreign/corporate PACs untouched), while Linux and Windows print combined-PAC guidance. Updated join and FAQ docs and added unit and host e2e coverage.
