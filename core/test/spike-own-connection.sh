@@ -262,12 +262,24 @@ http.server.ThreadingHTTPServer(("0.0.0.0", 8080), H).serve_forever()
 ' >/dev/null || exit 1
 
 # Host stock tailscaled on work tailnet with netfilter enabled (default on Linux).
-mkdir -p /etc/default
-rm -f /etc/default/tailscaled || true
-systemctl restart tailscaled
-retry 30 tailscale status >/dev/null 2>&1 || true
+systemctl restart tailscaled || {
+  echo "systemctl restart tailscaled failed" >&2
+  cat /lib/systemd/system/tailscaled.service /etc/default/tailscaled 2>/dev/null >&2 || true
+  systemctl status tailscaled.service --no-pager >&2 || true
+  journalctl -u tailscaled.service -n 50 --no-pager >&2 || true
+  exit 1
+}
+retry 30 test -S /var/run/tailscale/tailscaled.sock || {
+  echo "tailscaled socket /var/run/tailscale/tailscaled.sock never appeared" >&2
+  systemctl status tailscaled.service --no-pager >&2 || true
+  journalctl -u tailscaled.service -n 50 --no-pager >&2 || true
+  exit 1
+}
 tailscale up --login-server="http://work.example:8080" --auth-key="$WORK_KEY" --hostname=runner-host --accept-dns=true || {
-  echo "host tailscale up failed" >&2; tailscale status || true; exit 1;
+  echo "host tailscale up failed" >&2
+  tailscale status || true
+  journalctl -u tailscaled.service -n 50 --no-pager >&2 || true
+  exit 1
 }
 
 cgnat_drop_active() {
@@ -427,7 +439,31 @@ print(f'side-by-side: {dt:.3f}s  {mbps:.2f} MiB/s  cpu={cpu:.3f}s')
   echo "  BENCH $SBS_METRICS"
 else
   echo "  FAIL  side-by-side agent failed to start for benchmark"
+  cat "$WORK/sbs.log" >&2 || true
   fail=$((fail + 1))
+fi
+
+if [ "$fail" -ne 0 ]; then
+  {
+    echo
+    echo "=== FAILURE DIAGNOSTICS ==="
+    echo "--- resolvectl status ---"
+    resolvectl status 2>&1 || true
+    echo "--- ip addr show ---"
+    ip addr show 2>&1 || true
+    echo "--- ip route show ---"
+    ip route show 2>&1 || true
+    echo "--- ip route show table 52 ---"
+    ip route show table 52 2>&1 || true
+    echo "--- iptables -S ts-input ---"
+    iptables -S ts-input 2>&1 || true
+    echo "--- tailscale status ---"
+    tailscale status 2>&1 || true
+    echo "--- tail -n 60 spike-tun.log ---"
+    tail -n 60 "$WORK/spike-tun.log" 2>&1 || true
+    echo "--- tail -n 40 sbs.log ---"
+    tail -n 40 "$WORK/sbs.log" 2>&1 || true
+  } >&2
 fi
 
 echo

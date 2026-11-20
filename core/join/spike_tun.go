@@ -509,6 +509,10 @@ func (b *spikeBridge) handleSpikeDNS(ctx context.Context, raw []byte) []byte {
 }
 
 func (b *spikeBridge) serveTUN(dev tun.Device) {
+	go func() {
+		for range dev.Events() {
+		}
+	}()
 	go b.pumpTUNToStack(dev)
 	go b.pumpStackToTUN(dev)
 }
