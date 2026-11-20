@@ -259,6 +259,20 @@ func (s *Store) SetMemberRole(id int64, role string) error {
 	return err
 }
 
+// DemoteOwner gives an owner another role only while some other owner
+// remains, in one statement, so two owners demoting each other at the same
+// moment can never leave the pen with none (there is no recovery: D-16).
+func (s *Store) DemoteOwner(id int64, role string) (bool, error) {
+	res, err := s.db.Exec(`UPDATE members SET role = ? WHERE id = ? AND role = 'owner'
+		AND (SELECT count(*) FROM members WHERE role = 'owner' AND status != 'removed' AND id != ?) > 0`,
+		role, id, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
 func (s *Store) CountOwners() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT count(*) FROM members WHERE role = 'owner' AND status != 'removed'`).Scan(&n)
