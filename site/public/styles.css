@@ -188,3 +188,28 @@ footer p { margin: 0.2rem 0; }
 .plainwords { max-width: 46rem; font-size: 1.12rem; }
 .plainwords p { margin: 0 0 1.1rem; }
 .plainwords strong { color: var(--gold); }
+
+/* ---------- how it works: the pen, drawn ---------- */
+.diagram { margin: 0 0 2.4rem; padding: 1rem; background: linear-gradient(180deg, var(--panel), #120b10); border: 1px solid #3a2a33; border-radius: 8px; }
+.diagram svg { display: block; width: 100%; height: auto; }
+.diagram text { font: 16px var(--text); fill: var(--bone); }
+.diagram .pen { fill: #2a1a24; stroke: var(--gold); stroke-width: 3; stroke-dasharray: 14 8; }
+.diagram .pen-label { font: 400 26px var(--display); letter-spacing: 0.06em; fill: var(--gold); }
+.diagram .box { fill: #140c11; stroke: #6a5560; stroke-width: 1.5; }
+.diagram .home { stroke: var(--gold); }
+.diagram .site { stroke: #9be36b; }
+.diagram .dev { fill: #3a2430; stroke: #f0a3b9; }
+.diagram .horde { stroke: var(--blood); fill: #200a0a; }
+.diagram .gate { stroke: var(--steel); }
+.diagram .name { font: 400 21px var(--display); letter-spacing: 0.04em; }
+.diagram .small { font-size: 15px; fill: var(--ash); }
+.diagram .muted { font-style: italic; }
+.diagram .mono { font: 13px var(--mono); fill: var(--gold); }
+.diagram .dev-t { text-anchor: middle; font-size: 16px; }
+.diagram .red { fill: #ff5a4a; }
+.diagram .gold { fill: var(--gold); }
+.diagram .wire { fill: none; stroke: var(--gold); stroke-width: 2.5; opacity: 0.85; }
+.diagram .lockicon { fill: var(--gold); stroke: var(--gold); }
+.diagram .bounce { stroke: var(--blood); stroke-width: 3; stroke-dasharray: 6 5; }
+.diagram .x { stroke: #ff5a4a; stroke-width: 4; stroke-linecap: round; }
+.diagram .invite { stroke: var(--steel); stroke-width: 2.5; stroke-dasharray: 6 5; }

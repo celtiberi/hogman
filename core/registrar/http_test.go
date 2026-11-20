@@ -118,6 +118,74 @@ func TestMeshCSRFProtection(t *testing.T) {
 	}
 }
 
+// A server (what `hogman-join share` starts) may name itself, release its own
+// names and remove itself, but not touch its member's other names or devices.
+func TestMeshServerNamesItself(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+	if _, err := e.svc.AddMember(ctx, cli, "bob", "member"); err != nil {
+		t.Fatal(err)
+	}
+	_, laptop := e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.10", "")
+	_, srvA := e.addDevice(t, "bob", "server", "a", "100.64.0.11", "")
+	_, srvB := e.addDevice(t, "bob", "server", "b", "100.64.0.12", "")
+	h := MeshHandler(e.svc)
+	js := map[string]string{"Content-Type": "application/json"}
+	want := func(code int, method, path, src, body string) {
+		t.Helper()
+		var hdrs map[string]string
+		if method == "POST" {
+			hdrs = js
+		}
+		if rec := doMeshReq(h, method, path, src, body, hdrs); rec.Code != code {
+			t.Fatalf("%s %s from %s: status=%d want %d body=%s", method, path, src, rec.Code, code, rec.Body.String())
+		}
+	}
+	id := func(d *Device) string { return strconv.FormatInt(d.ID, 10) }
+
+	want(201, "POST", "/api/names", "100.64.0.11", `{"name":"blog"}`)                       // names itself
+	want(201, "POST", "/api/names", "100.64.0.11", `{"name":"blog"}`)                       // again: still its own
+	want(201, "POST", "/api/names", "100.64.0.11", `{"name":"x.blog"}`)                     // under its own name
+	want(409, "POST", "/api/names", "100.64.0.12", `{"name":"blog"}`)                       // B can't take A's name
+	want(403, "POST", "/api/names", "100.64.0.12", `{"name":"c","device_id":`+id(srvA)+`}`) // nor name A
+	want(403, "DELETE", "/api/names/blog", "100.64.0.12", "")                               // nor release A's name
+	want(403, "POST", "/api/names", "100.64.0.12", `{"name":"z.blog"}`)                     // B can't squat under A's name
+	want(201, "POST", "/api/names", "100.64.0.10", `{"name":"y.blog","device_id":`+id(srvB)+`}`)
+	want(403, "DELETE", "/api/names/blog", "100.64.0.11", "") // y.blog points at B now
+	want(200, "DELETE", "/api/names/x.blog", "100.64.0.11", "")
+	want(403, "DELETE", "/api/devices/"+id(srvB), "100.64.0.11", "")   // not another server
+	want(403, "DELETE", "/api/devices/"+id(laptop), "100.64.0.11", "") // nor the laptop
+	want(200, "DELETE", "/api/devices/"+id(srvA), "100.64.0.11", "")   // itself: yes
+}
+
+// The owner's server still counts against the names cap: a leaked server
+// link can't claim names without limit.
+func TestMeshOwnerServerNameCap(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	if _, err := e.svc.AddMember(ctx, Actor{CLI: true}, "root", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	e.addDevice(t, "root", "server", "srv", "100.64.0.11", "")
+	h := MeshHandler(e.svc)
+	js := map[string]string{"Content-Type": "application/json"}
+	got409 := false
+	for i := 0; i <= e.svc.cfg.MaxNamesPerMember; i++ {
+		rec := doMeshReq(h, "POST", "/api/names", "100.64.0.11", `{"name":"n`+strconv.Itoa(i)+`"}`, js)
+		if rec.Code == http.StatusConflict {
+			got409 = true
+			break
+		}
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("claim n%d: status=%d body=%s", i, rec.Code, rec.Body.String())
+		}
+	}
+	if !got409 {
+		t.Fatalf("the owner's server claimed more than %d names", e.svc.cfg.MaxNamesPerMember)
+	}
+}
+
 func TestMeshServerDeviceRestricted(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
@@ -162,7 +230,7 @@ func TestMeshServerDeviceRestricted(t *testing.T) {
 		{"GET", "/api/admin/members", ""},
 		{"POST", "/api/admin/members/bob/role", `{"role":"owner"}`},
 		{"POST", "/api/devices", `{"kind":"personal"}`},
-		{"POST", "/api/names", `{"name":"x","device_id":2}`},
+		{"POST", "/api/names", `{"name":"x","device_id":1}`}, // not itself
 		{"POST", "/api/invites", `{}`},
 		{"DELETE", "/api/devices/1", ""},
 	}

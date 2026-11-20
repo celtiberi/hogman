@@ -146,6 +146,7 @@ func MeshHandler(s *Service) http.Handler {
 		if c.device.Kind == "server" {
 			writeJSON(w, 200, map[string]any{
 				"member": c.member, "this_device": c.device, "zone": s.cfg.Zone,
+				"network": s.NetworkInfo(),
 			})
 			return
 		}
@@ -165,6 +166,8 @@ func MeshHandler(s *Service) http.Handler {
 			// What the page should offer. The API checks again on every call.
 			"can_invite": a.IsAdmin() || s.cfg.MembersCanInvite,
 			"is_admin":   a.IsAdmin(), "is_owner": a.IsOwner(),
+			// What `hogman-join share` needs to start a server of its own.
+			"network": s.NetworkInfo(),
 		})
 	})
 
@@ -191,14 +194,25 @@ func MeshHandler(s *Service) http.Handler {
 		writeJSON(w, 201, out)
 	})
 
-	h("DELETE /api/devices/{id}", false, false, func(w http.ResponseWriter, r *http.Request, c caller) {
+	// A server may remove itself (how `hogman-join share stop` cleans up), and
+	// nothing else.
+	h("DELETE /api/devices/{id}", false, true, func(w http.ResponseWriter, r *http.Request, c caller) {
 		id, ok := pathID(w, r)
-		if ok {
-			done(w, s.RemoveDevice(r.Context(), c.actor(), id))
+		if !ok {
+			return
 		}
+		if c.device.Kind == "server" && id != c.device.ID {
+			fail(w, forbidden("a server can only remove itself"))
+			return
+		}
+		done(w, s.RemoveDevice(r.Context(), c.actor(), id))
 	})
 
-	h("POST /api/names", false, false, func(w http.ResponseWriter, r *http.Request, c caller) {
+	// A server may claim a name for itself (device_id 0 or its own id), as long
+	// as the name is new or already points at it: `hogman-join share` names
+	// itself without a trip to the home page, but cannot take over its
+	// member's other names.
+	h("POST /api/names", false, true, func(w http.ResponseWriter, r *http.Request, c caller) {
 		var in struct {
 			Name     string `json:"name"`
 			DeviceID int64  `json:"device_id"`
@@ -206,7 +220,17 @@ func MeshHandler(s *Service) http.Handler {
 		if !readJSON(w, r, &in) {
 			return
 		}
-		fqdn, err := s.Claim(c.actor(), c.member.Handle, in.Name, in.DeviceID)
+		var fqdn string
+		var err error
+		if c.device.Kind == "server" {
+			if in.DeviceID != 0 && in.DeviceID != c.device.ID {
+				fail(w, forbidden("a server can only name itself"))
+				return
+			}
+			fqdn, err = s.ServerClaim(c.actor(), c.device, in.Name)
+		} else {
+			fqdn, err = s.Claim(c.actor(), c.member.Handle, in.Name, in.DeviceID)
+		}
 		if err != nil {
 			fail(w, err)
 			return
@@ -214,7 +238,11 @@ func MeshHandler(s *Service) http.Handler {
 		writeJSON(w, 201, map[string]string{"name": fqdn})
 	})
 
-	h("DELETE /api/names/{name}", false, false, func(w http.ResponseWriter, r *http.Request, c caller) {
+	h("DELETE /api/names/{name}", false, true, func(w http.ResponseWriter, r *http.Request, c caller) {
+		if c.device.Kind == "server" {
+			done(w, s.ServerRelease(c.actor(), c.device, r.PathValue("name")))
+			return
+		}
 		done(w, s.Release(c.actor(), r.PathValue("name")))
 	})
 

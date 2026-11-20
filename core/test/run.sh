@@ -362,6 +362,28 @@ check "no network interface was added to the computer" no_tun
 direct_ok() { run dave-laptop curl -sf -m10 -o /dev/null https://example.com; }
 check "dave's ordinary internet is untouched" direct_ok
 
+# One command puts a folder on the pen, from a laptop that only joined side by side.
+run dave-laptop sh -c 'mkdir -p /tmp/notes && echo "notes from dave" > /tmp/notes/index.html'
+out="$(join_tool dave-laptop share notes /tmp/notes --background 2>&1)"; rc=$?
+echo "$out" | sed 's/^/        | /'
+check "share puts a folder on the pen in one command (exit $rc)" grep -q "https://notes.$ZONE is up" <<<"$out"
+notes_via() { via_pen https://notes.$ZONE | grep -q "notes from dave"; }
+check "dave's laptop loads https://notes.$ZONE" retry 20 notes_via
+check "bob loads it too (with Tailscale)" retry 30 fetch notes.$ZONE "notes from dave"
+check "the name is dave's" sh -c "$H name list | grep notes | grep -q dave"
+notes_listed() { join_tool dave-laptop share list | grep -q "notes.*running"; }
+check "share list shows it running" notes_listed
+notes_device() { $H device list | awk '$2 == "dave" && $4 == "notes"' | grep -q .; }
+check "it is a server of dave's, called notes" notes_device
+out="$(join_tool dave-laptop share notes /tmp/notes 2>&1)"
+check "sharing the same name twice is refused while it runs" grep -q "already being shared" <<<"$out"
+out="$(join_tool dave-laptop share stop notes 2>&1)"; rc=$?
+[ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
+check "share stop takes it down (exit $rc)" grep -q "notes.$ZONE is down" <<<"$out"
+check "... and gives the name back" sh -c "! $H name list | grep -q notes"
+check "... and removes its server" retry 10 not notes_device
+check "bob can't load it any more" retry 15 not fetch notes.$ZONE "notes from dave"
+
 # Dave's server, also with no Tailscale: it hosts a site anyway.
 dc up -d dave-server
 retry 20 run dave-server test -s /etc/ssl/certs/ca-certificates.crt
@@ -382,6 +404,16 @@ check "its Caddy gets a certificate and dave's laptop loads the site over HTTPS"
 check "other members load it too (bob, with Tailscale)" retry 30 fetch daveweb.$ZONE "hello from daveweb"
 out="$(join_tool dave-server leave "$DAVE_SERVER_LINK" 2>&1)"
 check "the server leaves cleanly" grep -q "Left bobo.hogman" <<<"$out"
+
+# A computer that isn't on the pen at all: one server link, one command.
+docker exec -d "$(dc ps -q dave-server)" sh -c 'mkdir -p /tmp/www && echo "app from a server link" > /tmp/www/index.html && caddy file-server --listen 127.0.0.1:8080 --root /tmp/www >/tmp/fs.log 2>&1'
+SHARE_LINK="$($H device key dave server | awk '/^link:/ {print $2}')"
+out="$(join_tool dave-server share app 8080 "$SHARE_LINK" --background 2>&1)"; rc=$?
+echo "$out" | sed 's/^/        | /'
+check "a server link plus one command shares a port (exit $rc)" grep -q "https://app.$ZONE is up" <<<"$out"
+check "members load https://app.$ZONE" retry 30 fetch app.$ZONE "app from a server link"
+out="$(join_tool dave-server share stop app 2>&1)"; rc=$?
+check "and it stops cleanly (exit $rc)" grep -q "app.$ZONE is down" <<<"$out"
 
 out="$(join_tool dave-laptop leave "$DAVE_LINK" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
@@ -416,6 +448,7 @@ check "alice's laptop can no longer reach the portal" retry 30 not port_open ali
 check "alice's server can no longer reach anyone" retry 30 not can_ping alice-tools "$BOB_LAPTOP_IP"
 check "her name is held: bob can't claim alice" expect 409 bob-tools POST /api/names '{"name":"alice","device_id":1}'
 check "the kick is in the audit log" sh -c "$H audit | grep -q 'member.kick.*alice'"
+$H audit | grep -q 'member.kick.*alice' || { $H audit | tail -8; dc logs --tail 20 registrar 2>&1 | grep -i audit; } | sed 's/^/        audit| /'
 check "bob is unaffected" fetch home.$ZONE "You're in"
 
 echo

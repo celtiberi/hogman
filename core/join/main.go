@@ -43,6 +43,8 @@ const usageText = `hogman-join: join this device to a Hogman private network
 usage:
   hogman-join [options] '<link>'      join, using an invite or device link
   hogman-join leave '<link>'          remove the network's certificate and log out of it
+  hogman-join share NAME WHAT         put a port or a folder on the pen as https://NAME.<pen>.hogman
+                                      (hogman-join share --help for more)
 
 options:
   --handle NAME     the name you want on the network (invite links only; asked if missing)
@@ -69,11 +71,20 @@ type options struct {
 	yes, dryRun, noTrust, noOpen bool
 	alongside, switchNet         bool
 	noService, noSystemProxy     bool
+	pen                          string // share: which pen
+	background                   bool   // share: keep running after the window closes
 }
 
 func main() {
 	fs := flag.NewFlagSet("hogman-join", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Print(usageText) }
+	var pos []string
+	fs.Usage = func() {
+		if len(pos) > 0 && pos[0] == "share" {
+			fmt.Print(shareUsage)
+		} else {
+			fmt.Print(usageText)
+		}
+	}
 	var o options
 	fs.StringVar(&o.handle, "handle", "", "")
 	fs.StringVar(&o.hostname, "hostname", "", "")
@@ -87,10 +98,11 @@ func main() {
 	fs.BoolVar(&o.switchNet, "switch", false, "")
 	fs.BoolVar(&o.noService, "no-service", false, "")
 	fs.BoolVar(&o.noSystemProxy, "no-system-proxy", false, "")
+	fs.StringVar(&o.pen, "pen", "", "")
+	fs.BoolVar(&o.background, "background", false, "")
 	showVersion := fs.Bool("version", false, "")
 
 	// Allow options before or after the link.
-	var pos []string
 	args := os.Args[1:]
 	for len(args) > 0 {
 		if err := fs.Parse(args); err != nil {
@@ -129,6 +141,15 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	case len(pos) == 2 && pos[0] == "__share-run":
+		// Internal: a share running in the background.
+		if serr := runShareProcess(pos[1]); serr != nil {
+			fmt.Fprintln(os.Stderr, serr.Error())
+			os.Exit(1)
+		}
+		return
+	case len(pos) >= 1 && pos[0] == "share":
+		err = shareCmd(pos[1:], o)
 	case len(pos) == 1:
 		err = join(pos[0], o)
 	case len(pos) == 2 && pos[0] == "leave":
@@ -513,8 +534,18 @@ func leave(raw string, o options) error {
 	if err != nil {
 		return errorf("%v", err)
 	}
-	// The certificate first: it is the part that matters on this computer,
-	// and it needs nothing from the network.
+	// Shares on this pen go first, while they can still give their names back.
+	for _, dir := range allShares(n.Zone) {
+		if c, err := loadShare(dir); err == nil {
+			if err := removeShare(dir, c); err != nil {
+				note("could not take down %s: %v", c.url(), firstLine(err.Error()))
+			} else {
+				note("took down %s", c.url())
+			}
+		}
+	}
+	// The certificate: it is the part that matters on this computer, and it
+	// needs nothing from the network.
 	certFile, cleanupCert, err := writeTempCert(root.PEM)
 	if err != nil {
 		return err

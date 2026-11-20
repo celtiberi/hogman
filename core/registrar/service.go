@@ -660,6 +660,10 @@ func (s *Service) RemoveDevice(ctx context.Context, a Actor, id int64) error {
 			return forbidden("only the owner can remove devices of an owner or admin")
 		}
 	}
+	// A server removing itself loses its connection as its node goes, and the
+	// request's context is cancelled with it: finish the job regardless.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.hs.DeleteNode(ctx, d.HSNodeID); err != nil {
@@ -739,6 +743,22 @@ func (s *Service) VerifyLiveCaller(ctx context.Context, src string) (*Member, *D
 func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.claimLocked(a, handle, rawName, deviceID, nil)
+}
+
+// ServerClaim is a server naming itself (what `hogman-join share` does). The
+// checks run under s.mu together with the claim, so two servers can't race.
+func (s *Service) ServerClaim(a Actor, d *Device, rawName string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.serverMayUse(d, rawName); err != nil {
+		return "", err
+	}
+	return s.claimLocked(a, a.Member.Handle, rawName, d.ID, d)
+}
+
+// claimLocked: s.mu held. server is the calling server device, or nil.
+func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, server *Device) (string, error) {
 	m, err := s.member(handle)
 	if err != nil {
 		return "", err
@@ -771,7 +791,9 @@ func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64) (string
 	} else {
 		existing = nil
 	}
-	if !a.IsOwner() && (existing == nil || existing.MemberID != m.ID || existing.HeldUntil != nil) {
+	// A server always counts against the cap, even the owner's: a leaked server
+	// link must not be able to claim names without limit.
+	if (!a.IsOwner() || server != nil) && (existing == nil || existing.MemberID != m.ID || existing.HeldUntil != nil) {
 		count, err := s.st.CountMemberNames(m.ID)
 		if err != nil {
 			return "", err
@@ -813,10 +835,81 @@ func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64) (string
 	return name + "." + s.cfg.Zone, nil
 }
 
+// serverMayUse (s.mu held): a server naming itself may take a name that is
+// free (or whose hold has run out) or already points at it, never one of its
+// member's other names; and a name under another (x.blog) only if the parent
+// points at it too, so one server can't squat under another's name.
+func (s *Service) serverMayUse(d *Device, rawName string) error {
+	name, err := s.normaliseName(rawName)
+	if err != nil {
+		return err
+	}
+	pointsHere := func(n *Name) bool {
+		return n.MemberID == d.MemberID && n.HeldUntil == nil && n.DeviceID != nil && *n.DeviceID == d.ID
+	}
+	n, err := s.st.NameByName(name)
+	switch {
+	case errors.Is(err, ErrNotFound):
+	case err != nil:
+		return err
+	case n.HeldUntil != nil && *n.HeldUntil <= now():
+	case !pointsHere(n):
+		return conflict("%s is already taken; pick another name", name)
+	}
+	if top := topLabel(name); top != name {
+		p, err := s.st.NameByName(top)
+		if err != nil || !pointsHere(p) {
+			return forbidden("%s belongs under %s, which doesn't point at this server", name, top)
+		}
+	}
+	return nil
+}
+
+// serverOwnsName (s.mu held): a server may release a name only if it, and
+// every name under it, points at that server.
+func (s *Service) serverOwnsName(d *Device, rawName string) error {
+	name, err := s.normaliseName(rawName)
+	if err != nil {
+		return err
+	}
+	all, err := s.st.Names()
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, x := range all {
+		if x.Name != name && !strings.HasSuffix(x.Name, "."+name) {
+			continue
+		}
+		if x.MemberID != d.MemberID || x.HeldUntil != nil || x.DeviceID == nil || *x.DeviceID != d.ID {
+			return forbidden("%s does not point at this server", x.Name)
+		}
+		found = found || x.Name == name
+	}
+	if !found {
+		return missing("%s is not claimed", name)
+	}
+	return nil
+}
+
 // Release frees a name and everything under it.
 func (s *Service) Release(a Actor, rawName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.releaseLocked(a, rawName)
+}
+
+// ServerRelease is a server giving back a name that points only at it.
+func (s *Service) ServerRelease(a Actor, d *Device, rawName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.serverOwnsName(d, rawName); err != nil {
+		return err
+	}
+	return s.releaseLocked(a, rawName)
+}
+
+func (s *Service) releaseLocked(a Actor, rawName string) error {
 	name := strings.TrimSuffix(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rawName)), "."), "."+s.cfg.Zone)
 	n, err := s.st.NameByName(name)
 	if errors.Is(err, ErrNotFound) {

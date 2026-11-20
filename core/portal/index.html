@@ -89,13 +89,25 @@
 </section>
 
 <h2>Host something</h2>
-<p>Add a server above, give it a name, then run Caddy on it with:</p>
+<p>One command puts a folder or a website in the pen, with its own name and the padlock.
+Run it with the same <code>hogman-join</code> you joined with, on a computer that's in the pen:</p>
+<pre><code>./hogman-join share photos ~/holiday     # a folder, served as a website
+./hogman-join share blog 3000            # a site you're building, by its port</code></pre>
+<p class="muted">Everyone in the pen can then open <code>https://blog.<span class="zone">&lt;network&gt;.hogman</span></code>.
+Add <code>--background</code> to keep it running after the window closes;
+<code>./hogman-join share stop blog</code> takes it down and frees the name.</p>
+<p>A computer that isn't in the pen, like a spare box in the closet? Press <em>Add a server</em>
+above, and put its link at the end: <code>./hogman-join share blog 3000 '&lt;server link&gt;'</code>.</p>
+<details>
+<summary>Running your own web server instead</summary>
+<p>Add a server above, name it, and point Caddy (or any ACME client) at the pen's CA:</p>
 <pre><code>{
 	acme_ca https://ca.<span class="zone">&lt;network&gt;.hogman</span>:9000/acme/acme/directory
 }
 yourname.<span class="zone">&lt;network&gt;.hogman</span> {
 	respond "hello"
 }</code></pre>
+</details>
 
 <h2>Root certificate</h2>
 <p>Download it again: <a href="/root_ca.crt">root_ca.crt</a>. It can only vouch

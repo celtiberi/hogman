@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 - Enforce same-origin (`Origin` / `Sec-Fetch-Site`) and `Content-Type: application/json` checks on mutating mesh API endpoints to block CSRF from member-hosted or external sites.
-- Restrict `server` devices on the mesh API to read-only `GET /api/me` (minimal `{member, this_device, zone}` payload) and `GET /api/directory`, returning `403` on all mutations and `/api/admin/*` endpoints.
+- Restrict `server` devices on the mesh API to `GET /api/me` (minimal `{member, this_device, zone, network}` payload), `GET /api/directory`, and acting on themselves only (claim a free name or one already pointing at them, release names that point only at them, remove themselves), returning `403` on everything else, including `/api/admin/*`.
 - Switch Headscale IP allocation to `random`, verify caller mesh IPs against live Headscale nodes in `identify()`, harden admin-vs-owner RBAC and subdomain cleanup, rate-limit `POST /hogman/v1/redeem`, cap per-member invites/keys/names, revoke open keys on suspend, and configure server timeouts (PR #5).
 - Add strict anti-framing (`X-Frame-Options: DENY`, `frame-ancestors 'none'`), CSP (`script-src 'self'`, `style-src 'self'`), `nosniff`, and `no-store` headers on `portal` and `/join`, block `/api/*` and `/swagger*` on edge proxies, bind `edge-behind-front` strictly to `{$PUBLIC_HOST}`, and enable `trusted_proxies_strict` + forward `X-Forwarded-For: {client_ip}` on `/hogman/*` behind the shared front door (PR #6).
 - Harden `hogman-join`: reject URL credentials, require full IPv4/IPv6 exclusions and valid cert dates on the root CA, validate `/hogman/v1/network` metadata, store temp root certs at `0700`/`0600`, restrict proxy `forward()` to `http`, and quote systemd `ExecStart` paths (PR #7).
@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Configure RFC1918 `trusted_proxies` CIDRs in `core/templates/headscale.yaml` so Headscale honors `X-Real-IP` forwarded by Caddy `edge`.
 
 ### Added
+- `hogman-join share NAME WHAT ['<server link>']`: one command puts a port, a local web address or a folder on the pen as `https://NAME.<pen>.hogman`. Each share is its own small `tag:server` device (tsnet) that names itself, gets a certificate from the pen's CA (ACME TLS-ALPN-01 over the mesh) and proxies or serves files; no Caddy, no open ports, no administrator rights. `--background`, `share list`, `share stop NAME`; `leave` takes a pen's shares down first. `/api/me` now includes the pen's network info. End-to-end checks cover a folder shared from a side-by-side laptop and a port shared with only a server link.
+- "How it works" diagram on hogman.network and in the README (`docs/img/how-it-works.svg`).
 - `deploy/`: `bootstrap.sh` for a fresh Ubuntu server, and `hogman-host`, which runs many pens on one server behind a shared front door (each pen walled off on its own network), with `test-host.sh` (18 checks).
 - Core: front-door mode (`FRONT_DOOR=true`, `compose.front.yaml`, `config/edge-behind-front.Caddyfile`) and a per-pen relay port (`STUN_PORT`).
 - README rewritten in the website's style, with crops of the artwork in `docs/img/`.
