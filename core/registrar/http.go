@@ -158,9 +158,13 @@ func MeshHandler(s *Service) http.Handler {
 			}
 		}
 		invs, _ := s.st.Invites(&c.member.ID)
+		a := c.actor()
 		writeJSON(w, 200, map[string]any{
 			"member": c.member, "this_device": c.device, "devices": devs, "names": mine,
 			"invites": inviteViews(invs), "zone": s.cfg.Zone,
+			// What the page should offer. The API checks again on every call.
+			"can_invite": a.IsAdmin() || s.cfg.MembersCanInvite,
+			"is_admin":   a.IsAdmin(), "is_owner": a.IsOwner(),
 		})
 	})
 
@@ -241,7 +245,16 @@ func MeshHandler(s *Service) http.Handler {
 			fail(w, err)
 			return
 		}
-		writeJSON(w, 201, inv)
+		out := struct {
+			*MintedInvite
+			QRSVG string `json:"qr_svg,omitempty"`
+		}{MintedInvite: inv}
+		if svg, err := qrSVG(inv.URL); err == nil {
+			out.QRSVG = svg
+		} else {
+			log.Printf("invite link QR: %v", err)
+		}
+		writeJSON(w, 201, out)
 	})
 
 	h("DELETE /api/invites/{id}", false, false, func(w http.ResponseWriter, r *http.Request, c caller) {
@@ -260,6 +273,32 @@ func MeshHandler(s *Service) http.Handler {
 			return
 		}
 		writeJSON(w, 200, ms)
+	})
+
+	// The keeper's page: a searchable page of members with device counts, so a
+	// pen of ten thousand loads as fast as a pen of ten.
+	h("GET /api/admin/herd", true, false, func(w http.ResponseWriter, r *http.Request, c caller) {
+		q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+		for _, ch := range q {
+			if !(ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-') {
+				fail(w, bad("search with the letters, digits and dashes a handle can have"))
+				return
+			}
+		}
+		if len(q) > 32 {
+			q = q[:32]
+		}
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		if offset < 0 {
+			offset = 0
+		}
+		const limit = 20
+		ms, total, err := s.st.Herd(q, limit, offset)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"members": ms, "total": total, "offset": offset, "limit": limit})
 	})
 
 	h("POST /api/admin/members/{handle}/{action}", true, false, func(w http.ResponseWriter, r *http.Request, c caller) {
@@ -300,6 +339,15 @@ func MeshHandler(s *Service) http.Handler {
 	})
 
 	h("GET /api/admin/invites", true, false, func(w http.ResponseWriter, r *http.Request, c caller) {
+		if r.URL.Query().Get("open") == "1" {
+			invs, err := s.st.OpenInvites(100)
+			if err != nil {
+				fail(w, err)
+				return
+			}
+			writeJSON(w, 200, inviteViews(invs))
+			return
+		}
 		invs, err := s.st.Invites(nil)
 		if err != nil {
 			fail(w, err)

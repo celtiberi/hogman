@@ -36,6 +36,44 @@
   </div>
 </section>
 
+<section id="invite" hidden>
+  <h2>Invite someone</h2>
+  <div class="card">
+    <p class="muted hint">A link for one person. They open it, pick a name, and copy one command.
+      It works once and lasts a week.</p>
+    <form id="invite-form" class="row">
+      <input id="invite-note" maxlength="200" placeholder="Who is it for? (a note for keepers)" autocomplete="off">
+      <button class="primary" id="invite-make" type="submit">Make an invite</button>
+    </form>
+    <div id="invite-new" hidden>
+      <div class="qr">
+        <img id="invite-qr" alt="QR code for the invite link">
+        <div class="info">
+          <p>Send this link to them, any way you like:</p>
+          <div class="linkbox" id="invite-link"></div>
+          <p><button id="invite-copy" type="button">Copy link</button> <span class="muted" id="invite-exp"></span></p>
+        </div>
+      </div>
+    </div>
+    <p class="error" id="invite-err" hidden></p>
+  </div>
+  <h3 id="invites-title" hidden>Open invites</h3>
+  <ul class="devices" id="invites"></ul>
+</section>
+
+<section id="herd" hidden>
+  <h2>The herd</h2>
+  <p class="muted hint">Everyone in the pen. Suspending cuts all their devices off at once and can
+    be undone. Kicking ends their membership for good.</p>
+  <form class="row" id="herd-form" role="search">
+    <input id="herd-q" type="search" placeholder="Find someone by name" autocomplete="off" maxlength="32">
+  </form>
+  <p class="muted small" id="herd-count"></p>
+  <ul class="devices" id="members"></ul>
+  <p><button id="herd-more" type="button" hidden>Show more</button></p>
+  <p class="error" id="herd-err" hidden></p>
+</section>
+
 <h2>Host something</h2>
 <p>Add a server above, give it a name, then run Caddy on it with:</p>
 <pre><code>{

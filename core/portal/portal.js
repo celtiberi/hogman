@@ -31,7 +31,7 @@
         const here = document.createElement('span'); here.className = 'here'; here.textContent = 'this device';
         li.append(here);
       } else {
-        const rm = document.createElement('button'); rm.className = 'link'; rm.type = 'button'; rm.textContent = 'Remove';
+        const rm = document.createElement('button'); rm.className = 'link danger'; rm.type = 'button'; rm.textContent = 'Remove';
         rm.onclick = async () => {
           if (!confirmRemove(d.id, d.name)) return;
           rm.disabled = true;
@@ -89,9 +89,149 @@
   $('add-personal').onclick = () => add('personal');
   $('add-server').onclick = () => add('server');
 
+  // ------------------------------------------------------------ invites --
+
+  const el = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  };
+  const day = t => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const errIn = id => e => { const p = $(id); p.textContent = e.message; p.hidden = false; };
+
+  // Two presses instead of a browser dialog.
+  const pressTwice = (key, btn, warn, onErr) => {
+    if (armed.has(key)) { armed.delete(key); return true; }
+    armed.add(key);
+    const was = btn.textContent;
+    btn.textContent = warn;
+    setTimeout(() => { armed.delete(key); btn.textContent = was; }, 5000);
+    onErr && onErr(null);
+    return false;
+  };
+
+  $('invite-form').onsubmit = async ev => {
+    ev.preventDefault();
+    $('invite-err').hidden = true;
+    $('invite-make').disabled = true;
+    try {
+      const r = await api('POST', '/invites', { note: $('invite-note').value.trim() });
+      $('invite-qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(r.qr_svg || '');
+      $('invite-qr').hidden = !r.qr_svg;
+      $('invite-link').textContent = r.url;
+      $('invite-exp').textContent = `Works once, until ${day(r.expires_at)}.`;
+      $('invite-copy').textContent = 'Copy link';
+      $('invite-copy').onclick = async () => {
+        await navigator.clipboard.writeText(r.url);
+        $('invite-copy').textContent = 'Copied';
+      };
+      $('invite-new').hidden = false;
+      $('invite-note').value = '';
+      await loadInvites();
+    } catch (e) { errIn('invite-err')(e); }
+    finally { $('invite-make').disabled = false; }
+  };
+
+  const loadInvites = async () => {
+    const all = me.is_admin ? await api('GET', '/admin/invites?open=1') : (await api('GET', '/me')).invites;
+    const open = (all || []).filter(i => i.state === 'open');
+    const ul = $('invites');
+    ul.replaceChildren();
+    $('invites-title').hidden = open.length === 0;
+    for (const i of open) {
+      const li = el('li');
+      li.append(el('span', 'grow', i.note || `invite #${i.id}`));
+      if (i.role === 'admin') li.append(el('span', 'tag', 'admin'));
+      li.append(el('span', 'muted small', `until ${day(i.expires_at)}`));
+      const rv = el('button', 'link danger', 'Revoke'); rv.type = 'button';
+      rv.onclick = async () => {
+        if (!pressTwice('inv' + i.id, rv, 'Press again to revoke')) return;
+        try { await api('DELETE', '/invites/' + i.id); await loadInvites(); }
+        catch (e) { errIn('invite-err')(e); }
+      };
+      li.append(rv);
+      ul.append(li);
+    }
+  };
+
+  // --------------------------------------------------------------- herd --
+
+  // Searched and paged by the registrar: a pen of ten thousand loads like ten.
+  const herd = { q: '', offset: 0, total: 0, seq: 0 };
+
+  const herdCount = () => {
+    const shown = $('members').children.length;
+    $('herd-count').textContent = herd.q
+      ? `${herd.total} match${herd.total === 1 ? '' : 'es'} for “${herd.q}”`
+      : `${herd.total} in the pen${shown < herd.total ? `, showing ${shown}` : ''}`;
+    $('herd-more').hidden = shown >= herd.total;
+  };
+
+  const memberRow = m => {
+    const li = el('li');
+    li.append(el('span', 'grow', m.handle));
+    if (m.role !== 'member') li.append(el('span', 'tag', m.role));
+    if (m.status === 'suspended') li.append(el('span', 'tag warn', 'suspended'));
+    li.append(el('span', 'muted small', `${m.devices} device${m.devices === 1 ? '' : 's'}`));
+    if (m.id === me.member.id) { li.append(el('span', 'here', 'you')); return li; }
+    const act = (label, action, body, confirmText, after) => {
+      const b = el('button', confirmText ? 'link danger' : 'link', label); b.type = 'button';
+      b.onclick = async () => {
+        if (confirmText && !pressTwice(action + m.id, b, confirmText)) return;
+        b.disabled = true;
+        $('herd-err').hidden = true;
+        try {
+          await api('POST', `/admin/members/${encodeURIComponent(m.handle)}/${action}`, body || {});
+          after();
+        } catch (e) { b.disabled = false; errIn('herd-err')(e); }
+      };
+      li.append(b);
+    };
+    const redraw = () => li.replaceWith(memberRow(m));
+    // An admin can't act on the owner; the API refuses if tried.
+    if (me.is_owner && m.role !== 'owner') {
+      const to = m.role === 'admin' ? 'member' : 'admin';
+      act(`Make ${to}`, 'role', { role: to }, null, () => { m.role = to; redraw(); });
+    }
+    if (m.status === 'suspended') act('Resume', 'resume', null, null, () => { m.status = 'active'; redraw(); });
+    else act('Suspend', 'suspend', { reason: 'suspended from the home page' }, `Suspend ${m.handle}?`,
+      () => { m.status = 'suspended'; redraw(); });
+    act('Kick', 'kick', { reason: 'kicked from the home page' }, `Kick ${m.handle} for good?`,
+      () => { li.remove(); herd.total--; herd.offset--; herdCount(); });
+    return li;
+  };
+
+  const loadHerd = async (more) => {
+    $('herd-err').hidden = true;
+    if (!more) { herd.offset = 0; }
+    const seq = ++herd.seq;   // a slow answer to an old search must not win
+    const r = await api('GET', `/admin/herd?q=${encodeURIComponent(herd.q)}&offset=${herd.offset}`);
+    if (seq !== herd.seq) return;
+    if (!more) $('members').replaceChildren();
+    for (const m of r.members) $('members').append(memberRow(m));
+    herd.total = r.total;
+    herd.offset += r.members.length;
+    herdCount();
+  };
+
+  let searchTimer = null;
+  $('herd-q').oninput = () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      herd.q = $('herd-q').value.trim().toLowerCase();
+      loadHerd(false).catch(errIn('herd-err'));
+    }, 250);
+  };
+  $('herd-form').onsubmit = ev => ev.preventDefault();
+  $('herd-more').onclick = () => loadHerd(true).catch(errIn('herd-err'));
+
   const load = async () => {
     try { me = await api('GET', '/me'); render(); }
-    catch (e) { $('whoami').textContent = 'Could not load your details: ' + e.message; }
+    catch (e) { $('whoami').textContent = 'Could not load your details: ' + e.message; return; }
+    if (!me.devices) return;   // a server
+    if (me.can_invite) { $('invite').hidden = false; loadInvites().catch(errIn('invite-err')); }
+    if (me.is_admin) { $('herd').hidden = false; loadHerd().catch(errIn('herd-err')); }
   };
   load();
 })();

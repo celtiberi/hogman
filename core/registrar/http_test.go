@@ -314,3 +314,121 @@ func TestPublicRedeemRateLimit(t *testing.T) {
 		t.Fatalf("other IP: status=%d want 403 body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestKeeperPageAPI(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+	for h, r := range map[string]string{"root": "owner", "bob": "member"} {
+		if _, err := e.svc.AddMember(ctx, cli, h, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
+	e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.11", "")
+	h := MeshHandler(e.svc)
+	js := map[string]string{"Content-Type": "application/json"}
+
+	var me struct {
+		CanInvite bool `json:"can_invite"`
+		IsAdmin   bool `json:"is_admin"`
+		IsOwner   bool `json:"is_owner"`
+	}
+	rec := doMeshReq(h, "GET", "/api/me", "100.64.0.10", "", nil)
+	if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil || !me.CanInvite || !me.IsAdmin || !me.IsOwner {
+		t.Fatalf("owner /api/me: %+v %s", me, rec.Body.String())
+	}
+	me.CanInvite, me.IsAdmin, me.IsOwner = true, true, true
+	rec = doMeshReq(h, "GET", "/api/me", "100.64.0.11", "", nil)
+	if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil || me.CanInvite || me.IsAdmin || me.IsOwner {
+		t.Fatalf("member /api/me: %+v %s", me, rec.Body.String())
+	}
+
+	rec = doMeshReq(h, "POST", "/api/invites", "100.64.0.10", `{"note":"alice"}`, js)
+	var inv struct {
+		ID    int64  `json:"id"`
+		URL   string `json:"url"`
+		Token string `json:"token"`
+		Note  string `json:"note"`
+		QR    string `json:"qr_svg"`
+	}
+	if rec.Code != 201 || json.Unmarshal(rec.Body.Bytes(), &inv) != nil {
+		t.Fatalf("mint invite: %d %s", rec.Code, rec.Body.String())
+	}
+	if inv.ID == 0 || inv.Note != "alice" || !strings.Contains(inv.URL, "/join#t="+inv.Token) || !strings.HasPrefix(inv.QR, "<svg") {
+		t.Fatalf("invite response missing fields: %+v", inv)
+	}
+	if rec := doMeshReq(h, "POST", "/api/invites", "100.64.0.11", `{}`, js); rec.Code != 403 {
+		t.Fatalf("member minted an invite on a network where only admins invite: %d", rec.Code)
+	}
+}
+
+func TestHerdPagedAndSearched(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+	if _, err := e.svc.AddMember(ctx, cli, "root", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
+	for i := 0; i < 45; i++ {
+		h := "pig" + strconv.Itoa(100+i)
+		if _, err := e.svc.AddMember(ctx, cli, h, "member"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.svc.AddMember(ctx, cli, "zed", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	e.addDevice(t, "pig107", "personal", "a", "100.64.1.1", "")
+	e.addDevice(t, "pig107", "server", "b", "100.64.1.2", "")
+	e.addDevice(t, "pig101", "personal", "c", "100.64.1.3", "")
+	if _, err := e.svc.Kick(ctx, cli, "pig101", "test"); err != nil {
+		t.Fatal(err)
+	}
+	h := MeshHandler(e.svc)
+	type page struct {
+		Members []struct {
+			Handle  string `json:"handle"`
+			Role    string `json:"role"`
+			Devices int    `json:"devices"`
+		} `json:"members"`
+		Total int `json:"total"`
+	}
+	get := func(path string) page {
+		t.Helper()
+		rec := doMeshReq(h, "GET", path, "100.64.0.10", "", nil)
+		var p page
+		if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &p) != nil {
+			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body.String())
+		}
+		return p
+	}
+
+	p := get("/api/admin/herd")
+	if p.Total != 46 || len(p.Members) != 20 {
+		t.Fatalf("first page: total=%d len=%d (want 46 and 20: removed members left out)", p.Total, len(p.Members))
+	}
+	if p.Members[0].Handle != "root" || p.Members[1].Handle != "zed" {
+		t.Fatalf("keepers should come first: %s, %s", p.Members[0].Handle, p.Members[1].Handle)
+	}
+	if last := get("/api/admin/herd?offset=40"); len(last.Members) != 6 {
+		t.Fatalf("last page has %d, want 6", len(last.Members))
+	}
+	s := get("/api/admin/herd?q=PIG10")
+	if s.Total != 9 { // pig100..pig109 without the kicked pig101
+		t.Fatalf("search pig10: total=%d want 9", s.Total)
+	}
+	for _, m := range s.Members {
+		if m.Handle == "pig107" && m.Devices != 2 {
+			t.Fatalf("pig107 has %d devices, want 2", m.Devices)
+		}
+	}
+	if rec := doMeshReq(h, "GET", "/api/admin/herd?q=a%25", "100.64.0.10", "", nil); rec.Code != 400 {
+		t.Fatalf("a search with %% should be refused, got %d", rec.Code)
+	}
+	e.addDevice(t, "pig102", "personal", "d", "100.64.1.4", "")
+	if rec := doMeshReq(h, "GET", "/api/admin/herd", "100.64.1.4", "", nil); rec.Code != 403 {
+		t.Fatalf("a member listed the herd: %d", rec.Code)
+	}
+}

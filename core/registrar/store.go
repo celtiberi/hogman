@@ -142,6 +142,55 @@ func (s *Store) Members() ([]*Member, error) {
 	return out, rows.Err()
 }
 
+// HerdMember is a member as the keeper's page lists them: with how many
+// devices they have on the network.
+type HerdMember struct {
+	*Member
+	Devices int `json:"devices"`
+}
+
+// scanPlus scans a row whose last columns come after the ones scanMember reads.
+type scanPlus struct {
+	r     interface{ Scan(...any) error }
+	extra []any
+}
+
+func (p scanPlus) Scan(dest ...any) error { return p.r.Scan(append(dest, p.extra...)...) }
+
+// Herd lists members who haven't been removed, a page at a time: owners and
+// admins first, then by handle. q, if set, matches anywhere in the handle and
+// may only hold handle characters. Returns the page and how many match in all.
+func (s *Store) Herd(q string, limit, offset int) ([]*HerdMember, int, error) {
+	where, args := `WHERE status != 'removed'`, []any{}
+	if q != "" {
+		where += ` AND handle LIKE ?`
+		args = append(args, "%"+q+"%")
+	}
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM members `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.Query(`SELECT `+memberCols+`,
+		(SELECT COUNT(*) FROM devices d WHERE d.member_id = members.id AND d.removed_at IS NULL)
+		FROM members `+where+`
+		ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, handle
+		LIMIT ? OFFSET ?`, append(args, limit, offset)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []*HerdMember{}
+	for rows.Next() {
+		var n int
+		m, err := scanMember(scanPlus{rows, []any{&n}})
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, &HerdMember{m, n})
+	}
+	return out, total, rows.Err()
+}
+
 func (s *Store) InsertMember(m *Member) error {
 	res, err := s.db.Exec(`INSERT INTO members (handle, role, status, invited_by, hs_user_id, created_at) VALUES (?,?,?,?,?,?)`,
 		m.Handle, m.Role, m.Status, m.InvitedBy, m.HSUserID, now())
@@ -230,6 +279,26 @@ func (s *Store) InviteByHash(h string) (*Invite, error) {
 
 func (s *Store) InviteByID(id int64) (*Invite, error) {
 	return scanInvite(s.db.QueryRow(`SELECT `+inviteCols+` FROM invites WHERE id = ?`, id))
+}
+
+// OpenInvites lists unused, unrevoked, unexpired invites, newest first.
+func (s *Store) OpenInvites(limit int) ([]*Invite, error) {
+	rows, err := s.db.Query(`SELECT `+inviteCols+` FROM invites
+		WHERE redeemed_at IS NULL AND revoked_at IS NULL AND expires_at > ?
+		ORDER BY id DESC LIMIT ?`, now(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Invite{}
+	for rows.Next() {
+		i, err := scanInvite(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, i)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) Invites(mintedBy *int64) ([]*Invite, error) {

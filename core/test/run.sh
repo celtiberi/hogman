@@ -225,6 +225,23 @@ check "alice's server cannot reach bob's laptop"         not can_ping alice-tool
 check "members cannot reach other ports on the core (22)" not port_open bob-tools "$CORE_MESH_IP" 22
 check "bob can't use the admin API"   expect 403 bob-tools GET /api/admin/members
 check "alice (admin) can"             expect 200 alice-laptop-tools GET /api/admin/members
+page_invite() {  # an invite made from the home page comes with its link and QR code
+  api alice-laptop-tools POST /api/invites '{"note":"from the page"}' \
+    | jq -e --arg h "$PUBLIC_HOST" '(.url | startswith("https://\($h)/join#t=")) and (.qr_svg | startswith("<svg"))'
+}
+check "alice (admin) makes an invite from the home page" page_invite
+invite_open()  { $H invite list | grep 'from the page' | grep -q open; }
+offers_keeper(){ api "$1" GET /api/me | jq -e '.can_invite and .is_admin'; }
+offers_none()  { api "$1" GET /api/me | jq -e '(.can_invite or .is_admin) | not'; }
+check "the ledger lists it as open"   invite_open
+check "the home page offers alice the keeper controls" offers_keeper alice-laptop-tools
+check "and offers bob neither"        offers_none bob-tools
+check "the home page has the herd"    fetch "home.$ZONE" 'The herd'
+herd_finds_bob() {  # searched on the registrar, with his devices counted
+  api alice-laptop-tools GET '/api/admin/herd?q=bo' | jq -e '.total >= 1 and any(.members[]; .handle == "bob" and .devices >= 1)'
+}
+check "alice finds bob in the herd, devices counted" herd_finds_bob
+check "bob can't list the herd"       expect 403 bob-tools GET /api/admin/herd
 check "alice's server can read /api/me"        expect 200 alice-tools GET /api/me
 check "alice's server can read /api/directory" expect 200 alice-tools GET /api/directory
 check "alice's server cannot use the admin API"   expect 403 alice-tools GET /api/admin/members

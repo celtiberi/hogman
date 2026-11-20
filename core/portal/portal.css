@@ -8,10 +8,11 @@ code { background: #f2f2f2; padding: .1rem .35rem; border-radius: 4px; }
 pre code { display: block; padding: .8rem 1rem; }
 button { font: inherit; padding: .4rem 1rem; border-radius: 6px; border: 1px solid #999; background: #fff; cursor: pointer; }
 button.primary { background: #1d1d1f; color: #fff; border-color: #1d1d1f; }
-button.link { border: 0; background: none; color: #a33; padding: 0 .2rem; text-decoration: underline; }
+button.link { border: 0; background: none; color: inherit; padding: 0 .2rem; text-decoration: underline; }
+button.link.danger { color: #a33; }
 button:disabled { opacity: .5; cursor: default; }
 ul.devices { list-style: none; padding: 0; }
-ul.devices li { display: flex; gap: .7rem; align-items: baseline; padding: .45rem 0; border-bottom: 1px solid #ddd; }
+ul.devices li { display: flex; flex-wrap: wrap; gap: .7rem; align-items: baseline; padding: .45rem 0; border-bottom: 1px solid #ddd; }
 .tag { font-size: .8rem; padding: 0 .45rem; border-radius: 999px; border: 1px solid #aaa; }
 .here { font-size: .8rem; color: #2a7a2a; }
 .grow { flex: 1; }
@@ -23,8 +24,13 @@ ul.devices li { display: flex; gap: .7rem; align-items: baseline; padding: .45re
 .qr .info p:first-child { margin-top: 0; }
 .linkbox { font: .78rem ui-monospace, Menlo, monospace; word-break: break-all; background: #f2f2f2; padding: .5rem .6rem; border-radius: 6px; }
 .error { color: #a33; }
+.small { font-size: .85rem; }
+.tag.warn { border-color: #c80; color: #c80; }
+form.row { display: flex; gap: .6rem; flex-wrap: wrap; }
+form.row input { flex: 1; min-width: 12rem; font: inherit; padding: .4rem .6rem; border-radius: 6px; border: 1px solid #999; }
+h3 { margin-top: 1.4rem; font-size: 1rem; }
 @media (prefers-color-scheme: dark) {
   body { background: #111; color: #eee; } .sub, .muted { color: #999; } a { color: #8ab4ff; }
   code, .linkbox { background: #222; } button { background: #222; color: #eee; border-color: #555; }
-  button.primary { background: #eee; color: #111; } ul.devices li { border-color: #333; } .card { border-color: #444; }
+  button.primary { background: #eee; color: #111; } button.link { background: none; color: #ccc; } button.link.danger { color: #e66; } form.row input { background: #222; color: #eee; border-color: #555; } ul.devices li { border-color: #333; } .card { border-color: #444; }
 }
