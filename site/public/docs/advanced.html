@@ -67,10 +67,18 @@
   <li>Your Tailscale app can only be on one network at a time. If it's on another one (your
     work network, say), joining the pen switches it off that one until you switch back
     (add <code>--switch</code> to allow it).</li>
-  <li>The pen's rules still only let you reach its servers on ports 443 and 80. This doesn't
-    give anyone more access to you; it gives more of your computer access to the pen.</li>
+  <li>Your computer takes its DNS settings from the pen's control server. A trustworthy pen
+    only answers its own names, but a hostile keeper could point those names at your own
+    computer or your router, or tell your computer to send <em>all</em> its DNS lookups to
+    them, so they could see and redirect your ordinary browsing. (The usual connection
+    never does this: it answers only the pen's names and only ever connects to the pen's own
+    devices.)</li>
+  <li>What stays the same: other members still can't connect <em>to</em> your computer
+    (personal devices accept nothing), and the pen's rules still only let you reach its
+    servers on ports 443 and 80. The Tailscale app is told to refuse any routes the pen
+    offers.</li>
 </ul>
-<p>To go back to the usual way: <code>./hogman-join leave '&lt;your link&gt;'</code>, then join
+<p>Only do this for a pen whose keeper you'd trust with your computer's DNS. To go back to the usual way: <code>./hogman-join leave '&lt;your link&gt;'</code>, then join
   again without <code>--tailscale</code>.</p>
 
 <h2 class="docs-h2" id="own-server">Running your own web server</h2>
