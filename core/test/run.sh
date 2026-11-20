@@ -102,7 +102,11 @@ resolves_to()  { run bob-tools dig +short "$1" | tr -d '\r' | grep -qx "$2"; }
 resolves_none(){ [ -z "$(run bob-tools dig +short "$1" | tr -d '\r')" ]; }
 resolves_any() { run bob-tools dig +short "$1" | grep -q .; }
 refused()      { run bob-tools dig "@$CORE_MESH_IP" "$1" | grep -q REFUSED; }
-fetch()        { run "${FROM:-bob-tools}" curl -sf -m3 --cacert $ROOT "https://$1" | grep -q "$2"; }
+fetch() {
+  local body
+  body="$(run "${FROM:-bob-tools}" curl -sf -m3 --cacert $ROOT "https://$1")" || return 1
+  grep -q "$2" <<<"$body"
+}
 can_ping()     { run "$1" ping -c2 -W2 "$2"; }
 port_open()    { run "$1" nc -z -w3 "$2" "$3"; }
 verify_cert()  { openssl verify -CAfile data/pki/public/root_ca.crt \
@@ -170,7 +174,11 @@ srv="$(api alice-laptop-tools POST /api/devices '{"kind":"server"}')"
 ALICE_SERVER_KEY="$(jq -r .auth_key <<<"$srv")"
 check "alice gets a server key from the portal" test -n "$ALICE_SERVER_KEY" -a "$ALICE_SERVER_KEY" != null
 check "the device link comes with a QR code drawn inside the pen" grep -q '^<svg ' <<<"$(jq -r .join_qr_svg <<<"$srv")"
-portal_has_ui() { run alice-laptop-tools curl -sf -m5 --cacert $ROOT "https://home.$ZONE/" | grep -q 'id="add-personal"'; }
+portal_has_ui() {
+  local body
+  body="$(run alice-laptop-tools curl -sf -m5 --cacert $ROOT "https://home.$ZONE/")" || return 1
+  grep -q 'id="add-personal"' <<<"$body"
+}
 check "the portal offers 'Add a device'" portal_has_ui
 portal_hdrs="$(run alice-laptop-tools curl -sI -m5 --cacert $ROOT "https://home.$ZONE/" | tr -d '\r')"
 check "the portal sets anti-framing headers" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\"" _ "$portal_hdrs"
