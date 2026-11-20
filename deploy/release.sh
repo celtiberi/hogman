@@ -28,22 +28,28 @@ git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstr
 bins="hogman-bin-$ver.tar.gz"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-full="$(git rev-parse "$REF")"
+full="$(git rev-parse "$REF^{commit}")"   # a tag resolves to its commit
 if [ "${USE_CI_BUILD:-}" != 1 ] && docker info >/dev/null 2>&1; then
   git archive --format=tar "$REF" core/join core/registrar deploy/signup | tar -x -C "$work"
   deploy/build-bins.sh "$work" "$work/prebuilt"
 else
   echo "Docker isn't running here: using GitHub's build of $sha..."
-  run="$(gh run list --workflow build.yml --commit "$full" --status success --limit 1 \
-          --json databaseId --jq '.[0].databaseId // empty')"
+  # Only push or manual runs: a pull-request run builds a merge commit, and
+  # its artifact is named after that, not $full.
+  run="$(gh run list --workflow build.yml --commit "$full" --status success --limit 20 \
+          --json databaseId,event --jq '[.[] | select(.event != "pull_request")][0].databaseId // empty')"
   if [ -z "$run" ]; then
     echo "no successful GitHub build for $sha yet. Watch it: gh run list --workflow build.yml" >&2
     echo "(it runs on every push to main; or start one: gh workflow run build.yml --ref main)" >&2
     exit 1
   fi
-  gh run download "$run" --name "hogman-bin-$full" --dir "$work/prebuilt"
+  if ! gh run download "$run" --name "hogman-bin-$full" --dir "$work/prebuilt"; then
+    echo "GitHub's build of $sha can't be downloaded (builds are kept 30 days)." >&2
+    echo "Start Docker and run this again, or release a newer commit." >&2
+    exit 1
+  fi
   # Artifacts lose the executable bit.
-  find "$work/prebuilt" -type f -exec chmod 0755 {} +
+  find "$work/prebuilt" -type f ! -name SHA256SUMS -exec chmod 0755 {} +
 fi
 # No macOS file metadata in the bundle (Linux tar warns about it).
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$work" -czf "$out/$bins" prebuilt
