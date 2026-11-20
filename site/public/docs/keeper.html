@@ -49,7 +49,10 @@
 <table class="docs-table">
   <thead><tr><th>Role</th><th>Can</th></tr></thead>
   <tbody>
-    <tr><td>Owner (the keeper)</td><td>Everything. Can't be suspended or removed by anyone.</td></tr>
+    <tr><td>Owner (the keeper)</td><td>Everything. Can't be suspended or removed. A pen can have
+      more than one owner, and should: an owner who loses every device needs another owner to
+      invite them back. Owners can demote each other, so make owners only of people you trust
+      completely.</td></tr>
     <tr><td>Admin</td><td>Make and revoke invites, suspend, resume and remove members. Can't
       act on the owner or other admins.</td></tr>
     <tr><td>Member</td><td>Join devices, claim names, run servers and shares. Inviting is
@@ -79,13 +82,18 @@
   <li><strong>Kick</strong> (the boot): the membership ends, every device is deleted, unused
     keys and invites they made are revoked, and their names are held for 90 days so nobody can
     pretend to be them. Coming back takes a new invite.</li>
-  <li><strong>Make admin</strong> or back to member (owner only).</li>
+  <li><strong>Make admin</strong> or back to member, and <strong>Make owner</strong> for an
+    admin (owner only).</li>
+  <li><strong>Someone lost every device?</strong> There is no account recovery. Invite them
+    again, give the new account the old one's role, and kick the old account (make an old owner
+    an admin first).</li>
 </ul>
 <pre class="term"><span class="p">$</span> hogman-host pen mypen member list
 <span class="p">$</span> hogman-host pen mypen member suspend gary "spamming the forum"
 <span class="p">$</span> hogman-host pen mypen member resume gary
 <span class="p">$</span> hogman-host pen mypen member kick gary "second time"
-<span class="p">$</span> hogman-host pen mypen member role alice admin</pre>
+<span class="p">$</span> hogman-host pen mypen member role alice admin
+<span class="p">$</span> hogman-host pen mypen member role alice owner</pre>
 
 <h2 class="docs-h2">Devices and names</h2>
 <p>Every member manages their own devices on the home page: <strong>Add a device</strong> for a

@@ -166,6 +166,8 @@ func MeshHandler(s *Service) http.Handler {
 			// What the page should offer. The API checks again on every call.
 			"can_invite": a.IsAdmin() || s.cfg.MembersCanInvite,
 			"is_admin":   a.IsAdmin(), "is_owner": a.IsOwner(),
+			// A lone owner is warned: another owner is the only way back in (D-16).
+			"owners": ownerCount(s, a),
 			// What `hogman-join share` needs to start a server of its own.
 			"network": s.NetworkInfo(),
 		})
@@ -532,4 +534,13 @@ func fail(w http.ResponseWriter, err error) {
 	}
 	log.Printf("internal error: %v", err)
 	writeJSON(w, 500, map[string]string{"error": "internal error"})
+}
+
+// ownerCount tells an owner how many owners the pen has; others get 0.
+func ownerCount(s *Service, a Actor) int {
+	if !a.IsOwner() {
+		return 0
+	}
+	n, _ := s.st.CountOwners()
+	return n
 }
