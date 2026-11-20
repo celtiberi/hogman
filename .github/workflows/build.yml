@@ -1,0 +1,32 @@
+# Compile Hogman's own programs for every commit on main (and on demand), so a
+# release never needs Docker on our own machines. deploy/release.sh downloads
+# the artifact for the exact commit it releases.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:   # only to check changes to the build itself
+    paths: [".github/workflows/build.yml", "deploy/build-bins.sh"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bins:
+    name: compile (join tool, registrar, sign-up page)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compile
+        run: deploy/build-bins.sh . prebuilt
+      - name: List
+        run: find prebuilt -type f | sort
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hogman-bin-${{ github.sha }}
+          path: prebuilt/
+          retention-days: 30
+          if-no-files-found: error
