@@ -169,6 +169,13 @@ check "alice gets a server key from the portal" test -n "$ALICE_SERVER_KEY" -a "
 check "the device link comes with a QR code drawn inside the pen" grep -q '^<svg ' <<<"$(jq -r .join_qr_svg <<<"$srv")"
 portal_has_ui() { run alice-laptop-tools curl -sf -m5 --cacert $ROOT "https://home.$ZONE/" | grep -q 'id="add-personal"'; }
 check "the portal offers 'Add a device'" portal_has_ui
+portal_hdrs="$(run alice-laptop-tools curl -sI -m5 --cacert $ROOT "https://home.$ZONE/" | tr -d '\r')"
+check "the portal sets anti-framing headers" sh -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\"" _ "$portal_hdrs"
+portal_assets_ok() {
+  run alice-laptop-tools curl -sf -m5 --cacert $ROOT "https://home.$ZONE/portal.js" >/dev/null &&
+    run alice-laptop-tools curl -sf -m5 --cacert $ROOT "https://home.$ZONE/portal.css" >/dev/null
+}
+check "portal external JS/CSS load" portal_assets_ok
 export ALICE_SERVER_KEY
 dc up -d alice-server alice-web alice-tools
 retry 90 has_ip alice-server; ALICE_SERVER_IP="$(ip_of alice-server)"
@@ -248,6 +255,11 @@ from_internet() {  # from_internet <curl args...>
   docker run --rm --network "${COMPOSE_PROJECT_NAME}_outside" -v "$WORK/data/edge-trust:/t:ro" \
     nicolaka/netshoot:v0.14 curl -sf --cacert /t/root.crt "$@"
 }
+from_internet_status() {
+  docker run --rm --network "${COMPOSE_PROJECT_NAME}_outside" -v "$WORK/data/edge-trust:/t:ro" \
+    nicolaka/netshoot:v0.14 curl -s -o /dev/null -w '%{http_code}' --cacert /t/root.crt "$1" \
+    | tr -d '\r' | tail -c 3
+}
 page_ok() {
   local html
   html="$(from_internet "https://$PUBLIC_HOST/join")" || return 1
@@ -255,6 +267,15 @@ page_ok() {
 }
 net_ok()   { from_internet "https://$PUBLIC_HOST/hogman/v1/network" | grep -q '"zone":"bobo.hogman"'; }
 check "https://<host>/join serves the join page" page_ok
+join_hdrs="$(from_internet -sI "https://$PUBLIC_HOST/join" | tr -d '\r')"
+check "the join page sets anti-framing headers" sh -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\"" _ "$join_hdrs"
+join_assets_ok() {
+  from_internet "https://$PUBLIC_HOST/join/assets/join.js" >/dev/null &&
+    from_internet "https://$PUBLIC_HOST/join/assets/join.css" >/dev/null
+}
+check "join page external JS/CSS load" join_assets_ok
+check "edge blocks Headscale admin API (/api/v1/user -> 404)" test "$(from_internet_status "https://$PUBLIC_HOST/api/v1/user")" = 404
+check "edge blocks Headscale Swagger UI (/swagger -> 404)" test "$(from_internet_status "https://$PUBLIC_HOST/swagger")" = 404
 sums="$(from_internet "https://$PUBLIC_HOST/join/dl/SHA256SUMS")"
 check "the join tool is downloadable for 5 platforms" test "$(grep -c hogman-join <<<"$sums")" = 5
 check "the network info endpoint is public" net_ok

@@ -6,6 +6,14 @@
 }
 
 home.{$ZONE} {
+	header {
+		X-Frame-Options DENY
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Cache-Control no-store
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+		-Server
+	}
 	# Member and admin API. Caddy sets X-Forwarded-For to the caller's mesh
 	# address (ignoring any the caller sent), which is how the registrar
 	# knows who is asking.
