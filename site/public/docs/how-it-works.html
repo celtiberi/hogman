@@ -121,7 +121,8 @@
     one-time device key.</li>
   <li>It starts the pen's background connection: a small built-in client (Tailscale's
     <code>tsnet</code>) running as you, not as administrator, with a local proxy that carries
-    only HTTPS to the pen's names (and HTTP, so sites can redirect to HTTPS). Browsers use it
+    only HTTPS to the pen's names (an <code>http://</code> address is answered on your own computer
+    with a redirect to HTTPS). Browsers use it
     through an automatic proxy setting; everything else on the computer, including any
     Tailscale of your own, is untouched.</li>
   <li>It checks that your home page loads over HTTPS, and you're in.</li>
@@ -135,8 +136,8 @@
 <table class="docs-table">
   <thead><tr><th>Device</th><th>Accepts connections from</th><th>Can connect to</th></tr></thead>
   <tbody>
-    <tr><td>Personal</td><td>Nobody</td><td>The pen's DNS, home page and CA; every server, on HTTPS (443) and HTTP (80) only</td></tr>
-    <tr><td>Server</td><td>Any active member's device, on 443 and 80 only</td><td>The pen's services; other servers, on 443 and 80</td></tr>
+    <tr><td>Personal</td><td>Nobody</td><td>The pen's DNS, home page and CA; every server, on HTTPS (443) only</td></tr>
+    <tr><td>Server</td><td>Any active member's device, on 443 only</td><td>The pen's services; other servers, on 443</td></tr>
     <tr><td>Anything else</td><td>Nobody</td><td>Nothing</td></tr>
   </tbody>
 </table>

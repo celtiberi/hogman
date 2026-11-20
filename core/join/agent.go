@@ -9,7 +9,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -193,7 +192,6 @@ type agent struct {
 	cfg        *agentConfig
 	node       *tsnet.Server
 	resolver   *net.Resolver
-	rp         *httputil.ReverseProxy
 	dialMesh   func(ctx context.Context, network, addr string) (net.Conn, error)
 	lookupDNS  func(ctx context.Context, host string) ([]string, error)
 	peerLookup func(ctx context.Context, host string) ([]string, error)
@@ -247,13 +245,6 @@ func newAgent(c *agentConfig, node *tsnet.Server) *agent {
 			}
 			return peerIPsForHost(st, host), nil
 		}
-	}
-	a.rp = &httputil.ReverseProxy{
-		Director: func(*http.Request) {},
-		Transport: &http.Transport{
-			DialContext:     func(ctx context.Context, _, addr string) (net.Conn, error) { return a.dial(ctx, addr) },
-			IdleConnTimeout: 30 * time.Second,
-		},
 	}
 	return a
 }
@@ -359,13 +350,12 @@ func (a *agent) dial(ctx context.Context, hostport string) (net.Conn, error) {
 
 var errOutside = fmt.Errorf("this proxy only serves the pen")
 
-var errPort = fmt.Errorf("this proxy only carries HTTPS (port 443) and HTTP (port 80) to the pen")
+var errPort = fmt.Errorf("this proxy only carries HTTPS (port 443) to the pen")
 
-// webPort: Hogman carries HTTPS to pen names, and HTTP only so a site can
-// redirect to HTTPS (decision D-11). Nothing else goes through the proxy.
+// webPort: Hogman carries HTTPS to pen names and nothing else (D-11).
 func webPort(hostport string) bool {
 	_, port, err := net.SplitHostPort(hostport)
-	return err == nil && (port == "443" || port == "80")
+	return err == nil && port == "443"
 }
 
 // allowed: a mesh address of a device this pen's node knows (with no node,
@@ -456,27 +446,21 @@ func (a *agent) connect(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 }
 
-// forward handles plain-HTTP requests sent through the proxy.
+// forward answers plain-HTTP requests for pen names itself, with a redirect
+// to HTTPS. Nothing is sent over the network: the pen carries HTTPS only.
 func (a *agent) forward(w http.ResponseWriter, r *http.Request) {
 	if !strings.EqualFold(r.URL.Scheme, "http") {
 		http.Error(w, "use CONNECT for HTTPS", http.StatusForbidden)
 		return
 	}
-	host := r.URL.Host
-	if _, _, err := net.SplitHostPort(host); err != nil {
-		host = net.JoinHostPort(host, "80")
-	}
-	if !webPort(host) {
-		http.Error(w, errPort.Error(), http.StatusForbidden)
+	host := r.URL.Hostname()
+	if port := r.URL.Port(); (port != "" && port != "80") || !a.cfg.inZone(host) {
+		http.Error(w, errOutside.Error(), http.StatusForbidden)
 		return
 	}
-	if h, _, _ := net.SplitHostPort(host); !a.cfg.inZone(h) {
-		if ip, err := netip.ParseAddr(h); err != nil || !inMeshRanges(ip) {
-			http.Error(w, errOutside.Error(), http.StatusForbidden)
-			return
-		}
-	}
-	a.rp.ServeHTTP(w, r)
+	u := *r.URL
+	u.Scheme, u.Host = "https", host
+	http.Redirect(w, r, u.String(), http.StatusPermanentRedirect)
 }
 
 // agentLogout tells the pen this device is leaving. Best effort. Runs in its

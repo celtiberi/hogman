@@ -553,17 +553,10 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 	if err != nil {
 		return fail(err)
 	}
-	ln80, err := node.Listen("tcp", ":80")
-	if err != nil {
-		return fail(err)
-	}
 	quiet := log.New(io.Discard, "", 0)
 	tlsSrv := &http.Server{Handler: h, TLSConfig: m.TLSConfig(), ReadHeaderTimeout: 20 * time.Second, ErrorLog: quiet}
-	webSrv := &http.Server{Handler: m.HTTPHandler(nil), ReadHeaderTimeout: 20 * time.Second, ErrorLog: quiet}
 	go func() { _ = tlsSrv.ServeTLS(ln443, "", "") }()
-	go func() { _ = webSrv.Serve(ln80) }()
 	defer tlsSrv.Close()
-	defer webSrv.Close()
 
 	// Get the certificate now, rather than on the first visitor.
 	hello := &tls.ClientHelloInfo{ServerName: c.fqdn(),
