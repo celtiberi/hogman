@@ -84,11 +84,15 @@ func main() {
 		return
 	}
 	if args[0] == "serve" {
-		serve(setup())
+		s := setup()
+		defer s.st.Close()
+		serve(s)
 		return
 	}
 	s := setup()
-	if err := cli(context.Background(), s, args); err != nil {
+	err := cli(context.Background(), s, args)
+	_ = s.st.Close()
+	if err != nil {
 		var p *Problem
 		if errors.As(err, &p) {
 			fmt.Fprintln(os.Stderr, "error:", p.Msg)

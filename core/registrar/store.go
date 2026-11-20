@@ -97,6 +97,9 @@ func OpenStore(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+// Close closes the underlying SQLite database handle.
+func (s *Store) Close() error { return s.db.Close() }
+
 func hasColumn(db *sql.DB, table, col string) (bool, error) {
 	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
