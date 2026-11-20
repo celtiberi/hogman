@@ -42,6 +42,7 @@ const usageText = `hogman-join: join this device to a Hogman private network
 
 usage:
   hogman-join [options] '<link>'      join, using an invite or device link
+  hogman-join update ['<link|host>']  update hogman-join from a pen's server (verifies SHA-256)
   hogman-join leave '<link>'          remove the network's certificate and log out of it
   hogman-join share NAME WHAT         put a port or a folder on the pen as https://NAME.<pen>.hogman
                                       (hogman-join share --help for more)
@@ -75,9 +76,12 @@ type options struct {
 func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err error) {
 	fs := flag.NewFlagSet("hogman-join", flag.ContinueOnError)
 	fs.Usage = func() {
-		if len(pos) > 0 && pos[0] == "share" {
+		switch {
+		case len(pos) > 0 && pos[0] == "share":
 			fmt.Print(shareUsage)
-		} else {
+		case len(pos) > 0 && pos[0] == "update":
+			fmt.Print(updateUsage)
+		default:
 			fmt.Print(usageText)
 		}
 	}
@@ -165,6 +169,8 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	case len(pos) >= 1 && pos[0] == "update":
+		err = updateCmd(pos[1:], o)
 	case len(pos) >= 1 && pos[0] == "share":
 		err = shareCmd(pos[1:], o)
 	case len(pos) == 1:

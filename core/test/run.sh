@@ -472,6 +472,15 @@ check "members load https://app.$ZONE" retry 30 fetch app.$ZONE "app from a serv
 out="$(join_tool dave-server share stop app 2>&1)"; rc=$?
 check "and it stops cleanly (exit $rc)" grep -q "app.$ZONE is down" <<<"$out"
 
+out="$(join_tool dave-laptop update --dry-run 2>&1)"; rc=$?
+check "hogman-join update --dry-run checks SHA256SUMS cleanly (exit $rc)" bash -c 'test "$1" = 0 && grep -q "already up to date" <<<"$2"' _ "$rc" "$out"
+run dave-laptop sh -c 'printf "#!/bin/sh\nexit 1\n" > /root/.config/hogman/bobo.hogman/hogman-join && chmod 755 /root/.config/hogman/bobo.hogman/hogman-join'
+out="$(join_tool dave-laptop update 2>&1)"; rc=$?
+[ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
+check "hogman-join update repairs stale pen copy and restarts agent (exit $rc)" bash -c 'test "$1" = 0 && grep -q "Updated " <<<"$2"' _ "$rc" "$out"
+check "... and installed binary matches /join/dl exactly" run dave-laptop sh -c 'cmp -s /root/.config/hogman/bobo.hogman/hogman-join "/dl/hogman-join-$(uname -s)-$(uname -m)"'
+check "... and restarted agent still loads alice.$ZONE" retry 20 alice_via
+
 out="$(join_tool dave-laptop leave "$DAVE_LINK" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
 check "leave works (exit $rc)" grep -q "Left bobo.hogman" <<<"$out"
