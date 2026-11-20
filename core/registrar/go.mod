@@ -3,6 +3,7 @@ module hogman/registrar
 go 1.27
 
 require (
+	golang.org/x/net v0.60.0
 	modernc.org/sqlite v1.62.0
 	rsc.io/qr v0.2.0
 )

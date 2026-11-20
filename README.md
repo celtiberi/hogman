@@ -214,9 +214,8 @@ with GitHub's **Security → Report a vulnerability** button on this repository.
 ## How it's built
 
 Forged from good open-source steel: [Headscale](https://github.com/juanfont/headscale), the
-[Tailscale](https://tailscale.com) client, [CoreDNS](https://coredns.io),
-[step-ca](https://smallstep.com/certificates/) and [Caddy](https://caddyserver.com), plus
-three pieces of our own:
+[Tailscale](https://tailscale.com) client, [step-ca](https://smallstep.com/certificates/)
+and [Caddy](https://caddyserver.com), plus three pieces of our own:
 
 | Piece | What it does |
 |---|---|

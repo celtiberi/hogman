@@ -14,7 +14,6 @@ import (
 	"log"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -27,7 +26,6 @@ type Config struct {
 	PublicHost        string // control server hostname
 	CoreIP            string // mesh IP of the core node (DNS, portal)
 	CAIP              string // mesh IP of the CA
-	ZoneFile          string
 	RootCAFile        string
 	NameHold          time.Duration
 	InviteTTL         time.Duration
@@ -86,9 +84,8 @@ type Service struct {
 	rootPEM string
 	rootFP  string
 
-	mu         sync.Mutex // serialises changes that touch Headscale, policy or DNS
+	mu         sync.Mutex // serialises changes that touch Headscale or policy
 	lastPolicy string
-	lastZone   string
 	orphans    map[string]bool
 }
 
@@ -165,7 +162,6 @@ var (
 	reserved = map[string]bool{"home": true, "ca": true, "ns": true, "registrar": true,
 		"search": true, "nodes": true, "www": true, "join": true, "admin": true}
 	validRoles = map[string]bool{"owner": true, "admin": true, "member": true}
-	serialRE   = regexp.MustCompile(`SOA[^(]*\(\s*(\d+)`)
 )
 
 // normaliseName turns "Blog.Alice.bobo.hogman." into "blog.alice" and checks it.
@@ -415,9 +411,6 @@ func (s *Service) Kick(ctx context.Context, a Actor, handle, reason string) (*Ki
 		log.Printf("kick %s: hold names: %v", handle, err)
 	}
 	rep.NamesHeld = int(held)
-	if err := s.writeZone(); err != nil {
-		log.Printf("kick %s: zone: %v", handle, err)
-	}
 	// 7. Audit.
 	detail, _ := json.Marshal(rep)
 	if reason != "" {
@@ -676,10 +669,7 @@ func (s *Service) RemoveDevice(ctx context.Context, a Actor, id int64) error {
 		return err
 	}
 	s.st.Audit(a.String(), "device.remove", fmt.Sprintf("%s/%s#%d", owner.Handle, d.Name, d.ID), "")
-	if err := s.applyPolicy(ctx); err != nil {
-		return err
-	}
-	return s.writeZone()
+	return s.applyPolicy(ctx)
 }
 
 // WhoIs maps a mesh source address to the device and member behind it.
@@ -820,7 +810,7 @@ func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64) (string
 		return "", err
 	}
 	s.st.Audit(a.String(), "name.claim", name+"."+s.cfg.Zone, fmt.Sprintf("member=%s device=%d", handle, d.ID))
-	return name + "." + s.cfg.Zone, s.writeZone()
+	return name + "." + s.cfg.Zone, nil
 }
 
 // Release frees a name and everything under it.
@@ -860,7 +850,7 @@ func (s *Service) Release(a Actor, rawName string) error {
 		}
 	}
 	s.st.Audit(a.String(), "name.release", name+"."+s.cfg.Zone, "")
-	return s.writeZone()
+	return nil
 }
 
 // ---------------------------------------------------------- sync, policy --
@@ -947,10 +937,7 @@ func (s *Service) Sync(ctx context.Context) error {
 			s.st.Audit("registrar", "device.gone", fmt.Sprintf("%s/%s#%d", d.Member, d.Name, d.ID), "no longer in headscale")
 		}
 	}
-	if err := s.applyPolicy(ctx); err != nil {
-		return err
-	}
-	return s.writeZone()
+	return s.applyPolicy(ctx)
 }
 
 func (s *Service) deleteStray(ctx context.Context, n HSNode, d *Device, why string) {
@@ -1044,73 +1031,5 @@ func (s *Service) applyPolicy(ctx context.Context) error {
 		return fmt.Errorf("set policy: %w", err)
 	}
 	s.lastPolicy = pol
-	return nil
-}
-
-// writeZone renders the network's DNS zone from claimed names. CoreDNS
-// reloads it when the serial changes.
-func (s *Service) writeZone() error {
-	names, err := s.st.ResolvableNames()
-	if err != nil {
-		return err
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "$TTL 60\n")
-	fmt.Fprintf(&b, "@     IN NS  ns.%s.\n", s.cfg.Zone)
-	fmt.Fprintf(&b, "; core services\n")
-	fmt.Fprintf(&b, "ns    IN A   %s\n", s.cfg.CoreIP)
-	fmt.Fprintf(&b, "home  IN A   %s\n", s.cfg.CoreIP)
-	fmt.Fprintf(&b, "ca    IN A   %s\n", s.cfg.CAIP)
-	fmt.Fprintf(&b, "; member names (written by the registrar)\n")
-	for _, n := range names {
-		if n.IPv4 != "" {
-			fmt.Fprintf(&b, "%s IN A %s ; %s\n", n.Name, n.IPv4, n.Member)
-		}
-		if n.IPv6 != "" {
-			fmt.Fprintf(&b, "%s IN AAAA %s ; %s\n", n.Name, n.IPv6, n.Member)
-		}
-	}
-	body := b.String()
-	if body == s.lastZone {
-		return nil
-	}
-	// CoreDNS reloads only when the serial grows, so never reuse one, even if
-	// two writes (server and CLI) land in the same second.
-	serial := time.Now().Unix()
-	if old, err := os.ReadFile(s.cfg.ZoneFile); err == nil {
-		if m := serialRE.FindSubmatch(old); m != nil {
-			var cur int64
-			fmt.Sscan(string(m[1]), &cur)
-			if serial <= cur {
-				serial = cur + 1
-			}
-		}
-	}
-	head := fmt.Sprintf("$ORIGIN %s.\n@     IN SOA ns.%s. owner.%s. ( %d 3600 600 86400 60 )\n",
-		s.cfg.Zone, s.cfg.Zone, s.cfg.Zone, serial)
-	f, err := os.CreateTemp(filepath.Dir(s.cfg.ZoneFile), ".db.zone.*.tmp")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	if _, err := f.WriteString(head + body); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := f.Chmod(0o644); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, s.cfg.ZoneFile); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	s.lastZone = body
 	return nil
 }

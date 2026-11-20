@@ -8,9 +8,8 @@ its registrar, and the join tool, deployable with one command on a small server.
 | `headscale` | Headscale 0.29.7 | Behind `edge` (or shared front door); STUN on udp/3478 |
 | `edge` | Caddy 2.11.9 | Standalone installs only: public `https://<PUBLIC_HOST>` (behind `hogman-host`, the shared front door serves these routes directly) |
 | `core-mesh` | Tailscale 1.104.7 | Mesh identity `core` (tag:infra) |
-| `coredns` | CoreDNS 1.15.0 | `core` mesh IP, port 53; authoritative for `<network>.hogman` |
 | `portal` | Caddy 2.11.9 | `https://home.<network>.hogman`, mesh only; fronts the registrar's API |
-| `registrar` | built from [registrar/](registrar/) | Owns members, invites, devices, names, policy, DNS |
+| `registrar` | built from [registrar/](registrar/) | Owns members, invites, devices, names, policy, and authoritative DNS (`core` mesh IP, port 53) |
 | `step-ca` | step-ca 0.30.2 | `https://ca.<network>.hogman:9000`, mesh only (`core` mesh IP); ACME |
 
 Not built yet: a portal UI (the portal API exists), a way to earn an invite (that part

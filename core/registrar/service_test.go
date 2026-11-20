@@ -21,6 +21,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 type fakeHeadscale struct {
@@ -179,7 +181,6 @@ func newTestEnv(t *testing.T) *testEnv {
 		PublicHost:   "hs.example.com",
 		CoreIP:       "100.64.0.1",
 		CAIP:         "100.64.0.2",
-		ZoneFile:     filepath.Join(dir, "db.zone"),
 		RootCAFile:   rootPath,
 		NameHold:     90 * 24 * time.Hour,
 		InviteTTL:    7 * 24 * time.Hour,
@@ -371,7 +372,7 @@ func TestClaimOwnerSeizeAndConcurrency(t *testing.T) {
 	}
 }
 
-func TestWriteZoneIPv6AndConcurrency(t *testing.T) {
+func TestResolvableNameIPv6AndConcurrency(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
 	cli := Actor{CLI: true}
@@ -385,75 +386,48 @@ func TestWriteZoneIPv6AndConcurrency(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	raw, err := os.ReadFile(e.svc.cfg.ZoneFile)
+	got, err := e.st.ResolvableName("alice")
 	if err != nil {
 		t.Fatal(err)
 	}
-	zone := string(raw)
-	if !strings.Contains(zone, "alice IN A 100.64.0.20") {
-		t.Fatalf("zone file missing A record:\n%s", zone)
-	}
-	if !strings.Contains(zone, "alice IN AAAA fd7a:115c:a1e0::20") {
-		t.Fatalf("zone file missing AAAA record:\n%s", zone)
+	if got.IPv4 != "100.64.0.20" || got.IPv6 != "fd7a:115c:a1e0::20" {
+		t.Fatalf("got v4=%q v6=%q", got.IPv4, got.IPv6)
 	}
 
-	// Simulate concurrent zone writers (e.g., daemon + CLI processes) writing to the same directory.
+	// Simulate concurrent readers (DNS queries across separate store handles) alongside claims.
+	dbPath := filepath.Join(e.dir, "registrar.db")
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			svc2, err := NewService(e.svc.cfg, e.st, e.svc.hs)
+			st2, err := OpenStore(dbPath)
 			if err != nil {
 				errs <- err
 				return
 			}
-			errs <- svc2.writeZone()
-		}()
+			defer st2.db.Close()
+			if i%2 == 0 {
+				if _, err := st2.ResolvableName("alice"); err != nil {
+					errs <- err
+					return
+				}
+			} else {
+				if _, err := st2.HasResolvableChild("alice"); err != nil {
+					errs <- err
+					return
+				}
+			}
+			errs <- nil
+		}(i)
 	}
 	wg.Wait()
 	close(errs)
 	for err := range errs {
 		if err != nil {
-			t.Fatalf("concurrent writeZone failed: %v", err)
+			t.Fatalf("concurrent store DNS query failed: %v", err)
 		}
-	}
-
-	entries, err := os.ReadDir(e.dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, ent := range entries {
-		if strings.HasPrefix(ent.Name(), ".db.zone.") {
-			t.Fatalf("leftover temp file after writeZone: %s", ent.Name())
-		}
-	}
-
-	// Sequential writes within the same second must strictly bump SOA serial.
-	readSerial := func() int64 {
-		b, err := os.ReadFile(e.svc.cfg.ZoneFile)
-		if err != nil {
-			t.Fatal(err)
-		}
-		m := serialRE.FindSubmatch(b)
-		if m == nil {
-			t.Fatalf("SOA serial not found in:\n%s", b)
-		}
-		s, _ := strconv.ParseInt(string(m[1]), 10, 64)
-		return s
-	}
-	s1 := readSerial()
-	svc2, err := NewService(e.svc.cfg, e.st, e.svc.hs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := svc2.writeZone(); err != nil {
-		t.Fatal(err)
-	}
-	s2 := readSerial()
-	if s2 <= s1 {
-		t.Fatalf("expected SOA serial to increase (%d -> %d)", s1, s2)
 	}
 }
 
@@ -576,12 +550,17 @@ func TestClaimSeizeCleansUpChildSubdomains(t *testing.T) {
 	if _, err := e.st.NameByName("blog.alice"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("child name blog.alice should be deleted on parent seize, got err=%v", err)
 	}
-	raw, err := os.ReadFile(e.svc.cfg.ZoneFile)
+	dnsSrv, err := NewDNSServer(e.svc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "blog.alice") {
-		t.Fatalf("zone file still contains blog.alice:\n%s", raw)
+	if got := mustResolveA(t, dnsSrv, "alice.bobo.hogman."); got != "100.64.0.10" {
+		t.Fatalf("alice = %q want 100.64.0.10", got)
+	}
+	resp, _ := dnsSrv.HandlePacket(buildDNSQuery(t, 1, "blog.alice.bobo.hogman.", dnsmessage.TypeA, false, 0), false)
+	hdr, _, _, _ := parseDNSResp(t, resp)
+	if hdr.RCode != dnsmessage.RCodeNameError {
+		t.Fatalf("blog.alice still resolves after seize: rcode=%v", hdr.RCode)
 	}
 }
 
@@ -683,7 +662,6 @@ func TestCASharesCoreMeshIPAndPort9000(t *testing.T) {
 		Zone:       "bobo.hogman",
 		PublicHost: "hs.example.com",
 		CoreIP:     "100.64.0.10",
-		ZoneFile:   filepath.Join(dir, "db.zone"),
 		RootCAFile: rootPath,
 	}
 	svc, err := NewService(cfg, st, NewHeadscale(hs.srv.URL, "test-key"))
@@ -693,15 +671,12 @@ func TestCASharesCoreMeshIPAndPort9000(t *testing.T) {
 	if svc.cfg.CAIP != "100.64.0.10" {
 		t.Fatalf("CAIP=%q want 100.64.0.10", svc.cfg.CAIP)
 	}
-	if err := svc.writeZone(); err != nil {
-		t.Fatal(err)
-	}
-	zoneBytes, err := os.ReadFile(cfg.ZoneFile)
+	dnsSrv, err := NewDNSServer(svc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(zoneBytes), "ca    IN A   100.64.0.10") {
-		t.Fatalf("zone missing ca -> CoreIP record:\n%s", zoneBytes)
+	if got := mustResolveA(t, dnsSrv, "ca.bobo.hogman."); got != "100.64.0.10" {
+		t.Fatalf("ca.bobo.hogman. = %q want 100.64.0.10", got)
 	}
 	pol, err := svc.buildPolicy()
 	if err != nil {
