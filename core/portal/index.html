@@ -75,9 +75,12 @@
   <h2>The herd</h2>
   <p class="muted hint">Everyone in the pen. Suspending cuts all their devices off at once and can
     be undone. Kicking ends their membership for good.</p>
-  <p class="muted hint"><strong>Keeper backup:</strong> join a second computer (under <em>Your
-    devices</em> above) and make someone you trust an admin here. There is no support recovery —
-    if you lose every keeper device, you lose access to the pen.</p>
+  <p class="error" id="solo-owner" hidden><strong>You're the only owner.</strong> If you lose
+    every device, nobody can manage this pen again: there is no account recovery. Make someone
+    you trust completely an owner (make them an admin, then an owner).</p>
+  <p class="muted hint">Someone lost every device? There is no account recovery: invite them
+    again as a new member, give them back their role, then kick the old account (an old owner
+    account has to be made an admin first).</p>
   <form class="row" id="herd-form" role="search">
     <input id="herd-q" type="search" placeholder="Find someone by name" autocomplete="off" maxlength="32">
   </form>

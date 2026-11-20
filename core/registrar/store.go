@@ -455,6 +455,16 @@ func (s *Store) CountMemberNames(memberID int64) (int, error) {
 	return n, err
 }
 
+// HasJoined reports whether a member has ever had a personal device on the
+// pen: a used personal key (kept after the device is removed) or a device.
+func (s *Store) HasJoined(memberID int64) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT
+		(SELECT count(*) FROM device_keys WHERE member_id = ? AND kind = 'personal' AND used_at IS NOT NULL) +
+		(SELECT count(*) FROM devices WHERE member_id = ? AND kind = 'personal')`, memberID, memberID).Scan(&n)
+	return n > 0, err
+}
+
 func (s *Store) MarkDeviceKeyUsed(id int64) error {
 	_, err := s.db.Exec(`UPDATE device_keys SET used_at = ? WHERE id = ? AND used_at IS NULL`, now(), id)
 	return err

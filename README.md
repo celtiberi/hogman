@@ -267,6 +267,7 @@ hogman-host add mypen hs.example.com
 hogman-host pen mypen member add you --role owner
 
 # 3. Get your own laptop in: open the link this prints, on the laptop.
+#    (Only for a member's first device: there is no account recovery.)
 hogman-host pen mypen device key you personal
 
 # 4. Let the clean ones in, and show the filthy ones out.

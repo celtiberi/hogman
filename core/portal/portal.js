@@ -207,6 +207,8 @@
     $('herd-more').hidden = shown >= herd.total;
   };
 
+  const soloOwner = () => { $('solo-owner').hidden = !(me.is_owner && me.owners === 1); };
+
   const memberRow = m => {
     const li = el('li');
     li.append(el('span', 'grow', m.handle));
@@ -228,10 +230,21 @@
       li.append(b);
     };
     const redraw = () => li.replaceWith(memberRow(m));
-    // An admin can't act on the owner; the API refuses if tried.
+    // An admin can't act on an owner or another admin; the API refuses if tried.
     if (me.is_owner && m.role !== 'owner') {
       const to = m.role === 'admin' ? 'member' : 'admin';
       act(`Make ${to}`, 'role', { role: to }, null, () => { m.role = to; redraw(); });
+    }
+    // A second owner is how a pen survives a lost laptop (D-16). Owners are
+    // fully trusted: they can do everything, including demoting other owners.
+    if (me.is_owner && m.role === 'admin') {
+      act('Make owner', 'role', { role: 'owner' },
+        `Make ${m.handle} an owner? Owners can do everything you can, including demoting you.`,
+        () => { m.role = 'owner'; me.owners++; redraw(); soloOwner(); });
+    }
+    if (me.is_owner && m.role === 'owner') {
+      act('Make admin', 'role', { role: 'admin' }, `Make ${m.handle} an admin instead of an owner?`,
+        () => { m.role = 'admin'; me.owners--; redraw(); soloOwner(); });
     }
     if (m.status === 'suspended') act('Resume', 'resume', null, null, () => { m.status = 'active'; redraw(); });
     else act('Suspend', 'suspend', { reason: 'suspended from the home page' }, `Suspend ${m.handle}?`,
@@ -271,7 +284,7 @@
     loadDirectory().catch(errIn('sites-err'));
     if (!me.devices) return;   // a server
     if (me.can_invite) { $('invite').hidden = false; loadInvites().catch(errIn('invite-err')); }
-    if (me.is_admin) { $('herd').hidden = false; loadHerd().catch(errIn('herd-err')); }
+    if (me.is_admin) { $('herd').hidden = false; soloOwner(); loadHerd().catch(errIn('herd-err')); }
   };
   load();
 })();
