@@ -24,25 +24,27 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Tools
         run: |
           docker version --format 'docker {{.Server.Version}}'
           docker compose version
           jq --version
+      # As root, like a real server: the pens' containers write root-only
+      # folders (certificates, keys) into the bind-mounted data directory.
       - name: Run the pen suite
-        run: core/test/run.sh
+        run: sudo --preserve-env=PATH core/test/run.sh
 
   host:
     name: shared host (deploy/test-host.sh)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Tools
         run: |
           docker version --format 'docker {{.Server.Version}}'
           docker compose version
           jq --version
       - name: Run the shared-host suite
-        run: deploy/test-host.sh
+        run: sudo --preserve-env=PATH deploy/test-host.sh
