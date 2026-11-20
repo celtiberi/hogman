@@ -57,6 +57,18 @@
 <pre class="term"><span class="p">$</span> curl -fsSLo hogman-join https://smith.pens.hogman.network/join/dl/hogman-join-Darwin-arm64 \
     &amp;&amp; chmod +x hogman-join \
     &amp;&amp; ./hogman-join 'https://smith.pens.hogman.network/join#t=…&amp;fp=…'</pre></li>
+  <li>The page picks the right download for your computer. If you'd rather fetch it yourself,
+    the files are on the same host under <code>/join/dl/</code>, with checksums in
+    <code>SHA256SUMS</code>:
+    <table class="docs-table">
+      <tbody>
+        <tr><td>Mac, Apple silicon</td><td><code>hogman-join-Darwin-arm64</code></td></tr>
+        <tr><td>Mac, Intel</td><td><code>hogman-join-Darwin-x86_64</code></td></tr>
+        <tr><td>Linux, x86-64</td><td><code>hogman-join-Linux-x86_64</code></td></tr>
+        <tr><td>Linux, ARM (Raspberry Pi 4/5, ARM servers)</td><td><code>hogman-join-Linux-aarch64</code></td></tr>
+        <tr><td>Windows (untested)</td><td><code>hogman-join-windows-amd64.exe</code></td></tr>
+      </tbody>
+    </table></li>
   <li><strong>Pick your name</strong> when asked: lowercase letters, digits and dashes, 2 to 32
     characters. It's how the pen knows you.</li>
   <li><strong>Enter your password once</strong>, so the pen's certificate can be added to your
@@ -65,6 +77,9 @@
   <li><strong>You're in.</strong> It checks your pen's home page loads over HTTPS and opens it.
     Keep the <code>hogman-join</code> file: you'll use it to share things and to leave.</li>
 </ol>
+<p><strong>If it stops part way</strong> (a password prompt cancelled, DNS not ready), fix what it
+  says and run the same command again. Once your device is in, it won't use the invite a second
+  time, so a rerun picks up where it left off.</p>
 <p>Before trusting anything, the tool checks the pen's certificate against the fingerprint in
   your link, and that the certificate can only vouch for the pen's own names. A link that
   doesn't match is refused before the invite is used.</p>
