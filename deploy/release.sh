@@ -22,30 +22,29 @@ tarball="hogman-$ver.tar.gz"
 git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md deploy/signup LICENSE README.md \
   | gzip -9n > "$out/$tarball"
 
-# Compiled parts, so servers don't spend half an hour building them:
-# the join tool for every platform, and the registrar for Linux servers.
+# Compiled parts, so servers don't spend half an hour building them: built
+# here when Docker is running, otherwise taken from GitHub's build of this
+# exact commit (.github/workflows/build.yml), so no Docker is needed locally.
 bins="hogman-bin-$ver.tar.gz"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-git archive --format=tar "$REF" core/join core/registrar deploy/signup | tar -x -C "$work"
-echo "building the join tool (5 platforms), the registrar and the sign-up page (linux amd64, arm64)..."
-docker build -q --output "type=local,dest=$work/prebuilt/join" "$work/core/join" >/dev/null
-mkdir -p "$work/prebuilt/registrar"
-docker run --rm -v "$work/core/registrar:/src:ro" -v "$work/prebuilt/registrar:/out" -w /src \
-  -v hogman-gomod:/go/pkg/mod -v hogman-gocache:/root/.cache/go-build golang:1.27-alpine sh -c '
-    set -e
-    CGO_ENABLED=0 go test ./... >/dev/null
-    for a in amd64 arm64; do
-      CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath -ldflags="-s -w" -o /out/registrar-linux-$a .
-    done'
-mkdir -p "$work/prebuilt/signup"
-docker run --rm -v "$work/deploy/signup:/src:ro" -v "$work/prebuilt/signup:/out" -w /src \
-  -v hogman-gomod:/go/pkg/mod -v hogman-gocache:/root/.cache/go-build golang:1.27-alpine sh -c '
-    set -e
-    CGO_ENABLED=0 go test ./... >/dev/null
-    for a in amd64 arm64; do
-      CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath -ldflags="-s -w" -o /out/hogman-signup-linux-$a .
-    done'
+full="$(git rev-parse "$REF")"
+if [ "${USE_CI_BUILD:-}" != 1 ] && docker info >/dev/null 2>&1; then
+  git archive --format=tar "$REF" core/join core/registrar deploy/signup | tar -x -C "$work"
+  deploy/build-bins.sh "$work" "$work/prebuilt"
+else
+  echo "Docker isn't running here: using GitHub's build of $sha..."
+  run="$(gh run list --workflow build.yml --commit "$full" --status success --limit 1 \
+          --json databaseId --jq '.[0].databaseId // empty')"
+  if [ -z "$run" ]; then
+    echo "no successful GitHub build for $sha yet. Watch it: gh run list --workflow build.yml" >&2
+    echo "(it runs on every push to main; or start one: gh workflow run build.yml --ref main)" >&2
+    exit 1
+  fi
+  gh run download "$run" --name "hogman-bin-$full" --dir "$work/prebuilt"
+  # Artifacts lose the executable bit.
+  find "$work/prebuilt" -type f -exec chmod 0755 {} +
+fi
 # No macOS file metadata in the bundle (Linux tar warns about it).
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$work" -czf "$out/$bins" prebuilt
 
