@@ -85,15 +85,16 @@ good free ones), put them in your pen with one command, and Hogman makes them pr
 
 **A private corner of the internet for you and your people.**
 
-1. **Make a pen.** Sign up, and about a minute later you have your own walled-off space on
-   the internet. You make the rules.
-2. **Invite your people.** Send each person a link. They tap it, follow one step, and they're
-   in. Nobody else gets in without a link from you.
+1. **Make a pen.** Sign up, and about a minute later you have your pen: your own walled-off
+   space on the internet. You make the rules.
+2. **Invite your people.** Send each person a link. They open it, copy the one command it shows,
+   and they're in. Nobody else gets in without a link from you.
 3. **Private inside, invisible outside.** Inside: your photos, your chat, your own websites,
    in any ordinary browser. Outside: strangers and bots find nothing at all.
 
 A normal website is open to the whole internet, and bots try its login page all day. A site
-in your pen has no public address: to everyone you didn't invite, it doesn't exist.
+in your pen can't be found from the open internet: to everyone you didn't invite, it
+doesn't exist.
 
 **Putting something in.** Once you're in, one command puts a folder or a website you're
 building into the pen, with its own name and the padlock:
