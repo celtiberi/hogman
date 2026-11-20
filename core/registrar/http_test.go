@@ -670,3 +670,23 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 		t.Fatalf("UpsertName after migrate: %v", err)
 	}
 }
+
+// Removing a server device frees its names; a kick holds them instead.
+func TestRemoveDeviceFreesItsNames(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+	if _, err := e.svc.AddMember(ctx, cli, "bob", "member"); err != nil {
+		t.Fatal(err)
+	}
+	_, srv := e.addDevice(t, "bob", "server", "share-box", "100.64.0.12", "")
+	if _, err := e.svc.Claim(cli, "bob", "photos", srv.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.RemoveDevice(ctx, cli, srv.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.NameByName("photos"); err != ErrNotFound {
+		t.Fatalf("name after device removal: err=%v, want ErrNotFound", err)
+	}
+}

@@ -677,6 +677,11 @@ func (s *Service) RemoveDevice(ctx context.Context, a Actor, id int64) error {
 	if err := s.hs.DeleteNode(ctx, d.HSNodeID); err != nil {
 		return err
 	}
+	// Removing a device on purpose gives back the names it served (a share's
+	// name, say), so they aren't stuck. A kick holds names instead (Kick).
+	if err := s.st.DeleteNamesOfDevice(d.ID); err != nil {
+		return err
+	}
 	if err := s.st.MarkDeviceRemoved(d.ID); err != nil {
 		return err
 	}
