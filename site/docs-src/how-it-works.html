@@ -1,0 +1,198 @@
+<h1 class="docs-h1">How Hogman works</h1>
+<p class="lede">A pen is a private network for a group of people: its own encrypted mesh, its own
+  names, its own certificate authority and its own member list. This page goes through each
+  part, then follows a request from start to finish.</p>
+
+<nav class="toc" aria-label="On this page">
+  <a href="#parts">The parts</a> · <a href="#request">One request, start to finish</a> ·
+  <a href="#join">Joining</a> · <a href="#policy">Who can reach what</a> ·
+  <a href="#names">Names</a> · <a href="#certs">Certificates</a> · <a href="#share">Shares</a> ·
+  <a href="#boot">Removing people</a> · <a href="#hosted">Hosted pens</a> ·
+  <a href="#trust">Who sees what</a> · <a href="#limits">Limits</a>
+</nav>
+
+<h2 class="docs-h2" id="parts">The parts</h2>
+<p>Each pen runs five small services, in containers, with its own data folder. Only the first is
+  reachable from the internet; the rest answer only inside the mesh.</p>
+<table class="docs-table">
+  <thead><tr><th>Part</th><th>Software</th><th>Job</th></tr></thead>
+  <tbody>
+    <tr><td>Control server and relay</td><td><a href="https://github.com/juanfont/headscale">Headscale</a></td>
+      <td>Registers devices, hands out WireGuard keys, pushes the access policy and DNS settings
+        to every device. Its built-in relay carries encrypted packets for devices that can't
+        reach each other directly.</td></tr>
+    <tr><td>Registrar</td><td>Hogman (Go)</td>
+      <td>The ledger: members, roles, invites, devices, names, the audit log. Writes the access
+        policy into Headscale, answers DNS for the pen's zone, and serves the home page's API.</td></tr>
+    <tr><td>Certificate authority</td><td><a href="https://smallstep.com/certificates/">step-ca</a></td>
+      <td>Issues HTTPS certificates for names in the pen over ACME, the protocol Let's Encrypt
+        uses.</td></tr>
+    <tr><td>Home page</td><td><a href="https://caddyserver.com">Caddy</a></td>
+      <td>Serves <code>home.&lt;pen&gt;.hogman</code>, where members manage devices and names and the
+        keeper runs the pen.</td></tr>
+    <tr><td>The pen's own node</td><td>Tailscale client</td>
+      <td>Puts the pen's DNS, home page and CA at one address inside the mesh.</td></tr>
+  </tbody>
+</table>
+<p>Exact versions are pinned in
+  <a href="https://github.com/celtiberi/hogman/blob/main/core/compose.yaml">core/compose.yaml</a>.
+  Members' devices run the stock Tailscale client (or Hogman's built-in one, see
+  <a href="#join">joining</a>). Hogman's own code is the registrar, the join tool
+  (<code>hogman-join</code>), the sign-up service, and shell tools that run pens and hosts.</p>
+
+<h2 class="docs-h2" id="request">One request, start to finish</h2>
+<p>Bob is a member. Alice shared a photo folder as <code>photos.smith.hogman</code>. Bob types
+  that address into his browser:</p>
+<ol class="docs-steps">
+  <li><strong>DNS.</strong> Bob's computer sends any lookup ending in <code>.smith.hogman</code> to
+    the pen's DNS, at its address inside the mesh (Headscale pushed that "split DNS" rule when
+    Bob joined; every other lookup goes to his normal DNS). The registrar answers with the mesh
+    address of Alice's share, something like <code>100.80.12.7</code>.</li>
+  <li><strong>Policy.</strong> Bob's laptop may connect to that address because the policy says
+    members' devices may reach servers, and Alice's share is a server. If Bob were suspended,
+    his devices would simply not be in the policy and nothing would connect.</li>
+  <li><strong>Tunnel.</strong> The connection goes over WireGuard, Bob's device to Alice's, end
+    to end. If a firewall blocks a direct path, it goes through the pen's relay, still
+    encrypted; the relay can't read it.</li>
+  <li><strong>TLS.</strong> The share presents a certificate for <code>photos.smith.hogman</code>
+    signed by the pen's CA. Bob's computer trusts that CA because <code>hogman-join</code>
+    installed its root when he joined, after checking its fingerprint against his invite link.
+    The browser shows the padlock.</li>
+</ol>
+<p>A stranger typing the same address gets nowhere at step 1: <code>.hogman</code> isn't a
+  public top-level domain, so the name doesn't resolve. Even with the IP address, there's no
+  route to it: <code>100.80.12.7</code> exists only inside the mesh.</p>
+
+<h2 class="docs-h2" id="join">Joining</h2>
+<ol class="docs-steps">
+  <li>The keeper makes an invite: a single-use token, valid for 7 days. The link looks like
+    <code>https://&lt;control host&gt;/join#t=&lt;token&gt;&amp;fp=&lt;fingerprint&gt;</code>.
+    The part after <code>#</code> never leaves the browser except when the invite is redeemed.</li>
+  <li>The link's page shows one command, which downloads <code>hogman-join</code> for your
+    computer and runs it with the link.</li>
+  <li><code>hogman-join</code> fetches the pen's root certificate and checks it against the
+    fingerprint in the link, and that it can only vouch for the pen's own names. Only then does it
+    trust anything from the pen.</li>
+  <li>It adds the root to your computer's trust store (your password, once), then redeems the
+    invite with the name you choose. The registrar creates your membership and returns a
+    one-time device key.</li>
+  <li>It joins the mesh one of two ways:
+    <ul>
+      <li><strong>With your Tailscale</strong>, as a separate profile, if Tailscale is installed
+        and not busy on another network. Your other tailnets are kept; switch with
+        <code>tailscale switch</code>.</li>
+      <li><strong>Side by side</strong> otherwise: a small built-in client (Tailscale's
+        <code>tsnet</code>) runs in the background with a local proxy that carries only the
+        pen's names. Browsers use it through an automatic proxy setting; everything else on
+        the computer is untouched.</li>
+    </ul></li>
+  <li>It checks that your home page loads over HTTPS, and you're in.</li>
+</ol>
+<p>Details and options: <a href="/docs/join.html">Joining a pen</a>.</p>
+
+<h2 class="docs-h2" id="policy">Who can reach what</h2>
+<p>Every device is either <strong>personal</strong> (a member's laptop or phone) or a
+  <strong>server</strong> (anything set up to host sites). The registrar rebuilds the access
+  policy from its ledger every few seconds and whenever something changes. It is default deny:</p>
+<table class="docs-table">
+  <thead><tr><th>Device</th><th>Accepts connections from</th><th>Can connect to</th></tr></thead>
+  <tbody>
+    <tr><td>Personal</td><td>Nobody</td><td>The pen's DNS, home page and CA; every server</td></tr>
+    <tr><td>Server</td><td>Any active member's device</td><td>The pen's services; other servers</td></tr>
+    <tr><td>Anything else</td><td>Nobody</td><td>Nothing</td></tr>
+  </tbody>
+</table>
+<p>The policy lists device addresses, not tags. So suspending someone is just leaving their
+  devices out (instant and reversible), and a device that somehow joined without going through
+  the registrar is in no rule at all and can reach nothing.</p>
+
+<h2 class="docs-h2" id="names">Names</h2>
+<ul>
+  <li>Each pen has its own zone, <code>&lt;pen&gt;.hogman</code>. The registrar is the only DNS
+    server for it, and answers only inside the mesh.</li>
+  <li>Members claim names first come, first served, up to 50 each: <code>blog.smith.hogman</code>,
+    and anything under a name they own (<code>photos.blog.smith.hogman</code>). A name points
+    at one of that member's servers.</li>
+  <li>Reserved: <code>home</code>, <code>ca</code>, <code>ns</code>, <code>registrar</code>,
+    <code>search</code>, <code>nodes</code>, <code>www</code>, <code>join</code>,
+    <code>admin</code>. Devices also get automatic names under <code>nodes.&lt;pen&gt;.hogman</code>.</li>
+  <li>Your browsing outside the pen never touches the pen's DNS.</li>
+</ul>
+
+<h2 class="docs-h2" id="certs">Certificates</h2>
+<ul>
+  <li>When a pen is raised it makes its own root certificate. The root carries X.509 <strong>name
+    constraints</strong>: it may sign only names ending in the pen's zone, and no IP addresses.
+    Browsers and operating systems enforce that, so installing it can't be used to intercept your
+    other traffic. Hogman's tests try to make the CA sign <code>www.google.com</code> and check
+    that it fails.</li>
+  <li>Day-to-day signing uses an intermediate certificate valid for five years. The root key is
+    taken off the server and kept offline, encrypted.</li>
+  <li>The CA speaks ACME at <code>ca.&lt;pen&gt;.hogman:9000</code>, inside the mesh only.
+    Certificates last 7 days and renew automatically; the short life is the revocation
+    mechanism.</li>
+  <li>A server proves it owns a name the usual ACME way (TLS-ALPN or HTTP challenge) at the
+    address the pen's DNS gives for it. Since the registrar controls DNS, <strong>owning a name
+    in the pen is what entitles you to a certificate for it.</strong></li>
+</ul>
+
+<h2 class="docs-h2" id="share">Shares</h2>
+<p><code>hogman-join share blog 3000</code> creates a small device of its own, a server, using
+  Tailscale's <code>tsnet</code> inside the join tool. It names itself <code>blog</code>, gets a
+  certificate from the pen's CA, and passes visitors to port 3000 on your computer (or serves a
+  folder). Because the share is its own device, your laptop stays a personal device that accepts
+  no connections, and nothing needs administrator rights or an open port. A server may only name
+  itself, and only with a free name or one that already points at it. Guide:
+  <a href="/docs/share.html">Sharing a folder or a website</a>.</p>
+
+<h2 class="docs-h2" id="boot">Removing people</h2>
+<p>Three levels, from lightest:</p>
+<ul>
+  <li><strong>Remove a device</strong>: one lost or stolen laptop is cut off.</li>
+  <li><strong>Suspend</strong>: all of a member's devices are left out of the policy. Everything
+    else is kept, and resuming takes under a second.</li>
+  <li><strong>The boot</strong> (kick): the registrar marks them removed and refuses them
+    everything, revokes their unused device keys and the invites they made, deletes every device
+    they own from Headscale, deletes their Headscale user, rewrites the policy, and holds their
+    names for 90 days so nobody can impersonate their sites. All of it is in the audit log.</li>
+</ul>
+<p>Measured on a real Mac over a home network: suspend 2.0 s, resume 0.8 s, the boot 2.1 s.
+  What it can't do: take back data they already copied, or log them out of apps that keep their
+  own accounts.</p>
+
+<h2 class="docs-h2" id="hosted">Hosted pens</h2>
+<p>On our server, every pen is its own set of the five containers above, with its own folder,
+  database, keys and relay port, using about 75 MB of memory. A shared front door
+  (Caddy) holds ports 80 and 443, has a public Let's Encrypt certificate for each pen's control
+  address, and passes each pen's traffic only to that pen. Pens never share a network with each
+  other. A pen's folder is the whole pen: copy it to another server running Hogman and it
+  carries on there.</p>
+
+<h2 class="docs-h2" id="trust">Who sees what</h2>
+<table class="docs-table">
+  <thead><tr><th></th><th>The keeper</th><th>Us, if we host the pen</th></tr></thead>
+  <tbody>
+    <tr><td>Who is in the pen, their devices, when they're online</td><td>Yes</td><td>Yes</td></tr>
+    <tr><td>Which pen names devices look up</td><td>Yes</td><td>Yes</td></tr>
+    <tr><td>What members send each other</td><td>No (end to end encrypted)</td><td>No</td></tr>
+    <tr><td>Your browsing outside the pen</td><td>No</td><td>No</td></tr>
+    <tr><td>Could add a device or vouch for a name</td><td>Yes</td><td>Yes, in principle</td></tr>
+  </tbody>
+</table>
+<p>Joining a pen means trusting its keeper, the same as joining anyone's Tailscale network
+  means trusting its admin. If you'd rather trust nobody upstream,
+  <a href="/docs/self-host.html">raise your own pen</a>.</p>
+
+<h2 class="docs-h2" id="limits">Limits, honestly</h2>
+<ul>
+  <li><strong>Not audited.</strong> Young security software. Don't put anything high-stakes in a
+    pen yet.</li>
+  <li><strong>Phones</strong> can't join yet; the app is in the works.</li>
+  <li><strong>Windows</strong> is built but untested.</li>
+  <li>One control server per pen: if it's down, new connections, joins, DNS for the pen and
+    certificate renewals stop. Existing direct connections keep working for a while.</li>
+  <li>Some programs keep their own certificate list (Java, Node, Python). They need to be
+    pointed at the pen's root; see the <a href="/docs/faq.html#own-certs">FAQ</a>.</li>
+</ul>
+<p>The full design, with the reasoning, is in
+  <a href="https://github.com/celtiberi/hogman/blob/main/DESIGN.md">DESIGN.md</a>.</p>

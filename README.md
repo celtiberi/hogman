@@ -83,6 +83,8 @@ good free ones), put them in your pen with one command, and Hogman makes them pr
 
 ## How it works
 
+Full guides, use cases and the technical details: **[hogman.network/docs](https://hogman.network/docs/)**.
+
 **A private corner of the internet for you and your people.**
 
 1. **Make a pen.** Sign up, and about a minute later you have your pen: your own walled-off

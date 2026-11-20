@@ -1,0 +1,55 @@
+<h1 class="docs-h1">Running a server in your pen</h1>
+<p class="lede">For a site that stays up, with your own web server configuration: a machine
+  joined as a server, a name pointing at it, and Caddy (or any ACME client) getting its
+  certificates from the pen's own authority. For something quick, <a href="/docs/share.html">
+  sharing</a> is simpler.</p>
+
+<h2 class="docs-h2">1. Join the machine as a server</h2>
+<p>On your pen's home page, press <strong>Add a server</strong> and open the link on the
+  machine (or copy the command its page shows into the machine's terminal). It joins as one of
+  your devices, marked as a server, so members can connect to it. Like any join, it uses the
+  machine's Tailscale if it's free, or joins side by side.</p>
+
+<h2 class="docs-h2">2. Give it a name</h2>
+<p>On the home page, under <strong>Names for your servers</strong>, claim a name such as
+  <code>blog</code> and pick the machine. It becomes <code>blog.&lt;pen&gt;.hogman</code> for
+  everyone in the pen. Names under a name you own work too (<code>api.blog</code>).</p>
+
+<h2 class="docs-h2">3. Point Caddy at the pen's CA</h2>
+<p>The only pen-specific line is the CA address in Caddy's global options:</p>
+<pre class="term">{
+	acme_ca https://ca.smith.hogman:9000/acme/acme/directory
+}
+
+blog.smith.hogman {
+	reverse_proxy 127.0.0.1:3000
+}</pre>
+<p>Caddy trusts the pen's CA because the join added its root to the machine. If Caddy runs
+  somewhere that root isn't installed (a container, say), add
+  <code>acme_ca_root /path/to/root_ca.crt</code>; you can download the root from your home page.</p>
+<p>Caddy gets a 7-day certificate and renews it by itself. Any other ACME client works the same
+  way: point it at <code>https://ca.&lt;pen&gt;.hogman:9000/acme/acme/directory</code> and use the
+  TLS-ALPN or HTTP challenge.</p>
+
+<h2 class="docs-h2">4. Start it</h2>
+<ul>
+  <li><strong>With Tailscale</strong> (the machine joined with its own Tailscale): run Caddy as
+    usual.</li>
+  <li><strong>Side by side:</strong> the join tool passes the pen's ports 80 and 443 to the
+    machine's own 80 and 443, and Caddy reaches the CA through the join tool's proxy. The join
+    output prints the exact line, for example:
+<pre class="term"><span class="p">$</span> HTTPS_PROXY=http://127.0.0.1:21234 caddy run</pre></li>
+</ul>
+<p>Listening on ports 80 and 443 needs permission on Linux: run Caddy as root (or through
+  systemd), or allow the binary once with
+  <code>sudo setcap cap_net_bind_service=+ep "$(command -v caddy)"</code>.</p>
+
+<h2 class="docs-h2">Good to know</h2>
+<ul>
+  <li>Servers accept connections from any active member's device. Personal devices never do.</li>
+  <li>A server can't add devices, invite people or run the pen; use a personal device for that.</li>
+  <li>If the member who owns the server is suspended, the server is cut off until they're
+    resumed. If they're removed, the server is deleted and its names are held for 90 days.</li>
+  <li>Apps that keep their own certificate list (Java, Node, Python) may need the pen's root;
+    see the <a href="/docs/faq.html#own-certs">FAQ</a>.</li>
+</ul>

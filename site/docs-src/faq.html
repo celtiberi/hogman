@@ -1,0 +1,98 @@
+<h1 class="docs-h1">FAQ and troubleshooting</h1>
+
+<nav class="toc" aria-label="On this page">
+  <a href="#questions">Questions</a> · <a href="#trouble">Troubleshooting</a>
+</nav>
+
+<h2 class="docs-h2" id="questions">Questions</h2>
+<dl class="parts">
+  <dt>Is it a VPN?</dt>
+  <dd>No. A VPN hides your browsing by sending it through someone else's server. A pen is a
+    private place with its own sites and its own guest list. Your normal browsing keeps going
+    straight to the internet; only pen names use the pen.</dd>
+  <dt>Why not just use Tailscale?</dt>
+  <dd>If you're technical and only want your own devices connected, do. Hogman is built on
+    Tailscale's open-source pieces and runs alongside it. Hogman is for a private place for a
+    <em>group of people</em>: guests join from a link, the keeper runs the guest list from a web
+    page, every pen has its own names and certificate authority, and nothing about it shows up
+    in public certificate logs.</dd>
+  <dt>Can strangers find my pen?</dt>
+  <dd>No. Pen names don't exist on the public internet, and the addresses inside the mesh
+    aren't routable from it. The only public part is each pen's control address: it serves
+    the join page and lets in devices that hold a valid key, nothing more.</dd>
+  <dt>Can the keeper read what I send?</dt>
+  <dd>No. Traffic between members is WireGuard, encrypted from one device to the other. The
+    keeper can see who's in the pen, their devices, and which pen names get looked up.
+    <a href="/docs/how-it-works.html#trust">Who sees what</a>.</dd>
+  <dt>Does installing the pen's certificate let the keeper intercept my other sites?</dt>
+  <dd>No. The certificate is name-constrained: it can only vouch for names ending in the pen's
+    zone, and your browser and operating system refuse it for anything else. Leaving the pen
+    removes it.</dd>
+  <dt>Can I be in more than one pen?</dt>
+  <dd>Yes. Join each with its own link. With Tailscale, each pen is its own profile; side by side,
+    each pen gets its own background connection and proxy, and they run at the same time.</dd>
+  <dt>Phones?</dt>
+  <dd>Not yet. A phone app is in the works.</dd>
+  <dt>What does it cost?</dt>
+  <dd>Free while we test. Raising your own pen is free forever: it's open source.</dd>
+</dl>
+
+<h2 class="docs-h2" id="trouble">Troubleshooting</h2>
+<dl class="parts">
+  <dt id="mac-ssh">"macOS needs you to approve the certificate on screen"</dt>
+  <dd>macOS only lets a person at the Mac approve a new trusted certificate, even for an
+    administrator. Run the join command in Terminal on the Mac itself, not over SSH.</dd>
+
+  <dt>The browser can't find pen sites (side by side)</dt>
+  <dd>In side-by-side mode only programs that use the pen's proxy reach the pen. On a Mac the
+    join sets your automatic proxy setting; if another tool already set one, it leaves yours
+    alone and prints the address to use. On Linux and Windows, set your browser's or desktop's
+    automatic proxy configuration URL to the <code>proxy.pac</code> address the join printed
+    (it's <code>http://127.0.0.1:&lt;port&gt;/proxy.pac</code>). For command-line tools, see
+    <a href="/docs/join.html#side">side by side, in practice</a>.</dd>
+
+  <dt>"This computer cannot find the network's names yet"</dt>
+  <dd>With Tailscale, check its DNS setting is on (<code>tailscale set --accept-dns=true</code>)
+    and that the pen's profile is the active one (<code>tailscale switch --list</code>). Then run
+    the join again; it picks up where it left off without using your invite.</dd>
+
+  <dt>Firefox on Linux shows a certificate warning</dt>
+  <dd>Firefox on Linux keeps its own list of trusted certificates instead of the system's.
+    Download the pen's root from your home page (<code>/root_ca.crt</code>) and import it in
+    Settings → Privacy &amp; Security → Certificates → View Certificates → Authorities.</dd>
+
+  <dt id="own-certs">An app says the certificate isn't trusted (Node, Python, Java)</dt>
+  <dd>Some runtimes keep their own certificate list. Download the pen's root from your home page
+    and point them at it:
+<pre class="term">NODE_EXTRA_CA_CERTS=~/pen-root.crt node app.js
+SSL_CERT_FILE=~/pen-root.crt python app.py        <span class="c"># also REQUESTS_CA_BUNDLE for requests</span>
+keytool -importcert -alias mypen -file ~/pen-root.crt -cacerts   <span class="c"># Java</span></pre></dd>
+
+  <dt>The join tool tried to open a browser on a server</dt>
+  <dd>Add <code>--no-open</code>. On a machine with no desktop there's nothing to open; the home
+    page address is printed either way.</dd>
+
+  <dt>Caddy can't listen on port 80 or 443</dt>
+  <dd>On Linux, low ports need permission. Run Caddy as root or through systemd, or once:
+    <code>sudo setcap cap_net_bind_service=+ep "$(command -v caddy)"</code>.
+    <a href="/docs/servers.html">Running a server</a>.</dd>
+
+  <dt>"is already being shared from this computer"</dt>
+  <dd>That share is already running, perhaps in the background or another window. See it with
+    <code>./hogman-join share list</code>; stop it with <code>./hogman-join share stop NAME</code>.</dd>
+
+  <dt>A shared site says "the app isn't answering right now"</dt>
+  <dd>The share is up but nothing is listening on the port you gave it. Start your app (or
+    check the port), and reload.</dd>
+
+  <dt>"the invite was not accepted"</dt>
+  <dd>Invites work once and expire after 7 days; device links expire after an hour. Ask for a
+    new one. If you picked a name someone already has, the tool asks for another.</dd>
+
+  <dt>I left, and want back in</dt>
+  <dd>Leaving takes your devices out, not your membership. Ask the keeper for a device link (or
+    make one yourself from the home page on another device you still have), and join again.</dd>
+</dl>
+
+<p>Still stuck? Open an issue on <a href="https://github.com/celtiberi/hogman/issues">GitHub</a>
+  with what you ran and what it printed.</p>
