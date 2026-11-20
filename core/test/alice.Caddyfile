@@ -5,6 +5,18 @@
 	acme_ca_root /pki/root_ca.crt
 }
 
-alice.{$ZONE}, blog.alice.{$ZONE} {
+alice.{$ZONE} {
+	respond "hello from {host}"
+}
+
+# Backwards compatibility: a server still pointed at the old port-443 CA URL
+# (before step-ca moved onto core-mesh:9000) must still get a certificate.
+blog.alice.{$ZONE} {
+	tls {
+		issuer acme {
+			dir https://ca.{$ZONE}/acme/acme/directory
+			trusted_roots /pki/root_ca.crt
+		}
+	}
 	respond "hello from {host}"
 }

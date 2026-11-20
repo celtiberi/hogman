@@ -202,9 +202,15 @@ in_directory() { api bob-tools GET /api/directory | grep -q "$1"; }
 check "the directory lists alice's sites" in_directory "blog.alice.$ZONE"
 
 step "HTTPS with the network's own CA"
+legacy_acme_dir_ok() {
+  run bob-tools curl -sf -m5 --cacert $ROOT "https://ca.$ZONE/acme/acme/directory" \
+    | jq -e --arg p "https://ca.$ZONE/" \
+      '(.newNonce | startswith($p)) and (.newAccount | startswith($p)) and (.newOrder | startswith($p))'
+}
+check "legacy CA URL https://ca.$ZONE/acme/acme/directory serves port-443 links" retry 60 legacy_acme_dir_ok
 check "portal https://home.$ZONE is trusted"                    retry 60 fetch home.$ZONE "You're in"
 check "alice's site https://alice.$ZONE is trusted (ACME cert)" retry 150 fetch alice.$ZONE "hello from alice.$ZONE"
-check "sub-names work (https://blog.alice.$ZONE)"               retry 150 fetch blog.alice.$ZONE "hello from blog.alice"
+check "sub-names work via legacy port-443 CA URL (https://blog.alice.$ZONE)" retry 150 fetch blog.alice.$ZONE "hello from blog.alice"
 check "site certs are short-lived (expire within 7 days)" retry 10 expires_within alice.$ZONE 168
 check "the CA is healthy" retry 30 sh -c "[ \"\$(docker inspect -f '{{.State.Health.Status}}' $COMPOSE_PROJECT_NAME-step-ca-1)\" = healthy ]"
 

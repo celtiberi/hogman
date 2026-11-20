@@ -30,3 +30,16 @@ home.{$ZONE} {
 		file_server
 	}
 }
+
+# Backwards compatibility for member servers still pointed at https://ca.<zone>
+# (port 443) from before step-ca moved onto core-mesh:9000. step-ca builds ACME
+# directory links from the incoming Host header, so clients stay on port 443.
+ca.{$ZONE} {
+	reverse_proxy https://127.0.0.1:9000 {
+		header_up Host ca.{$ZONE}
+		transport http {
+			tls_server_name ca.{$ZONE}
+			tls_trust_pool file /pki/root_ca.crt
+		}
+	}
+}
