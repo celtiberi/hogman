@@ -151,6 +151,7 @@ Try it, break it, tell us what you find. Don't trust it with anything that matte
 | A one-line installer for servers; updates in under a minute | A security audit |
 | A real pen live on the internet: `farm.hogman`, joined from a Mac | |
 | Nightly encrypted backups, pulled to a machine you own; restore tested | |
+| Alerts on your phone when the server or its backups stop | |
 | End-to-end tests: 105 checks for a pen, 32 for a shared host | |
 
 **Found a security problem?** Please don't open a public issue. Report it privately

@@ -111,6 +111,22 @@ afterwards.
 
 `hogman-host backup` takes one now.
 
+## Knowing when it breaks
+
+Run `deploy/hogman-watch.sh` every five minutes on a machine you own (the same one that pulls
+backups is ideal). It checks that Headscale and the pen answer on the control host, that the
+certificate has two weeks left, and that backups keep arriving, and pushes an alert to your
+phone through [ntfy](https://ntfy.sh): no account, just the app and a topic name.
+
+```bash
+echo hogman-$(openssl rand -hex 12)          # your topic: subscribe to it in the ntfy app
+NTFY_TOPIC=<topic> deploy/hogman-watch.sh --test
+NTFY_TOPIC=<topic> deploy/hogman-watch.sh hs.example.com ~/hogman-backups   # every 5 minutes
+```
+
+It alerts after two failures in a row, reminds you every six hours, and tells you when it's
+fixed. If the watching machine is offline itself, it says nothing.
+
 ## Everyday
 
 ```bash
