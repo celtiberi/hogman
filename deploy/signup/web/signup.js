@@ -92,6 +92,7 @@
     if (r.join_qr_svg) $('qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(r.join_qr_svg);
     else $('qr').closest('.qr').hidden = true;
     $('copy').onclick = async () => { await navigator.clipboard.writeText(r.join_link); $('copy').textContent = 'Copied'; };
+    sessionStorage.removeItem(JOB);
     history.replaceState(null, '', location.pathname);   // the code is used up
     show('done');
   };

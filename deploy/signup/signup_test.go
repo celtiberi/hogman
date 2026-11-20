@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -178,20 +180,17 @@ func TestWebForwardsAndDrawsQR(t *testing.T) {
 	if res == nil || res["owner"] != "alice" || !strings.HasPrefix(res["join_qr_svg"].(string), "<svg") {
 		t.Fatalf("job result: %v", res)
 	}
+	// Results are one-time: reading a completed job again must return 404.
+	if code, _ := call(h, "GET", "/api/job?id="+id, "", nil); code != 404 {
+		t.Fatalf("second read of completed job: %d, want 404", code)
+	}
 	if code, _ := call(h, "GET", "/api/job?id=nope", "", nil); code != 404 {
 		t.Fatalf("an unknown job: %d", code)
 	}
-	// A failed sign-up reports its reason through the job.
-	_, out = call(h, "POST", "/api/create", `{"code":"PIG-ZZZZ-ZZZZ","pen":"jones","handle":"bob"}`, map[string]string{"Content-Type": "application/json"})
-	for i := 0; i < 100; i++ {
-		_, j := call(h, "GET", "/api/job?id="+out["job"].(string), "", nil)
-		if j["state"] == "failed" {
-			if j["status"] != float64(403) || !strings.Contains(j["error"].(string), "code") {
-				t.Fatalf("failed job: %v", j)
-			}
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+	// A wrong code is refused synchronously before creating a job.
+	code, out = call(h, "POST", "/api/create", `{"code":"PIG-ZZZZ-ZZZZ","pen":"jones","handle":"bob"}`, map[string]string{"Content-Type": "application/json"})
+	if code != 403 || out["job"] != nil {
+		t.Fatalf("wrong code: %d %v, want 403 without job", code, out)
 	}
 	if _, out := call(h, "GET", "/api/check?pen=smith", "", nil); out["free"] != false {
 		t.Fatalf("smith still free after it was raised: %v", out)
@@ -320,5 +319,161 @@ func TestWaitlistLeave(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(home, "signup", "waitlist"))
 	if strings.Contains(string(data), "a@example.com") || !strings.Contains(string(data), "b@example.com") {
 		t.Fatalf("after a left: %q", data)
+	}
+}
+
+func TestLimiterIPv6AndEvictOldest(t *testing.T) {
+	if a, b := rateLimitKey("2001:db8:1:2::10"), rateLimitKey("2001:db8:1:2:abcd::99"); a != b {
+		t.Fatalf("same /64 should share bucket: %q != %q", a, b)
+	}
+	if a, b := rateLimitKey("2001:db8:1:2::10"), rateLimitKey("2001:db8:1:3::10"); a == b {
+		t.Fatalf("different /64 should differ: %q == %q", a, b)
+	}
+	if a, b := rateLimitKey("::ffff:203.0.113.5"), rateLimitKey("203.0.113.5"); a != b {
+		t.Fatalf("v4-mapped IPv6 should match IPv4: %q != %q", a, b)
+	}
+
+	l := newLimiterWithCap(2, time.Minute, 3)
+	t0 := time.Now()
+	if !l.allow("abuser", t0) || !l.allow("abuser", t0.Add(time.Second)) || l.allow("abuser", t0.Add(2*time.Second)) {
+		t.Fatal("abuser should hit limit at 2")
+	}
+	if !l.allow("idle", t0.Add(3*time.Second)) {
+		t.Fatal("idle should be allowed")
+	}
+	if !l.allow("recent", t0.Add(4*time.Second)) {
+		t.Fatal("recent should be allowed")
+	}
+	// Touch abuser so "idle" is the oldest-seen key when a 4th key arrives.
+	if l.allow("abuser", t0.Add(5*time.Second)) {
+		t.Fatal("abuser should still be blocked")
+	}
+	if !l.allow("newcomer", t0.Add(6*time.Second)) {
+		t.Fatal("newcomer should be allowed")
+	}
+	if len(l.seen) > 3 {
+		t.Fatalf("limiter grew past cap: %d", len(l.seen))
+	}
+	if l.allow("abuser", t0.Add(7*time.Second)) {
+		t.Fatal("active abuser must not be flushed by key churn")
+	}
+}
+
+func TestWebCreateValidatesCodeAndCapsJobs(t *testing.T) {
+	b, _ := newTestBroker(t, "PIG-AAAA-BBBB x\n")
+	srv := httptest.NewServer(b.handler())
+	defer srv.Close()
+	wb := newWeb(srv.URL, testToken, "pens.test")
+	h := wb.handler()
+	js := map[string]string{"Content-Type": "application/json"}
+
+	// Wrong code, full capacity, and taken pen fail synchronously with zero jobs created.
+	if code, _ := call(h, "POST", "/api/create", `{"code":"PIG-ZZZZ-ZZZZ","pen":"smith","handle":"alice"}`, js); code != 403 {
+		t.Fatalf("bad code status = %d, want 403", code)
+	}
+	t.Setenv("FAKE_MAX", "0")
+	if code, _ := call(h, "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"smith","handle":"alice"}`, js); code != 503 {
+		t.Fatalf("full server status = %d, want 503", code)
+	}
+	t.Setenv("FAKE_MAX", "3")
+	if len(wb.jobs.jobs) != 0 {
+		t.Fatalf("synchronous failures created %d jobs, want 0", len(wb.jobs.jobs))
+	}
+
+	// Open job cap: mock broker validates synchronously and blocks provision on a gate.
+	gate := make(chan struct{})
+	gateClosed := false
+	defer func() {
+		if !gateClosed {
+			close(gate)
+		}
+	}()
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/validate":
+			jsonOut(w, 200, map[string]bool{"ok": true})
+		case "/provision":
+			<-gate
+			jsonOut(w, 500, map[string]string{"error": "boom"})
+		default:
+			jsonOut(w, 404, map[string]string{"error": "nope"})
+		}
+	}))
+	defer mock.Close()
+
+	wb2 := newWeb(mock.URL, testToken, "pens.test")
+	h2 := wb2.handler()
+	var ids []string
+	for i := 1; i <= defaultMaxOpenJobs; i++ {
+		code, out := call(h2, "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"pen`+strconv.Itoa(i)+`","handle":"alice"}`, map[string]string{
+			"Content-Type": "application/json", "X-Forwarded-For": "198.51.100." + strconv.Itoa(i),
+		})
+		if code != 202 {
+			t.Fatalf("job %d create = %d %v, want 202", i, code, out)
+		}
+		ids = append(ids, out["job"].(string))
+	}
+	if code, _ := call(h2, "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"extra","handle":"alice"}`, map[string]string{
+		"Content-Type": "application/json", "X-Forwarded-For": "198.51.100.99",
+	}); code != 503 {
+		t.Fatalf("over open-job cap status = %d, want 503", code)
+	}
+
+	close(gate)
+	gateClosed = true
+	// Failed terminal job is delivered once, then removed (404 on second read).
+	var gotFailed bool
+	for i := 0; i < 100; i++ {
+		code, j := call(h2, "GET", "/api/job?id="+ids[0], "", nil)
+		if code == 200 && j["state"] == "failed" {
+			gotFailed = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !gotFailed {
+		t.Fatal("did not observe failed state for blocked job")
+	}
+	if code, _ := call(h2, "GET", "/api/job?id="+ids[0], "", nil); code != 404 {
+		t.Fatalf("second read after failure = %d, want 404", code)
+	}
+}
+
+func TestWaitlistGlobalCapAndNotifyCap(t *testing.T) {
+	var pushes atomic.Int32
+	ntfySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pushes.Add(1)
+		w.WriteHeader(200)
+	}))
+	defer ntfySrv.Close()
+
+	b, _ := newTestBroker(t, "")
+	b.ntfy = ntfySrv.URL
+	b.waitJoins = newLimiterWithCap(3, time.Hour, 4)
+	b.waitNotify = newLimiterWithCap(2, time.Hour, 4)
+	b.raiseNotify = newLimiterWithCap(2, time.Hour, 4)
+	b.ntfySem = make(chan struct{}, 4)
+
+	h := b.handler()
+	for i, em := range []string{"u1@example.com", "u2@example.com", "u3@example.com"} {
+		if code, out := call(h, "POST", "/waitlist", `{"email":"`+em+`"}`, auth); code != 200 {
+			t.Fatalf("waitlist join %d: %d %v", i, code, out)
+		}
+	}
+	// Already-waiting duplicate still succeeds without hitting the new-join cap.
+	if code, out := call(h, "POST", "/waitlist", `{"email":"u1@example.com"}`, auth); code != 200 || out["already"] != true {
+		t.Fatalf("duplicate check under global cap: %d %v", code, out)
+	}
+	// A 4th brand-new email hits the global join cap (429).
+	if code, _ := call(h, "POST", "/waitlist", `{"email":"u4@example.com"}`, auth); code != 429 {
+		t.Fatalf("4th new waitlist join = %d, want 429", code)
+	}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for pushes.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := pushes.Load(); got != 2 {
+		t.Fatalf("ntfy pushes = %d, want 2 (capped)", got)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,7 +28,7 @@ func PublicHandlerWithRateLimit(s *Service, redeemLimit int, window time.Duratio
 	lim := newIPRateLimiter(redeemLimit, window)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /hogman/v1/redeem", func(w http.ResponseWriter, r *http.Request) {
-		if !lim.allow(clientIP(r), time.Now()) {
+		if !lim.allow(rateLimitKey(clientIP(r)), time.Now()) {
 			fail(w, &Problem{http.StatusTooManyRequests, "too many requests; try again shortly"})
 			return
 		}
@@ -56,39 +57,85 @@ func PublicHandlerWithRateLimit(s *Service, redeemLimit int, window time.Duratio
 type rateBucket struct {
 	count int
 	reset time.Time
+	last  time.Time
 }
 
 type ipRateLimiter struct {
 	mu      sync.Mutex
 	limit   int
 	window  time.Duration
+	maxKeys int
 	buckets map[string]*rateBucket
 }
 
 func newIPRateLimiter(limit int, window time.Duration) *ipRateLimiter {
-	return &ipRateLimiter{limit: limit, window: window, buckets: map[string]*rateBucket{}}
+	return newIPRateLimiterWithCap(limit, window, 1024)
+}
+
+func newIPRateLimiterWithCap(limit int, window time.Duration, maxKeys int) *ipRateLimiter {
+	if maxKeys <= 0 {
+		maxKeys = 1024
+	}
+	return &ipRateLimiter{limit: limit, window: window, maxKeys: maxKeys, buckets: map[string]*rateBucket{}}
 }
 
 func (l *ipRateLimiter) allow(ip string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if len(l.buckets) > 1024 {
+	if b, ok := l.buckets[ip]; ok {
+		if !now.Before(b.reset) {
+			b.count = 1
+			b.reset = now.Add(l.window)
+			b.last = now
+			return true
+		}
+		b.last = now
+		if b.count >= l.limit {
+			return false
+		}
+		b.count++
+		return true
+	}
+	maxKeys := l.maxKeys
+	if maxKeys <= 0 {
+		maxKeys = 1024
+	}
+	if len(l.buckets) >= maxKeys {
 		for k, b := range l.buckets {
 			if !now.Before(b.reset) {
 				delete(l.buckets, k)
 			}
 		}
 	}
-	b, ok := l.buckets[ip]
-	if !ok || !now.Before(b.reset) {
-		l.buckets[ip] = &rateBucket{count: 1, reset: now.Add(l.window)}
-		return true
+	if len(l.buckets) >= maxKeys {
+		var oldestKey string
+		var oldestAt time.Time
+		first := true
+		for k, b := range l.buckets {
+			if first || b.last.Before(oldestAt) {
+				first = false
+				oldestKey = k
+				oldestAt = b.last
+			}
+		}
+		if !first {
+			delete(l.buckets, oldestKey)
+		}
 	}
-	if b.count >= l.limit {
-		return false
-	}
-	b.count++
+	l.buckets[ip] = &rateBucket{count: 1, reset: now.Add(l.window), last: now}
 	return true
+}
+
+func rateLimitKey(raw string) string {
+	a, err := netip.ParseAddr(strings.TrimSpace(raw))
+	if err != nil {
+		return raw
+	}
+	a = a.Unmap()
+	if a.Is6() {
+		return netip.PrefixFrom(a, 64).Masked().String()
+	}
+	return a.String()
 }
 
 func clientIP(r *http.Request) string {
