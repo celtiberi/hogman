@@ -127,15 +127,17 @@
         <dd>Each pen has its own zone, like <code>smith.hogman</code>. Its DNS server only answers
           on the mesh, and <code>.hogman</code> isn't a public top-level domain, so nothing in a pen
           resolves, or exists, on the open internet.</dd>
-        <dt>Padlocks: the pen's own certificate authority</dt>
+        <dt>Padlocks (certificates): the pen's own CA</dt>
         <dd>Each pen runs <a href="https://smallstep.com/certificates/">step-ca</a>. Its root carries
           X.509 name constraints: it can only sign names ending in the pen's zone, and no IP
           addresses, so trusting it can't be used against any other site. Servers get 7-day
           certificates over ACME automatically. The root key is kept offline, encrypted.</dd>
         <dt>Who can reach what: default deny</dt>
-        <dd>Hogman's registrar keeps the member list and writes the pen's access policy. Members'
-          devices can reach servers and the pen's own services; personal devices accept no
-          incoming connections at all; a device that joins without an invite gets nothing.</dd>
+        <dd>Hogman's registrar keeps the member list and writes the pen's access policy. Two kinds
+          of device: <em>personal</em> (a member's laptop or phone) and <em>server</em> (anything set
+          up to host sites, such as a share). Members' devices can reach servers and the pen's own
+          services; personal devices accept no incoming connections at all; a device that joins
+          without an invite gets nothing.</dd>
         <dt>Invites and joining</dt>
         <dd>An invite is a single-use token in a link that also carries the SHA-256 fingerprint of
           the pen's root certificate. <code>hogman-join</code> checks that fingerprint before
@@ -148,7 +150,8 @@
           nobody can impersonate their sites. Measured: about two seconds.</dd>
         <dt>Hosted pens</dt>
         <dd>On our server each pen is its own set of five containers (Headscale, the registrar,
-          step-ca, the home page's web server, and the pen's own node on the mesh) with its own data folder, about 75 MB of
+          step-ca, Caddy serving the pen's home page, and the pen's own Tailscale node, which gives
+          its DNS, home page and CA an address inside the mesh) with its own data folder, about 75 MB of
           memory. A shared front door routes each pen's public control address; that and the
           relay port are the only things exposed to the internet.</dd>
       </dl>
@@ -159,13 +162,14 @@
 
 <span class="b">1</span> DNS     photos.smith.hogman → 100.80.12.7
           answered by the pen's DNS, on the mesh only
-<span class="b">2</span> policy  bob's laptop → alice's photos server?
-          allowed: bob is a member, it's a server
+<span class="b">2</span> policy  bob's laptop → alice's photos server:
+          allowed (a member's device → a server)
 <span class="b">3</span> tunnel  WireGuard, bob → alice, end to end
           direct if possible, else the pen's relay
 <span class="b">4</span> TLS     certificate for photos.smith.hogman
-          signed by the pen's CA, trusted on bob's
-          computer since he joined
+          signed by the pen's CA, whose root
+          hogman-join installed on bob's computer
+          after checking its fingerprint
 <span class="ok">✓ page loads, with the padlock</span>
 
 <span class="c"># a stranger types the same address</span>
