@@ -25,7 +25,7 @@
       <td>The ledger: members, roles, invites, devices, names, the audit log. Writes the access
         policy into Headscale, answers DNS for the pen's zone, and serves the home page's API.</td></tr>
     <tr><td>Certificate authority</td><td><a href="https://smallstep.com/certificates/">step-ca</a></td>
-      <td>Issues HTTPS certificates for names in the pen over ACME, the protocol Let's Encrypt
+      <td>Issues HTTPS certificates for names in the pen over ACME (the standard way to get certificates automatically), the protocol Let's Encrypt
         uses.</td></tr>
     <tr><td>Home page</td><td><a href="https://caddyserver.com">Caddy</a></td>
       <td>Serves <code>home.yourpen.hogman</code>, where members manage devices and names and the
@@ -78,7 +78,7 @@
     invite with the name you choose. The registrar creates your membership and returns a
     one-time device key.</li>
   <li>It starts the pen's background connection: a small built-in client (Tailscale's
-    <code>tsnet</code>) running as you, not as administrator, with a local proxy that carries
+    <code>tsnet</code>, its library for building a connection into a program) running as you, not as administrator, with a local proxy that carries
     only HTTPS to the pen's names (an <code>http://</code> address is answered on your own computer
     with a redirect to HTTPS). Browsers use it
     through an automatic proxy setting; everything else on the computer, including any
@@ -90,7 +90,7 @@
 <h2 class="docs-h2" id="policy">Who can reach what</h2>
 <p>Every device is either <strong>personal</strong> (a member's laptop or phone) or a
   <strong>server</strong> (anything set up to host sites). The registrar rebuilds the access
-  policy from its ledger every few seconds and whenever something changes. It is default deny:</p>
+  policy from its ledger every few seconds and whenever something changes. It is default deny, meaning nothing is allowed unless a rule says so:</p>
 <table class="docs-table">
   <thead><tr><th>Device</th><th>Accepts connections from</th><th>Can connect to</th></tr></thead>
   <tbody>

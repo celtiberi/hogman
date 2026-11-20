@@ -94,6 +94,7 @@ func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err 
 	fs.BoolVar(&o.noService, "no-service", false, "")
 	fs.BoolVar(&o.noSystemProxy, "no-system-proxy", false, "")
 	fs.StringVar(&o.pen, "pen", "", "")
+	gone := fs.Bool("tailscale", false, "") // removed (D-11); kept only to explain
 	fs.BoolVar(&o.background, "background", false, "")
 	fs.StringVar(&o.note, "note", "", "")
 	ver := fs.Bool("version", false, "")
@@ -115,12 +116,21 @@ func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err 
 		pos = append(pos, fs.Arg(0))
 		args = fs.Args()[1:]
 	}
+	if *gone {
+		return nil, o, false, errorf("--tailscale no longer exists: every computer joins through Hogman's own connection,\n" +
+			"  which carries HTTPS to the pen and nothing else. Run the same command without it.\n" +
+			"  Why: https://hogman.network/docs/faq.html#not")
+	}
 	return pos, o, *ver, nil
 }
 
 func main() {
 	pos, o, showVersion, err := parseCLIArgs(os.Args[1:])
 	if err != nil {
+		var u *userError
+		if errors.As(err, &u) {
+			fmt.Fprintf(os.Stderr, "\n✗ %s\n", u.msg)
+		}
 		os.Exit(2)
 	}
 	if showVersion {
@@ -472,6 +482,9 @@ func leave(raw string, o options) error {
 			}
 		}
 	}
+	// This computer's own device next, through its connection while it's
+	// still up, so old devices don't pile up in "Your devices".
+	removeOwnDevice(n.Zone, root)
 	// The certificate: it is the part that matters on this computer, and it
 	// needs nothing from the network.
 	certFile, cleanupCert, err := writeTempCert(root.PEM)

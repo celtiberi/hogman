@@ -475,6 +475,9 @@ check "and it stops cleanly (exit $rc)" grep -q "app.$ZONE is down" <<<"$out"
 out="$(join_tool dave-laptop leave "$DAVE_LINK" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
 check "leave works (exit $rc)" grep -q "Left bobo.hogman" <<<"$out"
+check "... and removed dave's laptop from his devices" grep -q "removed this computer from your devices" <<<"$out"
+dave_laptop_gone() { local out; out="$($H device list)" || return 1; [ -z "$(awk '$2 == "dave" && $4 == "dave-laptop"' <<<"$out")" ]; }
+check "... so it's no longer listed" retry 10 dave_laptop_gone
 gone() { ! run dave-laptop test -e /root/.config/hogman/bobo.hogman; }
 check "leave removed the connection and its settings" gone
 proxy_closed() { ! run dave-laptop curl -s -m3 -o /dev/null "http://$PROXY/status"; }

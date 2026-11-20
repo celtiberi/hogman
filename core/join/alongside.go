@@ -273,6 +273,34 @@ func pollPortal(c *http.Client, portal string, d time.Duration) (string, error) 
 	return "", errorf("joined, but the portal did not load: %v", last)
 }
 
+// removeOwnDevice asks the pen, as this computer, to remove this computer's
+// device. Best effort: leaving still works if the pen can't be reached.
+func removeOwnDevice(zone string, root *RootInfo) {
+	cfg, err := loadAgentConfig(stateDir(zone))
+	if err != nil {
+		return
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM([]byte(root.PEM))
+	pu, err := url.Parse(cfg.proxyURL())
+	if err != nil {
+		return
+	}
+	c := &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{
+		Proxy: http.ProxyURL(pu), TLSClientConfig: &tls.Config{RootCAs: pool}}}
+	var me meView
+	if _, err := homeAPI(c, zone, "GET", "/me", nil, &me); err != nil || me.ThisDevice.ID == 0 {
+		note("could not remove this computer from your devices (the keeper can, on the home page)")
+		return
+	}
+	// The pen drops this device as it answers, so the answer may not arrive.
+	if code, err := homeAPI(c, zone, "DELETE", "/devices/"+strconv.FormatInt(me.ThisDevice.ID, 10), nil, nil); err != nil && code != 0 && code != 404 {
+		note("could not remove this computer from your devices: %v", firstLine(err.Error()))
+		return
+	}
+	note("removed this computer from your devices")
+}
+
 // leaveAlongside undoes side-by-side mode for a pen. Reports whether there was anything to undo.
 func leaveAlongside(zone string) bool {
 	dir := stateDir(zone)
