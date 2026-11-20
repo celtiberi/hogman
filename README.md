@@ -113,6 +113,44 @@ it running after the window closes; `./hogman-join share stop blog` takes it dow
 the name. A computer that isn't in the pen can share too: press *Add a server* on your home
 page and add the link it gives you to the end of the command.
 
+## Under the hood
+
+- **The network:** each pen is a private [WireGuard](https://www.wireguard.com) mesh with its own
+  [Headscale](https://github.com/juanfont/headscale) (the open-source Tailscale control server);
+  devices use the stock Tailscale client. Traffic is end-to-end encrypted, device to device,
+  through the pen's own relay only when a firewall blocks a direct path. The control server
+  hands out keys and rules; it never carries or sees traffic.
+- **Names:** a private DNS zone per pen (`smith.hogman`), answered only on the mesh. `.hogman`
+  isn't a public top-level domain, so nothing in a pen exists on the open internet.
+- **Padlocks:** each pen runs [step-ca](https://smallstep.com/certificates/). Its root carries
+  X.509 name constraints (only the pen's zone, no IP addresses), so trusting it can't be used
+  against any other site. Servers get 7-day certificates over ACME. The root key is kept
+  offline, encrypted.
+- **Access:** default deny. Hogman's registrar keeps the member list and writes the access
+  policy: members' devices can reach servers and the pen's services; personal devices accept no
+  incoming connections; a device that joins without an invite gets nothing.
+- **Invites:** a single-use token in a link that also carries the SHA-256 fingerprint of the
+  pen's root. `hogman-join` checks it before trusting anything, installs the root, and joins
+  with Tailscale (its own profile) or side by side through a built-in client that only handles
+  the pen's names.
+- **The boot:** deletes all of a member's devices, revokes their keys and invites, rewrites the
+  policy, and holds their names for 90 days. About two seconds.
+- **Hosted pens:** five containers per pen (Headscale, registrar, step-ca, the home page's web
+  server, the pen's own mesh node), its own data folder, about 75 MB of memory. Only each pen's
+  control address and the relay port are exposed to the internet.
+
+What happens when Bob opens `https://photos.smith.hogman`:
+
+```text
+1 DNS     photos.smith.hogman → 100.80.12.7   (the pen's DNS, on the mesh only)
+2 policy  bob's laptop → alice's photos server: allowed (member → server)
+3 tunnel  WireGuard, bob → alice, end to end (direct, else the pen's relay)
+4 TLS     certificate signed by the pen's CA, trusted on bob's computer since he joined
+✓ page loads, with the padlock
+
+A stranger typing the same address: no such name. There is nothing to reach.
+```
+
 ## What you get
 
 - **Proper names.** Every pen has its own name, and so does everything in it:
