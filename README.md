@@ -149,7 +149,7 @@ Try it, break it, tell us what you find. Don't trust it with anything that matte
 | Joining from Linux and a Mac, side by side with Tailscale | Windows (built, never tried) |
 | Many pens on one server, kept apart | Hosted pens (first server going up) |
 | A one-line installer for servers | A security audit |
-| End-to-end tests: 99 checks for a pen, 18 for a shared host | |
+| End-to-end tests: 105 checks for a pen, 26 for a shared host | |
 
 **Found a security problem?** Please don't open a public issue. Report it privately
 with GitHub's **Security → Report a vulnerability** button on this repository.

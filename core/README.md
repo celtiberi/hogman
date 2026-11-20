@@ -166,7 +166,7 @@ join, a second device via a device link, and leaving.
 
 Plus side-by-side mode on a machine with no Tailscale at all.
 
-About six minutes. Last result: **99 passed, 0 failed** (Docker Desktop on macOS, arm64).
+About six minutes. Last result: **105 passed, 0 failed** (Docker Desktop on macOS, arm64).
 Suspension cut access in 3–5 seconds; resume restored it within 2 seconds; a kick cut
 access in 3 seconds. On the real Mac mini (direct connection over the LAN): suspend 2.0 s,
 resume 0.8 s, kick 2.1 s.
