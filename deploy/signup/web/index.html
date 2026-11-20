@@ -24,13 +24,13 @@
     <p class="hint">Sign-ups are by invitation while we test. Got a link? The code is already filled in.
       No code? <a href="#wait" id="to-wait">Join the waiting list</a>.</p>
 
-    <label for="pen">Name your pen</label>
-    <div class="suffix"><input id="pen" name="pen" placeholder="smith" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30" required><span>.hogman</span></div>
-    <p class="hint" id="pen-hint">Your network's name. Everything in it ends in .<span class="penname">smith</span>.hogman</p>
+    <label for="pen">Network name (your pen)</label>
+    <div class="suffix"><input id="pen" name="pen" placeholder="your-network" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30" required><span>.hogman</span></div>
+    <p class="hint" id="pen-hint">For your private network itself. Sites and addresses will end in .<span class="penname">&lt;network&gt;</span>.hogman</p>
 
-    <label for="handle">Your name in it</label>
-    <div class="suffix"><input id="handle" name="handle" placeholder="you" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" required><span>.<span class="penname">smith</span>.hogman</span></div>
-    <p class="hint">You'll be the pen's keeper: you invite people, and you can show anyone out.</p>
+    <label for="handle">Your personal name in it</label>
+    <div class="suffix"><input id="handle" name="handle" placeholder="your-name" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" required><span>.<span class="penname">&lt;network&gt;</span>.hogman</span></div>
+    <p class="hint">For you as the pen's keeper: you invite people and can remove anyone.</p>
 
     <button class="btn" id="go" type="submit">Raise my pen</button>
     <p class="error" id="err" role="alert" hidden></p>
@@ -68,19 +68,22 @@
 
   <section id="done" class="panel" hidden>
     <h2>Your pen is up</h2>
-    <p><strong id="done-zone"></strong> is yours. Now get your laptop in.</p>
+    <p><strong id="done-zone"></strong> is yours. Once your laptop joins, your pen's home page will be <code id="done-home"></code>.</p>
     <ol>
-      <li>Open this link <strong>on your laptop</strong> (macOS or Linux):
+      <li>Open this setup link <strong>on your laptop</strong> (macOS or Linux):
         <div class="linkbox" id="link"></div>
         <button class="btn small" id="copy" type="button">Copy link</button></li>
-      <li>It shows one command. Paste it into a terminal. It checks your pen's certificate,
-        trusts it, and joins.</li>
-      <li>You land on your pen's home page. That's where you add your other devices, invite
+      <li>The link opens a page with one command to paste into a terminal. It downloads <code>hogman-join</code>,
+        checks your pen's certificate, trusts it, and joins.</li>
+      <li>You land on <code id="done-home-step"></code>, where you add other devices, invite
         people, and run the herd.</li>
     </ol>
     <div class="qr"><img id="qr" alt="QR code of the same link"><p>Same link, for the phone app (coming soon).</p></div>
-    <p class="warn">The link works <strong>once, within an hour</strong>, and this page is the only
-      place it's shown. Keep it open until your laptop is in.</p>
+    <p class="warn">This link carries a <strong>one-time key — treat it like a password</strong> and don't share it.
+      It works once within an hour, and this page is the only place it's shown, so keep it open until your laptop is in.</p>
+    <p class="warn"><strong>Back up your keeper access once you're in:</strong> join a second computer
+      and make someone you trust an admin in <em>The herd</em>. We never recover a pen on request —
+      if you lose every keeper device, the pen cannot be recovered.</p>
   </section>
 
   <footer>

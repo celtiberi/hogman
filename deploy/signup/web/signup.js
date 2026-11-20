@@ -16,7 +16,7 @@
   if (m) $('code').value = m[1].toUpperCase();
 
   const setNames = () => {
-    const p = $('pen').value.trim().toLowerCase() || 'smith';
+    const p = $('pen').value.trim().toLowerCase() || '<network>';
     document.querySelectorAll('.penname').forEach(e => { e.textContent = p; });
   };
 
@@ -39,8 +39,8 @@
     }, 350);
   });
   const defaultHint = () => {
-    const s = document.createElement('span'); s.className = 'penname'; s.textContent = 'smith';
-    return [document.createTextNode('Your network\'s name. Everything in it ends in .'), s, document.createTextNode('.hogman')];
+    const s = document.createElement('span'); s.className = 'penname'; s.textContent = '<network>';
+    return [document.createTextNode('For your private network itself. Sites and addresses will end in .'), s, document.createTextNode('.hogman')];
   };
   $('handle').addEventListener('input', setNames);
   for (const f of ['pen', 'handle']) $(f).addEventListener('change', setNames);   // autofill, paste, scripts
@@ -85,6 +85,9 @@
                   [20, 'Opening the gate'], [35, 'Raking the last of the straw'], [90, 'Taking longer than usual; hang on']];
   const showDone = r => {
     $('done-zone').textContent = r.zone;
+    const homeURL = 'https://home.' + r.zone;
+    $('done-home').textContent = homeURL;
+    $('done-home-step').textContent = homeURL;
     $('link').textContent = r.join_link;
     if (r.join_qr_svg) $('qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(r.join_qr_svg);
     else $('qr').closest('.qr').hidden = true;

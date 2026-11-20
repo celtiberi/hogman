@@ -6,6 +6,8 @@
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
+code { font-family: var(--mono); font-size: .92em; }
 html { background: var(--night); }
 body {
   margin: 0; color: var(--bone); font: 18px/1.6 var(--text); -webkit-font-smoothing: antialiased;

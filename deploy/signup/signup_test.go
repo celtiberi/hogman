@@ -202,8 +202,24 @@ func TestWebPageAndHeaders(t *testing.T) {
 	h := newWeb("http://127.0.0.1:1", testToken, "pens.test").handler()
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "Get a pen") {
+	body := rec.Body.String()
+	if rec.Code != 200 || !strings.Contains(body, "Get a pen") {
 		t.Fatalf("page: %d", rec.Code)
+	}
+	for _, want := range []string{
+		`id="done-home"`,
+		`treat it like a password`,
+		`Network name (your pen)`,
+		`Your personal name in it`,
+		`Back up your keeper access`,
+		`never recover a pen on request`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("page missing %q", want)
+		}
+	}
+	if strings.Contains(body, `class="penname">smith<`) {
+		t.Fatal("page still uses smith in field suffix")
 	}
 	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") {
 		t.Fatalf("CSP: %q", csp)
