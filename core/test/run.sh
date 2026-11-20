@@ -449,30 +449,21 @@ check "... and gives the name back" no_match notes $H name list
 check "... and removes its server" retry 10 not notes_device
 check "bob can't load it any more" retry 15 not fetch notes.$ZONE "notes from dave"
 
-# Dave's server, also with no Tailscale: it hosts a site anyway.
+# Server links only put something in the pen with share (D-11): joining a
+# whole computer with one is refused before the link is used, and the same
+# link then works with share.
 dc up -d dave-server
 retry 20 run dave-server test -s /etc/ssl/certs/ca-certificates.crt
-DAVE_SERVER_LINK="$($H device key dave server | awk '/^link:/ {print $2}')"
-out="$(join_tool dave-server --hostname dave-server "$DAVE_SERVER_LINK" 2>&1)"; rc=$?
-[ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
-check "a server joins side by side too (exit $rc)" grep -q "You're in" <<<"$out"
-check "the join tool says the pen's web ports reach it" grep -q "This is a server" <<<"$out"
-DS_ID="$($H device list | awk '$2 == "dave" && $4 == "dave-server" {print $1}')"
-check "dave names it daveweb.$ZONE" sh -c "$H name claim dave daveweb $DS_ID >/dev/null"
-# Use exactly what the join tool told dave to run.
-DS_PROXY="$(grep -o 'HTTPS_PROXY=http://127.0.0.1:[0-9]*' <<<"$out" | head -1 | cut -d/ -f3)"
-check "it prints the proxy to run Caddy with" test -n "$DS_PROXY"
-docker exec -d "$(dc ps -q dave-server)" sh -c "ZONE=$ZONE HTTPS_PROXY=http://$DS_PROXY caddy run --config /etc/caddy/dave.Caddyfile >/tmp/caddy.log 2>&1"
-dave_site() { match "hello from daveweb.$ZONE" via_pen "https://daveweb.$ZONE"; }
-check "its Caddy gets a certificate and dave's laptop loads the site over HTTPS" retry 90 dave_site
-[ "$(dave_site && echo ok)" = ok ] || run dave-server sh -c 'grep -v "\"level\":\"debug\"" /tmp/caddy.log | tail -12 | cut -c1-400' | sed 's/^/        caddy| /'
-check "other members load it too (bob, with Tailscale)" retry 30 fetch daveweb.$ZONE "hello from daveweb"
-out="$(join_tool dave-server leave "$DAVE_SERVER_LINK" 2>&1)"
-check "the server leaves cleanly" grep -q "Left bobo.hogman" <<<"$out"
+SHARE_LINK="$($H device key dave server | awk '/^link:/ {print $2}')"
+check "a server link is marked for share" grep -q 'for=share' <<<"$SHARE_LINK"
+out="$(join_tool dave-server --hostname dave-server "$SHARE_LINK" 2>&1)"; rc=$?
+check "joining a whole computer with a server link is refused (exit $rc)" test $rc != 0
+check "... and says to use it with share" grep -q "hogman-join share" <<<"$out"
+no_dave_server() { local out; out="$($H device list)" || return 1; [ -z "$(awk '$2 == "dave" && $4 == "dave-server"' <<<"$out")" ]; }
+check "... and adds no device" no_dave_server
 
 # A computer that isn't on the pen at all: one server link, one command.
 docker exec -d "$(dc ps -q dave-server)" sh -c 'mkdir -p /tmp/www && echo "app from a server link" > /tmp/www/index.html && caddy file-server --listen 127.0.0.1:8080 --root /tmp/www >/tmp/fs.log 2>&1'
-SHARE_LINK="$($H device key dave server | awk '/^link:/ {print $2}')"
 out="$(join_tool dave-server share app 8080 "$SHARE_LINK" --background 2>&1)"; rc=$?
 echo "$out" | sed 's/^/        | /'
 check "a server link plus one command shares a port (exit $rc)" grep -q "https://app.$ZONE is up" <<<"$out"

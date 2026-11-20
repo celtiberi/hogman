@@ -311,6 +311,10 @@ func join(raw string, o options) error {
 	if err != nil {
 		return errorf("%v", err)
 	}
+	if link.ForShare {
+		return errorf("that's a server link: it's for putting something in the pen, not for joining a computer.\n" +
+			"  Use it with share, for example: hogman-join share blog 8080 '<this link>'")
+	}
 	client, err := controlClient(o.controlCA)
 	if err != nil {
 		return err

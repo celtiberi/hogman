@@ -114,7 +114,7 @@ visitors, and nothing needs administrator rights or an open port. Everything sha
 shows up in the **Sites in this pen** list on your home page (with who runs it and its
 optional `--note`). Add `--background` to keep it running after the window closes;
 `./hogman-join share stop blog` takes it down and frees the name. A computer that isn't in
-the pen can share too: press *Add a server* on your home page and add the link it gives you
+the pen can share too: press *Get a share link* on your home page and add the link it gives you
 to the end of the command.
 
 ## Under the hood

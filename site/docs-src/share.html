@@ -59,7 +59,7 @@ https://blog.smith.hogman                http://127.0.0.1:3000  (running in the 
   (an old laptop, a mini PC, a small cloud server) and share it from there. That computer doesn't
   need to join the pen first:</p>
 <ol class="docs-steps">
-  <li>On your pen's home page, press <strong>Add a server</strong> and copy the link. It works
+  <li>On your pen's home page, press <strong>Get a share link</strong> and copy the link. It works
     once, for an hour.</li>
   <li>On the always-on computer, download <code>hogman-join</code> the same way you did when you
     joined, and add the link to the end of the share command:
@@ -73,8 +73,7 @@ https://blog.smith.hogman                http://127.0.0.1:3000  (running in the 
     dashes.</li>
   <li>First come, first served. If it's taken you're told, nothing is left behind, and you pick
     another. Each member can hold up to 50.</li>
-  <li>Share names are one word, like <code>blog</code> or <code>my-notes</code>. Dotted names such
-    as <code>api.blog</code> are for <a href="/docs/servers.html">your own web server</a>.</li>
+  <li>Share names are one word, like <code>blog</code> or <code>my-notes</code>.</li>
 </ul>
 
 <h2 class="docs-h2" id="limits">Limits</h2>
@@ -93,5 +92,5 @@ https://blog.smith.hogman                http://127.0.0.1:3000  (running in the 
 <p>For developers: requests are passed to your app with <code>X-Forwarded-For</code>,
   <code>-Host</code> and <code>-Proto</code>, and with the app's own Host header, so dev servers
   that check it still work. WebSockets work.</p>
-<p>Want to run your own web server (Caddy, nginx) with the pen's certificates instead? That's
-  <a href="/docs/servers.html">the advanced page</a>.</p>
+<p>Already run a web server such as Caddy or nginx, with several sites behind it? Share its port
+  (<code>share blog 8080</code>); the share handles the pen's name and certificate.</p>

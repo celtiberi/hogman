@@ -133,3 +133,16 @@ func TestCheckRoot(t *testing.T) {
 		}
 	}
 }
+
+// A server (share) link is marked for=share; a plain device link isn't.
+func TestParseLinkForShare(t *testing.T) {
+	fp := strings.Repeat("AB", 32)
+	l, err := ParseLink("https://hs.example.com/join#k=hskey-auth-x&fp=" + fp + "&for=share")
+	if err != nil || !l.ForShare || l.DeviceKey != "hskey-auth-x" {
+		t.Fatalf("share link: %+v, %v", l, err)
+	}
+	l, err = ParseLink("https://hs.example.com/join#k=hskey-auth-x&fp=" + fp)
+	if err != nil || l.ForShare {
+		t.Fatalf("device link: %+v, %v", l, err)
+	}
+}

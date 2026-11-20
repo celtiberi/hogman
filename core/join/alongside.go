@@ -177,6 +177,13 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 	if err != nil {
 		return err
 	}
+	if st.Server {
+		// An old server link without the for=share mark: never expose a whole
+		// computer to the pen. Undo the join.
+		leaveAlongside(n.Zone)
+		return errorf("that's a server link: it's for putting something in the pen, not for joining a computer.\n" +
+			"  Use a new one with share, for example: hogman-join share blog 8080 '<server link>'")
+	}
 	note("online as %s", strings.Join(st.IPs, ", "))
 
 	browsers := "set your browser's automatic proxy configuration to " + cfg.pacURL()
@@ -206,13 +213,6 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 	say("    curl / most CLIs:  https_proxy=%s curl https://<site>.%s", cfg.proxyURL(), n.Zone)
 	say("    git:               git config --global http.https://%s/.proxy %s   (per site)", "<site>."+n.Zone, cfg.proxyURL())
 	say("  The pen carries HTTPS only (and HTTP to redirect).")
-	if st.Server {
-		say("")
-		say("  This is a server: the pen's ports 80 and 443 now reach this computer.")
-		say("  Host a site: claim a name for it on %s, then run Caddy here with the", n.Portal)
-		say("  home page's snippet, pointed at the pen through its proxy:")
-		say("    HTTPS_PROXY=%s caddy run", cfg.proxyURL())
-	}
 	say("  To leave: hogman-join leave '<this link>'")
 	if !o.noOpen {
 		openURL(n.Portal)

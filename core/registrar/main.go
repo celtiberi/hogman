@@ -361,7 +361,7 @@ func cli(ctx context.Context, s *Service, args []string) error {
 			return err
 		}
 		fmt.Printf("key:   %s\n", key)
-		fmt.Printf("link:  %s\n", s.DeviceLink(key))
+		fmt.Printf("link:  %s\n", s.DeviceLink(key, rest[1]))
 		fmt.Printf("valid until %s, single use\n", ts(exp))
 	case "device list":
 		ds, err := s.st.LiveDevices()

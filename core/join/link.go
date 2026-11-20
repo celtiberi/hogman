@@ -23,6 +23,7 @@ type Link struct {
 	Host        string // the network's public control host
 	InviteToken string
 	DeviceKey   string
+	ForShare    bool   // a server link: only for `hogman-join share`, never a whole-computer join
 	Fingerprint string // SHA-256 of the root certificate, uppercase hex, no colons
 }
 
@@ -50,7 +51,8 @@ func ParseLink(raw string) (*Link, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the part after # is damaged: %w", err)
 	}
-	l := &Link{Host: u.Host, InviteToken: q.Get("t"), DeviceKey: q.Get("k"), Fingerprint: normaliseFP(q.Get("fp"))}
+	l := &Link{Host: u.Host, InviteToken: q.Get("t"), DeviceKey: q.Get("k"), Fingerprint: normaliseFP(q.Get("fp")),
+		ForShare: q.Get("for") == "share"}
 	switch {
 	case l.InviteToken == "" && l.DeviceKey == "":
 		return nil, errors.New("the link has no invite or device key in it; was it copied whole?")

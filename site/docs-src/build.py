@@ -19,9 +19,7 @@ PAGES = [  # (file, nav title, page title, description, sidebar group)
     ("use-cases", "Use cases", "Use cases, worked through", "Families, clubs, small companies, customer portals and side projects, set up step by step.", "Start here"),
     ("faq", "FAQ and troubleshooting", "FAQ and troubleshooting", "Common questions, and fixes for the problems people actually hit.", "Start here"),
     ("how-it-works", "How it works", "How Hogman works", "The parts of a pen, what happens on the wire, and what the keeper can and can't see.", "Going deeper"),
-    ("servers", "Your own web server", "Your own web server (advanced)", "For the technically minded: run Caddy or any ACME client on a server in the pen, with the pen's certificate authority.", "Going deeper"),
     ("self-host", "Raising your own pen", "Raising your own pen", "Run Hogman on a server of your own: what you need and where the full guide is.", "Going deeper"),
-    ("advanced", "Advanced (less safe)", "Advanced", "Options that open your computer up further than Hogman's HTTPS-only default, and why we don't recommend them.", "Going deeper"),
 ]
 
 HEAD = """<!doctype html>

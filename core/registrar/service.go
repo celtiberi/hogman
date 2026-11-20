@@ -151,8 +151,15 @@ func (s *Service) InviteLink(token string) string {
 	return fmt.Sprintf("https://%s/join#t=%s&fp=%s", s.cfg.PublicHost, token, s.rootFP)
 }
 
-func (s *Service) DeviceLink(key string) string {
-	return fmt.Sprintf("https://%s/join#k=%s&fp=%s", s.cfg.PublicHost, key, s.rootFP)
+// DeviceLink is the one-time link for a device key. A server key's link is
+// marked for=share: server links only put things in the pen with
+// `hogman-join share`, they don't join a whole computer (D-11).
+func (s *Service) DeviceLink(key, kind string) string {
+	link := fmt.Sprintf("https://%s/join#k=%s&fp=%s", s.cfg.PublicHost, key, s.rootFP)
+	if kind == "server" {
+		link += "&for=share"
+	}
+	return link
 }
 
 // ------------------------------------------------------------- validation --

@@ -167,19 +167,15 @@ func runAgent(dir string) error {
 		}
 		a.up = true
 		log.Printf("on %s as %s", c.Zone, strings.Join(a.ips, ", "))
-		// A server hosts sites: pass the pen's web ports to this computer, where
-		// Caddy (or anything else) listens. Personal devices get no visitors
-		// (the pen's access rules refuse them), so they don't need it.
+		// A computer joins as a personal device only. Things that serve the pen
+		// are shares, each a device of its own (D-11): nothing on this computer
+		// is ever exposed to the pen. If the pen made this a server (an old,
+		// unmarked server link), report it; joinAlongside refuses and leaves.
 		if st.Self != nil && st.Self.Tags != nil {
 			for _, t := range st.Self.Tags.All() {
 				if t == "tag:server" {
 					a.server = true
 				}
-			}
-		}
-		if a.server {
-			for _, port := range []string{"80", "443"} {
-				go forwardPort(node, port)
 			}
 		}
 	}()
@@ -191,44 +187,6 @@ func runAgent(dir string) error {
 	defer cancel()
 	_ = srv.Shutdown(shut)
 	return nil
-}
-
-// forwardPort passes connections to the pen's port to the same port on this
-// computer, untouched (TLS stays end to end, so Caddy here gets its HTTP-01
-// and TLS-ALPN challenges and its visitors as if it were on the mesh itself).
-func forwardPort(node *tsnet.Server, port string) {
-	ln, err := node.Listen("tcp", ":"+port)
-	if err != nil {
-		log.Printf("cannot take the pen's port %s: %v", port, err)
-		return
-	}
-	for {
-		in, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go func() {
-			defer in.Close()
-			out, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 5*time.Second)
-			if err != nil {
-				log.Printf("a visitor came to port %s, but nothing listens on 127.0.0.1:%s", port, port)
-				return
-			}
-			defer out.Close()
-			done := make(chan struct{}, 2)
-			pipe := func(dst, src net.Conn) {
-				_, _ = io.Copy(dst, src)
-				if cw, ok := dst.(closeWriter); ok {
-					_ = cw.CloseWrite()
-				}
-				done <- struct{}{}
-			}
-			go pipe(out, in)
-			go pipe(in, out)
-			<-done
-			<-done
-		}()
-	}
 }
 
 type agent struct {
@@ -341,7 +299,7 @@ type agentStatus struct {
 	Up     bool     `json:"up"`
 	Error  string   `json:"error,omitempty"`
 	IPs    []string `json:"ips,omitempty"`
-	Server bool     `json:"server,omitempty"` // a server: the pen's 80/443 reach this computer
+	Server bool     `json:"server,omitempty"` // the pen tagged this device a server (refused)
 }
 
 // dial opens a connection to a pen host. Anything outside the pen is refused:

@@ -36,9 +36,7 @@
 <p class="docs-nav-h">Going deeper</p>
 <ul>
 <li><a href="/docs/how-it-works.html" aria-current="page">How it works</a></li>
-<li><a href="/docs/servers.html">Your own web server</a></li>
 <li><a href="/docs/self-host.html">Raising your own pen</a></li>
-<li><a href="/docs/advanced.html">Advanced (less safe)</a></li>
 </ul>
 </aside>
 <main class="docs-main">
@@ -142,8 +140,12 @@
     <tr><td>Anything else</td><td>Nobody</td><td>Nothing</td></tr>
   </tbody>
 </table>
-<p>Hogman carries HTTPS and nothing else: no ssh, no other ports, no ping between devices.
-  The best way to secure a surface is not to have it. The policy lists device addresses, not tags. So suspending someone is just leaving their
+<blockquote class="placard">
+  <p>Sometimes the best security fix for a surface is just to delete the surface.</p>
+</blockquote>
+<p>So Hogman carries HTTPS and nothing else: no ssh, no other ports, no ping between devices, no
+  joining a whole computer as a server. Things that serve the pen are shares, each a small
+  device of its own. The policy lists device addresses, not tags. So suspending someone is just leaving their
   devices out (instant and reversible), and a device that somehow joined without going through
   the registrar is in no rule at all and can reach nothing.</p>
 

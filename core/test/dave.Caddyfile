@@ -1,9 +1,0 @@
-# Dave's site, on a server that joined side by side (no Tailscale installed).
-# Caddy reaches the pen's CA through the join tool's proxy (HTTPS_PROXY), on port 443 (the proxy carries only 443 and 80).
-{
-	acme_ca https://ca.{$ZONE}/acme/acme/directory
-	admin off
-}
-daveweb.{$ZONE} {
-	respond "hello from daveweb.{$ZONE}"
-}
