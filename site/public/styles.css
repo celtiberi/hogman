@@ -198,3 +198,12 @@ footer p { margin: 0.2rem 0; }
   font-size: 1rem; border: 1px dashed #ffc23366; border-radius: 6px; color: var(--ash); }
 .how-contrast strong { color: var(--bone); }
 .after-join { margin-top: 1.8rem; }
+
+/* ---------- under the hood ---------- */
+.parts { margin: 0; }
+.parts dt { font: 400 1.05rem var(--display); letter-spacing: 0.04em; text-transform: uppercase; color: var(--gold); margin-top: 0.9rem; }
+.parts dt:first-child { margin-top: 0; }
+.parts dd { margin: 0.2rem 0 0; color: var(--bone); }
+.parts a, .sub a { color: var(--gold); }
+.tech h3 { margin: 0 0 0.5rem; }
+.tech .term + h3 { margin-top: 1.3rem; }
