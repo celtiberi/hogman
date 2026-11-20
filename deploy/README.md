@@ -65,6 +65,52 @@ hogman-host upgrade bobo                                   # restart a pen on it
 Members stay joined; their devices reconnect by themselves after the pen restarts (about 20
 seconds on a small server).
 
+## Backups
+
+Every night at 03:30 UTC the server packs each pen (its member ledger, Headscale's database,
+names, the intermediate CA, settings) and encrypts it to a key the server doesn't have. The
+root key is never in a backup; it should already be off the server.
+
+1. On your own computer, make the backup key and keep the private half in your password
+   manager, not on disk:
+
+   ```bash
+   age-keygen -o backup-key.txt      # prints the public key: age1...
+   ```
+
+2. On the server:
+
+   ```bash
+   hogman-host backup-setup age1...  # installs age, the nightly timer, takes a first backup
+   ```
+
+3. Get the backups off the server. On a machine you own (an always-on Mac mini is ideal),
+   make a key, then allow it on the server. That key can list and download backups, and
+   nothing else: no shell, no other files, no forwarding.
+
+   ```bash
+   ssh-keygen -t ed25519 -N "" -f ~/.ssh/hogman_backup                # on that machine
+   hogman-host backup-allow "$(cat hogman_backup.pub)"                # on the server
+   deploy/backup-pull.sh hogman-1                                     # on that machine
+   ```
+
+   Run `backup-pull.sh` on a schedule (cron, or a LaunchDaemon on a Mac). It keeps 30 days;
+   the server keeps 7.
+
+**Restoring.** With the private key back out of your password manager:
+
+```bash
+age -d -i backup-key.txt farm-<time>.tar.gz.age | tar -xz -C restore/
+```
+
+`restore/data` is the pen's `data/` folder and `restore/.env` its settings. Put both in
+`/opt/hogman/pens/<name>/` on a server with Hogman installed (on a new server, fix
+`PUBLIC_IPV4` in `.env` and point the pen's hostname at it), then `hogman-host upgrade <name>`.
+Members keep their names, and their devices reconnect by themselves. Delete `backup-key.txt`
+afterwards.
+
+`hogman-host backup` takes one now.
+
 ## Everyday
 
 ```bash

@@ -278,6 +278,9 @@ use_prebuilt_or_build() {
 cmd_up() {
   load_env
   [ -f "$DATA/pki/public/root_ca.crt" ] || die "run ./hogman init first."
+  # Folders a backup leaves out. Made here, as us: if Docker made them, they
+  # would belong to root and step-ca could not write its database.
+  mkdir -p "$DATA"/{step/db,edge,portal,join-dl,tmp}
 
   if [ -z "${CORE_MESH_IP:-}" ]; then
     info "First start: bootstrapping"

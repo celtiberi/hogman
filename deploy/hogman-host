@@ -254,7 +254,13 @@ cmd_upgrade() {
   local n="${1:-}"
   valid_name "$n" || die "invalid network name: $n"
   [ -d "$PENS/$n" ] || die "no pen $n"
+  [ -f "$PENS/$n/.env" ] || die "pen $n has no .env (restoring? put the backup's .env and data/ in $PENS/$n)"
   rsync -a --exclude data --exclude .env "$SRC/" "$PENS/$n/"
+  # Also brings back a pen restored from a backup onto a new server.
+  rm -f "$PENS/$n/.removed"
+  docker network inspect "pen-$n-core" >/dev/null 2>&1 || docker network create "pen-$n-core" >/dev/null
+  write_front
+  reload_front
   local front_ca=""
   [ -n "${FRONT_TLS_MODE:-}" ] && front_ca="$FRONT/data/caddy/pki/authorities/local/root.crt"
   (cd "$PENS/$n" && FRONT_CA="$front_ca" ./hogman up)

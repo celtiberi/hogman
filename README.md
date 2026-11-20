@@ -140,7 +140,7 @@ Tailscale. If that's too much trust, raise your own.
 
 ## Status
 
-**Experimental.** Young security software: not audited, and not yet run on a public server.
+**Experimental.** Young security software, not audited, with one public pen so far.
 Try it, break it, tell us what you find. Don't trust it with anything that matters yet.
 
 | On tour now | Not on the bill yet |
@@ -150,7 +150,8 @@ Try it, break it, tell us what you find. Don't trust it with anything that matte
 | Many pens on one server, kept apart | Hosted pens (first server going up) |
 | A one-line installer for servers; updates in under a minute | A security audit |
 | A real pen live on the internet: `farm.hogman`, joined from a Mac | |
-| End-to-end tests: 105 checks for a pen, 26 for a shared host | |
+| Nightly encrypted backups, pulled to a machine you own; restore tested | |
+| End-to-end tests: 105 checks for a pen, 32 for a shared host | |
 
 **Found a security problem?** Please don't open a public issue. Report it privately
 with GitHub's **Security → Report a vulnerability** button on this repository.

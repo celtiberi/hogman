@@ -96,6 +96,23 @@ fp_z="$(in_client zebra curl -sf https://control.zebra.example/hogman/v1/network
 check "each pen has its own certificate authority" test -n "$fp_b" -a "$fp_b" != "$fp_z"
 check "bobo's members are not zebra's" sh -c "! '$HOST' pen zebra member list | grep -q bobo-owner"
 
+step "Restore a pen from a backup, as on a new server"
+# What hogman-host backup keeps: .env and data/, minus what the pen rebuilds.
+(cd "$HOGMAN_HOME/pens/zebra" && tar -czf "$HOGMAN_HOME/zebra-backup.tar.gz" \
+  --exclude data/join-dl --exclude data/edge --exclude data/portal --exclude data/step/db --exclude data/tmp .env data)
+"$HOST" remove zebra >/dev/null 2>&1
+mv "$HOGMAN_HOME/pens/zebra" "$HOGMAN_HOME/zebra-old"
+check "zebra is gone" fails docker network inspect pen-zebra-core
+mkdir "$HOGMAN_HOME/pens/zebra" && tar -xzf "$HOGMAN_HOME/zebra-backup.tar.gz" -C "$HOGMAN_HOME/pens/zebra"
+out="$("$HOST" upgrade zebra 2>&1)"; rc=$?
+[ $rc = 0 ] || echo "$out" | tail -15 | sed 's/^/        | /'
+check "hogman-host upgrade brings the restored pen up (exit $rc)" test $rc = 0
+restored() { in_client zebra curl -sf https://control.zebra.example/hogman/v1/network | jq -e --arg f "$fp_z" '.root_fingerprint == $f'; }
+check "the restored pen answers with its own certificate authority" retry 30 restored
+check "the restored pen kept its members" sh -c "'$HOST' pen zebra member list | grep -q zebra-owner"
+check "the restored pen kept its devices" sh -c "'$HOST' pen zebra device list | grep -q 'member1.*laptop'"
+check "the restored pen is listed as running" sh -c "'$HOST' list | grep zebra | grep -q running"
+
 step "Host & secret hardening"
 check "hogman-host pen rejects path traversal"     fails "$HOST" pen ../front status
 check "hogman-host upgrade rejects path traversal" fails "$HOST" upgrade ../front
