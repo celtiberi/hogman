@@ -406,7 +406,12 @@ wait "$SPIKE_PID" >/dev/null 2>&1 || true
 SPIKE_PID=""
 check "6a. hogman0 interface gone after leave/SIGTERM" fails ip link show hogman0
 check "6b. 198.19.0.0/16 route gone after teardown" bash -c "! ip route show | grep -q '198\.19\.'"
-check "6c. resolvectl has no hogman0 after teardown" fails resolvectl status hogman0
+resolvectl_clean() {
+  local st
+  st="$(resolvectl status 2>&1)" || return 1
+  ! grep -qE 'hogman0|198\.19\.0\.53|bobo\.hogman|zebra\.hogman' <<<"$st"
+}
+check "6c. resolvectl has no hogman0 or pen DNS after teardown" retry 10 resolvectl_clean
 check "6d. work-peer MagicDNS STILL works after spike teardown" work_dns_ok
 
 step "Side-by-side baseline throughput & CPU benchmark (50 MiB)"
