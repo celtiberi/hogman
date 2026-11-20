@@ -196,15 +196,17 @@ func shareUnitName(c *shareConfig) string { return "hogman-share-" + c.fqdn() + 
 
 // renderLaunchPlist builds a macOS LaunchAgent plist for a pen agent.
 func renderLaunchPlist(label, bin, dir, logPath string) (string, error) {
-	return renderLaunchPlistArgs(label, bin, []string{"agent", dir}, logPath)
+	return renderLaunchPlistArgs(label, bin, []string{"agent", dir}, logPath, false)
 }
 
 func renderShareLaunchPlist(c *shareConfig, bin, dir string) (string, error) {
-	return renderLaunchPlistArgs(shareLaunchLabel(c), bin, []string{"__share-run", dir}, filepath.Join(dir, "share.log"))
+	return renderLaunchPlistArgs(shareLaunchLabel(c), bin, []string{"__share-run", dir}, filepath.Join(dir, "share.log"), true)
 }
 
 // renderLaunchPlistArgs builds a macOS LaunchAgent plist with XML-escaped strings.
-func renderLaunchPlistArgs(label, bin string, args []string, logPath string) (string, error) {
+// When stopOnZeroExit is true, launchd stops relaunching on exit 0 and backs
+// off restarts by 30s on transient non-zero failures.
+func renderLaunchPlistArgs(label, bin string, args []string, logPath string, stopOnZeroExit bool) (string, error) {
 	el, err := xmlEscape(label)
 	if err != nil {
 		return "", err
@@ -230,17 +232,21 @@ func renderLaunchPlistArgs(label, bin string, args []string, logPath string) (st
 		prog.WriteString(ea)
 		prog.WriteString("</string>")
 	}
+	keepAlive := "<key>KeepAlive</key><true/>"
+	if stopOnZeroExit {
+		keepAlive = "<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n  <key>ThrottleInterval</key><integer>30</integer>"
+	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>%s</string>
   <key>ProgramArguments</key><array>%s</array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  %s
   <key>StandardOutPath</key><string>%s</string>
   <key>StandardErrorPath</key><string>%s</string>
 </dict></plist>
-`, el, prog.String(), ep, ep), nil
+`, el, prog.String(), keepAlive, ep, ep), nil
 }
 
 func systemdQuote(s string) string {
@@ -269,11 +275,13 @@ func renderShareSystemdUnit(c *shareConfig, bin, dir string) string {
 	return fmt.Sprintf(`[Unit]
 Description=Hogman share (%s)
 After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 ExecStart=%s __share-run %s
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=30
 
 [Install]
 WantedBy=default.target

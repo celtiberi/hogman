@@ -432,19 +432,78 @@ func shareFromMembership(name string, o options) (*shareConfig, string, error) {
 
 // --------------------------------------------------------------- serving --
 
+// permanentShareError marks failures where automatic restarts cannot help
+// (such as a refused share name, removed device, or invalid config).
+type permanentShareError struct{ err error }
+
+func (e *permanentShareError) Error() string { return e.err.Error() }
+func (e *permanentShareError) Unwrap() error { return e.err }
+
+func permanentShare(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &permanentShareError{err: err}
+}
+
+func isPermanentShareError(err error) bool {
+	var p *permanentShareError
+	return errors.As(err, &p)
+}
+
+func shareExitCode(err error) int {
+	if err == nil || isPermanentShareError(err) {
+		return 0
+	}
+	return 1
+}
+
+func isPermanentNameStatus(code int) bool {
+	return code >= 400 && code < 500 && code != http.StatusRequestTimeout && code != http.StatusTooManyRequests
+}
+
+func isPermanentNodeError(hasAuthKey bool, backendState string, err error) bool {
+	if err == nil {
+		return false
+	}
+	if !hasAuthKey && backendState == "NeedsLogin" {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, needle := range []string{"invalid authkey", "authkey expired", "auth key", "not authorized", "unauthorized", "node not found"} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 // shareNode brings a share's own device onto the pen and returns it with a
 // client for reaching the pen through it.
 func shareNode(ctx context.Context, dir string, c *shareConfig) (*tsnet.Server, *agent, *http.Client, error) {
 	ac := c.agentConfig()
 	ac.trustControlCA()
 	key, _ := os.ReadFile(filepath.Join(dir, "authkey"))
-	node := newNode(dir, ac, strings.TrimSpace(string(key)))
+	authKey := strings.TrimSpace(string(key))
+	node := newNode(dir, ac, authKey)
 	upCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	st, err := node.Up(upCtx)
 	if err != nil {
+		var backendState string
+		if lc, lerr := node.LocalClient(); lerr == nil {
+			sctx, scancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if status, serr := lc.StatusWithoutPeers(sctx); serr == nil && status != nil {
+				backendState = status.BackendState
+			}
+			scancel()
+		}
 		node.Close()
-		return nil, nil, nil, errorf("the share could not join the pen: %v", err)
+		out := errorf("the share could not join the pen: %v", err)
+		if isPermanentNodeError(authKey != "", backendState, err) {
+			return nil, nil, nil, permanentShare(out)
+		}
+		return nil, nil, nil, out
 	}
 	_ = os.Remove(filepath.Join(dir, "authkey")) // single use, and now spent
 	server := false
@@ -455,7 +514,7 @@ func shareNode(ctx context.Context, dir string, c *shareConfig) (*tsnet.Server, 
 	}
 	if !server {
 		node.Close()
-		return nil, nil, nil, errorf("that link adds a personal device, which can't be visited. Use a share link (Get a share link on your home page)")
+		return nil, nil, nil, permanentShare(errorf("that link adds a personal device, which can't be visited. Use a share link (Get a share link on your home page)"))
 	}
 	a := newAgent(ac, node)
 	pool := x509.NewCertPool()
@@ -489,7 +548,8 @@ func untilOK(ctx context.Context, d time.Duration, fn func() (retry bool, err er
 func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error {
 	c, err := loadShare(dir)
 	if err != nil {
-		return err
+		writeShareStatus(dir, "error", err.Error())
+		return permanentShare(err)
 	}
 	// Foreground or background, the pid file says a share is running, so
 	// list, stop and a second start all see it.
@@ -508,8 +568,10 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 	defer node.Close()
 
 	// Name ourselves.
+	var lastCode int
 	err = untilOK(ctx, 90*time.Second, func() (bool, error) {
 		code, err := homeAPI(hc, c.Zone, "POST", "/names", map[string]string{"name": c.Name, "note": c.Note}, nil)
+		lastCode = code
 		if err == nil {
 			return false, nil
 		}
@@ -525,7 +587,11 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 			_ = os.RemoveAll(filepath.Join(dir, "node"))
 			_ = os.Remove(filepath.Join(dir, "share.json"))
 		}
-		return fail(errorf("could not claim %s: %v", c.fqdn(), err))
+		out := errorf("could not claim %s: %v", c.fqdn(), err)
+		if ctx.Err() == nil && isPermanentNameStatus(lastCode) {
+			return fail(permanentShare(out))
+		}
+		return fail(out)
 	}
 
 	m := &autocert.Manager{
@@ -583,7 +649,7 @@ func shareHandler(c *shareConfig) (http.Handler, func(), error) {
 	}
 	u, err := url.Parse(c.Target)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, permanentShare(err)
 	}
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {

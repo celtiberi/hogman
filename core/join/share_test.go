@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/xml"
+	"errors"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -146,21 +148,88 @@ func TestShareServiceTemplates(t *testing.T) {
 		"/tmp/dir &lt;1&gt; &amp; 2/shares/blog",
 		"/tmp/dir &lt;1&gt; &amp; 2/shares/blog/share.log",
 		"<key>RunAtLoad</key><true/>",
-		"<key>KeepAlive</key><true/>",
+		"<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>",
+		"<key>ThrottleInterval</key><integer>30</integer>",
 	} {
 		if !strings.Contains(plist, want) {
 			t.Fatalf("share plist missing %q:\n%s", want, plist)
 		}
 	}
+	if strings.Contains(plist, "<key>KeepAlive</key><true/>") {
+		t.Fatalf("share plist must not keep restarting on exit 0:\n%s", plist)
+	}
 
 	unit := renderShareSystemdUnit(c, `/tmp/bin "q"`, `/tmp/dir "x"\y`)
 	for _, want := range []string{
 		"Description=Hogman share (blog.bobo.hogman)",
+		"StartLimitIntervalSec=300",
+		"StartLimitBurst=5",
 		`ExecStart="/tmp/bin \"q\"" __share-run "/tmp/dir \"x\"\\y"`,
-		"Restart=always",
+		"Restart=on-failure",
+		"RestartSec=30",
 	} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("share systemd unit missing %q:\n%s", want, unit)
+		}
+	}
+	if strings.Contains(unit, "Restart=always") {
+		t.Fatalf("share systemd unit must not use Restart=always:\n%s", unit)
+	}
+}
+
+func TestSharePermanentErrorClassification(t *testing.T) {
+	if got := shareExitCode(nil); got != 0 {
+		t.Fatalf("shareExitCode(nil) = %d, want 0", got)
+	}
+	if got := shareExitCode(errors.New("transient dial error")); got != 1 {
+		t.Fatalf("shareExitCode(transient) = %d, want 1", got)
+	}
+	perm := permanentShare(errorf("could not claim blog.bobo.hogman"))
+	if !isPermanentShareError(perm) {
+		t.Fatal("expected isPermanentShareError(perm) = true")
+	}
+	if got := shareExitCode(perm); got != 0 {
+		t.Fatalf("shareExitCode(perm) = %d, want 0", got)
+	}
+
+	statusCases := []struct {
+		code int
+		want bool
+	}{
+		{0, false},
+		{http.StatusBadRequest, true},
+		{http.StatusForbidden, true},
+		{http.StatusNotFound, true},
+		{http.StatusConflict, true},
+		{http.StatusRequestTimeout, false},
+		{http.StatusTooManyRequests, false},
+		{http.StatusInternalServerError, false},
+		{http.StatusBadGateway, false},
+		{http.StatusServiceUnavailable, false},
+	}
+	for _, tc := range statusCases {
+		if got := isPermanentNameStatus(tc.code); got != tc.want {
+			t.Fatalf("isPermanentNameStatus(%d) = %v, want %v", tc.code, got, tc.want)
+		}
+	}
+
+	nodeCases := []struct {
+		name       string
+		hasAuthKey bool
+		state      string
+		err        error
+		want       bool
+	}{
+		{"nil error", false, "NeedsLogin", nil, false},
+		{"removed device needs login without key", false, "NeedsLogin", errors.New("context deadline exceeded"), true},
+		{"initial join with key briefly needs login", true, "NeedsLogin", errors.New("context deadline exceeded"), false},
+		{"offline at boot while starting", false, "Starting", errors.New("context deadline exceeded"), false},
+		{"invalid authkey message", true, "", errors.New("tsnet.Up: backend: invalid authkey"), true},
+		{"transient network timeout", true, "", errors.New("dial tcp: i/o timeout"), false},
+	}
+	for _, tc := range nodeCases {
+		if got := isPermanentNodeError(tc.hasAuthKey, tc.state, tc.err); got != tc.want {
+			t.Fatalf("isPermanentNodeError(%s) = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
