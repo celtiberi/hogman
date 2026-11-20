@@ -1,32 +1,25 @@
 # Front-door mode (FRONT_DOOR=true in .env): this pen shares a host with other
-# pens. The host's front door (deploy/hogman-host) holds ports 80/443 and the
-# public certificate for every pen, and passes this pen's traffic to its edge
-# as plain HTTP.
+# pens. The host's shared front door (deploy/hogman-host) holds ports 80/443,
+# terminates TLS, serves /join and /join/dl, blocks /api/* and /swagger*, and
+# proxies /hogman/* to this pen's registrar (core-mesh:8081) and everything
+# else to its headscale (:8080) over this pen's private network.
 #
-# Isolation: only this pen's edge joins the shared "hogman-front" network, and
-# only under a name unique to this pen. Nothing else of the pen is on it. (Every
-# container on a network answers to its service name there, so a shared
-# "core-mesh" would mix pens up.) The front door instead joins this pen's own
-# private network, where it answers for the pen's control hostname, so the
-# pen's core reaches its control server the way members do.
+# Isolation: no container of this pen joins the shared "hogman-front" network.
+# Every container stays on this pen's own private network ("pen-<name>-core").
+# The front door joins each pen's private network and addresses each pen by its
+# unique container names (pen-<name>-core-mesh-1, pen-<name>-headscale-1).
 
 services:
   edge:
-    ports: !reset []
-    volumes: !override
-      - ./config/edge-behind-front.Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./data/edge:/data
-      - ./join-page:/srv/join-page:ro
-      - ./data/join-dl:/srv/join-dl:ro
-    networks: !override
-      core: {}
-      hogman-front:
-        aliases: ["edge-${NETWORK}"]
+    # Unused behind the shared front door; standalone installs omit this file.
+    profiles: [standalone]
+
+  core-mesh:
+    depends_on: !override
+      headscale: { condition: service_healthy }
 
 networks:
   core:
     # Created by hogman-host before the pen starts, so the front door can join it.
     name: pen-${NETWORK}-core
-    external: true
-  hogman-front:
     external: true

@@ -84,15 +84,35 @@ for pen in bobo zebra; do
 done
 
 step "Pens are separate"
-same_core() {  # every lookup of core-mesh from a pen's edge lands on that pen's own core
-  local pen="$1" own; own="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "pen-$pen-core-mesh-1")"
+check "bobo has no per-pen edge container"  fails docker inspect pen-bobo-edge-1
+check "zebra has no per-pen edge container" fails docker inspect pen-zebra-edge-1
+check "bobo runs 6 containers"  test "$(docker ps -q --filter name=^/pen-bobo- | wc -l | tr -d ' ')" = 6
+check "zebra runs 6 containers" test "$(docker ps -q --filter name=^/pen-zebra- | wc -l | tr -d ' ')" = 6
+pen_isolated() {  # no container in a pen joins hogman-front or another pen's network
+  local pen="$1" nets
+  nets="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "pen-$pen-core-mesh-1" "pen-$pen-headscale-1")"
+  [ "$(tr ' ' '\n' <<<"$nets" | grep -v '^$' | sort -u | tr '\n' ' ')" = "pen-$pen-core " ]
+}
+check "bobo's containers stay off hogman-front and zebra" pen_isolated bobo
+check "zebra's containers stay off hogman-front and bobo" pen_isolated zebra
+front_dns_ok() {  # the front door resolves each pen's unique container names only to that pen
+  local pen="$1" want_core want_hs got_core got_hs
+  want_core="$(docker inspect -f '{{(index .NetworkSettings.Networks "pen-'"$pen"'-core").IPAddress}}' "pen-$pen-core-mesh-1")"
+  want_hs="$(docker inspect -f '{{(index .NetworkSettings.Networks "pen-'"$pen"'-core").IPAddress}}' "pen-$pen-headscale-1")"
   for _ in 1 2 3 4 5 6; do
-    ip="$(docker exec "pen-$pen-edge-1" getent hosts core-mesh | awk '{print $1}' | head -1)"
-    grep -qw "$ip" <<<"$own" || return 1
+    got_core="$(docker exec hogman-front-front-1 getent hosts "pen-$pen-core-mesh-1" | awk '{print $1}' | head -1)"
+    got_hs="$(docker exec hogman-front-front-1 getent hosts "pen-$pen-headscale-1" | awk '{print $1}' | head -1)"
+    [ "$got_core" = "$want_core" ] && [ "$got_hs" = "$want_hs" ] || return 1
   done
 }
-check "bobo's edge only ever reaches bobo's core" same_core bobo
-check "zebra's edge only ever reaches zebra's core" same_core zebra
+check "front door reaches only bobo's core and headscale"  front_dns_ok bobo
+check "front door reaches only zebra's core and headscale" front_dns_ok zebra
+check "front door hides Headscale admin API (404)" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/api/v1/node)" = 404
+check "front door hides Headscale Swagger (404)"   test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/swagger)" = 404
+join_hdrs="$(in_client bobo curl -sI https://control.bobo.example/join | tr -d '\r')"
+check "front door sets anti-framing headers on /join" sh -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\"" _ "$join_hdrs"
+check "front door serves /join/assets/join.js" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/join/assets/join.js)" = 200
+check "front door serves /join/dl/SHA256SUMS"  test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/join/dl/SHA256SUMS)" = 200
 cross() { in_client bobo curl -sf "https://control.zebra.example/hogman/v1/network" | jq -e '.zone == "zebra.hogman"'; }
 check "both control hosts answer through the same front door" cross
 fp_b="$(in_client bobo curl -sf https://control.bobo.example/hogman/v1/network | jq -r .root_fingerprint)"
