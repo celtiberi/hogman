@@ -229,6 +229,7 @@ EOF
   [ -n "${FRONT_TLS_MODE:-}" ] && front_ca="$FRONT/data/caddy/pki/authorities/local/root.crt"
   (cd "$PENS/$n" && ./hogman init && FRONT_CA="$front_ca" ./hogman up)
   info "Pen $n is up. Create its owner:  hogman-host pen $n member add <handle> --role owner"
+  info "Then join your own laptop:      hogman-host pen $n device key <handle> personal  (open the link on it)"
   info "Its root key is in $PENS/$n/data/pki/offline/: move it somewhere safe and delete it here."
 }
 

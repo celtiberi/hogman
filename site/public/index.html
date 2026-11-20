@@ -187,6 +187,9 @@
 <span class="p">$</span> hogman-host add mypen hs.example.com
 <span class="p">$</span> hogman-host pen mypen member add you --role owner
 
+<span class="c"># get your own laptop in: open the link it prints there</span>
+<span class="p">$</span> hogman-host pen mypen device key you personal
+
 <span class="c"># let a clean one in</span>
 <span class="p">$</span> hogman-host pen mypen invite create --note "alice, clean pig"
 
@@ -200,6 +203,9 @@ revoked, 1 names held until 2027-02-17 20:54</pre>
         the internet, and move the pen's root key somewhere safe.</p>
       <p>Run the same <code>curl</code> again to update. One server holds as many pens as you
         like, each walled off from the others.</p>
+      <p><a href="https://github.com/celtiberi/hogman/blob/main/deploy/README.md"><strong>The keeper's guide &rarr;</strong></a>
+        Step by step from an empty server: the hostname, locking it down, your own devices,
+        nightly backups, alerts on your phone, updating.</p>
       <p class="fine">Invited to someone else's pen? Nothing to install up front. Open your invite
         link and copy the one command it gives you.</p>
       <h3>On tour now</h3>

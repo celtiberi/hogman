@@ -1,6 +1,83 @@
-# Running pens on a server
+# The keeper's guide
 
-Two tools for a real server:
+Everything to raise a pen on a server of your own, from an empty server to your first
+guests, plus keeping it backed up, watched and up to date.
+
+## Before you start
+
+- **A server**: Ubuntu 24.04, 2 GB of memory, a public IPv4 address. A $12-a-month
+  DigitalOcean droplet or similar is plenty, and one server holds many pens.
+- **A hostname you control** for each pen's front gate, such as `hs.example.com`. Members'
+  devices connect to it.
+- **A free Tailscale account** (recommended), so you manage the server over your own
+  tailnet and close SSH to the internet. Hogman runs side by side with it.
+- **A password manager**, for the pen's root key.
+
+## Your first pen
+
+1. **Point the hostname at the server** with an A record to its IPv4 address. On
+   Cloudflare, leave it *DNS only* (grey cloud), not proxied. Do this first: the pen fetches
+   its certificate through that name.
+
+2. **Install.** Log in to the server and run:
+
+   ```bash
+   curl -fsSL https://hogman.network/install.sh | sudo bash
+   ```
+
+   This sets the server up (security updates, Docker, Tailscale, firewall, swap), installs
+   Hogman into `/opt/hogman`, and starts the front door. The code comes from a release on
+   hogman.network, checked against its published SHA-256, with the join tool and registrar
+   already compiled.
+
+3. **Lock the server down.** Manage it over your own tailnet, and close SSH to the internet:
+
+   ```bash
+   tailscale up --hostname=hogman-1                  # open the link it prints
+   bash /opt/hogman/bootstrap.sh --lock-ssh          # from now on: ssh root@hogman-1
+   ```
+
+4. **Raise the pen** and make yourself its keeper:
+
+   ```bash
+   hogman-host add mypen hs.example.com
+   hogman-host pen mypen member add you --role owner
+   ```
+
+   The pen's names end in `.mypen.hogman`.
+
+5. **Get your own laptop in.** This makes a one-time link for one of your devices:
+
+   ```bash
+   hogman-host pen mypen device key you personal
+   ```
+
+   Open the link on your laptop (macOS or Linux). It shows one command to copy into a
+   terminal; that trusts the pen's certificates and joins. You then land on your pen's home
+   page, where you can add your other devices yourself. Run it again for each device you
+   want to add from the server.
+
+6. **Take the root key off the server.** The pen runs without it; you need it only to
+   replace the pen's intermediate certificate, years from now. Copy it to your computer,
+   put the three files in your password manager, then delete both copies:
+
+   ```bash
+   scp -r root@hogman-1:/opt/hogman/pens/mypen/data/pki/offline ./mypen-root   # on your computer
+   rm -rf /opt/hogman/pens/mypen/data/pki/offline/*                            # on the server
+   ```
+
+7. **Let others in.** Each invite is a link for one person. They open it, pick a name, and
+   copy one command:
+
+   ```bash
+   hogman-host pen mypen invite create --note "alice"
+   ```
+
+   Then set up [backups](#backups) and [alerts](#knowing-when-it-breaks), below.
+
+## How a shared server works
+
+Two tools run a real server:
 
 - **`bootstrap.sh`** sets up a fresh Ubuntu 24.04 server: automatic security updates,
   Docker, Tailscale (so you manage it over your own tailnet), a firewall that only opens the
@@ -8,8 +85,6 @@ Two tools for a real server:
 - **`hogman-host`** runs any number of pens behind one shared **front door**. The front
   door holds ports 80 and 443 and a Let's Encrypt certificate for every pen's control
   hostname, and hands each pen's traffic to that pen alone.
-
-## What is shared, and what isn't
 
 | Shared by all pens | Each pen's own |
 |---|---|
@@ -21,39 +96,6 @@ server and the pen moves with it.
 The front door joins each pen's private network; pens never share a network with each
 other's core. `test-host.sh` checks this: two pens on one host, a member joining each, and
 neither pen able to reach the other.
-
-## Setting up a server
-
-1. Create an Ubuntu 24.04 server with your SSH key, log in, and install:
-
-   ```bash
-   curl -fsSL https://hogman.network/install.sh | sudo bash
-   ```
-
-   This sets the server up (security updates, Docker, Tailscale, firewall, swap), installs
-   Hogman into `/opt/hogman`, and starts the front door. The code comes from a release on
-   hogman.network, checked against its published SHA-256, with the join tool and registrar
-   already compiled.
-
-2. Manage the server over your own tailnet, and close SSH to the internet:
-
-   ```bash
-   tailscale up --hostname=hogman-1                  # open the link it prints
-   bash /opt/hogman/bootstrap.sh --lock-ssh          # from now on: ssh root@hogman-1
-   ```
-
-3. For each pen, point its control hostname at the server (an A record, not proxied, if the
-   DNS is on Cloudflare), then:
-
-   ```bash
-   hogman-host add bobo hs.example.com
-   hogman-host pen bobo member add alice --role owner
-   hogman-host pen bobo invite create
-   ```
-
-4. **Take each pen's root key off the server.** `add` prints where it is
-   (`pens/<name>/data/pki/offline/`). Keep it in your password manager. The pen runs without
-   it.
 
 ## Updating
 

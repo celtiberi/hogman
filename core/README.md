@@ -27,6 +27,7 @@ cp .env.example .env      # set NETWORK, PUBLIC_HOST, PUBLIC_IPV4
 ./hogman init             # creates the network's CA; prints its fingerprint
 ./hogman up
 ./hogman member add <you> --role owner
+./hogman device key <you> personal   # open the link it prints on your laptop to join
 ```
 
 `init` leaves the root key in `data/pki/offline/`. Once the network works, move that

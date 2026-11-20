@@ -107,7 +107,10 @@ curl -fsSL https://hogman.network/install.sh | sudo bash
 hogman-host add mypen hs.example.com
 hogman-host pen mypen member add you --role owner
 
-# 3. Let the clean ones in, and show the filthy ones out.
+# 3. Get your own laptop in: open the link this prints, on the laptop.
+hogman-host pen mypen device key you personal
+
+# 4. Let the clean ones in, and show the filthy ones out.
 hogman-host pen mypen invite create --note "alice, clean pig"
 hogman-host pen mypen member kick gary "rolled in something"
 ```
@@ -117,8 +120,10 @@ SSH closed to the internet, and moving the pen's root key somewhere safe. Run th
 `curl` again later to update, then `hogman-host upgrade mypen`.
 
 One server can hold many pens: `hogman-host add` again with another name and hostname. Each
-pen is walled off from the others, in its own folder you can move to another server. More in
-[deploy/README.md](deploy/README.md). To run a single pen by hand instead, see
+pen is walled off from the others, in its own folder you can move to another server.
+
+**[The keeper's guide](deploy/README.md)** goes step by step from an empty server, and covers
+nightly backups and alerts on your phone. To run a single pen by hand instead, see
 [core/README.md](core/README.md).
 
 How and why it's built this way: [DESIGN.md](DESIGN.md).

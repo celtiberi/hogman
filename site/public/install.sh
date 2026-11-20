@@ -78,8 +78,13 @@ Next:
   2. Point a hostname at this server (for example hs.example.com), then raise a pen:
        hogman-host add mypen hs.example.com
        hogman-host pen mypen member add you --role owner
-       hogman-host pen mypen invite create
-  3. Move the pen's root key off the server (hogman-host add says where it is).
+  3. Get your own laptop in: open the link this prints, on the laptop:
+       hogman-host pen mypen device key you personal
+  4. Move the pen's root key off the server (hogman-host add says where it is).
+  5. Invite others:  hogman-host pen mypen invite create
+
+The whole guide, with backups and alerts:
+  https://github.com/celtiberi/hogman/blob/main/deploy/README.md
 EOF
   else
     cat <<EOF
