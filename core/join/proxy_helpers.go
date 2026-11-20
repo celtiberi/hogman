@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -185,8 +186,25 @@ func xmlEscape(s string) (string, error) {
 	return b.String(), nil
 }
 
-// renderLaunchPlist builds a macOS LaunchAgent plist with XML-escaped strings.
+func launchLabel(zone string) string { return "network.hogman." + zone }
+
+func unitName(zone string) string { return "hogman-" + zone + ".service" }
+
+func shareLaunchLabel(c *shareConfig) string { return "network.hogman.share." + c.fqdn() }
+
+func shareUnitName(c *shareConfig) string { return "hogman-share-" + c.fqdn() + ".service" }
+
+// renderLaunchPlist builds a macOS LaunchAgent plist for a pen agent.
 func renderLaunchPlist(label, bin, dir, logPath string) (string, error) {
+	return renderLaunchPlistArgs(label, bin, []string{"agent", dir}, logPath)
+}
+
+func renderShareLaunchPlist(c *shareConfig, bin, dir string) (string, error) {
+	return renderLaunchPlistArgs(shareLaunchLabel(c), bin, []string{"__share-run", dir}, filepath.Join(dir, "share.log"))
+}
+
+// renderLaunchPlistArgs builds a macOS LaunchAgent plist with XML-escaped strings.
+func renderLaunchPlistArgs(label, bin string, args []string, logPath string) (string, error) {
 	el, err := xmlEscape(label)
 	if err != nil {
 		return "", err
@@ -195,25 +213,34 @@ func renderLaunchPlist(label, bin, dir, logPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ed, err := xmlEscape(dir)
-	if err != nil {
-		return "", err
-	}
 	ep, err := xmlEscape(logPath)
 	if err != nil {
 		return "", err
+	}
+	var prog strings.Builder
+	prog.WriteString("<string>")
+	prog.WriteString(eb)
+	prog.WriteString("</string>")
+	for _, a := range args {
+		ea, err := xmlEscape(a)
+		if err != nil {
+			return "", err
+		}
+		prog.WriteString("<string>")
+		prog.WriteString(ea)
+		prog.WriteString("</string>")
 	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>%s</string>
-  <key>ProgramArguments</key><array><string>%s</string><string>agent</string><string>%s</string></array>
+  <key>ProgramArguments</key><array>%s</array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>%s</string>
   <key>StandardErrorPath</key><string>%s</string>
 </dict></plist>
-`, el, eb, ed, ep, ep), nil
+`, el, prog.String(), ep, ep), nil
 }
 
 func systemdQuote(s string) string {
@@ -235,4 +262,20 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 `, zone, systemdQuote(bin), systemdQuote(dir))
+}
+
+// renderShareSystemdUnit builds a systemd user service unit for a persistent share.
+func renderShareSystemdUnit(c *shareConfig, bin, dir string) string {
+	return fmt.Sprintf(`[Unit]
+Description=Hogman share (%s)
+After=network-online.target
+
+[Service]
+ExecStart=%s __share-run %s
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+`, c.fqdn(), systemdQuote(bin), systemdQuote(dir))
 }

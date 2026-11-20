@@ -55,7 +55,8 @@ NAME becomes https://NAME.<pen>.hogman, open to everyone in the pen.
 
 options:
   --note TEXT    short one-line description shown on the pen's home page (--note "" clears it)
-  --background   keep running after this window closes (until the computer restarts)
+  --background   keep running in the background and start automatically after a restart
+  --no-service   with --background, don't register a login item, just run in the background
   --pen ZONE     which pen, if this computer is on more than one
 `
 
@@ -231,23 +232,28 @@ func shareStart(name, what, rawLink string, o options) error {
 	}
 
 	if o.background {
-		return shareBackground(dir, cfg)
+		return shareBackground(dir, cfg, o)
 	}
+	stopShareService(cfg)
 	step("Sharing %s as %s", cfg.showing(), cfg.url())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return serveShare(ctx, dir, func(c *shareConfig) {
-		shareReady(c, false)
+		shareReady(c, false, false)
 		say("  Stop: Ctrl-C. The name stays yours: run the same command to bring it back.")
 	})
 }
 
-func shareReady(c *shareConfig, background bool) {
+func shareReady(c *shareConfig, background, managed bool) {
 	say("\n✓ %s is up.", c.url())
 	say("  Everyone in the pen can open it.")
 	say("  It shows %s.", c.showing())
 	if background {
-		say("  It runs in the background until this computer restarts.")
+		if managed {
+			say("  It runs in the background and starts by itself when you log in.")
+		} else {
+			say("  It runs in the background until this computer restarts.")
+		}
 	}
 	say("  Take it down and give the name back: hogman-join share stop %s", c.Name)
 }
@@ -625,34 +631,50 @@ func sharePID(dir string) int {
 	return pid
 }
 
-func shareBackground(dir string, c *shareConfig) error {
-	bin, err := installedBinary(dir)
-	if err != nil {
-		return err
-	}
+func shareBackground(dir string, c *shareConfig, o options) error {
 	_ = os.Remove(filepath.Join(dir, "status.json"))
+	_ = os.Remove(filepath.Join(dir, "share.pid"))
 	step("Sharing %s as %s, in the background", c.showing(), c.url())
-	logPath := filepath.Join(dir, "share.log")
-	pid, err := spawnDetached(logPath, bin, "__share-run", dir)
+	managed, pid, err := startShareBackground(dir, c, o)
 	if err != nil {
 		return err
 	}
-	deadline := time.Now().Add(4 * time.Minute)
+	return waitShareBackground(dir, c, managed, pid, 4*time.Minute, func() {
+		stopShare(dir, c)
+	})
+}
+
+func waitShareBackground(dir string, c *shareConfig, managed bool, pid int, timeout time.Duration, stopFn func()) error {
+	logPath := filepath.Join(dir, "share.log")
+	poll := time.Second
+	if timeout < poll {
+		poll = max(10*time.Millisecond, timeout/2)
+	}
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		time.Sleep(time.Second)
+		time.Sleep(poll)
 		st := readShareStatus(dir)
-		if st.State != "up" && st.State != "error" && !processAlive(pid) {
+		if !managed && st.State != "up" && st.State != "error" && !processAlive(pid) {
+			if stopFn != nil {
+				stopFn()
+			}
 			return errorf("the share stopped before it came up. Log: %s", logPath)
 		}
 		switch st.State {
 		case "up":
-			shareReady(c, true)
+			shareReady(c, true, managed)
 			return nil
 		case "error":
+			if stopFn != nil {
+				stopFn()
+			}
 			return errorf("%s", st.Error)
 		}
 	}
-	return errorf("the share did not come up in time. Log: %s", filepath.Join(dir, "share.log"))
+	if stopFn != nil {
+		stopFn()
+	}
+	return errorf("the share did not come up in time. Log: %s", logPath)
 }
 
 // runShareProcess is the background process (`__share-run DIR`).
@@ -660,6 +682,11 @@ func runShareProcess(dir string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return serveShare(ctx, dir, func(c *shareConfig) { log.Printf("%s is up, showing %s", c.url(), c.showing()) })
+}
+
+func stopShare(dir string, c *shareConfig) {
+	stopShareService(c)
+	stopShareProcess(dir)
 }
 
 func stopShareProcess(dir string) {
@@ -681,6 +708,19 @@ func stopShareProcess(dir string) {
 
 // ------------------------------------------------------------ list, stop --
 
+func shareListState(running, managed bool) string {
+	switch {
+	case running && managed:
+		return "running in the background, starts at login"
+	case running:
+		return "running in the background"
+	case managed:
+		return "stopped (starts at login)"
+	default:
+		return "not running"
+	}
+}
+
 func shareList() error {
 	dirs := allShares("")
 	if len(dirs) == 0 {
@@ -692,11 +732,9 @@ func shareList() error {
 		if err != nil {
 			continue
 		}
-		state := "not running"
-		if sharePID(d) != 0 {
-			state = "running in the background"
-		}
-		say("%-40s %s  (%s)", c.url(), c.showing(), state)
+		running := sharePID(d) != 0
+		managed := shareServiceConfigured(c)
+		say("%-40s %s  (%s)", c.url(), c.showing(), shareListState(running, managed))
 	}
 	return nil
 }
@@ -737,7 +775,7 @@ func shareStop(name string, o options) error {
 
 // removeShare stops a share, gives its name back and removes its device.
 func removeShare(dir string, c *shareConfig) error {
-	stopShareProcess(dir)
+	stopShare(dir, c)
 	// Never got as far as joining the pen (its one-time key is still unused,
 	// or has expired): there's nothing on the pen to give back.
 	if _, err := os.Stat(filepath.Join(dir, "authkey")); err == nil {

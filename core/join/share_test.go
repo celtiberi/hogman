@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/xml"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestShareTarget(t *testing.T) {
@@ -115,5 +117,106 @@ func TestShareNoteResolutionAndFlags(t *testing.T) {
 		if strings.Join(pos, ",") != strings.Join(tc.wantPos, ",") || o.note != tc.note || o.noteSet != tc.noteSet || o.background != tc.bg {
 			t.Fatalf("parseCLIArgs(%v) = pos:%v note:%q noteSet:%v bg:%v", tc.args, pos, o.note, o.noteSet, o.background)
 		}
+	}
+}
+
+func TestShareServiceTemplates(t *testing.T) {
+	c := &shareConfig{Name: "blog", Zone: "bobo.hogman"}
+	if got, pen := shareLaunchLabel(c), launchLabel(c.Zone); got == pen || got != "network.hogman.share.blog.bobo.hogman" {
+		t.Fatalf("shareLaunchLabel = %q, pen label = %q", got, pen)
+	}
+	if got, pen := shareUnitName(c), unitName(c.Zone); got == pen || got != "hogman-share-blog.bobo.hogman.service" {
+		t.Fatalf("shareUnitName = %q, pen unit = %q", got, pen)
+	}
+
+	bin := "/tmp/a & b/hogman-join"
+	dir := "/tmp/dir <1> & 2/shares/blog"
+	plist, err := renderShareLaunchPlist(c, bin, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed any
+	if err := xml.Unmarshal([]byte(plist), &parsed); err != nil {
+		t.Fatalf("rendered share plist is not valid XML: %v\n%s", err, plist)
+	}
+	for _, want := range []string{
+		"network.hogman.share.blog.bobo.hogman",
+		"__share-run",
+		"/tmp/a &amp; b/hogman-join",
+		"/tmp/dir &lt;1&gt; &amp; 2/shares/blog",
+		"/tmp/dir &lt;1&gt; &amp; 2/shares/blog/share.log",
+		"<key>RunAtLoad</key><true/>",
+		"<key>KeepAlive</key><true/>",
+	} {
+		if !strings.Contains(plist, want) {
+			t.Fatalf("share plist missing %q:\n%s", want, plist)
+		}
+	}
+
+	unit := renderShareSystemdUnit(c, `/tmp/bin "q"`, `/tmp/dir "x"\y`)
+	for _, want := range []string{
+		"Description=Hogman share (blog.bobo.hogman)",
+		`ExecStart="/tmp/bin \"q\"" __share-run "/tmp/dir \"x\"\\y"`,
+		"Restart=always",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("share systemd unit missing %q:\n%s", want, unit)
+		}
+	}
+}
+
+func TestShareListState(t *testing.T) {
+	cases := []struct {
+		running, managed bool
+		want             string
+	}{
+		{true, true, "running in the background, starts at login"},
+		{true, false, "running in the background"},
+		{false, true, "stopped (starts at login)"},
+		{false, false, "not running"},
+	}
+	for _, tc := range cases {
+		if got := shareListState(tc.running, tc.managed); got != tc.want {
+			t.Fatalf("shareListState(%v, %v) = %q, want %q", tc.running, tc.managed, got, tc.want)
+		}
+	}
+}
+
+func TestWaitShareBackgroundCleansUpOnErrorAndTimeout(t *testing.T) {
+	c := &shareConfig{Name: "blog", Zone: "bobo.hogman", Target: "http://127.0.0.1:3000"}
+
+	// 1. Healthy "up" status -> returns nil without calling stopFn.
+	upDir := t.TempDir()
+	writeShareStatus(upDir, "up", "")
+	stopped := false
+	if err := waitShareBackground(upDir, c, true, 0, 100*time.Millisecond, func() { stopped = true }); err != nil {
+		t.Fatalf("expected nil on up status, got %v", err)
+	}
+	if stopped {
+		t.Fatal("stopFn should not be called when share comes up cleanly")
+	}
+
+	// 2. "error" status -> returns error AND calls stopFn to unload/cleanup service.
+	errDir := t.TempDir()
+	writeShareStatus(errDir, "error", "could not claim blog.bobo.hogman")
+	stopped = false
+	err := waitShareBackground(errDir, c, true, 0, 100*time.Millisecond, func() { stopped = true })
+	if err == nil || !strings.Contains(err.Error(), "could not claim") {
+		t.Fatalf("expected claim error, got %v", err)
+	}
+	if !stopped {
+		t.Fatal("stopFn must be called when background share reports error")
+	}
+
+	// 3. Timed out while "starting" -> returns timeout error AND calls stopFn.
+	slowDir := t.TempDir()
+	writeShareStatus(slowDir, "starting", "")
+	stopped = false
+	err = waitShareBackground(slowDir, c, true, 0, 50*time.Millisecond, func() { stopped = true })
+	if err == nil || !strings.Contains(err.Error(), "did not come up in time") {
+		t.Fatalf("expected timeout error, got %v", err)
+	}
+	if !stopped {
+		t.Fatal("stopFn must be called when background share times out")
 	}
 }

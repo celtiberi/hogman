@@ -574,6 +574,82 @@ func updatePenAgent(p *penTarget, binPath, verifiedSrc, wantHex string, o option
 	return nil
 }
 
+type shareUpdateOps struct {
+	isRunning  func(dir string) bool
+	hasService func(c *shareConfig) bool
+	stop       func(dir string, c *shareConfig)
+	stage      func(srcPath, dstPath, wantHex string) error
+	restartNew func(s *shareTargetDir, binPath string, o options) error
+	restartOld func(s *shareTargetDir, binPath string, o options) error
+}
+
+func defaultShareUpdateOps() shareUpdateOps {
+	return shareUpdateOps{
+		isRunning:  func(dir string) bool { return sharePID(dir) != 0 },
+		hasService: shareServiceConfigured,
+		stop:       stopShare,
+		stage:      stageAndVerify,
+		restartNew: func(s *shareTargetDir, binPath string, o options) error {
+			return restartShareService(s, binPath, o, true)
+		},
+		restartOld: func(s *shareTargetDir, binPath string, o options) error {
+			return restartShareService(s, binPath, o, false)
+		},
+	}
+}
+
+func restartShareService(s *shareTargetDir, binPath string, o options, updated bool) error {
+	_ = os.Remove(filepath.Join(s.dir, "status.json"))
+	_ = os.Remove(filepath.Join(s.dir, "share.pid"))
+	managed, pid, err := startShareServiceWithBinary(binPath, s.dir, s.cfg, o.noService)
+	if err != nil {
+		return err
+	}
+	if err := waitShareBackground(s.dir, s.cfg, managed, pid, 45*time.Second, func() {
+		stopShare(s.dir, s.cfg)
+	}); err != nil {
+		return err
+	}
+	if updated {
+		note("%s share restarted", s.cfg.fqdn())
+	} else {
+		note("restarted the previous %s share so it stays online", s.cfg.fqdn())
+	}
+	return nil
+}
+
+func updateShareBinary(s *shareTargetDir, binPath, verifiedSrc, wantHex string, o options, ops shareUpdateOps) error {
+	running := ops.isRunning(s.dir)
+	managed := ops.hasService(s.cfg)
+	if running && managed {
+		step("Restarting %s share", s.cfg.fqdn())
+		ops.stop(s.dir, s.cfg)
+		if err := ops.stage(verifiedSrc, binPath, wantHex); err != nil {
+			if rerr := ops.restartOld(s, binPath, o); rerr != nil {
+				return errorf("could not update %s share binary (%v), and restarting the previous share also failed (%v).\n"+
+					"  To bring it back up: hogman-join share %s %s --background",
+					s.cfg.fqdn(), err, rerr, s.cfg.Name, s.cfg.Target)
+			}
+			return errorf("could not update %s share binary: %v", s.cfg.fqdn(), err)
+		}
+		note("updated %s", binPath)
+		if err := ops.restartNew(s, binPath, o); err != nil {
+			return errorf("updated %s share binary, but restarting it failed (%v).\n"+
+				"  To bring it back up: hogman-join share %s %s --background",
+				s.cfg.fqdn(), err, s.cfg.Name, s.cfg.Target)
+		}
+		return nil
+	}
+	if err := ops.stage(verifiedSrc, binPath, wantHex); err != nil {
+		return errorf("could not update share %s binary: %v", s.name, err)
+	}
+	note("updated %s", binPath)
+	if running {
+		note("share %s is still running the previous process in the foreground/background; restart it when ready", s.cfg.url())
+	}
+	return nil
+}
+
 func updateCmd(args []string, o options) error {
 	if len(args) > 1 {
 		return errorf("usage: hogman-join update [--pen ZONE] [--dry-run] ['<link|host>']")
@@ -700,6 +776,7 @@ func updateCmd(args []string, o options) error {
 	}
 
 	ops := defaultPenUpdateOps()
+	shareOps := defaultShareUpdateOps()
 	for _, u := range updates {
 		if !u.needsCopy {
 			continue
@@ -711,18 +788,13 @@ func updateCmd(args []string, o options) error {
 			continue
 		}
 		if u.share != nil {
-			s := u.share
-			if err := stageAndVerify(verifiedSrc, u.path, wantHex); err != nil {
-				return errorf("could not update share %s binary: %v", s.name, err)
-			}
-			note("updated %s", u.path)
-			if sharePID(s.dir) != 0 {
-				note("share %s is still running the previous process; restart when ready: hogman-join share stop %s", s.cfg.url(), s.name)
+			if err := updateShareBinary(u.share, u.path, verifiedSrc, wantHex, o, shareOps); err != nil {
+				return err
 			}
 		}
 	}
 
-	// If selfPath itself IS a pen agent binary and was replaced, restart that pen's running agent too.
+	// If selfPath itself IS a pen agent or managed share binary and was replaced, restart it too.
 	if selfNeedsUpdate {
 		for i := range plan.pens {
 			p := &plan.pens[i]
@@ -735,6 +807,20 @@ func updateCmd(args []string, o options) error {
 				step("Restarting %s agent", p.zone)
 				ops.stop(p.dir, p.cfg)
 				if err := ops.restartNew(p, pBin, hadService, o); err != nil {
+					return err
+				}
+			}
+		}
+		for i := range plan.shares {
+			s := &plan.shares[i]
+			sBin := filepath.Join(s.dir, instName)
+			if !sameFilePath(selfPath, sBin) {
+				continue
+			}
+			if shareOps.isRunning(s.dir) && shareOps.hasService(s.cfg) {
+				step("Restarting %s share", s.cfg.fqdn())
+				shareOps.stop(s.dir, s.cfg)
+				if err := shareOps.restartNew(s, sBin, o); err != nil {
 					return err
 				}
 			}

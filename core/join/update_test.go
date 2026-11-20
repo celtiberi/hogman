@@ -355,3 +355,62 @@ func TestUpdatePenAgentRollbackAndRecovery(t *testing.T) {
 	}
 }
 
+func TestUpdateShareBinaryRestartAndRollback(t *testing.T) {
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "hogman-join")
+	s := &shareTargetDir{
+		dir:  dir,
+		name: "blog",
+		cfg:  &shareConfig{Name: "blog", Zone: "bobo.hogman", Target: "http://127.0.0.1:3000"},
+	}
+
+	// 1. Running managed share + stage failure -> stops share, calls restartOld, returns error.
+	var calls []string
+	ops := shareUpdateOps{
+		isRunning:  func(string) bool { return true },
+		hasService: func(*shareConfig) bool { return true },
+		stop:       func(string, *shareConfig) { calls = append(calls, "stop") },
+		stage:      func(string, string, string) error { calls = append(calls, "stage"); return errors.New("disk full") },
+		restartNew: func(*shareTargetDir, string, options) error { calls = append(calls, "restartNew"); return nil },
+		restartOld: func(*shareTargetDir, string, options) error { calls = append(calls, "restartOld"); return nil },
+	}
+	err := updateShareBinary(s, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops)
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("expected disk full error, got %v", err)
+	}
+	if !slices.Equal(calls, []string{"stop", "stage", "restartOld"}) {
+		t.Fatalf("managed stage failure sequence = %v, want [stop stage restartOld]", calls)
+	}
+
+	// 2. Running managed share + stage success -> stops share, stages new binary, calls restartNew.
+	calls = nil
+	ops.stage = func(string, string, string) error { calls = append(calls, "stage"); return nil }
+	if err := updateShareBinary(s, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops); err != nil {
+		t.Fatalf("unexpected error on managed happy path: %v", err)
+	}
+	if !slices.Equal(calls, []string{"stop", "stage", "restartNew"}) {
+		t.Fatalf("managed happy-path sequence = %v, want [stop stage restartNew]", calls)
+	}
+
+	// 3. Running unmanaged (foreground/no-service) share -> stages without stopping or restarting.
+	calls = nil
+	ops.hasService = func(*shareConfig) bool { return false }
+	if err := updateShareBinary(s, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops); err != nil {
+		t.Fatalf("unexpected error on unmanaged running share: %v", err)
+	}
+	if !slices.Equal(calls, []string{"stage"}) {
+		t.Fatalf("unmanaged running share sequence = %v, want [stage]", calls)
+	}
+
+	// 4. Stopped share -> stages without stopping or starting.
+	calls = nil
+	ops.isRunning = func(string) bool { return false }
+	ops.hasService = func(*shareConfig) bool { return true }
+	if err := updateShareBinary(s, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops); err != nil {
+		t.Fatalf("unexpected error on stopped share: %v", err)
+	}
+	if !slices.Equal(calls, []string{"stage"}) {
+		t.Fatalf("stopped share sequence = %v, want [stage]", calls)
+	}
+}
+
