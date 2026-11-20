@@ -145,6 +145,25 @@ fp_z="$(in_client zebra curl -sf https://control.zebra.example/hogman/v1/network
 check "each pen has its own certificate authority" test -n "$fp_b" -a "$fp_b" != "$fp_z"
 check "bobo's members are not zebra's" no_match bobo-owner "$HOST" pen zebra member list
 
+step "One computer joins two pens (combined PAC)"
+link2="$("$HOST" pen zebra invite create --note multi-pen | awk '/^link:/ {print $2}')"
+out2="$(in_client bobo sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open --handle member2 --hostname laptop2 "$1"' _ "$link2" 2>&1)"; rc2=$?
+[ $rc2 = 0 ] || echo "$out2" | sed 's/^/        | /'
+check "client-bobo joins zebra too (exit $rc2)" grep -q "You're in. You are member2 on zebra.hogman" <<<"$out2"
+bobo_proxy="$(in_client bobo sh -c 'jq -r .proxy_addr "${XDG_CONFIG_HOME:-$HOME/.config}/hogman/bobo.hogman/config.json"')"
+zebra_proxy="$(in_client bobo sh -c 'jq -r .proxy_addr "${XDG_CONFIG_HOME:-$HOME/.config}/hogman/zebra.hogman/config.json"')"
+pac_bobo="$(in_client bobo curl -sf "http://$bobo_proxy/proxy.pac")"
+pac_zebra="$(in_client bobo curl -sf "http://$zebra_proxy/proxy.pac")"
+check "bobo /proxy.pac routes bobo and zebra" bash -c 'grep -q "dnsDomainIs(host, \".bobo.hogman\").*PROXY $1" <<<"$3" && grep -q "dnsDomainIs(host, \".zebra.hogman\").*PROXY $2" <<<"$3"' _ "$bobo_proxy" "$zebra_proxy" "$pac_bobo"
+check "zebra /proxy.pac matches bobo /proxy.pac" test "$pac_bobo" = "$pac_zebra"
+check "client-bobo reaches home.bobo.hogman through bobo proxy" in_client bobo sh -c 'curl -sf -x "http://$1" https://home.bobo.hogman/api/me | jq -e ".member.handle == \"member1\""' _ "$bobo_proxy"
+check "client-bobo reaches home.zebra.hogman through zebra proxy" in_client bobo sh -c 'curl -sf -x "http://$1" https://home.zebra.hogman/api/me | jq -e ".member.handle == \"member2\""' _ "$zebra_proxy"
+out_leave="$(in_client bobo sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" leave "$1" </dev/null' _ "$link2" 2>&1)"; rc_leave=$?
+[ $rc_leave = 0 ] || echo "$out_leave" | sed 's/^/        | /'
+check "client-bobo leaves zebra cleanly (exit $rc_leave)" test $rc_leave = 0
+pac_after="$(in_client bobo curl -sf "http://$bobo_proxy/proxy.pac")"
+check "bobo /proxy.pac drops zebra after leave" bash -c 'grep -q "dnsDomainIs(host, \".bobo.hogman\")" <<<"$1" && ! grep -q "zebra.hogman" <<<"$1"' _ "$pac_after"
+
 step "Restore a pen from a backup, as on a new server"
 # What hogman-host backup keeps: .env and data/, minus what the pen rebuilds.
 (cd "$HOGMAN_HOME/pens/zebra" && tar -czf "$HOGMAN_HOME/zebra-backup.tar.gz" \

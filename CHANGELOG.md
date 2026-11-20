@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- `hogman-join`: support multiple simultaneous pens in browsers with a combined `/proxy.pac` served dynamically by each running pen agent across all installed pens; macOS updates Hogman-managed automatic proxy settings with a versioned `?v=` URL when joining or leaving (still leaving foreign/corporate PACs untouched), while Linux and Windows print combined-PAC guidance. Updated join and FAQ docs and added unit and host e2e coverage.
+
 ### Security
 - `hogman-join`: the agent's own `/status` and `/proxy.pac` answer only requests addressed to its loopback address or `localhost` (no DNS-rebinding reads); `leave` removes the computer's own device from the pen (so old devices don't pile up) and no longer fails on shares that never came up; `share` no longer looks at the system Tailscale; `--tailscale` explains that it was removed. FAQ: what Hogman deliberately doesn't do, reworded, and "What if I lose my laptop?" (no recovery on request, ever: D-12), and that a copied device file works elsewhere until the device is removed (hardware locking is Phase 2: D-13, D-14). `leave` removes the certificate before the device, so cancelling the password prompt leaves the computer still on the pen.
 - Port 80 removed: members reach servers, and the pen's home page, on 443 only (infra keeps 53 for DNS and 9000 for the CA). The join agent answers `http://` pen addresses itself with a 308 redirect to HTTPS instead of carrying HTTP into the pen (its reverse proxy is gone); shares no longer listen on 80 and get certificates over TLS-ALPN on 443.

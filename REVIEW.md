@@ -45,7 +45,7 @@ Because `WhoIs()` previously treated every live device owned by a member identic
 ## Open follow-ups (deferred)
 
 - **Single-writer registrar IPC**: Have `./hogman` CLI invocations talk to the running `registrar serve` process over a Unix domain socket rather than opening SQLite and pushing Headscale policies / writing the zone file from a second process.
-- **Multi-pen PAC merging**: In side-by-side mode, if a member regularly stays joined to two or more Hogman pens simultaneously on macOS, generate or merge a combined PAC file so the second pen does not require manual proxy selection.
+- **Multi-pen PAC merging** (addressed in `feat/multi-pen-pac`): In side-by-side mode, each running pen agent serves a combined `/proxy.pac` covering all installed pens and macOS updates Hogman-managed PAC URLs with cache-busting `?v=` versions when joining or leaving.
 - **Static site hosting & `hogman.fly.dev` canonicalization**: Decide whether `hogman.fly.dev` should also redirect to `hogman.network`, and optionally move `site/public/` to Cloudflare Workers Static Assets to eliminate Fly scale-to-zero cold starts.
 - **`core/hogman` JSON parsing**: Replace the `sed`-based `json_field` helper in `core/hogman` with `jq` or a small Go subcommand.
 - **Suspended members' DNS visibility**: Decide whether names owned by `suspended` members should stay in CoreDNS / `GET /api/directory` (while Headscale grants block all traffic to their servers) or be hidden until resumed.

@@ -62,11 +62,12 @@
 
   <dt>The browser can't find pen sites</dt>
   <dd>Only programs that use the pen's proxy reach the pen. On a Mac the
-    join sets your automatic proxy setting; if another tool already set one, it leaves yours
-    alone and prints the address to use. On Linux and Windows, set your browser's or desktop's
-    automatic proxy configuration URL to the <code>proxy.pac</code> address the join printed
-    (it's <code>http://127.0.0.1:&lt;port&gt;/proxy.pac</code>). For command-line tools, see
-    <a href="/docs/join.html#side">joining, in practice</a>.</dd>
+    join sets your automatic proxy setting; if another non-Hogman tool already set one, it leaves
+    yours alone and prints the address to use. If you join multiple pens, each pen's
+    <code>proxy.pac</code> includes all joined pens and Mac updates it automatically; on Linux
+    and Windows, use one printed <code>http://127.0.0.1:&lt;port&gt;/proxy.pac</code> URL and
+    reload proxy settings (or switch to a remaining pen's URL when leaving a pen). For
+    command-line tools, see <a href="/docs/join.html#side">joining, in practice</a>.</dd>
 
   <dt>"This computer cannot find the network's names yet"</dt>
   <dd>Run the same join command again. Your invite was already used to add this device, so the rerun

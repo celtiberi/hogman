@@ -60,9 +60,12 @@
   (something like <code>http://127.0.0.1:21234</code>) and sets things up:</p>
 <ul>
   <li><strong>Browsers:</strong> on a Mac, the tool sets the automatic proxy setting for you
-    (it never replaces one someone else set). On Linux and Windows, set your browser's or
-    desktop's automatic proxy configuration URL to the <code>proxy.pac</code> address it
-    prints. The rules file sends only pen names through the pen.</li>
+    (it never replaces a non-Hogman setting). If you join more than one pen, any pen's
+    <code>proxy.pac</code> routes each pen's own names automatically and updates the Mac
+    setting when you join or leave. On Linux and Windows, set your browser's or desktop's
+    automatic proxy configuration URL to the <code>proxy.pac</code> address it prints (one URL
+    covers every pen you join, though you may need to reload browser proxy settings when adding
+    or leaving a pen). The rules file sends only pen names through their pens.</li>
   <li><strong>curl and most command-line tools</strong>, per command:
 <pre class="term"><span class="p">$</span> https_proxy=http://127.0.0.1:21234 curl https://blog.smith.hogman</pre>
     Don't export it for the whole shell: the proxy refuses everything outside the pen.</li>

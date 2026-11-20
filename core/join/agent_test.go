@@ -282,18 +282,29 @@ func TestParseAutoProxyOutput(t *testing.T) {
 }
 
 func TestShouldLeaveAutoProxy(t *testing.T) {
-	want := "http://127.0.0.1:18123/proxy.pac"
-	if !shouldLeaveAutoProxy("http://corp.example/proxy.pac", true, want) {
+	p1 := &agentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}
+	p2 := &agentConfig{Zone: "zebra.hogman", ProxyAddr: "127.0.0.1:18124"}
+	known := []*agentConfig{p1, p2}
+	if !shouldLeaveAutoProxy("http://corp.example/proxy.pac", true, known) {
 		t.Fatal("must leave active corporate /proxy.pac alone")
 	}
-	if !shouldLeaveAutoProxy("http://127.0.0.1:19999/proxy.pac", true, want) {
-		t.Fatal("must leave another pen's active PAC alone")
+	if !shouldLeaveAutoProxy("http://127.0.0.1:19999/proxy.pac", true, known) {
+		t.Fatal("must leave unknown local port /proxy.pac alone")
 	}
-	if shouldLeaveAutoProxy("http://127.0.0.1:19999/proxy.pac", false, want) {
+	if !shouldLeaveAutoProxy("https://127.0.0.1:18123/proxy.pac", true, known) {
+		t.Fatal("must leave non-http scheme PAC alone")
+	}
+	if !shouldLeaveAutoProxy("http://127.0.0.1:18123/other.pac", true, known) {
+		t.Fatal("must leave non-/proxy.pac path alone")
+	}
+	if shouldLeaveAutoProxy("http://127.0.0.1:19999/proxy.pac", false, known) {
 		t.Fatal("disabled leftover PAC should not block setup")
 	}
-	if shouldLeaveAutoProxy(want, true, want) {
-		t.Fatal("matching active PAC should not be flagged as foreign")
+	if shouldLeaveAutoProxy(p1.pacURL(), true, known) {
+		t.Fatal("legacy Hogman pen PAC should not be flagged as foreign")
+	}
+	if shouldLeaveAutoProxy(p2.pacURL()+"?v=deadbeef", true, known) {
+		t.Fatal("versioned Hogman pen PAC should not be flagged as foreign")
 	}
 }
 
@@ -493,5 +504,159 @@ func TestAgentOwnPagesCheckHost(t *testing.T) {
 				t.Fatalf("GET %s with Host %s: %d, want %d", path, host, rec.Code, want)
 			}
 		}
+	}
+}
+
+func TestRenderPACSingleAndMulti(t *testing.T) {
+	p1 := &agentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}
+	single := renderPAC([]*agentConfig{p1})
+	if !strings.Contains(single, "only names in bobo.hogman use the pen") {
+		t.Fatalf("unexpected single-pen PAC header:\n%s", single)
+	}
+	if !strings.Contains(single, `if (host === "bobo.hogman" || dnsDomainIs(host, ".bobo.hogman")) return "PROXY 127.0.0.1:18123";`) {
+		t.Fatalf("missing single-pen rule:\n%s", single)
+	}
+
+	nested := &agentConfig{Zone: "team.bobo.hogman", ProxyAddr: "127.0.0.1:18125"}
+	p2 := &agentConfig{Zone: "a.hogman", ProxyAddr: "127.0.0.1:18124"}
+	p3 := &agentConfig{Zone: "b.hogman", ProxyAddr: "127.0.0.1:18126"}
+	badZone := &agentConfig{Zone: "bad\";return \"PROXY evil", ProxyAddr: "127.0.0.1:18127"}
+	badDot := &agentConfig{Zone: ".bobo.hogman", ProxyAddr: "127.0.0.1:18128"}
+	badAddr := &agentConfig{Zone: "z.hogman", ProxyAddr: "evil.example:8080"}
+	badPort := &agentConfig{Zone: "z2.hogman", ProxyAddr: "127.0.0.1:99999"}
+	override := &agentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:19123"}
+
+	multi := renderPAC(normalizePenConfigs(
+		[]*agentConfig{p1, p3, p2, nested, badZone, badDot, badAddr, badPort},
+		override,
+	))
+	if !strings.Contains(multi, "only pen names use their pen's proxy") {
+		t.Fatalf("unexpected multi-pen PAC header:\n%s", multi)
+	}
+	for _, want := range []string{
+		`if (host === "team.bobo.hogman" || dnsDomainIs(host, ".team.bobo.hogman")) return "PROXY 127.0.0.1:18125";`,
+		`if (host === "bobo.hogman" || dnsDomainIs(host, ".bobo.hogman")) return "PROXY 127.0.0.1:19123";`,
+		`if (host === "a.hogman" || dnsDomainIs(host, ".a.hogman")) return "PROXY 127.0.0.1:18124";`,
+		`if (host === "b.hogman" || dnsDomainIs(host, ".b.hogman")) return "PROXY 127.0.0.1:18126";`,
+	} {
+		if !strings.Contains(multi, want) {
+			t.Fatalf("multi PAC missing %q:\n%s", want, multi)
+		}
+	}
+	if strings.Contains(multi, "18123") || strings.Contains(multi, "evil") || strings.Contains(multi, "99999") {
+		t.Fatalf("multi PAC kept invalid or overridden entry:\n%s", multi)
+	}
+	idxNested := strings.Index(multi, `"team.bobo.hogman"`)
+	idxParent := strings.Index(multi, `"bobo.hogman"`)
+	idxA := strings.Index(multi, `"a.hogman"`)
+	idxB := strings.Index(multi, `"b.hogman"`)
+	if !(idxNested < idxParent && idxParent < idxA && idxA < idxB) {
+		t.Fatalf("multi PAC rules not deterministically ordered by longest zone then name:\n%s", multi)
+	}
+}
+
+func TestAgentServesCombinedPAC(t *testing.T) {
+	base := t.TempDir()
+	bobo := &agentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}
+	zebra := &agentConfig{Zone: "zebra.hogman", ProxyAddr: "127.0.0.1:18124"}
+	for _, c := range []*agentConfig{bobo, zebra} {
+		dir := filepath.Join(base, c.Zone)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.save(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	badDir := filepath.Join(base, "bad.hogman")
+	if err := os.MkdirAll(badDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&agentConfig{Zone: "bad zone", ProxyAddr: "127.0.0.1:18125"}).save(badDir); err != nil {
+		t.Fatal(err)
+	}
+
+	a := newAgent(bobo, nil)
+	a.configBase = base
+
+	for _, path := range []string{"/proxy.pac", "/proxy.pac?v=deadbeef"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Host = bobo.ProxyAddr
+		a.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: status %d", path, rec.Code)
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Fatalf("GET %s: Cache-Control=%q, want no-store", path, cc)
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "application/x-ns-proxy-autoconfig" {
+			t.Fatalf("GET %s: Content-Type=%q", path, ct)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, ".bobo.hogman") || !strings.Contains(body, ".zebra.hogman") {
+			t.Fatalf("GET %s missing both pens:\n%s", path, body)
+		}
+		if strings.Contains(body, "bad zone") {
+			t.Fatalf("GET %s included malformed config:\n%s", path, body)
+		}
+	}
+
+	if err := os.RemoveAll(filepath.Join(base, zebra.Zone)); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/proxy.pac", nil)
+	req.Host = bobo.ProxyAddr
+	a.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, ".bobo.hogman") || strings.Contains(body, ".zebra.hogman") {
+		t.Fatalf("after removing zebra config, /proxy.pac body:\n%s", body)
+	}
+}
+
+func TestPlanAutoProxyActions(t *testing.T) {
+	p1 := &agentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}
+	p2 := &agentConfig{Zone: "zebra.hogman", ProxyAddr: "127.0.0.1:18124"}
+	url1 := pacURLWithVersion(p1, []*agentConfig{p1})
+	url12OnP2 := pacURLWithVersion(p2, []*agentConfig{p1, p2})
+	url2Only := pacURLWithVersion(p2, []*agentConfig{p2})
+	if url12OnP2 == url2Only {
+		t.Fatalf("expected combined PAC version hash to differ from single pen: %s", url12OnP2)
+	}
+
+	if got := planAutoProxyAction("", false, []*agentConfig{p1}, url1); got != "set" {
+		t.Fatalf("join pen 1 (empty): got %q, want set", got)
+	}
+	if got := planAutoProxyAction(url1, true, []*agentConfig{p1}, url1); got != "noop" {
+		t.Fatalf("repeat pen 1: got %q, want noop", got)
+	}
+	if got := planAutoProxyAction(url1, true, []*agentConfig{p1, p2}, url12OnP2); got != "set" {
+		t.Fatalf("join pen 2 when pen 1 active: got %q, want set", got)
+	}
+	if got := planAutoProxyAction("http://corp.example/proxy.pac", true, []*agentConfig{p1, p2}, url12OnP2); got != "leave" {
+		t.Fatalf("join with corporate PAC active: got %q, want leave", got)
+	}
+	if got := planAutoProxyAction("http://127.0.0.1:19999/proxy.pac", false, []*agentConfig{p1}, url1); got != "set" {
+		t.Fatalf("join with disabled foreign PAC: got %q, want set", got)
+	}
+
+	if got := planClearAutoProxyAction("http://corp.example/proxy.pac", true, []*agentConfig{p1, p2}, url2Only); got != "noop" {
+		t.Fatalf("leave must ignore corporate PAC: got %q, want noop", got)
+	}
+	if got := planClearAutoProxyAction(url1, false, []*agentConfig{p1, p2}, url2Only); got != "noop" {
+		t.Fatalf("leave must ignore disabled PAC: got %q, want noop", got)
+	}
+	if got := planClearAutoProxyAction(url12OnP2, true, []*agentConfig{p1, p2}, url2Only); got != "set" {
+		t.Fatalf("leave pen 1 with pen 2 remaining: got %q, want set", got)
+	}
+	if got := planClearAutoProxyAction(url2Only, true, []*agentConfig{p1, p2}, url2Only); got != "noop" {
+		t.Fatalf("leave pen 1 when already on pen 2 URL: got %q, want noop", got)
+	}
+	if got := planClearAutoProxyAction(url1, true, []*agentConfig{p1}, ""); got != "off" {
+		t.Fatalf("leave last pen: got %q, want off", got)
+	}
+	if got := planClearAutoProxyAction(url1, true, []*agentConfig{p1}, url1); got != "noop" {
+		t.Fatalf("already matching nextURL: got %q, want noop", got)
 	}
 }

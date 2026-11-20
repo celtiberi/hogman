@@ -4,6 +4,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // Windows: the agent runs as a plain background process for now. It does not
@@ -29,8 +31,22 @@ func startDetached(bin, dir string) error {
 	return cmd.Start()
 }
 
-func setSystemProxy(c *agentConfig) (string, error) {
-	return "set Settings → Network & Internet → Proxy → \"Use setup script\" to " + c.pacURL(), nil
+func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, error) {
+	pens = normalizePenConfigs(pens, c)
+	if len(pens) <= 1 {
+		return "set Settings → Network & Internet → Proxy → \"Use setup script\" to " + c.pacURL(), nil
+	}
+	return "set Settings → Network & Internet → Proxy → \"Use setup script\" to " + c.pacURL() +
+		" (covers all " + strconv.Itoa(len(pens)) + " pens: " + strings.Join(penZoneNames(pens), ", ") +
+		"; if your proxy already uses another pen's proxy.pac, reload it)", nil
 }
 
-func clearSystemProxy(c *agentConfig) string { return "" }
+func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {
+	remaining = normalizePenConfigs(remaining, nil)
+	host := pickPACHost(remaining)
+	if host == nil {
+		return ""
+	}
+	return "if Windows proxy \"Use setup script\" was pointing at " + leaving.pacURL() +
+		", update it to " + host.pacURL() + " for your remaining pen(s): " + strings.Join(penZoneNames(remaining), ", ")
+}
