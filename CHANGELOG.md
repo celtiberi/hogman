@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- `hogman-join` side-by-side agent (and `share`) now dials only devices the pen's own node knows (`WhoIs`), whatever the pen's DNS answers. tsnet's `Dial` falls back to the computer's own network for non-peer addresses, so a hostile pen's DNS could have pointed a pen name at `127.0.0.1`, the LAN, or another tailnet's 100.x address and had the agent connect there (found in the red team of the own-connection design).
 - Enforce same-origin (`Origin` / `Sec-Fetch-Site`) and `Content-Type: application/json` checks on mutating mesh API endpoints to block CSRF from member-hosted or external sites.
 - Restrict `server` devices on the mesh API to `GET /api/me` (minimal `{member, this_device, zone, network}` payload), `GET /api/directory`, and acting on themselves only (claim a free name or one already pointing at them, release names that point only at them, remove themselves), returning `403` on everything else, including `/api/admin/*`.
 - Switch Headscale IP allocation to `random`, verify caller mesh IPs against live Headscale nodes in `identify()`, harden admin-vs-owner RBAC and subdomain cleanup, rate-limit `POST /hogman/v1/redeem`, cap per-member invites/keys/names, revoke open keys on suspend, and configure server timeouts (PR #5).

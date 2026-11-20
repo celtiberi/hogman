@@ -380,3 +380,45 @@ func TestRenderSystemdUnitQuotesSpaces(t *testing.T) {
 		t.Fatalf("unit missing quoted ExecStart %q:\n%s", want, u)
 	}
 }
+
+// A hostile pen's DNS can answer anything. Only the pen's own devices may be
+// dialed: never loopback, the LAN, or a 100.x address of another tailnet
+// (tsnet's Dial would reach those through the computer's own network).
+func TestAgentDialsOnlyPenDevices(t *testing.T) {
+	a := newAgent(&agentConfig{Zone: "bobo.hogman"}, nil)
+	peer := netip.MustParseAddr("100.70.0.5")
+	a.isPeer = func(_ context.Context, ip netip.Addr) bool { return ip == peer }
+	answers := map[string][]string{
+		"evil.bobo.hogman":  {"127.0.0.1", "192.168.1.1", "::ffff:127.0.0.1", "100.99.0.9", "100.70.0.5"},
+		"local.bobo.hogman": {"127.0.0.1", "::ffff:127.0.0.1"},
+		"work.bobo.hogman":  {"100.99.0.9"},
+	}
+	a.lookupDNS = func(_ context.Context, host string) ([]string, error) { return answers[host], nil }
+	var dialed []string
+	a.dialMesh = func(_ context.Context, _, addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		c1, c2 := net.Pipe()
+		go c2.Close()
+		return c1, nil
+	}
+	ctx := context.Background()
+
+	if c, err := a.dial(ctx, "evil.bobo.hogman:443"); err != nil {
+		t.Fatalf("evil: %v", err)
+	} else {
+		c.Close()
+	}
+	if len(dialed) != 1 || dialed[0] != "100.70.0.5:443" {
+		t.Fatalf("dialed %v, want only the pen's own device 100.70.0.5:443", dialed)
+	}
+	for _, target := range []string{"local.bobo.hogman:80", "work.bobo.hogman:80", "100.99.0.9:22", "127.0.0.1:22", "[::ffff:127.0.0.1]:22"} {
+		dialed = nil
+		if c, err := a.dial(ctx, target); err == nil {
+			c.Close()
+			t.Fatalf("%s: dial allowed, dialed %v", target, dialed)
+		}
+		if len(dialed) != 0 {
+			t.Fatalf("%s: dialed %v", target, dialed)
+		}
+	}
+}

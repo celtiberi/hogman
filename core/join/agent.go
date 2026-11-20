@@ -239,6 +239,11 @@ type agent struct {
 	dialMesh   func(ctx context.Context, network, addr string) (net.Conn, error)
 	lookupDNS  func(ctx context.Context, host string) ([]string, error)
 	peerLookup func(ctx context.Context, host string) ([]string, error)
+	// isPeer reports whether ip belongs to a device this pen's node knows.
+	// Only those may be dialed: tsnet's Dial quietly uses the computer's own
+	// network for anything else, so a pen whose DNS answered 127.0.0.1, a LAN
+	// address or another tailnet's 100.x address would otherwise reach it.
+	isPeer func(ctx context.Context, ip netip.Addr) bool
 
 	mu     sync.Mutex
 	up     bool
@@ -258,6 +263,14 @@ func newAgent(c *agentConfig, node *tsnet.Server) *agent {
 		}
 		a.lookupDNS = func(ctx context.Context, host string) ([]string, error) {
 			return a.resolver.LookupHost(ctx, host)
+		}
+		a.isPeer = func(ctx context.Context, ip netip.Addr) bool {
+			lc, err := node.LocalClient()
+			if err != nil {
+				return false
+			}
+			_, err = lc.WhoIs(ctx, ip.String())
+			return err == nil
 		}
 		a.peerLookup = func(ctx context.Context, host string) ([]string, error) {
 			lc, err := node.LocalClient()
@@ -339,7 +352,7 @@ func (a *agent) dial(ctx context.Context, hostport string) (net.Conn, error) {
 		return nil, err
 	}
 	if ip, err := netip.ParseAddr(host); err == nil {
-		if inMeshRanges(ip) {
+		if a.allowed(ctx, ip) {
 			return a.dialMesh(ctx, "tcp", hostport)
 		}
 		return nil, errOutside
@@ -357,7 +370,13 @@ func (a *agent) dial(ctx context.Context, hostport string) (net.Conn, error) {
 			ips = pips
 		}
 	}
-	ordered := orderIPs(ips)
+	// Whatever the pen's DNS answered, dial only its own devices.
+	var ordered []string
+	for _, raw := range orderIPs(ips) {
+		if ip, err := netip.ParseAddr(raw); err == nil && a.allowed(ctx, ip) {
+			ordered = append(ordered, raw)
+		}
+	}
 	if len(ordered) == 0 {
 		return nil, fmt.Errorf("no such name in the pen: %s", host)
 	}
@@ -373,6 +392,19 @@ func (a *agent) dial(ctx context.Context, hostport string) (net.Conn, error) {
 }
 
 var errOutside = fmt.Errorf("this proxy only serves the pen")
+
+// allowed: a mesh address of a device this pen's node knows (with no node,
+// as in tests, the mesh ranges alone).
+func (a *agent) allowed(ctx context.Context, ip netip.Addr) bool {
+	ip = ip.Unmap()
+	if !inMeshRanges(ip) {
+		return false
+	}
+	if a.isPeer == nil {
+		return true
+	}
+	return a.isPeer(ctx, ip)
+}
 
 func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
