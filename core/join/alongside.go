@@ -129,6 +129,7 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		return err
 	}
 	defer cleanupCert()
+	trustedBefore := trustInstalled(root)
 	if !o.noTrust {
 		step("Adding the %s certificate to this computer", n.Zone)
 		if err := installTrust(root, certFile); err != nil {
@@ -191,6 +192,9 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		// An old server link without the for=share mark: never expose a whole
 		// computer to the pen. Undo the join.
 		leaveAlongside(n.Zone)
+		if !o.noTrust && !trustedBefore {
+			_ = removeTrust(root, certFile)
+		}
 		return errorf("that's a server link: it's for putting something in the pen, not for joining a computer.\n" +
 			"  Use a new one with share, for example: hogman-join share blog 8080 '<server link>'")
 	}

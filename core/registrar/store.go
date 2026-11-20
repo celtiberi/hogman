@@ -564,8 +564,8 @@ func (s *Store) UpdateDevice(id int64, name, v4, v6 string) error {
 	return err
 }
 
-// DeleteNamesOfDevice frees the active names pointing at a device (and any
-// names under them belonging to the same member).
+// DeleteNamesOfDevice frees the active names pointing at a device. Names
+// under them that point at other devices are left alone.
 func (s *Store) DeleteNamesOfDevice(deviceID int64) error {
 	_, err := s.db.Exec(`DELETE FROM names WHERE device_id = ? AND held_until IS NULL`, deviceID)
 	return err
