@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -180,9 +181,11 @@ func TestWebForwardsAndDrawsQR(t *testing.T) {
 	if res == nil || res["owner"] != "alice" || !strings.HasPrefix(res["join_qr_svg"].(string), "<svg") {
 		t.Fatalf("job result: %v", res)
 	}
-	// Results are one-time: reading a completed job again must return 404.
-	if code, _ := call(h, "GET", "/api/job?id="+id, "", nil); code != 404 {
-		t.Fatalf("second read of completed job: %d, want 404", code)
+	// Completed results stay re-readable during the post-delivery grace window.
+	code, again := call(h, "GET", "/api/job?id="+id, "", nil)
+	againRes, _ := again["result"].(map[string]any)
+	if code != 200 || again["state"] != "done" || againRes == nil || againRes["join_qr_svg"] != res["join_qr_svg"] {
+		t.Fatalf("second read of completed job: %d %v, want 200 done with matching QR", code, again)
 	}
 	if code, _ := call(h, "GET", "/api/job?id=nope", "", nil); code != 404 {
 		t.Fatalf("an unknown job: %d", code)
@@ -421,7 +424,7 @@ func TestWebCreateValidatesCodeAndCapsJobs(t *testing.T) {
 
 	close(gate)
 	gateClosed = true
-	// Failed terminal job is delivered once, then removed (404 on second read).
+	// Failed terminal job stays re-readable within the post-delivery window.
 	var gotFailed bool
 	for i := 0; i < 100; i++ {
 		code, j := call(h2, "GET", "/api/job?id="+ids[0], "", nil)
@@ -434,8 +437,8 @@ func TestWebCreateValidatesCodeAndCapsJobs(t *testing.T) {
 	if !gotFailed {
 		t.Fatal("did not observe failed state for blocked job")
 	}
-	if code, _ := call(h2, "GET", "/api/job?id="+ids[0], "", nil); code != 404 {
-		t.Fatalf("second read after failure = %d, want 404", code)
+	if code, j := call(h2, "GET", "/api/job?id="+ids[0], "", nil); code != 200 || j["state"] != "failed" {
+		t.Fatalf("second read after failure = %d %v, want 200 failed", code, j)
 	}
 }
 
@@ -475,5 +478,92 @@ func TestWaitlistGlobalCapAndNotifyCap(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if got := pushes.Load(); got != 2 {
 		t.Fatalf("ntfy pushes = %d, want 2 (capped)", got)
+	}
+}
+
+func TestJobStoreDeliveryWindow(t *testing.T) {
+	wb := newWeb("http://127.0.0.1:0", testToken, "example.com")
+	var clockMu sync.Mutex
+	cur := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	wb.jobs.now = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return cur
+	}
+	setNow := func(ts time.Time) {
+		clockMu.Lock()
+		cur = ts
+		clockMu.Unlock()
+	}
+	h := wb.handler()
+
+	startDone := func(status int, out map[string]any) string {
+		t.Helper()
+		id, ok := wb.jobs.start(func() (int, map[string]any) { return status, out })
+		if !ok {
+			t.Fatal("expected job start to succeed")
+		}
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			wb.jobs.mu.Lock()
+			done := wb.jobs.jobs[id] != nil && wb.jobs.jobs[id].done
+			wb.jobs.mu.Unlock()
+			if done {
+				return id
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("job %s did not finish in time", id)
+		return ""
+	}
+	exists := func(id string) bool {
+		wb.jobs.mu.Lock()
+		defer wb.jobs.mu.Unlock()
+		_, ok := wb.jobs.jobs[id]
+		return ok
+	}
+
+	// 1. Delivered job stays re-readable for 5 minutes from first read, then expires.
+	t0 := cur
+	id1 := startDone(201, map[string]any{"owner": "alice"})
+	if code, j := call(h, "GET", "/api/job?id="+id1, "", nil); code != 200 || j["state"] != "done" {
+		t.Fatalf("first terminal read = %d %v, want 200 done", code, j)
+	}
+	setNow(t0.Add(4*time.Minute + 59*time.Second))
+	if code, j := call(h, "GET", "/api/job?id="+id1, "", nil); code != 200 || j["state"] != "done" {
+		t.Fatalf("re-read at +4m59s = %d %v, want 200 done", code, j)
+	}
+	setNow(t0.Add(5*time.Minute + 1*time.Second))
+	if code, _ := call(h, "GET", "/api/job?id="+id1, "", nil); code != 404 {
+		t.Fatalf("read at +5m01s = %d, want 404", code)
+	}
+	if exists(id1) {
+		t.Fatalf("job %s still in store after delivery window expired", id1)
+	}
+
+	// 2. Unread finished job expires after the 30-minute ceiling.
+	setNow(t0)
+	id2 := startDone(500, map[string]any{"error": "boom"})
+	setNow(t0.Add(30*time.Minute + 1*time.Second))
+	if code, _ := call(h, "GET", "/api/job?id="+id2, "", nil); code != 404 {
+		t.Fatalf("unread read at +30m01s = %d, want 404", code)
+	}
+	if exists(id2) {
+		t.Fatalf("unread job %s still in store after 30m TTL", id2)
+	}
+
+	// 3. First delivery late in the 30m window still obeys the 30m hard ceiling.
+	setNow(t0)
+	id3 := startDone(201, map[string]any{"owner": "bob"})
+	setNow(t0.Add(28 * time.Minute))
+	if code, j := call(h, "GET", "/api/job?id="+id3, "", nil); code != 200 || j["state"] != "done" {
+		t.Fatalf("first read at +28m = %d %v, want 200 done", code, j)
+	}
+	setNow(t0.Add(30*time.Minute + 1*time.Second))
+	if code, _ := call(h, "GET", "/api/job?id="+id3, "", nil); code != 404 {
+		t.Fatalf("re-read past 30m ceiling = %d, want 404", code)
+	}
+	if exists(id3) {
+		t.Fatalf("late-delivered job %s still in store past 30m ceiling", id3)
 	}
 }

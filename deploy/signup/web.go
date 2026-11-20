@@ -58,7 +58,7 @@ func newWeb(brokerURL, token, domain string) *web {
 		waits:       newLimiter(5, time.Hour),
 		globalWaits: newLimiterWithCap(30, time.Hour, 4),
 		leaves:      newLimiter(5, time.Hour),
-		jobs:        newJobStore(defaultMaxOpenJobs, defaultMaxStoredJobs, defaultJobTTL),
+		jobs:        newJobStore(defaultMaxOpenJobs, defaultMaxStoredJobs, defaultJobTTL, defaultDeliveredTTL),
 	}
 }
 
@@ -185,8 +185,9 @@ func (wb *web) create(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 202, map[string]string{"job": id})
 }
 
-// job reports on a sign-up: working, or its result (once, to whoever holds
-// the job's id, which only the page that started it knows).
+// job reports on a sign-up: working, or its terminal result (re-readable for
+// 5 minutes after first delivery within the 30-minute unread TTL, to whoever
+// holds the job's id, which only the page that started it knows).
 func (wb *web) job(w http.ResponseWriter, r *http.Request) {
 	if !wb.jobPolls.allow(rateLimitKey(clientIP(r)), time.Now()) {
 		jsonOut(w, 429, map[string]string{"error": "slow down a little"})
@@ -216,26 +217,67 @@ const (
 	defaultMaxOpenJobs   = 4
 	defaultMaxStoredJobs = 32
 	defaultJobTTL        = 30 * time.Minute
+	defaultDeliveredTTL  = 5 * time.Minute
 )
 
 type job struct {
-	started  time.Time
-	finished time.Time
-	done     bool
-	status   int
-	out      map[string]any
+	started   time.Time
+	finished  time.Time
+	delivered time.Time
+	done      bool
+	status    int
+	out       map[string]any
 }
 
 type jobStore struct {
-	mu        sync.Mutex
-	maxOpen   int
-	maxStored int
-	ttl       time.Duration
-	jobs      map[string]*job
+	mu           sync.Mutex
+	maxOpen      int
+	maxStored    int
+	ttl          time.Duration
+	deliveredTTL time.Duration
+	now          func() time.Time
+	jobs         map[string]*job
 }
 
-func newJobStore(maxOpen, maxStored int, ttl time.Duration) *jobStore {
-	return &jobStore{maxOpen: maxOpen, maxStored: maxStored, ttl: ttl, jobs: map[string]*job{}}
+func newJobStore(maxOpen, maxStored int, ttl, deliveredTTL time.Duration) *jobStore {
+	return &jobStore{
+		maxOpen:      maxOpen,
+		maxStored:    maxStored,
+		ttl:          ttl,
+		deliveredTTL: deliveredTTL,
+		now:          time.Now,
+		jobs:         map[string]*job{},
+	}
+}
+
+func (s *jobStore) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+func (s *jobStore) expired(j *job, now time.Time) bool {
+	if !j.done {
+		return false
+	}
+	ttl := s.ttl
+	if ttl <= 0 {
+		ttl = defaultJobTTL
+	}
+	if now.Sub(j.finished) > ttl {
+		return true
+	}
+	if !j.delivered.IsZero() {
+		dttl := s.deliveredTTL
+		if dttl <= 0 {
+			dttl = defaultDeliveredTTL
+		}
+		if now.Sub(j.delivered) > dttl {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *jobStore) start(run func() (int, map[string]any)) (string, bool) {
@@ -248,14 +290,10 @@ func (s *jobStore) start(run func() (int, map[string]any)) (string, bool) {
 	if maxStored <= 0 {
 		maxStored = defaultMaxStoredJobs
 	}
-	ttl := s.ttl
-	if ttl <= 0 {
-		ttl = defaultJobTTL
-	}
-	now := time.Now()
+	now := s.clock()
 	open := 0
 	for k, j := range s.jobs {
-		if j.done && now.Sub(j.finished) > ttl {
+		if s.expired(j, now) {
 			delete(s.jobs, k)
 			continue
 		}
@@ -296,7 +334,7 @@ func (s *jobStore) start(run func() (int, map[string]any)) (string, bool) {
 	go func() {
 		status, out := run()
 		s.mu.Lock()
-		j.done, j.finished, j.status, j.out = true, time.Now(), status, out
+		j.done, j.finished, j.status, j.out = true, s.clock(), status, out
 		s.mu.Unlock()
 	}()
 	return id, true
@@ -309,15 +347,13 @@ func (s *jobStore) take(id string) (job, bool) {
 	if !ok {
 		return job{}, false
 	}
-	ttl := s.ttl
-	if ttl <= 0 {
-		ttl = defaultJobTTL
-	}
-	if j.done {
+	now := s.clock()
+	if s.expired(j, now) {
 		delete(s.jobs, id)
-		if time.Since(j.finished) > ttl {
-			return job{}, false
-		}
+		return job{}, false
+	}
+	if j.done && j.delivered.IsZero() {
+		j.delivered = now
 	}
 	return *j, true
 }
