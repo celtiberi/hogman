@@ -43,39 +43,87 @@
     return [document.createTextNode('Your network\'s name. Everything in it ends in .'), s, document.createTextNode('.hogman')];
   };
   $('handle').addEventListener('input', setNames);
+  for (const f of ['pen', 'handle']) $(f).addEventListener('change', setNames);   // autofill, paste, scripts
 
-  const show = id => { for (const s of ['form', 'working', 'done']) $(s).hidden = s !== id; };
+  const show = id => { for (const s of ['form', 'wait', 'waited', 'working', 'done']) $(s).hidden = s !== id; };
+
+  // The waiting list: for when the farm is full, or there's no code.
+  $('to-wait').addEventListener('click', ev => { ev.preventDefault(); show('wait'); $('w-email').focus(); });
+  $('to-form').addEventListener('click', ev => { ev.preventDefault(); show('form'); });
+  $('wait').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    $('w-err').hidden = true;
+    const email = $('w-email').value.trim();
+    if (!email.includes('@')) { $('w-err').textContent = 'Your email, please.'; $('w-err').hidden = false; return; }
+    $('w-go').disabled = true;
+    try {
+      const r = await api('POST', '/waitlist', { email, pen: $('w-pen').value.trim(), note: $('w-note').value.trim() });
+      $('waited-text').textContent = r.already
+        ? `You were already on it. You're number ${r.place}. We'll email ${email} when there's room.`
+        : `You're number ${r.place}. We'll email ${email} a sign-up code when there's room.`;
+      show('waited');
+    } catch (e) { $('w-err').textContent = e.message; $('w-err').hidden = false; }
+    finally { $('w-go').disabled = false; }
+  });
+
+  // Raising a pen is a job on the server: start it, then check on it. The job's
+  // id is kept for this tab, so a reload carries on instead of losing the link.
+  const JOB = 'hogman-signup-job';
+  const stages = [[0, 'Building the fence'], [8, 'Minting your certificate authority'],
+                  [20, 'Opening the gate'], [35, 'Raking the last of the straw'], [90, 'Taking longer than usual; hang on']];
+  const showDone = r => {
+    $('done-zone').textContent = r.zone;
+    $('link').textContent = r.join_link;
+    if (r.join_qr_svg) $('qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(r.join_qr_svg);
+    else $('qr').closest('.qr').hidden = true;
+    $('copy').onclick = async () => { await navigator.clipboard.writeText(r.join_link); $('copy').textContent = 'Copied'; };
+    history.replaceState(null, '', location.pathname);   // the code is used up
+    show('done');
+  };
+  const fail = msg => {
+    sessionStorage.removeItem(JOB);
+    show('form');
+    $('err').textContent = msg; $('err').hidden = false;
+    $('go').disabled = false;
+  };
+  const follow = async id => {
+    show('working');
+    const t0 = Date.now();
+    for (;;) {
+      let j = null;
+      try { j = await api('GET', '/job?id=' + encodeURIComponent(id)); }
+      catch (e) { if (e.status === 404) return fail(e.message); }   // otherwise a blip: keep checking
+      if (j && j.state === 'done') return showDone(j.result);
+      if (j && j.state === 'failed') return fail(j.error);
+      const secs = j ? j.seconds : Math.round((Date.now() - t0) / 1000);
+      const stage = stages.filter(([at]) => secs >= at).pop()[1];
+      $('stage').textContent = `${stage}… ${secs}s`;
+      $('bar').style.width = Math.min(95, 5 + secs * 1.5) + '%';   // only ever moves forward
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  };
 
   $('form').addEventListener('submit', async ev => {
     ev.preventDefault();
     $('err').hidden = true;
+    setNames();
     const body = { code: $('code').value, pen: $('pen').value, handle: $('handle').value };
     if (!body.code.trim() || !body.pen.trim() || !body.handle.trim()) {
       $('err').textContent = 'Fill in all three.'; $('err').hidden = false; return;
     }
     $('go').disabled = true;
-    show('working');
-    // A pen can't be raised twice from one page, and leaving mid-way loses the link.
-    window.onbeforeunload = () => true;
     try {
       const r = await api('POST', '/create', body);
-      $('done-zone').textContent = r.zone;
-      $('link').textContent = r.join_link;
-      if (r.join_qr_svg) $('qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(r.join_qr_svg);
-      else $('qr').closest('.qr').hidden = true;
-      $('copy').onclick = async () => { await navigator.clipboard.writeText(r.join_link); $('copy').textContent = 'Copied'; };
-      history.replaceState(null, '', location.pathname);   // the code is used up
-      show('done');
-    } catch (e) {
-      window.onbeforeunload = null;
-      show('form');
-      $('err').textContent = e.message; $('err').hidden = false;
-      $('go').disabled = false;
-    }
+      sessionStorage.setItem(JOB, r.job);
+      await follow(r.job);
+    } catch (e) { fail(e.message); }
   });
+  const pending = sessionStorage.getItem(JOB);
+  if (pending) follow(pending);
 
+  if (location.hash === '#wait') show('wait');   // a link straight to the waiting list
   api('GET', '/status').then(s => {
-    if (!s.open) { $('closed').hidden = false; $('go').disabled = true; }
+    if (!s.open) { $('closed').hidden = false; $('go').disabled = true; show('wait'); }
   }).catch(() => { $('down').hidden = false; });
   setNames();
 })();

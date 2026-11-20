@@ -1,0 +1,219 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// The waiting list: people who'd like a pen when there's room, or who have no
+// code yet. One line per person in $HOGMAN_HOME/signup/waitlist, tab-separated:
+//
+//	id  added-at  status  email  pen  note
+//
+// status is "waiting", or "invited <code>" once the keeper sends them a code.
+// hogman-host waitlist reads and edits the same file, under the same lock.
+
+const waitlistMax = 5000
+
+var emailRE = regexp.MustCompile(`^[^\s@<>"',;:\\]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$`)
+
+type waitEntry struct {
+	ID     int
+	At     string
+	Status string
+	Email  string
+	Pen    string
+	Note   string
+}
+
+func validEmail(e string) bool { return len(e) <= 254 && emailRE.MatchString(e) }
+
+// cleanField keeps a field to one line with no tabs, so the file stays parseable.
+func cleanField(s string, max int) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\n' || r == '\r' || r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, strings.TrimSpace(s))
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max])
+	}
+	return strings.TrimSpace(s)
+}
+
+func (b *broker) waitPath() string { return filepath.Join(b.home, "signup", "waitlist") }
+
+func (b *broker) readWaitlist() ([]waitEntry, error) {
+	f, err := os.Open(b.waitPath())
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var out []waitEntry
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		p := strings.Split(sc.Text(), "\t")
+		if len(p) < 6 {
+			continue
+		}
+		id, _ := strconv.Atoi(p[0])
+		out = append(out, waitEntry{id, p[1], p[2], p[3], p[4], p[5]})
+	}
+	return out, sc.Err()
+}
+
+// joinWaitlist adds someone, unless they're already waiting. Returns their
+// place among those still waiting.
+func (b *broker) joinWaitlist(email, pen, note string) (place int, already bool, err error) {
+	unlock, err := b.lock(b.waitPath() + ".lock")
+	if err != nil {
+		return 0, false, err
+	}
+	defer unlock()
+	list, err := b.readWaitlist()
+	if err != nil {
+		return 0, false, err
+	}
+	maxID, waiting := 0, 0
+	for _, e := range list {
+		if e.ID > maxID {
+			maxID = e.ID
+		}
+		if e.Status == "waiting" {
+			waiting++
+			if strings.EqualFold(e.Email, email) {
+				return waiting, true, nil
+			}
+		}
+	}
+	if len(list) >= waitlistMax {
+		return 0, false, errFull
+	}
+	f, err := os.OpenFile(b.waitPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return 0, false, err
+	}
+	defer f.Close()
+	_, err = fmt.Fprintf(f, "%d\t%s\t%s\t%s\t%s\t%s\n", maxID+1, time.Now().UTC().Format(time.RFC3339), "waiting", email, pen, note)
+	return waiting + 1, false, err
+}
+
+var errFull = fmt.Errorf("the waiting list is full")
+
+func (b *broker) waitlist(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Email string `json:"email"`
+		Pen   string `json:"pen"`
+		Note  string `json:"note"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		jsonOut(w, 400, map[string]string{"error": "bad request"})
+		return
+	}
+	email := strings.ToLower(strings.TrimSpace(in.Email))
+	if !validEmail(email) {
+		jsonOut(w, 400, map[string]string{"error": "that doesn't look like an email address"})
+		return
+	}
+	pen := strings.ToLower(strings.TrimSpace(in.Pen))
+	if pen != "" {
+		if why, ok := validPen(pen); !ok {
+			jsonOut(w, 400, map[string]string{"error": "pen name: " + why})
+			return
+		}
+	}
+	place, already, err := b.joinWaitlist(email, pen, cleanField(in.Note, 280))
+	switch {
+	case err == errFull:
+		jsonOut(w, 503, map[string]string{"error": "the waiting list is full right now; try again later"})
+		return
+	case err != nil:
+		log.Printf("waitlist: %v", err)
+		jsonOut(w, 500, map[string]string{"error": "internal error"})
+		return
+	}
+	if !already {
+		log.Printf("waitlist: someone joined (%d waiting)", place)
+		b.notify(fmt.Sprintf("Someone joined the waiting list. %d waiting. See: hogman-host waitlist", place))
+	}
+	jsonOut(w, 200, map[string]any{"place": place, "already": already})
+}
+
+// notify pushes a short note to the operator's ntfy topic, if one is set.
+// Never personal details: just that something happened.
+func (b *broker) notify(msg string) {
+	if b.ntfy == "" {
+		return
+	}
+	u, err := url.Parse(b.ntfy)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+		return
+	}
+	go func() {
+		req, _ := http.NewRequest("POST", u.String(), strings.NewReader(msg))
+		req.Header.Set("Title", "Hogman sign-ups")
+		req.Header.Set("Tags", "pig")
+		c := &http.Client{Timeout: 15 * time.Second}
+		if resp, err := c.Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}()
+}
+
+// dropInvited deletes the waiting-list entry that was sent this code, if any:
+// the page promises to delete someone's email once they've signed up.
+func (b *broker) dropInvited(code string) error {
+	unlock, err := b.lock(b.waitPath() + ".lock")
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	data, err := os.ReadFile(b.waitPath())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var keep []string
+	dropped := false
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		p := strings.Split(line, "\t")
+		if len(p) >= 3 && p[2] == "invited "+code {
+			dropped = true
+			continue
+		}
+		if line != "" {
+			keep = append(keep, line)
+		}
+	}
+	if !dropped {
+		return nil
+	}
+	out := strings.Join(keep, "\n")
+	if out != "" {
+		out += "\n"
+	}
+	tmp := b.waitPath() + ".new"
+	if err := os.WriteFile(tmp, []byte(out), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, b.waitPath())
+}

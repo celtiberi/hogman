@@ -4,6 +4,9 @@
 #
 # usage: deploy/test-host.sh [--keep]
 set -uo pipefail
+# shellcheck source=/dev/null
+. "$(dirname "$0")/../core/test/e2e-lock.sh"
+e2e_lock
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 KEEP=false; [ "${1:-}" = --keep ] && KEEP=true
@@ -35,7 +38,7 @@ cleanup() {
   docker network rm hogman-front >/dev/null 2>&1
   rm -rf "$HOGMAN_HOME"
 }
-trap cleanup EXIT
+trap 'cleanup; e2e_unlock' EXIT
 
 step "Set up the host"
 mkdir -p "$HOGMAN_HOME/src"
@@ -130,14 +133,28 @@ docker run -d --name client-signup --network hogman-front \
   -v "$FRONT_CA:/front-ca.crt:ro" --entrypoint sh nicolaka/netshoot:v0.14 -c \
   'cp /front-ca.crt /usr/local/share/ca-certificates/front.crt && update-ca-certificates >/dev/null 2>&1; exec sleep infinity' >/dev/null
 retry 20 docker exec client-signup test -s /etc/ssl/certs/ca-certificates.crt
-signup() { docker exec client-signup curl -s -m 900 -H 'content-type: application/json' "https://get.example$@"; }
+signup() { docker exec client-signup curl -s -m 30 -H 'content-type: application/json' "https://get.example$@"; }
+create_pen() {  # create_pen <json>: start a sign-up and follow its job, like the page does; prints the result
+  local job j i
+  job="$(signup /api/create -d "$1" | jq -r '.job // empty')"
+  [ -n "$job" ] || { echo '{"error":"no job"}'; return; }
+  for i in $(seq 1 300); do
+    j="$(signup "/api/job?id=$job")"
+    case "$(jq -r .state <<<"$j" 2>/dev/null)" in
+      done) jq -c .result <<<"$j"; return ;;
+      failed) jq -c '{error, status}' <<<"$j"; return ;;
+    esac
+    sleep 2
+  done
+  echo '{"error":"timed out"}'
+}
 check "the page is served at https://get.example" sh -c "docker exec client-signup curl -sf https://get.example/ | grep -q 'Get a pen'"
 check "it says sign-ups are open" sh -c "docker exec client-signup curl -sf https://get.example/api/status | jq -e '.open'"
 check "a reserved name is refused" sh -c "docker exec client-signup curl -sf 'https://get.example/api/check?pen=www' | jq -e '.free == false'"
-check "a wrong code is refused" sh -c "docker exec client-signup curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
-  -d '{\"code\":\"PIG-AAAA-AAAA\",\"pen\":\"smithy\",\"handle\":\"keeper\"}' https://get.example/api/create | grep -qx 403"
+wrong_code() { [ "$(create_pen '{"code":"PIG-AAAA-AAAA","pen":"smithy","handle":"keeper"}' | jq -r .status)" = 403 ]; }
+check "a wrong code is refused" wrong_code
 front_started="$(docker inspect -f '{{.State.StartedAt}}' hogman-front-front-1)"
-res="$(signup /api/create -d "{\"code\":\"$code\",\"pen\":\"smithy\",\"handle\":\"keeper\"}")"
+res="$(create_pen "{\"code\":\"$code\",\"pen\":\"smithy\",\"handle\":\"keeper\"}")"
 check "raising a pen doesn't restart the front door (other pens stay up)" \
   test "$(docker inspect -f '{{.State.StartedAt}}' hogman-front-front-1)" = "$front_started"
 link="$(jq -r .join_link <<<"$res" 2>/dev/null)"
@@ -165,9 +182,26 @@ check "the keeper joins with the link (exit $rc)" grep -q "You're in. You are ke
 check "and is the pen's owner" sh -c "'$HOST' pen smithy member list | grep -q 'keeper.*owner'"
 code2="$("$HOST" signup-code | awk '/^code:/ {print $2}')"
 check "the server is full at 3 pens" sh -c "docker exec client-signup curl -sf https://get.example/api/status | jq -e '.open == false'"
-full="$(docker exec client-signup curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
-  -d "{\"code\":\"$code2\",\"pen\":\"jones\",\"handle\":\"keeper\"}" https://get.example/api/create)"
+full="$(create_pen "{\"code\":\"$code2\",\"pen\":\"jones\",\"handle\":\"keeper\"}" | jq -r .status)"
 check "a full server says so (503)" test "$full" = 503
+
+# The waiting list, now that the server is full.
+wl() { docker exec client-signup curl -s -H 'content-type: application/json' -d "$1" https://get.example/api/waitlist; }
+check "a full server's page takes you onto the waiting list" sh -c "jq -e '.place == 1' <<<'$(wl '{"email":"Wanda@Example.com","pen":"wanda","note":"for the band"}')'"
+check "joining twice keeps one place" sh -c "jq -e '.already and .place == 1' <<<'$(wl '{"email":"wanda@example.com"}')'"
+bad_email() { wl '{"email":"nope"}' | jq -e '.error | test("email")'; }
+check "a bad email is refused" bad_email
+wl '{"email":"xavier@example.org"}' >/dev/null
+check "the keeper sees who's waiting" sh -c "'$HOST' waitlist | grep -q 'wanda@example.com.*wanda.*for the band'"
+inv="$("$HOST" waitlist invite 1 2>&1)"
+wcode="$(grep -o 'PIG-[A-Z0-9]\{4\}-[A-Z0-9]\{4\}' <<<"$inv" | head -1)"
+invite_ok() {
+  [ -n "$wcode" ] && grep -q "^$wcode " "$HOGMAN_HOME/signup/codes" && grep -qF "get.example/#code=$wcode" <<<"$inv"
+}
+check "inviting from the list makes a working code and the message to send" invite_ok
+check "and marks them invited" sh -c "'$HOST' waitlist | grep -q 'invited $wcode.*wanda@example.com'"
+"$HOST" waitlist remove 2 >/dev/null 2>&1
+check "the keeper can remove someone" sh -c "! '$HOST' waitlist | grep -q xavier"
 check "the page cannot reach Docker or the pens" sh -c "! docker inspect hogman-signup-web-1 | grep -q docker.sock"
 broker_unreachable() {  # only the page shares a network with the broker
   local n; for n in $(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' hogman-signup-broker-1); do

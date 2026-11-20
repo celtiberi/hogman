@@ -159,8 +159,39 @@ func TestWebForwardsAndDrawsQR(t *testing.T) {
 		t.Fatalf("a one-letter name is free? %v", out)
 	}
 	code, out := call(h, "POST", "/api/create", `{"code":" pig-aaaa-bbbb ","pen":"Smith","handle":"Alice"}`, map[string]string{"Content-Type": "application/json"})
-	if code != 201 || out["owner"] != "alice" || !strings.HasPrefix(out["join_qr_svg"].(string), "<svg") {
+	id, _ := out["job"].(string)
+	if code != 202 || len(id) != 32 {
 		t.Fatalf("create: %d %v", code, out)
+	}
+	var res map[string]any
+	for i := 0; i < 100; i++ {
+		_, j := call(h, "GET", "/api/job?id="+id, "", nil)
+		if j["state"] == "done" {
+			res, _ = j["result"].(map[string]any)
+			break
+		}
+		if j["state"] != "working" {
+			t.Fatalf("job: %v", j)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if res == nil || res["owner"] != "alice" || !strings.HasPrefix(res["join_qr_svg"].(string), "<svg") {
+		t.Fatalf("job result: %v", res)
+	}
+	if code, _ := call(h, "GET", "/api/job?id=nope", "", nil); code != 404 {
+		t.Fatalf("an unknown job: %d", code)
+	}
+	// A failed sign-up reports its reason through the job.
+	_, out = call(h, "POST", "/api/create", `{"code":"PIG-ZZZZ-ZZZZ","pen":"jones","handle":"bob"}`, map[string]string{"Content-Type": "application/json"})
+	for i := 0; i < 100; i++ {
+		_, j := call(h, "GET", "/api/job?id="+out["job"].(string), "", nil)
+		if j["state"] == "failed" {
+			if j["status"] != float64(403) || !strings.Contains(j["error"].(string), "code") {
+				t.Fatalf("failed job: %v", j)
+			}
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	if _, out := call(h, "GET", "/api/check?pen=smith", "", nil); out["free"] != false {
 		t.Fatalf("smith still free after it was raised: %v", out)
@@ -193,5 +224,69 @@ func TestLimiter(t *testing.T) {
 	}
 	if !l.allow("a", now.Add(61*time.Second)) {
 		t.Fatal("the window should pass")
+	}
+}
+
+func TestWaitlist(t *testing.T) {
+	b, home := newTestBroker(t, "")
+	h := b.handler()
+	join := func(j string) (int, map[string]any) { return call(h, "POST", "/waitlist", j, auth) }
+
+	code, out := join(`{"email":"Alice@Example.com","pen":"smith","note":"for my band\tand\nfriends"}`)
+	if code != 200 || out["place"] != float64(1) || out["already"] != false {
+		t.Fatalf("join: %d %v", code, out)
+	}
+	if code, out := join(`{"email":"alice@example.com"}`); code != 200 || out["already"] != true {
+		t.Fatalf("a second join should be recognised: %d %v", code, out)
+	}
+	if code, out := join(`{"email":"bob@example.org"}`); code != 200 || out["place"] != float64(2) {
+		t.Fatalf("bob: %d %v", code, out)
+	}
+	for _, bad := range []string{
+		`{"email":"not-an-email"}`,
+		`{"email":"a@b"}`,
+		`{"email":"x\"y@example.com"}`,
+		`{"email":"ok@example.com","pen":"www"}`,
+		`{"email":"ok@example.com","extra":1}`,
+	} {
+		if code, _ := join(bad); code != 400 {
+			t.Fatalf("%s: %d, want 400", bad, code)
+		}
+	}
+	data, _ := os.ReadFile(filepath.Join(home, "signup", "waitlist"))
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("waitlist file: %q", data)
+	}
+	f := strings.Split(lines[0], "\t")
+	if len(f) != 6 || f[0] != "1" || f[2] != "waiting" || f[3] != "alice@example.com" || f[4] != "smith" || f[5] != "for my band and friends" {
+		t.Fatalf("first entry: %q", f)
+	}
+}
+
+func TestWaitlistThroughThePage(t *testing.T) {
+	b, _ := newTestBroker(t, "")
+	srv := httptest.NewServer(b.handler())
+	defer srv.Close()
+	h := newWeb(srv.URL, testToken, "pens.test").handler()
+	js := map[string]string{"Content-Type": "application/json"}
+	if code, out := call(h, "POST", "/api/waitlist", `{"email":" Carol@Example.com ","pen":"","note":"hi"}`, js); code != 200 || out["place"] != float64(1) {
+		t.Fatalf("join through the page: %d %v", code, out)
+	}
+	if code, _ := call(h, "POST", "/api/waitlist", `{"email":"nope"}`, js); code != 400 {
+		t.Fatalf("bad email through the page: %d", code)
+	}
+}
+
+func TestSignupClearsWaitlistEntry(t *testing.T) {
+	b, home := newTestBroker(t, "PIG-AAAA-BBBB waitlist #1\n")
+	w := filepath.Join(home, "signup", "waitlist")
+	os.WriteFile(w, []byte("1\tt\tinvited PIG-AAAA-BBBB\tdan@example.com\t\t\n2\tt\twaiting\terin@example.com\t\t\n"), 0o600)
+	if code, out := call(b.handler(), "POST", "/provision", `{"code":"PIG-AAAA-BBBB","pen":"dans","owner":"dan"}`, auth); code != 201 {
+		t.Fatalf("provision: %d %v", code, out)
+	}
+	data, _ := os.ReadFile(w)
+	if strings.Contains(string(data), "dan@example.com") || !strings.Contains(string(data), "erin@example.com") {
+		t.Fatalf("after dan signed up, the waiting list is %q", data)
 	}
 }

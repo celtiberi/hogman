@@ -183,3 +183,8 @@ footer p { margin: 0.2rem 0; }
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* The plain-words explainer: readable first, jokes later. */
+.plainwords { max-width: 46rem; font-size: 1.12rem; }
+.plainwords p { margin: 0 0 1.1rem; }
+.plainwords strong { color: var(--gold); }

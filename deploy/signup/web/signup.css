@@ -48,9 +48,9 @@ input:focus { outline: 2px solid var(--gold); outline-offset: 1px; }
 .btn:focus-visible { outline: 3px solid var(--gold); outline-offset: 3px; }
 .notice { text-align: center; border: 1px solid var(--fire); border-radius: 10px; padding: .8rem; }
 .bar { height: 10px; border-radius: 99px; background: #0008; overflow: hidden; margin-top: 1rem; }
-.bar div { height: 100%; width: 30%; border-radius: 99px; background: linear-gradient(90deg, var(--gold), var(--fire)); animation: slide 1.6s ease-in-out infinite; }
-@keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(340%); } }
-@media (prefers-reduced-motion: reduce) { .bar div { animation: none; width: 100%; opacity: .5; } }
+.bar div { height: 100%; width: 5%; border-radius: 99px; background: linear-gradient(90deg, var(--gold), var(--fire)); transition: width 1.8s linear; }
+@media (prefers-reduced-motion: reduce) { .bar div { transition: none; } }
+.stage { font-family: var(--mono); color: var(--gold); margin: .6rem 0 0; }
 ol { padding-left: 1.3rem; } ol li { margin-bottom: .9rem; }
 .linkbox { font: .78rem var(--mono); word-break: break-all; background: #000a; border: 1px solid #ffc23355; border-radius: 8px; padding: .5rem .6rem; margin-top: .4rem; }
 .qr { display: flex; gap: 1rem; align-items: center; margin: .4rem 0 1rem; }
@@ -58,3 +58,5 @@ ol { padding-left: 1.3rem; } ol li { margin-bottom: .9rem; }
 .qr p { color: var(--ash); font-size: .88rem; margin: 0; }
 .warn { border-left: 4px solid var(--fire); padding-left: .8rem; color: var(--bone); }
 footer { margin-top: 2.4rem; text-align: center; color: var(--ash); font-size: .88rem; }
+.opt { font-weight: 400; color: var(--ash); }
+#wait h2, #waited h2 { margin-top: 0; }

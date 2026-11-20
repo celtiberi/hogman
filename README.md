@@ -33,6 +33,37 @@ Hogman gives you your own **private internet** for the people you choose. Get a 
 server in about a minute, or raise one on your own. You hold the gate. Your swine get real
 names, real websites and real padlocks. The filthy horde stays outside the fence, howling.
 
+## In plain words
+
+**Your own little internet, with a guest list.** You make a private network and invite the
+people you want. Inside it you can have websites, message boards, photo pages, anything you'd
+normally use in a browser, and they work just like the sites you already visit. The
+difference: only the people you let in can reach them.
+
+**From the outside, there is nothing there.** Your sites don't have public addresses, so
+strangers, scrapers and attackers can't find them, can't load them and can't try to break in.
+There's no login page for them to guess at.
+
+**You stay in charge.** You hand out invitations, everyone gets a proper name, and if someone
+misbehaves you remove them, every device at once, in about two seconds.
+
+**What people use it for.** You bring the apps (a photo gallery, a forum, a wiki: there are
+good free ones) and run them on a server in your pen; Hogman makes them private.
+
+- **A family:** photo albums, a shared calendar, recipes, the family chat, seen by nobody else.
+- **Friends, clubs and teams:** your own private Facebook, with a message board, events and a
+  members page.
+- **A business and its customers:** a customer portal only invited customers can even reach,
+  so attackers never see a login page. (Hogman isn't audited yet; wait for that before
+  putting anything high-stakes behind it.)
+- **A small company:** internal tools and a wiki, reachable by employees from anywhere and
+  invisible to everyone else.
+- **A community:** a forum or archive away from bots, trolls and drive-by strangers.
+- **Your own projects:** the home server or side project, reachable from your laptop or phone
+  anywhere, with real HTTPS.
+
+## What you get
+
 - **Proper names.** Every pen has its own name, and so does everything in it:
   `alice.yourpen.hogman`, `blog.alice.yourpen.hogman`. Nobody outside can look them up.
 - **The padlock, without the paperwork.** Each pen runs its own certificate authority, so
@@ -106,7 +137,8 @@ gone and their names held so nobody can pretend to be them.
 
 1. **Sign up** at [get.hogman.network](https://get.hogman.network): name your pen and
    yourself. About a minute later it's up on our server, with its own gate, names and
-   certificate authority. While we test, you need a sign-up code from someone already in.
+   certificate authority. While we test, you need a sign-up code from someone already in;
+   no code, or the farm is full? Join the waiting list on the same page.
 2. **Get your laptop in.** Open the link you're given on your laptop and copy one command.
 3. **Let your people in.** Your pen's home page makes invite links and QR codes, and shows
    the herd: suspend anyone, or give them the boot. No server, no shell.
@@ -172,9 +204,9 @@ Try it, break it, tell us what you find. Don't trust it with anything that matte
 | A real pen live on the internet: `farm.hogman`, joined from a Mac | |
 | Nightly encrypted backups, pulled to a machine you own; restore tested | |
 | Alerts on your phone when the server or its backups stop | |
-| Pens on our server: sign up by invitation while we test | |
+| Pens on our server: sign up by invitation while we test, or join the waiting list | |
 | Run your pen from its home page: invites, the herd, the boot | |
-| End-to-end tests: 112 checks for a pen, 52 for a shared host | |
+| End-to-end tests: 112 checks for a pen, 59 for a shared host | |
 
 **Found a security problem?** Please don't open a public issue. Report it privately
 with GitHub's **Security → Report a vulnerability** button on this repository.

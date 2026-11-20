@@ -15,13 +15,14 @@
   <p class="sub">Your own private internet, on our server. Your people get names inside it,
     real HTTPS, and nobody gets in unless you let them.</p>
 
-  <p class="notice" id="closed" hidden>The farm is full right now. Check back soon.</p>
+  <p class="notice" id="closed" hidden>The farm is full right now. Join the waiting list and we'll email you a code when there's room.</p>
   <p class="notice" id="down" hidden>The sign-up service is resting. Try again in a bit.</p>
 
   <form id="form" class="panel" novalidate>
     <label for="code">Sign-up code</label>
     <input id="code" name="code" placeholder="PIG-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="13" required>
-    <p class="hint">Sign-ups are by invitation while we test. Got a link? The code is already filled in.</p>
+    <p class="hint">Sign-ups are by invitation while we test. Got a link? The code is already filled in.
+      No code? <a href="#wait" id="to-wait">Join the waiting list</a>.</p>
 
     <label for="pen">Name your pen</label>
     <div class="suffix"><input id="pen" name="pen" placeholder="smith" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30" required><span>.hogman</span></div>
@@ -35,11 +36,31 @@
     <p class="error" id="err" role="alert" hidden></p>
   </form>
 
+  <form id="wait" class="panel" novalidate hidden>
+    <h2>The waiting list</h2>
+    <p>Leave your email and we'll send you a sign-up code when there's room.</p>
+    <label for="w-email">Email</label>
+    <input id="w-email" type="email" autocomplete="email" maxlength="254" required>
+    <label for="w-pen">The pen name you'd like <span class="opt">(optional)</span></label>
+    <div class="suffix"><input id="w-pen" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30"><span>.hogman</span></div>
+    <label for="w-note">Anything you'd like us to know <span class="opt">(optional)</span></label>
+    <input id="w-note" maxlength="280" autocomplete="off" placeholder="who it's for, how you heard of us">
+    <p class="hint">We keep your email only to send you a code, and delete it once you've signed up or when you ask.</p>
+    <button class="btn" id="w-go" type="submit">Put me on the list</button>
+    <p class="error" id="w-err" role="alert" hidden></p>
+    <p class="hint"><a href="#" id="to-form">I have a code</a></p>
+  </form>
+
+  <section id="waited" class="panel" hidden aria-live="polite">
+    <h2>You're on the list</h2>
+    <p id="waited-text"></p>
+  </section>
+
   <section id="working" class="panel" hidden aria-live="polite">
     <h2>Raising your pen</h2>
-    <p>Building the fence, minting your certificate authority, opening the gate. About a minute.
-      Keep this page open.</p>
-    <div class="bar"><div></div></div>
+    <p>About a minute. You can reload this page; it picks up where it left off.</p>
+    <p class="stage" id="stage" aria-live="polite">Building the fence…</p>
+    <div class="bar"><div id="bar"></div></div>
   </section>
 
   <section id="done" class="panel" hidden>

@@ -25,6 +25,7 @@ type broker struct {
 	home  string // HOGMAN_HOME
 	tool  string // hogman-host
 	token string
+	ntfy  string // optional: ntfy topic URL for the operator's pushes
 	mu    sync.Mutex
 }
 
@@ -33,6 +34,7 @@ func runBroker() {
 		home:  env("HOGMAN_HOME", "/opt/hogman"),
 		tool:  env("HOGMAN_HOST_TOOL", "hogman-host"),
 		token: readToken(),
+		ntfy:  env("NTFY_URL", ""),
 	}
 	addr := env("BROKER_ADDR", ":9090")
 	log.Printf("broker on %s", addr)
@@ -45,6 +47,7 @@ func (b *broker) handler() http.Handler {
 	mux.HandleFunc("GET /capacity", b.capacity)
 	mux.HandleFunc("GET /check", b.check)
 	mux.HandleFunc("POST /provision", b.provision)
+	mux.HandleFunc("POST /waitlist", b.waitlist)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(got), []byte(b.token)) != 1 {
@@ -188,8 +191,12 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 	if err := b.useCode(in.Code); err != nil {
 		log.Printf("could not mark code used: %v", err) // the pen exists; say so anyway
 	}
+	if err := b.dropInvited(in.Code); err != nil {
+		log.Printf("could not clear the waiting list entry: %v", err)
+	}
 	b.ledger(fmt.Sprintf("%s raised %s for %s with %s (%s) in %s",
 		time.Now().UTC().Format(time.RFC3339), in.Pen, in.Owner, in.Code, note, time.Since(start).Round(time.Second)))
+	b.notify(fmt.Sprintf("New pen raised: %s.hogman", in.Pen))
 	jsonOut(w, 201, res)
 }
 
@@ -197,8 +204,11 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 
 func (b *broker) codesPath() string { return filepath.Join(b.home, "signup", "codes") }
 
-func (b *broker) lockCodes() (func(), error) {
-	f, err := os.OpenFile(b.codesPath()+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+func (b *broker) lockCodes() (func(), error) { return b.lock(b.codesPath() + ".lock") }
+
+// lock takes an exclusive flock on path; hogman-host takes the same locks.
+func (b *broker) lock(path string) (func(), error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}

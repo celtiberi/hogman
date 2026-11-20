@@ -199,6 +199,25 @@ intermediate certificate for five years; you need the root only to renew that.
 
 Who signed up, and with which code, is in `/opt/hogman/signup/raised.log`.
 
+**The waiting list.** When the server is full, or someone has no code, the page takes their
+email instead (and, optionally, the pen name they'd like and a note). It promises to keep the
+email only to send them a code, and to delete it once they've signed up; the broker removes
+their line when they sign up with their code.
+
+```bash
+hogman-host waitlist                 # who's waiting
+hogman-host waitlist invite 3        # make their code and email it (or print the message to send)
+hogman-host waitlist remove 3        # delete someone, e.g. when they ask
+
+hogman-host signup-mail "Hogman <pens@example.com>" < resend-api-key   # email codes via Resend
+hogman-host signup-mail test you@example.com
+hogman-host signup-notify https://ntfy.sh/<topic>   # a push when someone joins or gets a pen
+```
+
+Mail goes out only when you invite someone, never when someone joins, so nobody can use the
+page to make you email an address they typed. Pushes never include personal details. Link
+people straight to the list with `https://<signup-host>/#wait`.
+
 ## Everyday
 
 ```bash

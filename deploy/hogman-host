@@ -42,6 +42,9 @@ usage: hogman-host <command>
                                  a sign-up page that raises pens for other people
                                  (no arguments: rebuild it with the saved settings)
   signup-code [note]             a single-use sign-up code (sign-ups are invite-only)
+  waitlist [invite|remove <id>]  who's waiting for a pen; invite emails them a code
+  signup-mail "<from>" < key     email waiting-list codes through Resend (signup-mail test <addr>)
+  signup-notify <ntfy-url>|off   a push when someone joins the waiting list or gets a pen
   capacity                       how many pens this server holds, and its limit
   provision <pen> <owner>        raise a hosted pen (what the sign-up page runs)
 
@@ -578,7 +581,8 @@ services:
       hogman-front: { aliases: [signup] }
       signup: {}
   # Raises pens. It drives Docker, so it is as powerful as root: it listens
-  # only on the private network it shares with the page, and does three things.
+  # only on the private network it shares with the page, and does four things:
+  # capacity, name check, raise a pen with a valid code, add to the waiting list.
   broker:
     build: { context: ./build, dockerfile: $dockerfile, target: broker }
     image: hogman/signup-broker:local
@@ -590,6 +594,7 @@ services:
       HOGMAN_HOME: $HOGMAN_HOME
       HOGMAN_HOST_TOOL: /usr/local/bin/hogman-host
       BROKER_TOKEN_FILE: $SIGNUP/token
+      NTFY_URL: ${SIGNUP_NTFY:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - $HOGMAN_HOME:$HOGMAN_HOME
@@ -616,27 +621,174 @@ rand_chars() {
     '{ for (i = 1; i <= NF; i++) printf "%s", substr(a, $i % 32 + 1, 1) }'
 }
 
+# make_code <note>: add a single-use sign-up code and print it.
+make_code() {
+  local note code
+  note="$(printf '%s' "$1" | tr -cd 'A-Za-z0-9 ,.@_#-' | cut -c1-80)"
+  # No 0/O or 1/I: codes get read out loud and typed.
+  code="PIG-$(rand_chars 4)-$(rand_chars 4)"
+  with_lock "$SIGNUP/codes.lock" sh -c 'echo "$1" >> "$2"' _ "$code $note" "$SIGNUP/codes"
+  echo "$code"
+}
+
+# with_lock <lockfile> <command...>: the broker takes the same flock.
+with_lock() {
+  local l="$1"; shift
+  if command -v flock >/dev/null; then flock "$l" "$@"; else "$@"; fi
+}
+
 # signup-code [note]: a single-use code for the sign-up page (invite-only
 # sign-ups). Prints a link that fills it in.
 cmd_signup_code() {
   load_host
   [ -n "${SIGNUP_HOST:-}" ] && [ -f "$SIGNUP/codes" ] || die "sign-ups are not set up: hogman-host signup-setup"
-  local note="${*:-}" code
-  note="$(printf '%s' "$note" | tr -cd 'A-Za-z0-9 ,.@_-' | cut -c1-80)"
-  # No 0/O or 1/I: codes get read out loud and typed.
-  code="PIG-$(rand_chars 4)-$(rand_chars 4)"
-  if command -v flock >/dev/null; then
-    ( flock 9; echo "$code $note" >> "$SIGNUP/codes" ) 9>"$SIGNUP/codes.lock"
-  else
-    echo "$code $note" >> "$SIGNUP/codes"
-  fi
+  local code; code="$(make_code "${*:-}")"
   echo "code: $code"
   echo "link: https://$SIGNUP_HOST/#code=$code"
   echo "works once"
 }
 
+# --------------------------------------------------------- waiting list ----
+# $SIGNUP/waitlist: one person per line, tab-separated:
+#   id  added-at  status  email  pen  note      (status: waiting | invited <code>)
+# The sign-up page's broker appends to it; these commands read and edit it,
+# under the same lock. When someone signs up with their code, the broker
+# removes their line, as the page promises.
+
+WAITLIST_FILE() { echo "$SIGNUP/waitlist"; }
+
+cmd_waitlist() {
+  load_host
+  [ -n "${SIGNUP_HOST:-}" ] || die "sign-ups are not set up: hogman-host signup-setup"
+  local w; w="$(WAITLIST_FILE)"
+  case "${1:-list}" in
+    list)
+      [ -s "$w" ] || { echo "nobody waiting"; return; }
+      awk -F'\t' 'BEGIN { printf "%-4s %-17s %-22s %-34s %-14s %s\n", "ID", "ADDED", "STATUS", "EMAIL", "PEN", "NOTE" }
+        { printf "%-4s %-17s %-22s %-34s %-14s %s\n", $1, substr($2, 1, 16), $3, $4, $5, $6 }' "$w"
+      echo "$(awk -F'\t' '$3 == "waiting"' "$w" | wc -l | tr -d ' ') waiting" ;;
+    invite) shift; waitlist_invite "${1:-}" ;;
+    remove) shift; waitlist_remove "${1:-}" ;;
+    *) die "usage: hogman-host waitlist [list | invite <id> | remove <id>]" ;;
+  esac
+}
+
+waitlist_field() {  # waitlist_field <id> <column>
+  awk -F'\t' -v id="$1" -v c="$2" '$1 == id { print $c }' "$(WAITLIST_FILE)"
+}
+
+waitlist_set_status() {  # waitlist_set_status <id> <status>  (empty status: delete the line)
+  local w tmp; w="$(WAITLIST_FILE)"; tmp="$w.new.$$"
+  with_lock "$w.lock" sh -c '
+    awk -F"\t" -v OFS="\t" -v id="$1" -v st="$2" "\$1 == id { if (st == \"\") next; \$3 = st } { print }" "$3" > "$4" \
+      && chmod 600 "$4" && mv "$4" "$3"' _ "$1" "$2" "$w" "$tmp"
+}
+
+waitlist_invite() {
+  local id="$1" status email pen code link
+  [[ "$id" =~ ^[0-9]+$ ]] || die "usage: hogman-host waitlist invite <id>"
+  status="$(waitlist_field "$id" 3)"
+  [ -n "$status" ] || die "nobody with id $id on the waiting list"
+  [ "$status" = waiting ] || die "$id is already: $status"
+  email="$(waitlist_field "$id" 4)"; pen="$(waitlist_field "$id" 5)"
+  code="$(make_code "waitlist #$id")"
+  link="https://$SIGNUP_HOST/#code=$code"
+  waitlist_set_status "$id" "invited $code"
+  if [ -s "$SIGNUP/resend_key" ] && [ -n "${SIGNUP_FROM:-}" ]; then
+    if send_invite_mail "$email" "$code" "$link" "$pen"; then
+      info "emailed $email their code $code"
+    else
+      info "could not email $email; send this yourself:"; invite_text "$code" "$link" "$pen"
+    fi
+  else
+    info "no mail set up (hogman-host signup-mail); send this to $email yourself:"
+    echo; invite_text "$code" "$link" "$pen"
+  fi
+}
+
+waitlist_remove() {
+  local id="$1"
+  [[ "$id" =~ ^[0-9]+$ ]] || die "usage: hogman-host waitlist remove <id>"
+  [ -n "$(waitlist_field "$id" 1)" ] || die "nobody with id $id on the waiting list"
+  waitlist_set_status "$id" ""
+  info "removed $id from the waiting list"
+}
+
+invite_text() {  # invite_text <code> <link> <pen>
+  # (The pen line is built here: bash 3.2 can't parse ${3:+...} with a quote in a heredoc.)
+  local penline=""
+  [ -n "$3" ] && penline="You asked for the name $3; it's yours if nobody took it first.
+"
+  cat <<EOF
+There's room on the farm. Here is your Hogman sign-up code:
+
+    $1
+
+Get your pen here (the code is filled in): $2
+${penline}It works once. We'll delete your email from our waiting list once you've
+signed up. If you didn't ask for this, ignore this email.
+
+Clean pigs only.
+Hogman
+EOF
+}
+
+send_invite_mail() {  # send_invite_mail <to> <code> <link> <pen>
+  local body; body="$(invite_text "$2" "$3" "$4" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{ printf "%s\\n", $0 }')"
+  resend_send "$1" "Your Hogman sign-up code" "$body"
+}
+
+resend_send() {  # resend_send <to> <subject> <json-escaped text>
+  # <to> passed the page's email check (no quotes or backslashes), and the
+  # rest is ours, so plain printf is enough to build the JSON.
+  printf '{"from":"%s","to":["%s"],"subject":"%s","text":"%s"}' "$SIGNUP_FROM" "$1" "$2" "$3" \
+    | curl -fsS -m 20 -o /dev/null https://api.resend.com/emails \
+        -H "Authorization: Bearer $(cat "$SIGNUP/resend_key")" -H "Content-Type: application/json" --data-binary @-
+}
+
+# signup-mail "<from>" < key: email codes to the waiting list through Resend
+# (https://resend.com). The API key comes on standard input, so it never sits
+# in your shell history. signup-mail test <address>: send a test email.
+cmd_signup_mail() {
+  load_host
+  [ -d "$SIGNUP" ] || die "sign-ups are not set up: hogman-host signup-setup"
+  if [ "${1:-}" = test ]; then
+    [ -s "$SIGNUP/resend_key" ] && [ -n "${SIGNUP_FROM:-}" ] || die "set it up first: hogman-host signup-mail \"Hogman <pens@example.com>\" < key"
+    local addr_re='^[^<>"\\[:space:]]+@[A-Za-z0-9.-]+\.[A-Za-z]+$'
+    [[ "${2:-}" =~ $addr_re ]] || die "usage: hogman-host signup-mail test <your email>"
+    resend_send "$2" "Hogman: test email" "This is a test from hogman-host on $(hostname). Mail works.\\n" \
+      && info "sent a test email to $2" || die "Resend refused it (check the key and that the sender's domain is verified)"
+    return
+  fi
+  local from="${1:-}" key
+  local bare_re='^[^<>"\\[:space:]]+@[A-Za-z0-9.-]+\.[A-Za-z]+$' named_re='^[A-Za-z0-9 ]+ <[^<>"\\[:space:]]+@[A-Za-z0-9.-]+\.[A-Za-z]+>$'
+  [[ "$from" =~ $bare_re || "$from" =~ $named_re ]] || die 'usage: hogman-host signup-mail "Hogman <pens@your.domain>" < resend-api-key'
+  [ -t 0 ] && die "pipe the Resend API key in on standard input, e.g. < keyfile"
+  key="$(tr -d ' \r\n' | head -c 200)"
+  [[ "$key" =~ ^re_[A-Za-z0-9_]+$ ]] || die "that doesn't look like a Resend API key (re_...)"
+  ( umask 077; printf '%s' "$key" > "$SIGNUP/resend_key" )
+  set_host_var SIGNUP_FROM "$from"
+  info "Codes for the waiting list will be emailed from $from. Try: hogman-host signup-mail test <your email>"
+}
+
+# signup-notify <ntfy topic URL>: a push when someone joins the waiting list or
+# a pen is raised (never personal details). "off" turns it off.
+cmd_signup_notify() {
+  load_host
+  local u="${1:-}"
+  if [ "$u" = off ]; then u=""; else
+    [[ "$u" =~ ^https://[A-Za-z0-9.-]+/[A-Za-z0-9_-]{8,64}$ ]] || die "usage: hogman-host signup-notify https://ntfy.sh/<topic> | off"
+  fi
+  set_host_var SIGNUP_NTFY "$u"
+  cmd_signup_setup
+  info "Sign-up pushes ${u:+go to $u}${u:-are off}"
+}
+
 case "${1:-}" in
   init)    shift; cmd_init "$@" ;;
+  waitlist) shift; cmd_waitlist "$@" ;;
+  signup-mail) shift; cmd_signup_mail "$@" ;;
+  signup-notify) shift; cmd_signup_notify "$@" ;;
   capacity) cmd_capacity ;;
   provision) shift; cmd_provision "$@" ;;
   signup-setup) shift; cmd_signup_setup "$@" ;;

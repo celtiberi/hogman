@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -28,6 +30,8 @@ type web struct {
 	client    *http.Client
 	checks    *limiter // name checks while typing
 	creates   *limiter // sign-up attempts, which also bounds guessing codes
+	waits     *limiter // waiting-list joins
+	jobs      *jobStore
 }
 
 func runWeb() {
@@ -44,6 +48,8 @@ func newWeb(brokerURL, token, domain string) *web {
 		client:  &http.Client{Timeout: 16 * time.Minute},
 		checks:  newLimiter(60, time.Minute),
 		creates: newLimiter(5, time.Hour),
+		waits:   newLimiter(5, time.Hour),
+		jobs:    &jobStore{jobs: map[string]*job{}},
 	}
 }
 
@@ -54,6 +60,8 @@ func (wb *web) handler() http.Handler {
 	mux.HandleFunc("GET /api/status", wb.status)
 	mux.HandleFunc("GET /api/check", wb.check)
 	mux.HandleFunc("POST /api/create", wb.create)
+	mux.HandleFunc("GET /api/job", wb.job)
+	mux.HandleFunc("POST /api/waitlist", wb.waitlist)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
@@ -139,18 +147,90 @@ func (wb *web) create(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 403, map[string]string{"error": "that sign-up code isn't right"})
 		return
 	}
-	// Raising a pen takes a minute or two; finish it even if the browser goes away.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 16*time.Minute)
-	defer cancel()
-	code, out := wb.ask(ctx, "POST", "/provision", map[string]string{"code": in.Code, "pen": in.Pen, "owner": in.Handle})
-	if code == 201 {
-		if link, _ := out["join_link"].(string); link != "" {
-			if svg, err := qrSVG(link); err == nil {
-				out["join_qr_svg"] = svg
+	// Raising a pen takes a minute or so. It runs as a job the page checks on,
+	// so no single request has to survive that long (proxies and browsers drop
+	// them) and a reload picks up where it left off.
+	id := wb.jobs.start(func() (int, map[string]any) {
+		ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
+		defer cancel()
+		code, out := wb.ask(ctx, "POST", "/provision", map[string]string{"code": in.Code, "pen": in.Pen, "owner": in.Handle})
+		if code == 201 {
+			if link, _ := out["join_link"].(string); link != "" {
+				if svg, err := qrSVG(link); err == nil {
+					out["join_qr_svg"] = svg
+				}
 			}
 		}
+		return code, out
+	})
+	jsonOut(w, 202, map[string]string{"job": id})
+}
+
+// job reports on a sign-up: working, or its result (once, to whoever holds
+// the job's id, which only the page that started it knows).
+func (wb *web) job(w http.ResponseWriter, r *http.Request) {
+	j, ok := wb.jobs.get(r.URL.Query().Get("id"))
+	if !ok {
+		jsonOut(w, 404, map[string]string{"error": "we lost track of that sign-up; if it finished, your code is used and the pen exists. Ask whoever gave you the code."})
+		return
 	}
-	jsonOut(w, code, out)
+	if !j.done {
+		jsonOut(w, 200, map[string]any{"state": "working", "seconds": int(time.Since(j.started).Seconds())})
+		return
+	}
+	if j.status == 201 {
+		jsonOut(w, 200, map[string]any{"state": "done", "result": j.out})
+		return
+	}
+	msg, _ := j.out["error"].(string)
+	if msg == "" {
+		msg = "raising your pen failed"
+	}
+	jsonOut(w, 200, map[string]any{"state": "failed", "status": j.status, "error": msg})
+}
+
+type job struct {
+	started time.Time
+	done    bool
+	status  int
+	out     map[string]any
+}
+
+type jobStore struct {
+	mu   sync.Mutex
+	jobs map[string]*job
+}
+
+func (s *jobStore) start(run func() (int, map[string]any)) string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	id := hex.EncodeToString(b)
+	s.mu.Lock()
+	for k, j := range s.jobs { // forget jobs older than a day
+		if time.Since(j.started) > 24*time.Hour {
+			delete(s.jobs, k)
+		}
+	}
+	j := &job{started: time.Now()}
+	s.jobs[id] = j
+	s.mu.Unlock()
+	go func() {
+		status, out := run()
+		s.mu.Lock()
+		j.done, j.status, j.out = true, status, out
+		s.mu.Unlock()
+	}()
+	return id
+}
+
+func (s *jobStore) get(id string) (job, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[id]
+	if !ok {
+		return job{}, false
+	}
+	return *j, true
 }
 
 // clientIP: the front door sets X-Forwarded-For to the real client, and is
@@ -223,3 +303,28 @@ func qrSVG(text string) (string, error) {
 }
 
 func itoa(i int) string { return strconv.Itoa(i) }
+
+func (wb *web) waitlist(w http.ResponseWriter, r *http.Request) {
+	if !wb.waits.allow(clientIP(r), time.Now()) {
+		jsonOut(w, 429, map[string]string{"error": "too many tries from here; wait an hour"})
+		return
+	}
+	var in struct {
+		Email string `json:"email"`
+		Pen   string `json:"pen"`
+		Note  string `json:"note"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		jsonOut(w, 400, map[string]string{"error": "bad request"})
+		return
+	}
+	in.Email = strings.ToLower(strings.TrimSpace(in.Email))
+	if !validEmail(in.Email) {
+		jsonOut(w, 400, map[string]string{"error": "that doesn't look like an email address"})
+		return
+	}
+	code, out := wb.ask(r.Context(), "POST", "/waitlist", map[string]string{
+		"email": in.Email, "pen": strings.ToLower(strings.TrimSpace(in.Pen)), "note": cleanField(in.Note, 280)})
+	jsonOut(w, code, out)
+}
