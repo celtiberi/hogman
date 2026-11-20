@@ -322,14 +322,14 @@ func TestClaimOwnerSeizeAndConcurrency(t *testing.T) {
 	_, aliceSrv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.11", "")
 	_, bobSrv := e.addDevice(t, "bob", "server", "bob-srv", "100.64.0.12", "")
 
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "alice", aliceSrv.ID, ""); err != nil {
+	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "alice", aliceSrv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Claim(Actor{Member: bob}, "bob", "alice", bobSrv.ID, ""); err == nil {
+	if _, err := e.svc.Claim(Actor{Member: bob}, "bob", "alice", bobSrv.ID, nil); err == nil {
 		t.Fatal("bob should not be able to claim alice's name")
 	}
 
-	if _, err := e.svc.Claim(cli, "root", "alice", ownerSrv.ID, ""); err != nil {
+	if _, err := e.svc.Claim(cli, "root", "alice", ownerSrv.ID, nil); err != nil {
 		t.Fatalf("owner should be able to seize active name: %v", err)
 	}
 	n, err := e.st.NameByName("alice")
@@ -343,12 +343,12 @@ func TestClaimOwnerSeizeAndConcurrency(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, err := e.svc.Claim(Actor{Member: alice}, "alice", "contested", aliceSrv.ID, "")
+		_, err := e.svc.Claim(Actor{Member: alice}, "alice", "contested", aliceSrv.ID, nil)
 		errs <- err
 	}()
 	go func() {
 		defer wg.Done()
-		_, err := e.svc.Claim(Actor{Member: bob}, "bob", "contested", bobSrv.ID, "")
+		_, err := e.svc.Claim(Actor{Member: bob}, "bob", "contested", bobSrv.ID, nil)
 		errs <- err
 	}()
 	wg.Wait()
@@ -382,7 +382,7 @@ func TestResolvableNameIPv6AndConcurrency(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, srv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.20", "fd7a:115c:a1e0::20")
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "alice", srv.ID, ""); err != nil {
+	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "alice", srv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -458,13 +458,13 @@ func TestRBACAdminRestrictions(t *testing.T) {
 	_, memberDev := e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.13", "")
 	_, memberSrv := e.addDevice(t, "bob", "server", "bob-srv", "100.64.0.14", "")
 
-	if _, err := e.svc.Claim(Actor{Member: owner}, "root", "root-site", ownerSrv.ID, ""); err != nil {
+	if _, err := e.svc.Claim(Actor{Member: owner}, "root", "root-site", ownerSrv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Claim(Actor{Member: admin2}, "carol", "carol-site", admin2Srv.ID, ""); err != nil {
+	if _, err := e.svc.Claim(Actor{Member: admin2}, "carol", "carol-site", admin2Srv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Claim(Actor{Member: member1}, "bob", "bob-site", memberSrv.ID, ""); err != nil {
+	if _, err := e.svc.Claim(Actor{Member: member1}, "bob", "bob-site", memberSrv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Kick a member to put a held name in place.
@@ -473,7 +473,7 @@ func TestRBACAdminRestrictions(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, garySrv := e.addDevice(t, "gary", "server", "gary-srv", "100.64.0.15", "")
-	if _, err := e.svc.Claim(cli, "gary", "gary-site", garySrv.ID, ""); err != nil {
+	if _, err := e.svc.Claim(cli, "gary", "gary-site", garySrv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.svc.Kick(ctx, cli, "gary", "bad pig"); err != nil {
@@ -518,7 +518,7 @@ func TestRBACAdminRestrictions(t *testing.T) {
 			t.Fatalf("admin IssueDeviceKey(%s): got %v, want 403", target, err)
 		}
 	}
-	if _, err := e.svc.Claim(a1, "carol", "hijack", admin2Srv.ID, ""); err == nil {
+	if _, err := e.svc.Claim(a1, "carol", "hijack", admin2Srv.ID, nil); err == nil {
 		t.Fatal("admin should not claim names for another admin")
 	}
 }
@@ -538,13 +538,13 @@ func TestClaimSeizeCleansUpChildSubdomains(t *testing.T) {
 	_, rootSrv := e.addDevice(t, "root", "server", "root-srv", "100.64.0.10", "")
 	_, aliceSrv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.11", "")
 
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "alice", aliceSrv.ID, ""); err != nil {
+	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "alice", aliceSrv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "blog.alice", aliceSrv.ID, ""); err != nil {
+	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "blog.alice", aliceSrv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Claim(cli, "root", "alice", rootSrv.ID, ""); err != nil {
+	if _, err := e.svc.Claim(cli, "root", "alice", rootSrv.ID, nil); err != nil {
 		t.Fatalf("owner seize failed: %v", err)
 	}
 	if _, err := e.st.NameByName("blog.alice"); !errors.Is(err, ErrNotFound) {
@@ -639,11 +639,11 @@ func TestQuotasAndSuspendExpiresKeys(t *testing.T) {
 
 	// Name quota.
 	for _, nm := range []string{"n1", "n2"} {
-		if _, err := e.svc.Claim(aAlice, "alice", nm, aliceSrv.ID, ""); err != nil {
+		if _, err := e.svc.Claim(aAlice, "alice", nm, aliceSrv.ID, nil); err != nil {
 			t.Fatalf("Claim(%s): %v", nm, err)
 		}
 	}
-	if _, err := e.svc.Claim(aAlice, "alice", "n3", aliceSrv.ID, ""); err == nil {
+	if _, err := e.svc.Claim(aAlice, "alice", "n3", aliceSrv.ID, nil); err == nil {
 		t.Fatal("expected 3rd name to hit quota")
 	}
 }

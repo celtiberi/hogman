@@ -214,9 +214,9 @@ func MeshHandler(s *Service) http.Handler {
 	// member's other names.
 	h("POST /api/names", false, true, func(w http.ResponseWriter, r *http.Request, c caller) {
 		var in struct {
-			Name     string `json:"name"`
-			DeviceID int64  `json:"device_id"`
-			Note     string `json:"note"`
+			Name     string  `json:"name"`
+			DeviceID int64   `json:"device_id"`
+			Note     *string `json:"note"`
 		}
 		if !readJSON(w, r, &in) {
 			return

@@ -401,7 +401,11 @@ func cli(ctx context.Context, s *Service, args []string) error {
 			return err
 		}
 		id, _ := strconv.ParseInt(rest[2], 10, 64)
-		fqdn, err := s.Claim(a, rest[0], rest[1], id, flags["note"])
+		var note *string
+		if v, ok := flags["note"]; ok {
+			note = &v
+		}
+		fqdn, err := s.Claim(a, rest[0], rest[1], id, note)
 		if err != nil {
 			return err
 		}

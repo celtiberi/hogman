@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -507,7 +509,7 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
 	cli := Actor{CLI: true}
-	for h, r := range map[string]string{"alice": "member", "bob": "member"} {
+	for h, r := range map[string]string{"root": "owner", "alice": "member", "bob": "member"} {
 		if _, err := e.svc.AddMember(ctx, cli, h, r); err != nil {
 			t.Fatal(err)
 		}
@@ -515,6 +517,8 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 	e.addDevice(t, "alice", "personal", "alice-laptop", "100.64.0.10", "")
 	e.addDevice(t, "alice", "server", "srvA", "100.64.0.11", "")
 	_, bobSrv := e.addDevice(t, "bob", "server", "bobSrv", "100.64.0.12", "")
+	_, srvA2 := e.addDevice(t, "alice", "server", "srvA2", "100.64.0.13", "")
+	_, rootSrv := e.addDevice(t, "root", "server", "rootSrv", "100.64.0.14", "")
 	h := MeshHandler(e.svc)
 	js := map[string]string{"Content-Type": "application/json"}
 
@@ -526,7 +530,7 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 
 	// Rune cap is 140 runes for multi-byte UTF-8 text.
 	longNote := strings.Repeat("é", 150)
-	if _, err := e.svc.Claim(cli, "bob", "blog", bobSrv.ID, longNote); err != nil {
+	if _, err := e.svc.Claim(cli, "bob", "blog", bobSrv.ID, &longNote); err != nil {
 		t.Fatalf("claim long note: %v", err)
 	}
 
@@ -574,28 +578,41 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 		}
 	}
 
-	// Server can clear its own note with "" and /api/me returns personal owner's notes.
+	// Server updates its own note; bare re-claim from personal device omitting note preserves it and re-points to srvA2.
 	if rec := doMeshReq(h, "POST", "/api/names", "100.64.0.11", `{"name":"photos","note":"updated note"}`, js); rec.Code != 201 {
 		t.Fatalf("update note: %d %s", rec.Code, rec.Body.String())
+	}
+	repointBody := fmt.Sprintf(`{"name":"photos","device_id":%d}`, srvA2.ID)
+	if rec := doMeshReq(h, "POST", "/api/names", "100.64.0.10", repointBody, js); rec.Code != 201 {
+		t.Fatalf("repoint without note: %d %s", rec.Code, rec.Body.String())
 	}
 	rec := doMeshReq(h, "GET", "/api/me", "100.64.0.10", "", nil)
 	var me struct {
 		Names []Name `json:"names"`
 	}
-	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &me) != nil || len(me.Names) != 1 || me.Names[0].Note != "updated note" {
-		t.Fatalf("/api/me names = %+v (body=%s)", me.Names, rec.Body.String())
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &me) != nil || len(me.Names) != 1 ||
+		me.Names[0].Note != "updated note" || me.Names[0].DeviceID == nil || *me.Names[0].DeviceID != srvA2.ID {
+		t.Fatalf("/api/me after bare repoint = %+v (body=%s)", me.Names, rec.Body.String())
 	}
-	if rec := doMeshReq(h, "POST", "/api/names", "100.64.0.11", `{"name":"photos","note":""}`, js); rec.Code != 201 {
-		t.Fatalf("clear note: %d %s", rec.Code, rec.Body.String())
+	if rec := doMeshReq(h, "POST", "/api/names", "100.64.0.13", `{"name":"photos","note":""}`, js); rec.Code != 201 {
+		t.Fatalf("clear note from srvA2: %d %s", rec.Code, rec.Body.String())
 	}
 	n, err := e.st.NameByName("photos")
 	if err != nil || n.Note != "" {
 		t.Fatalf("cleared note: %+v err=%v", n, err)
 	}
 
-	// Legacy SQLite database without names.note column migrates cleanly in OpenStore.
+	// Owner takeover with nil note clears the previous owner's note instead of keeping it.
+	if _, err := e.svc.Claim(cli, "root", "blog", rootSrv.ID, nil); err != nil {
+		t.Fatalf("owner takeover with nil note: %v", err)
+	}
+	if n, err := e.st.NameByName("blog"); err != nil || n.Member != "root" || n.Note != "" {
+		t.Fatalf("after takeover: %+v err=%v", n, err)
+	}
+
+	// Legacy SQLite database without names.note column migrates cleanly across concurrent OpenStore calls.
 	legacyPath := filepath.Join(t.TempDir(), "legacy.db")
-	db, err := sql.Open("sqlite", "file:"+legacyPath)
+	db, err := sql.Open("sqlite", "file:"+legacyPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -611,9 +628,37 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	const openers = 8
+	start := make(chan struct{})
+	type openRes struct {
+		st  *Store
+		err error
+	}
+	resCh := make(chan openRes, openers)
+	var wg sync.WaitGroup
+	for i := 0; i < openers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			st, err := OpenStore(legacyPath)
+			resCh <- openRes{st: st, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(resCh)
+	for res := range resCh {
+		if res.st != nil {
+			defer res.st.db.Close()
+		}
+		if res.err != nil {
+			t.Fatalf("concurrent OpenStore legacy migrate: %v", res.err)
+		}
+	}
 	st, err := OpenStore(legacyPath)
 	if err != nil {
-		t.Fatalf("OpenStore legacy migrate: %v", err)
+		t.Fatalf("OpenStore after concurrent migrate: %v", err)
 	}
 	defer st.db.Close()
 	gotOld, err := st.NameByName("old")

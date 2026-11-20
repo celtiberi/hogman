@@ -124,7 +124,9 @@
     const note = $('name-note').value.trim();
     if (!name) return nameErr(new Error('Type a name, like blog.'));
     try {
-      const r = await api('POST', '/names', { name, device_id: Number($('name-device').value), note });
+      const body = { name, device_id: Number($('name-device').value) };
+      if (note) body.note = note;
+      const r = await api('POST', '/names', body);
       $('name-input').value = '';
       $('name-note').value = '';
       await load();

@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS audit (
 `
 
 func OpenStore(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, err
 	}
@@ -97,34 +97,37 @@ func OpenStore(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
-func migrateNamesNote(db *sql.DB) error {
-	rows, err := db.Query(`PRAGMA table_info(names)`)
+func hasColumn(db *sql.DB, table, col string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
-		return err
+		return false, err
 	}
-	hasNote := false
+	defer rows.Close()
 	for rows.Next() {
 		var cid, notnull, pk int
 		var name, typ string
 		var dflt sql.NullString
 		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
-			_ = rows.Close()
-			return err
+			return false, err
 		}
-		if name == "note" {
-			hasNote = true
+		if name == col {
+			return true, nil
 		}
 	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
+	return false, rows.Err()
+}
+
+func migrateNamesNote(db *sql.DB) error {
+	if has, err := hasColumn(db, "names", "note"); err != nil || has {
 		return err
 	}
-	_ = rows.Close()
-	if hasNote {
-		return nil
+	if _, err := db.Exec(`ALTER TABLE names ADD COLUMN note TEXT NOT NULL DEFAULT ''`); err != nil {
+		if has, checkErr := hasColumn(db, "names", "note"); checkErr == nil && has {
+			return nil
+		}
+		return err
 	}
-	_, err = db.Exec(`ALTER TABLE names ADD COLUMN note TEXT NOT NULL DEFAULT ''`)
-	return err
+	return nil
 }
 
 var ErrNotFound = errors.New("not found")

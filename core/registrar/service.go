@@ -766,7 +766,7 @@ func cleanNameNote(raw string) string {
 	return collapsed
 }
 
-func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64, note string) (string, error) {
+func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64, note *string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.claimLocked(a, handle, rawName, deviceID, note, nil)
@@ -774,7 +774,7 @@ func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64, note st
 
 // ServerClaim is a server naming itself (what `hogman-join share` does). The
 // checks run under s.mu together with the claim, so two servers can't race.
-func (s *Service) ServerClaim(a Actor, d *Device, rawName, note string) (string, error) {
+func (s *Service) ServerClaim(a Actor, d *Device, rawName string, note *string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.serverMayUse(d, rawName); err != nil {
@@ -784,7 +784,7 @@ func (s *Service) ServerClaim(a Actor, d *Device, rawName, note string) (string,
 }
 
 // claimLocked: s.mu held. server is the calling server device, or nil.
-func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, rawNote string, server *Device) (string, error) {
+func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, rawNote *string, server *Device) (string, error) {
 	m, err := s.member(handle)
 	if err != nil {
 		return "", err
@@ -854,7 +854,12 @@ func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, r
 			}
 		}
 	}
-	note := cleanNameNote(rawNote)
+	note := ""
+	if rawNote != nil {
+		note = cleanNameNote(*rawNote)
+	} else if existing != nil && existing.HeldUntil == nil && existing.MemberID == m.ID {
+		note = existing.Note
+	}
 	if err := s.st.UpsertName(name, m.ID, &d.ID, note); err != nil {
 		return "", err
 	}
