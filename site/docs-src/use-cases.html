@@ -16,7 +16,7 @@
     their computer and copy the command.</li>
   <li>Put the photos in a folder, then:
 <pre class="term"><span class="p">$</span> ./hogman-join share photos ~/Pictures/2026 --background</pre></li>
-  <li>Tell everyone: <code>https://photos.&lt;pen&gt;.hogman</code>.</li>
+  <li>Tell everyone: <code>https://photos.yourpen.hogman</code>.</li>
 </ol>
 <p><strong>Going further:</strong> for albums, uploads and face search, run a photo app such as
   Immich or PhotoPrism on a spare computer and share its port (<code>share photos 2283</code>).
@@ -69,7 +69,7 @@
   deploying it anywhere.</p>
 <pre class="term"><span class="p">$</span> npm run dev                          <span class="c"># listening on 5173, say</span>
 <span class="p">$</span> ./hogman-join share demo 5173</pre>
-<p>Send <code>https://demo.&lt;pen&gt;.hogman</code> to the people in the pen. It has real HTTPS, so
+<p>Send <code>https://demo.yourpen.hogman</code> to the people in the pen. It has real HTTPS, so
   service workers, secure cookies and camera access behave as they will in production. Ctrl-C
   takes it down; run it again later and it's back at the same address.</p>
 
@@ -79,6 +79,6 @@
 <ol class="docs-steps">
   <li>On a computer at home that's in the pen, share the device's local address:
 <pre class="term"><span class="p">$</span> ./hogman-join share media http://192.168.1.20:8096 --background</pre></li>
-  <li>From anywhere, members open <code>https://media.&lt;pen&gt;.hogman</code>.</li>
+  <li>From anywhere, members open <code>https://media.yourpen.hogman</code>.</li>
 </ol>
 <p>Nothing on your home router is opened or forwarded.</p>
