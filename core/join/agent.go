@@ -377,6 +377,10 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.connect(w, r)
 	case r.URL.IsAbs():
 		a.forward(w, r)
+	case !a.localHost(r.Host):
+		// Only this computer's own requests, by name: a web page that rebinds
+		// some DNS name to 127.0.0.1 gets nothing here.
+		http.NotFound(w, r)
 	case r.URL.Path == "/proxy.pac":
 		w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
 		_, _ = io.WriteString(w, a.cfg.pac())
@@ -392,6 +396,16 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type closeWriter interface{ CloseWrite() error }
+
+// localHost: the agent's own pages (/status, /proxy.pac) answer only requests
+// addressed to its loopback address by number or as localhost.
+func (a *agent) localHost(host string) bool {
+	_, port, err := net.SplitHostPort(a.cfg.ProxyAddr)
+	if err != nil {
+		return false
+	}
+	return host == a.cfg.ProxyAddr || host == "localhost:"+port || host == "[::1]:"+port
+}
 
 // connect handles "CONNECT host:443", which is how browsers reach HTTPS sites
 // through a proxy. The proxy only moves bytes; TLS stays end to end.
@@ -454,8 +468,12 @@ func (a *agent) forward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	host := r.URL.Hostname()
-	if port := r.URL.Port(); (port != "" && port != "80") || !a.cfg.inZone(host) {
+	if !a.cfg.inZone(host) {
 		http.Error(w, errOutside.Error(), http.StatusForbidden)
+		return
+	}
+	if port := r.URL.Port(); port != "" && port != "80" {
+		http.Error(w, errPort.Error(), http.StatusForbidden)
 		return
 	}
 	u := *r.URL

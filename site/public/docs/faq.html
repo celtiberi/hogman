@@ -74,12 +74,19 @@
   <dd>Yes. Join each with its own link. Each pen gets its own background connection and proxy,
     and they run at the same time.</dd>
   <dt id="not">What does Hogman deliberately not do?</dt>
-  <dd>Anything but HTTPS. No ssh, no other ports, no games or voice over UDP, no joining a
-    whole computer to the pen, no exit nodes or routes, and nobody can connect to members'
-    own computers. Each of those would be one more way in for an attacker, on your computer
+  <dd>Anything but HTTPS. No ssh, no other ports, no games or voice over UDP. Your computer
+    joins only as a visitor: it can't be turned into a server for the pen, or into a route
+    for the pen's traffic to your home network or the internet, and nobody in the pen can
+    connect to it. Each of those would be one more way in for an attacker, on your computer
     and on everyone else's in the pen, so they don't exist and there's no setting to turn
-    them on. <em>Sometimes the best security fix for a surface is just to delete the
-    surface.</em></dd>
+    them on. Things that serve the pen are <a href="/docs/share.html">shares</a>, each a small
+    device of its own.</dd>
+  <dt id="lost">What if I lose my laptop?</dt>
+  <dd>Join a second device (another computer) and, if you're a keeper, make someone you trust an
+    admin; either can remove the lost laptop from the home page and carry on. Keepers will be
+    able to save a passkey (in a password manager like Bitwarden) to get back in after losing
+    every device; that's coming. <strong>We never recover a pen on request</strong>, not even one
+    we host: there is no support route to talk your way into someone's pen, so nobody can try.</dd>
   <dt>Phones?</dt>
   <dd>Not yet. A phone app is in the works.</dd>
   <dt>What does it cost?</dt>

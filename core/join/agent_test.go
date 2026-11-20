@@ -472,3 +472,26 @@ func TestAgentDialsUnmapped(t *testing.T) {
 		}
 	}
 }
+
+// The agent's own pages answer only requests addressed to it by its loopback
+// address (or localhost), so a page that rebinds a DNS name to 127.0.0.1
+// can't read /status or /proxy.pac.
+func TestAgentOwnPagesCheckHost(t *testing.T) {
+	a := newAgent(&agentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}, nil)
+	for host, want := range map[string]int{
+		"127.0.0.1:18123":         http.StatusOK,
+		"localhost:18123":         http.StatusOK,
+		"evil.example:18123":      http.StatusNotFound,
+		"rebind.attacker.example": http.StatusNotFound,
+	} {
+		for _, path := range []string{"/status", "/proxy.pac"} {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Host = host
+			a.ServeHTTP(rec, req)
+			if rec.Code != want {
+				t.Fatalf("GET %s with Host %s: %d, want %d", path, host, rec.Code, want)
+			}
+		}
+	}
+}

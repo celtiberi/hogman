@@ -293,28 +293,13 @@ type penConn struct {
 	controlCA string
 }
 
-// myPens finds the pens this computer is on: side-by-side connections and
-// this computer's Tailscale.
+// myPens finds the pens this computer is on (each has its own connection).
 func myPens() []penConn {
 	var out []penConn
 	m, _ := filepath.Glob(filepath.Join(filepath.Dir(stateDir("x")), "*", "config.json"))
 	for _, f := range m {
 		if c, err := loadAgentConfig(filepath.Dir(f)); err == nil && c.Zone != "" {
 			out = append(out, penConn{zone: c.Zone, proxy: c.proxyURL(), controlCA: c.ControlCA})
-		}
-	}
-	if ts, err := findTailscale(); err == nil {
-		if st, err := ts.Status(); err == nil && st.BackendState == "Running" && st.CurrentTailnet != nil {
-			z := strings.TrimPrefix(st.CurrentTailnet.MagicDNSSuffix, "nodes.")
-			if z != st.CurrentTailnet.MagicDNSSuffix && zoneRE.MatchString(z) {
-				dup := false
-				for _, p := range out {
-					dup = dup || p.zone == z
-				}
-				if !dup {
-					out = append(out, penConn{zone: z})
-				}
-			}
 		}
 	}
 	return out
@@ -753,6 +738,12 @@ func shareStop(name string, o options) error {
 // removeShare stops a share, gives its name back and removes its device.
 func removeShare(dir string, c *shareConfig) error {
 	stopShareProcess(dir)
+	// Never got as far as joining the pen (its one-time key is still unused,
+	// or has expired): there's nothing on the pen to give back.
+	if _, err := os.Stat(filepath.Join(dir, "authkey")); err == nil {
+		note("%s never came up; removed it from this computer", c.url())
+		return os.RemoveAll(dir)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	node, _, hc, err := shareNode(ctx, dir, c)
