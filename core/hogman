@@ -141,6 +141,29 @@ json_field() {  # json_field <field>  (reads one JSON object on stdin)
 
 randpw() { head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | head -c 40; }
 
+# The user the registrar and step-ca run as. Never root (audit H3): run by a
+# person, that's them. Run as root (a hosted server, or the sign-up broker's
+# container), it's a fixed numeric user with no account, 65532 ("nonroot" by
+# the usual convention), so it's the same everywhere and survives rebuilds.
+run_ids() {   # prints "UID GID"
+  if [ "$(id -u)" != 0 ]; then echo "$(id -u) $(id -g)"; return; fi
+  echo "${HOGMAN_PEN_UID:-65532} ${HOGMAN_PEN_GID:-65532}"
+}
+
+# Hand the runtime user what it reads and writes. Only does anything as root;
+# a person running their own pen already owns everything.
+own_runtime_files() {
+  [ "$(id -u)" = 0 ] || return 0
+  [ -n "${HOGMAN_UID:-}" ] && [ "$HOGMAN_UID" != 0 ] || return 0
+  local d
+  # Certificates are public; make sure a non-root reader can open them.
+  chmod 644 "$DATA"/pki/public/*.crt 2>/dev/null || true
+  for d in "$DATA/registrar" "$DATA/secrets/registrar" "$DATA/step/secrets" "$DATA/step/db"; do
+    [ -e "$d" ] && chown -R "$HOGMAN_UID:$HOGMAN_GID" "$d"
+  done
+  return 0
+}
+
 # ------------------------------------------------------------------ init ----
 
 cmd_init() {
@@ -154,8 +177,10 @@ cmd_init() {
   chmod 700 "$DATA/pki/offline" "$DATA/step/secrets" "$DATA/secrets/registrar" \
             "$DATA/mesh" "$DATA/registrar" "$DATA/headscale/lib"
 
-  set_state HOGMAN_UID "$(id -u)"
-  set_state HOGMAN_GID "$(id -g)"
+  local ids; ids="$(run_ids)"
+  HOGMAN_UID="${ids% *}"; HOGMAN_GID="${ids#* }"
+  set_state HOGMAN_UID "$HOGMAN_UID"
+  set_state HOGMAN_GID "$HOGMAN_GID"
 
   info "Generating the network's certificate authority (restricted to .$ZONE)"
   (
@@ -182,6 +207,7 @@ cmd_init() {
     "
   rm -rf "$DATA/tmp"
   chmod 600 "$DATA"/pki/offline/* "$DATA"/step/secrets/*
+  own_runtime_files
 
   render templates/ca.json "$DATA/step/config/ca.json"
   render templates/policy.hujson "$DATA/headscale/config/policy.hujson"
@@ -311,6 +337,16 @@ cmd_up() {
   # Folders a backup leaves out. Made here, as us: if Docker made them, they
   # would belong to root and step-ca could not write its database.
   mkdir -p "$DATA"/{step/db,edge,portal,join-dl,tmp}
+  # Pens raised as root before audit H3 ran their registrar and step-ca as
+  # root too. Move them to the unprivileged user on the next start.
+  if [ "${HOGMAN_UID:-}" = 0 ] && [ "$(id -u)" = 0 ]; then
+    local ids; ids="$(run_ids)"
+    HOGMAN_UID="${ids% *}"; HOGMAN_GID="${ids#* }"
+    set_state HOGMAN_UID "$HOGMAN_UID"
+    set_state HOGMAN_GID "$HOGMAN_GID"
+    info "registrar and step-ca now run as user $HOGMAN_UID, not root"
+  fi
+  own_runtime_files
 
   if [ -z "${CORE_MESH_IP:-}" ]; then
     info "First start: bootstrapping"
@@ -353,6 +389,7 @@ cmd_up() {
       hs apikeys create --expiration 3650d | tail -1 | tr -d '\r\n' > "$DATA/secrets/registrar/headscale_api_key"
     )
     chmod 600 "$DATA/secrets/registrar/headscale_api_key"
+    own_runtime_files
 
     render_headscale
     dc restart headscale

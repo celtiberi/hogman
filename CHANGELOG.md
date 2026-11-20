@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security (audit quick wins, docs/security/audit-2026-11.md)
+- Pens (audit H3): the registrar and step-ca never run as root. A pen set up as root (every hosted pen) now runs them as user 65532 ("nonroot"), and pens raised as root before this change move to it on their next start. The files they use are handed over, and the public certificates are made readable. A person running their own pen still runs them as themselves. The Caddy containers still run as root; that's a separate change.
 - The pen's CA offers only TLS-ALPN on 443 (`http-01` removed, matching HTTPS-only) and refuses certificates for IP addresses or wildcard names (step-ca issuance policy). The portal asks for TLS-ALPN explicitly.
 - HSTS (one year) on the website, every pen's public host, the sign-up page and the home page.
 - CI: e2e always reports (a docs-only change skips the suites), so its checks can be required on main; GitHub Actions pinned to commit SHAs; `govulncheck` on every module for PRs, main and weekly; Dependabot for Go modules, base images and Actions. Secret scanning, push protection and Dependabot security updates are on for the repository.
