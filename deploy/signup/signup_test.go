@@ -206,7 +206,14 @@ func TestWebPageAndHeaders(t *testing.T) {
 	if rec.Code != 200 || !strings.Contains(body, "Get a pen") {
 		t.Fatalf("page: %d", rec.Code)
 	}
-	for _, want := range []string{`id="done-home"`, `treat it like a password`, `Network name (your pen)`, `Your personal name in it`} {
+	for _, want := range []string{
+		`id="done-home"`,
+		`treat it like a password`,
+		`Network name (your pen)`,
+		`Your personal name in it`,
+		`Back up your keeper access`,
+		`never recover a pen on request`,
+	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("page missing %q", want)
 		}
