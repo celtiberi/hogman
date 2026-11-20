@@ -28,7 +28,7 @@
       <td>Issues HTTPS certificates for names in the pen over ACME, the protocol Let's Encrypt
         uses.</td></tr>
     <tr><td>Home page</td><td><a href="https://caddyserver.com">Caddy</a></td>
-      <td>Serves <code>home.&lt;pen&gt;.hogman</code>, where members manage devices and names and the
+      <td>Serves <code>home.yourpen.hogman</code>, where members manage devices and names and the
         keeper runs the pen.</td></tr>
     <tr><td>The pen's own node</td><td>Tailscale client</td>
       <td>Puts the pen's DNS, home page and CA at one address inside the mesh.</td></tr>
@@ -108,14 +108,14 @@
 
 <h2 class="docs-h2" id="names">Names</h2>
 <ul>
-  <li>Each pen has its own zone, <code>&lt;pen&gt;.hogman</code>. The registrar is the only DNS
+  <li>Each pen has its own zone, <code>yourpen.hogman</code>. The registrar is the only DNS
     server for it, and answers only inside the mesh.</li>
   <li>Members claim names first come, first served, up to 50 each: <code>blog.smith.hogman</code>,
     and anything under a name they own (<code>photos.blog.smith.hogman</code>). A name points
     at one of that member's servers.</li>
   <li>Reserved: <code>home</code>, <code>ca</code>, <code>ns</code>, <code>registrar</code>,
     <code>search</code>, <code>nodes</code>, <code>www</code>, <code>join</code>,
-    <code>admin</code>. Devices also get automatic names under <code>nodes.&lt;pen&gt;.hogman</code>.</li>
+    <code>admin</code>. Devices also get automatic names under <code>nodes.yourpen.hogman</code>.</li>
   <li>Your browsing outside the pen never touches the pen's DNS.</li>
 </ul>
 
@@ -128,7 +128,7 @@
     that it fails.</li>
   <li>Day-to-day signing uses an intermediate certificate valid for five years. The root key is
     taken off the server and kept offline, encrypted.</li>
-  <li>The CA speaks ACME at <code>ca.&lt;pen&gt;.hogman:9000</code>, inside the mesh only.
+  <li>The CA speaks ACME at <code>ca.yourpen.hogman:9000</code>, inside the mesh only.
     Certificates last 7 days and renew automatically; the short life is the revocation
     mechanism.</li>
   <li>A server proves it owns a name the usual ACME way (TLS-ALPN or HTTP challenge) at the

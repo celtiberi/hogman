@@ -42,8 +42,9 @@
   the same command later to bring it back at the same address.</p>
 <p>To keep it running after you close the window, add <code>--background</code>:</p>
 <pre class="term"><span class="p">$</span> ./hogman-join share blog 3000 --background</pre>
-<p>It runs until the computer restarts. (Starting by itself after a restart isn't built yet;
-  run the command again.)</p>
+<p>On a Mac or Linux, a background share keeps running after you close the terminal, until
+  the computer restarts (or, on some Linux systems, until you log out). (Starting by itself after a restart isn't
+  built yet; run the command again.)</p>
 
 <h2 class="docs-h2" id="manage">Listing and stopping</h2>
 <pre class="term"><span class="p">$</span> ./hogman-join share list
@@ -65,7 +66,7 @@ https://blog.smith.hogman                http://127.0.0.1:3000  (running in the 
 
 <h2 class="docs-h2" id="names">Names</h2>
 <ul>
-  <li>The name becomes <code>https://NAME.&lt;pen&gt;.hogman</code>: lowercase letters, digits and
+  <li>The name becomes <code>https://NAME.yourpen.hogman</code>: lowercase letters, digits and
     dashes. A dotted name like <code>photos.blog</code> works if <code>blog</code> is already
     yours and points at the same share.</li>
   <li>Names are first come, first served. If it's taken, you're told and nothing is left
@@ -87,7 +88,7 @@ https://blog.smith.hogman                http://127.0.0.1:3000  (running in the 
 </ol>
 <p>Your laptop itself stays a personal device that accepts no connections. Nothing opens a
   port on your computer, and nothing needs administrator rights. Its state lives in your
-  user config folder under <code>hogman-shares/&lt;pen&gt;/&lt;name&gt;</code>.</p>
+  user config folder under <code>hogman-shares/yourpen/&lt;name&gt;</code>.</p>
 
 <h2 class="docs-h2" id="limits">Limits</h2>
 <ul>
