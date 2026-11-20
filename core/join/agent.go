@@ -167,6 +167,21 @@ func runAgent(dir string) error {
 		}
 		a.up = true
 		log.Printf("on %s as %s", c.Zone, strings.Join(a.ips, ", "))
+		// A server hosts sites: pass the pen's web ports to this computer, where
+		// Caddy (or anything else) listens. Personal devices get no visitors
+		// (the pen's access rules refuse them), so they don't need it.
+		if st.Self != nil && st.Self.Tags != nil {
+			for _, t := range st.Self.Tags.All() {
+				if t == "tag:server" {
+					a.server = true
+				}
+			}
+		}
+		if a.server {
+			for _, port := range []string{"80", "443"} {
+				go forwardPort(node, port)
+			}
+		}
 	}()
 
 	sig := make(chan os.Signal, 1)
@@ -178,6 +193,44 @@ func runAgent(dir string) error {
 	return nil
 }
 
+// forwardPort passes connections to the pen's port to the same port on this
+// computer, untouched (TLS stays end to end, so Caddy here gets its HTTP-01
+// and TLS-ALPN challenges and its visitors as if it were on the mesh itself).
+func forwardPort(node *tsnet.Server, port string) {
+	ln, err := node.Listen("tcp", ":"+port)
+	if err != nil {
+		log.Printf("cannot take the pen's port %s: %v", port, err)
+		return
+	}
+	for {
+		in, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			defer in.Close()
+			out, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 5*time.Second)
+			if err != nil {
+				log.Printf("a visitor came to port %s, but nothing listens on 127.0.0.1:%s", port, port)
+				return
+			}
+			defer out.Close()
+			done := make(chan struct{}, 2)
+			pipe := func(dst, src net.Conn) {
+				_, _ = io.Copy(dst, src)
+				if cw, ok := dst.(closeWriter); ok {
+					_ = cw.CloseWrite()
+				}
+				done <- struct{}{}
+			}
+			go pipe(out, in)
+			go pipe(in, out)
+			<-done
+			<-done
+		}()
+	}
+}
+
 type agent struct {
 	cfg        *agentConfig
 	node       *tsnet.Server
@@ -187,10 +240,11 @@ type agent struct {
 	lookupDNS  func(ctx context.Context, host string) ([]string, error)
 	peerLookup func(ctx context.Context, host string) ([]string, error)
 
-	mu  sync.Mutex
-	up  bool
-	err string
-	ips []string
+	mu     sync.Mutex
+	up     bool
+	err    string
+	ips    []string
+	server bool
 }
 
 func newAgent(c *agentConfig, node *tsnet.Server) *agent {
@@ -270,10 +324,11 @@ func orderIPs(ips []string) []string {
 }
 
 type agentStatus struct {
-	Zone  string   `json:"zone"`
-	Up    bool     `json:"up"`
-	Error string   `json:"error,omitempty"`
-	IPs   []string `json:"ips,omitempty"`
+	Zone   string   `json:"zone"`
+	Up     bool     `json:"up"`
+	Error  string   `json:"error,omitempty"`
+	IPs    []string `json:"ips,omitempty"`
+	Server bool     `json:"server,omitempty"` // a server: the pen's 80/443 reach this computer
 }
 
 // dial opens a connection to a pen host. Anything outside the pen is refused:
@@ -330,7 +385,7 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, a.cfg.pac())
 	case r.URL.Path == "/status":
 		a.mu.Lock()
-		st := agentStatus{Zone: a.cfg.Zone, Up: a.up, Error: a.err, IPs: a.ips}
+		st := agentStatus{Zone: a.cfg.Zone, Up: a.up, Error: a.err, IPs: a.ips, Server: a.server}
 		a.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(st)

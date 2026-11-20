@@ -81,6 +81,7 @@ func installTrust(r *RootInfo, file string) error {
 		return errorf("could not refresh the certificate store: %v\n%s", err, out)
 	}
 	note("browsers on Linux keep their own list; if Chrome or Firefox warn, import %s there", anchorPath(s, r))
+	note("(it's also at https://home.%s/root_ca.crt once you're in)", r.Zone)
 	return nil
 }
 

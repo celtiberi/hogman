@@ -361,6 +361,28 @@ no_tun() { ! run dave-laptop ip -o link | grep -qi tailscale; }
 check "no network interface was added to the computer" no_tun
 direct_ok() { run dave-laptop curl -sf -m10 -o /dev/null https://example.com; }
 check "dave's ordinary internet is untouched" direct_ok
+
+# Dave's server, also with no Tailscale: it hosts a site anyway.
+dc up -d dave-server
+retry 20 run dave-server test -s /etc/ssl/certs/ca-certificates.crt
+DAVE_SERVER_LINK="$($H device key dave server | awk '/^link:/ {print $2}')"
+out="$(join_tool dave-server --hostname dave-server "$DAVE_SERVER_LINK" 2>&1)"; rc=$?
+[ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
+check "a server joins side by side too (exit $rc)" grep -q "You're in" <<<"$out"
+check "the join tool says the pen's web ports reach it" grep -q "This is a server" <<<"$out"
+DS_ID="$($H device list | awk '$2 == "dave" && $4 == "dave-server" {print $1}')"
+check "dave names it daveweb.$ZONE" sh -c "$H name claim dave daveweb $DS_ID >/dev/null"
+# Use exactly what the join tool told dave to run.
+DS_PROXY="$(grep -o 'HTTPS_PROXY=http://127.0.0.1:[0-9]*' <<<"$out" | head -1 | cut -d/ -f3)"
+check "it prints the proxy to run Caddy with" test -n "$DS_PROXY"
+docker exec -d "$(dc ps -q dave-server)" sh -c "ZONE=$ZONE HTTPS_PROXY=http://$DS_PROXY caddy run --config /etc/caddy/dave.Caddyfile >/tmp/caddy.log 2>&1"
+dave_site() { via_pen https://daveweb.$ZONE | grep -q "hello from daveweb.$ZONE"; }
+check "its Caddy gets a certificate and dave's laptop loads the site over HTTPS" retry 90 dave_site
+[ "$(dave_site && echo ok)" = ok ] || run dave-server sh -c 'grep -v "\"level\":\"debug\"" /tmp/caddy.log | tail -12 | cut -c1-400' | sed 's/^/        caddy| /'
+check "other members load it too (bob, with Tailscale)" retry 30 fetch daveweb.$ZONE "hello from daveweb"
+out="$(join_tool dave-server leave "$DAVE_SERVER_LINK" 2>&1)"
+check "the server leaves cleanly" grep -q "Left bobo.hogman" <<<"$out"
+
 out="$(join_tool dave-laptop leave "$DAVE_LINK" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
 check "leave works (exit $rc)" grep -q "Left bobo.hogman" <<<"$out"

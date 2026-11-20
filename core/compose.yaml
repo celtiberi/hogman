@@ -163,6 +163,10 @@ services:
       - ./data/step/secrets:/home/step/secrets:ro
       - ./data/pki/public:/home/step/certs:ro
       - ./data/step/db:/home/step/db
+      # Look names up in the pen's own DNS. step-ca's --resolver covers some
+      # ACME checks but not TLS-ALPN, which otherwise asks Docker's DNS, finds
+      # nothing for <name>.<zone>, and fails every member's first try.
+      - ./config/step-resolv.conf:/etc/resolv.conf:ro
 
 networks:
   core: {}

@@ -119,6 +119,24 @@ services:
       - ./data/edge-trust:/edge-trust:ro
       - ./data/join-dl:/dl:ro
 
+  # A server with no Tailscale either: it joins side by side and hosts a site
+  # with Caddy, so the join tool must pass the pen's 80/443 through to it.
+  dave-server:
+    image: caddy:2.11.9
+    hostname: dave-server
+    networks: [outside]
+    profiles: [clients]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        cp /edge-trust/root.crt /usr/local/share/ca-certificates/control-host.crt &&
+        update-ca-certificates >/dev/null 2>&1;
+        exec sleep infinity
+    volumes:
+      - ./data/edge-trust:/edge-trust:ro
+      - ./data/join-dl:/dl:ro
+      - ./test/dave.Caddyfile:/etc/caddy/dave.Caddyfile:ro
+
   # Alice's website, running on her server exactly as a member would run it.
   alice-web:
     image: caddy:2.11.9
