@@ -110,8 +110,15 @@ func MeshHandler(s *Service) http.Handler {
 			fail(w, err)
 			return
 		}
-		writeJSON(w, 201, map[string]any{"auth_key": key, "expires_at": exp, "login_server": s.LoginServer(),
-			"kind": in.Kind, "join_link": s.DeviceLink(key)})
+		link := s.DeviceLink(key)
+		out := map[string]any{"auth_key": key, "expires_at": exp, "login_server": s.LoginServer(),
+			"kind": in.Kind, "join_link": link}
+		if svg, err := qrSVG(link); err == nil {
+			out["join_qr_svg"] = svg
+		} else {
+			log.Printf("device link QR: %v", err)
+		}
+		writeJSON(w, 201, out)
 	})
 
 	h("DELETE /api/devices/{id}", false, false, func(w http.ResponseWriter, r *http.Request, c caller) {

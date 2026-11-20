@@ -68,6 +68,12 @@
     return err('This link contains unexpected characters. Ask whoever sent it for a fresh one.');
   }
   const kind = t ? 'invite' : 'device';
+  // Phones can't run the join command. Say so plainly instead of showing it.
+  if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
+    document.getElementById('what').textContent = '';
+    return err('This link is for joining from a phone. The Hogman phone app is coming soon. ' +
+               'Until then, open the link on a computer.');
+  }
   const cleanLink = `https://${host}/join#${t ? 't=' + t : 'k=' + k}&fp=${fp}`;
   const quoted = `'${cleanLink}'`;
   const cmds = {

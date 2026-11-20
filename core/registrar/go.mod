@@ -2,7 +2,10 @@ module hogman/registrar
 
 go 1.27
 
-require modernc.org/sqlite v1.62.0
+require (
+	modernc.org/sqlite v1.62.0
+	rsc.io/qr v0.2.0
+)
 
 require (
 	github.com/dustin/go-humanize v1.1.0 // indirect

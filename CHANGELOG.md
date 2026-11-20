@@ -23,6 +23,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Configure RFC1918 `trusted_proxies` CIDRs in `core/templates/headscale.yaml` so Headscale honors `X-Real-IP` forwarded by Caddy `edge`.
 
 ### Added
+- Portal (`home.<zone>`): shows who you are and your devices, lets members remove their other devices, and offers "Add a device" / "Add a server": a one-time link plus a QR code for the coming phone app.
+- Registrar: `POST /api/devices` also returns `join_qr_svg`, drawn inside the pen (`rsc.io/qr`) so the secret link never goes to an outside QR service.
+- Join page: on a phone, explains that the app is coming instead of showing desktop commands.
 - `REVIEW.md` documenting project review findings, DNS/Cloudflare operational notes, and security rationale.
 - `LICENSE`: the project's code is now licensed under AGPL-3.0; README gains status and license sections.
 

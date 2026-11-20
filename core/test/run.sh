@@ -166,6 +166,9 @@ step "Alice adds a server and names it"
 srv="$(api alice-laptop-tools POST /api/devices '{"kind":"server"}')"
 ALICE_SERVER_KEY="$(jq -r .auth_key <<<"$srv")"
 check "alice gets a server key from the portal" test -n "$ALICE_SERVER_KEY" -a "$ALICE_SERVER_KEY" != null
+check "the device link comes with a QR code drawn inside the pen" grep -q '^<svg ' <<<"$(jq -r .join_qr_svg <<<"$srv")"
+portal_has_ui() { run alice-laptop-tools curl -sf -m5 --cacert $ROOT "https://home.$ZONE/" | grep -q 'id="add-personal"'; }
+check "the portal offers 'Add a device'" portal_has_ui
 export ALICE_SERVER_KEY
 dc up -d alice-server alice-web alice-tools
 retry 90 has_ip alice-server; ALICE_SERVER_IP="$(ip_of alice-server)"
