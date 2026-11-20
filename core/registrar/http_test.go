@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func doMeshReq(h http.Handler, method, path, srcIP, body string, headers map[string]string) *httptest.ResponseRecorder {
@@ -185,5 +186,131 @@ func TestMeshServerDeviceRestricted(t *testing.T) {
 	rec = doMeshReq(h, "GET", "/api/admin/members", "100.64.0.10", "", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("personal owner GET /api/admin/members: status=%d want 200 body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestIPReuseBlockedBeforeSync(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+
+	if _, err := e.svc.AddMember(ctx, cli, "root", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	bob, err := e.svc.AddMember(ctx, cli, "bob", "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
+
+	// Case 1: owner's device logged out and Headscale reassigned 100.64.0.10 to a stray/new node before Sync runs.
+	e.hs.mu.Lock()
+	e.hs.nodes = []HSNode{{
+		ID:          "node-reassigned-stray",
+		Name:        "bob-new",
+		GivenName:   "bob-new",
+		IPAddresses: []string{"100.64.0.10"},
+	}}
+	e.hs.mu.Unlock()
+
+	h := MeshHandler(e.svc)
+	rec := doMeshReq(h, "POST", "/api/admin/members/bob/role", "100.64.0.10", `{"role":"owner"}`, map[string]string{
+		"Content-Type": "application/json",
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("reused IP (stray): status=%d want 403 body=%s", rec.Code, rec.Body.String())
+	}
+	bobAfter, err := e.st.MemberByHandle("bob")
+	if err != nil || bobAfter.Role != "member" {
+		t.Fatalf("bob should still be member, got %+v (err=%v)", bobAfter, err)
+	}
+
+	// Case 2: Bob joins with his own legitimate device key and receives 100.64.0.10 before Sync runs.
+	bobKey, _, err := e.svc.IssueDeviceKey(ctx, cli, "bob", "personal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = bobKey
+	// Find the issued key ID in DB.
+	keys, err := e.st.OpenDeviceKeys(bob.ID)
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("expected 1 open key for bob, got %d (err=%v)", len(keys), err)
+	}
+	// Reset root-laptop row as if another owner device still had 100.64.0.10 in stale SQLite.
+	e.addDevice(t, "root", "personal", "root-stale", "100.64.0.10", "")
+	e.hs.mu.Lock()
+	e.hs.nodes = []HSNode{{
+		ID:          "node-bob-legit",
+		Name:        "bob-laptop",
+		GivenName:   "bob-laptop",
+		IPAddresses: []string{"100.64.0.10"},
+		PreAuthKey:  &HSPreAuthKey{ID: keys[0].HSKeyID},
+	}}
+	e.hs.mu.Unlock()
+
+	rec = doMeshReq(h, "POST", "/api/admin/members/bob/role", "100.64.0.10", `{"role":"owner"}`, map[string]string{
+		"Content-Type": "application/json",
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("reused IP (bob legit key): status=%d want 403 body=%s", rec.Code, rec.Body.String())
+	}
+	bobAfter, _ = e.st.MemberByHandle("bob")
+	if bobAfter.Role != "member" {
+		t.Fatalf("bob should remain member, got %q", bobAfter.Role)
+	}
+}
+
+func TestEmptyXFFDoesNotMatchIPv4OnlyDevice(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+
+	if _, err := e.svc.AddMember(ctx, cli, "root", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	// IPv4-only device has ipv6 = "" in SQLite.
+	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
+
+	h := MeshHandler(e.svc)
+	for _, xff := range []string{"", "100.64.0.10, ", "not-an-ip"} {
+		rec := doMeshReq(h, "GET", "/api/me", xff, "", nil)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("X-Forwarded-For=%q: status=%d want 403 body=%s", xff, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestPublicRedeemRateLimit(t *testing.T) {
+	e := newTestEnv(t)
+	h := PublicHandlerWithRateLimit(e.svc, 2, time.Minute)
+
+	send := func(remoteAddr, xff, token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/hogman/v1/redeem", strings.NewReader(`{"token":"`+token+`","handle":"alice"}`))
+		req.RemoteAddr = remoteAddr
+		if xff != "" {
+			req.Header.Set("X-Forwarded-For", xff)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// First two requests from 198.51.100.1 pass rate limit (403 on bogus token); 3rd hits 429.
+	for i := 0; i < 2; i++ {
+		rec := send("172.18.0.2:1234", "198.51.100.1", "bad-token")
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("req #%d: status=%d want 403 body=%s", i, rec.Code, rec.Body.String())
+		}
+	}
+	rec := send("172.18.0.2:1234", "198.51.100.1", "hmi_nonexistent")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("3rd req from same IP: status=%d want 429 body=%s", rec.Code, rec.Body.String())
+	}
+
+	// A different visitor IP is not blocked.
+	rec = send("172.18.0.2:1234", "198.51.100.2", "bad-token")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("other IP: status=%d want 403 body=%s", rec.Code, rec.Body.String())
 	}
 }

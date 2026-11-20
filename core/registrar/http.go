@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,8 +20,17 @@ import (
 // PublicHandler serves the one thing reachable from the internet: redeeming
 // an invite. Mounted by the edge at https://<public host>/hogman/.
 func PublicHandler(s *Service) http.Handler {
+	return PublicHandlerWithRateLimit(s, 20, time.Minute)
+}
+
+func PublicHandlerWithRateLimit(s *Service, redeemLimit int, window time.Duration) http.Handler {
+	lim := newIPRateLimiter(redeemLimit, window)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /hogman/v1/redeem", func(w http.ResponseWriter, r *http.Request) {
+		if !lim.allow(clientIP(r), time.Now()) {
+			fail(w, &Problem{http.StatusTooManyRequests, "too many requests; try again shortly"})
+			return
+		}
 		var in struct {
 			Token  string `json:"token"`
 			Handle string `json:"handle"`
@@ -41,6 +51,62 @@ func PublicHandler(s *Service) http.Handler {
 		writeJSON(w, 200, s.NetworkInfo())
 	})
 	return mux
+}
+
+type rateBucket struct {
+	count int
+	reset time.Time
+}
+
+type ipRateLimiter struct {
+	mu      sync.Mutex
+	limit   int
+	window  time.Duration
+	buckets map[string]*rateBucket
+}
+
+func newIPRateLimiter(limit int, window time.Duration) *ipRateLimiter {
+	return &ipRateLimiter{limit: limit, window: window, buckets: map[string]*rateBucket{}}
+}
+
+func (l *ipRateLimiter) allow(ip string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.buckets) > 1024 {
+		for k, b := range l.buckets {
+			if !now.Before(b.reset) {
+				delete(l.buckets, k)
+			}
+		}
+	}
+	b, ok := l.buckets[ip]
+	if !ok || !now.Before(b.reset) {
+		l.buckets[ip] = &rateBucket{count: 1, reset: now.Add(l.window)}
+		return true
+	}
+	if b.count >= l.limit {
+		return false
+	}
+	b.count++
+	return true
+}
+
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		last := strings.TrimSpace(parts[len(parts)-1])
+		if ip := net.ParseIP(last); ip != nil {
+			return ip.String()
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		if ip := net.ParseIP(host); ip != nil {
+			return ip.String()
+		}
+		return host
+	}
+	return r.RemoteAddr
 }
 
 // ------------------------------------------------------------------- mesh --
@@ -299,9 +365,17 @@ func identify(s *Service, next http.Handler) http.Handler {
 		xff := r.Header.Get("X-Forwarded-For")
 		parts := strings.Split(xff, ",")
 		src := strings.TrimSpace(parts[len(parts)-1])
-		m, d, err := s.WhoIs(src)
-		if err != nil {
+		if src == "" || net.ParseIP(src) == nil {
 			fail(w, forbidden("this device is not enrolled in the network"))
+			return
+		}
+		m, d, err := s.VerifyLiveCaller(r.Context(), src)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				fail(w, forbidden("this device is not enrolled in the network"))
+				return
+			}
+			fail(w, err)
 			return
 		}
 		if m.Status != "active" {

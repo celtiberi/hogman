@@ -304,8 +304,9 @@ func (s *Store) InsertDeviceKey(k *DeviceKey) error {
 	return nil
 }
 
-func (s *Store) DeviceKeys() (map[string]*DeviceKey, error) {
-	rows, err := s.db.Query(`SELECT id, member_id, kind, hs_key_id, expires_at, used_at, revoked_at FROM device_keys`)
+func (s *Store) PendingDeviceKeys(cutoff int64) (map[string]*DeviceKey, error) {
+	rows, err := s.db.Query(`SELECT id, member_id, kind, hs_key_id, expires_at, used_at, revoked_at FROM device_keys
+		WHERE used_at IS NULL AND expires_at > ?`, cutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -319,6 +320,26 @@ func (s *Store) DeviceKeys() (map[string]*DeviceKey, error) {
 		out[k.HSKeyID] = &k
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) CountOpenDeviceKeys(memberID int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM device_keys
+		WHERE member_id = ? AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?`, memberID, now()).Scan(&n)
+	return n, err
+}
+
+func (s *Store) CountOpenInvites(memberID int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM invites
+		WHERE minted_by = ? AND redeemed_at IS NULL AND revoked_at IS NULL AND expires_at > ?`, memberID, now()).Scan(&n)
+	return n, err
+}
+
+func (s *Store) CountMemberNames(memberID int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM names WHERE member_id = ? AND held_until IS NULL`, memberID).Scan(&n)
+	return n, err
 }
 
 func (s *Store) MarkDeviceKeyUsed(id int64) error {
@@ -408,8 +429,11 @@ func (s *Store) DeviceByID(id int64) (*Device, error) {
 }
 
 func (s *Store) DeviceByIP(ip string) (*Device, error) {
+	if ip == "" {
+		return nil, ErrNotFound
+	}
 	return scanDevice(s.db.QueryRow(`SELECT `+deviceCols+deviceFrom+
-		`WHERE d.removed_at IS NULL AND (d.ipv4 = ? OR d.ipv6 = ?)`, ip, ip))
+		`WHERE d.removed_at IS NULL AND ((d.ipv4 != '' AND d.ipv4 = ?) OR (d.ipv6 != '' AND d.ipv6 = ?))`, ip, ip))
 }
 
 func (s *Store) InsertDevice(d *Device) error {

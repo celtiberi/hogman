@@ -209,6 +209,21 @@ func (e *testEnv) addDevice(t *testing.T, handle, kind, name, ipv4, ipv6 string)
 	if err := e.st.InsertDevice(d); err != nil {
 		t.Fatal(err)
 	}
+	var ips []string
+	if ipv4 != "" {
+		ips = append(ips, ipv4)
+	}
+	if ipv6 != "" {
+		ips = append(ips, ipv6)
+	}
+	e.hs.mu.Lock()
+	e.hs.nodes = append(e.hs.nodes, HSNode{
+		ID:          d.HSNodeID,
+		Name:        name,
+		GivenName:   name,
+		IPAddresses: ips,
+	})
+	e.hs.mu.Unlock()
 	return m, d
 }
 
@@ -439,5 +454,217 @@ func TestWriteZoneIPv6AndConcurrency(t *testing.T) {
 	s2 := readSerial()
 	if s2 <= s1 {
 		t.Fatalf("expected SOA serial to increase (%d -> %d)", s1, s2)
+	}
+}
+
+func TestRBACAdminRestrictions(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+
+	owner, err := e.svc.AddMember(ctx, cli, "root", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin1, err := e.svc.AddMember(ctx, cli, "alice", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin2, err := e.svc.AddMember(ctx, cli, "carol", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member1, err := e.svc.AddMember(ctx, cli, "bob", "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ownerSrv := e.addDevice(t, "root", "server", "root-srv", "100.64.0.10", "")
+	_, admin2Dev := e.addDevice(t, "carol", "personal", "carol-laptop", "100.64.0.11", "")
+	_, admin2Srv := e.addDevice(t, "carol", "server", "carol-srv", "100.64.0.12", "")
+	_, memberDev := e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.13", "")
+	_, memberSrv := e.addDevice(t, "bob", "server", "bob-srv", "100.64.0.14", "")
+
+	if _, err := e.svc.Claim(Actor{Member: owner}, "root", "root-site", ownerSrv.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Claim(Actor{Member: admin2}, "carol", "carol-site", admin2Srv.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Claim(Actor{Member: member1}, "bob", "bob-site", memberSrv.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Kick a member to put a held name in place.
+	_, err = e.svc.AddMember(ctx, cli, "gary", "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, garySrv := e.addDevice(t, "gary", "server", "gary-srv", "100.64.0.15", "")
+	if _, err := e.svc.Claim(cli, "gary", "gary-site", garySrv.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Kick(ctx, cli, "gary", "bad pig"); err != nil {
+		t.Fatal(err)
+	}
+
+	a1 := Actor{Member: admin1}
+
+	// Admin cannot remove another admin's or owner's device, but can remove a member's device.
+	for _, devID := range []int64{ownerSrv.ID, admin2Dev.ID} {
+		err := e.svc.RemoveDevice(ctx, a1, devID)
+		var prob *Problem
+		if !errors.As(err, &prob) || prob.Status != 403 {
+			t.Fatalf("admin RemoveDevice(%d): got %v, want 403", devID, err)
+		}
+	}
+	if err := e.svc.RemoveDevice(ctx, a1, memberDev.ID); err != nil {
+		t.Fatalf("admin RemoveDevice(memberDev): %v", err)
+	}
+
+	// Admin cannot release owner's name, another admin's name, or a held name.
+	for _, name := range []string{"root-site", "carol-site", "gary-site"} {
+		err := e.svc.Release(a1, name)
+		var prob *Problem
+		if !errors.As(err, &prob) || prob.Status != 403 {
+			t.Fatalf("admin Release(%q): got %v, want 403", name, err)
+		}
+	}
+	// Admin can release a regular member's active name, and owner can release held names.
+	if err := e.svc.Release(a1, "bob-site"); err != nil {
+		t.Fatalf("admin Release(bob-site): %v", err)
+	}
+	if err := e.svc.Release(Actor{Member: owner}, "gary-site"); err != nil {
+		t.Fatalf("owner Release(gary-site): %v", err)
+	}
+
+	// Admin cannot issue device keys or claim names for owner or another admin.
+	for _, target := range []string{"root", "carol"} {
+		_, _, err := e.svc.IssueDeviceKey(ctx, a1, target, "personal")
+		var prob *Problem
+		if !errors.As(err, &prob) || prob.Status != 403 {
+			t.Fatalf("admin IssueDeviceKey(%s): got %v, want 403", target, err)
+		}
+	}
+	if _, err := e.svc.Claim(a1, "carol", "hijack", admin2Srv.ID); err == nil {
+		t.Fatal("admin should not claim names for another admin")
+	}
+}
+
+func TestClaimSeizeCleansUpChildSubdomains(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+
+	if _, err := e.svc.AddMember(ctx, cli, "root", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	alice, err := e.svc.AddMember(ctx, cli, "alice", "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rootSrv := e.addDevice(t, "root", "server", "root-srv", "100.64.0.10", "")
+	_, aliceSrv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.11", "")
+
+	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "alice", aliceSrv.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "blog.alice", aliceSrv.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Claim(cli, "root", "alice", rootSrv.ID); err != nil {
+		t.Fatalf("owner seize failed: %v", err)
+	}
+	if _, err := e.st.NameByName("blog.alice"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("child name blog.alice should be deleted on parent seize, got err=%v", err)
+	}
+	raw, err := os.ReadFile(e.svc.cfg.ZoneFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "blog.alice") {
+		t.Fatalf("zone file still contains blog.alice:\n%s", raw)
+	}
+}
+
+func TestQuotasAndSuspendExpiresKeys(t *testing.T) {
+	e := newTestEnv(t)
+	e.svc.cfg.MaxOpenDeviceKeys = 2
+	e.svc.cfg.MaxNamesPerMember = 2
+	e.svc.cfg.MaxOpenInvites = 2
+	e.svc.cfg.MaxInviteNoteLen = 16
+	e.svc.cfg.MembersCanInvite = true
+
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+	alice, err := e.svc.AddMember(ctx, cli, "alice", "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, aliceSrv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.11", "")
+	aAlice := Actor{Member: alice}
+
+	// Open device key quota + PendingDeviceKeys filtering.
+	for i := 0; i < 2; i++ {
+		if _, _, err := e.svc.IssueDeviceKey(ctx, aAlice, "alice", "personal"); err != nil {
+			t.Fatalf("IssueDeviceKey #%d: %v", i, err)
+		}
+	}
+	if _, _, err := e.svc.IssueDeviceKey(ctx, aAlice, "alice", "personal"); err == nil {
+		t.Fatal("expected 3rd open device key to hit quota")
+	}
+
+	// Suspend expires & revokes open device keys.
+	if err := e.svc.Suspend(ctx, cli, "alice", "pause"); err != nil {
+		t.Fatal(err)
+	}
+	openKeys, err := e.st.OpenDeviceKeys(alice.ID)
+	if err != nil || len(openKeys) != 0 {
+		t.Fatalf("expected 0 open keys after suspend, got %d (err=%v)", len(openKeys), err)
+	}
+	if err := e.svc.Resume(ctx, cli, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	// After suspend revoked old keys, alice can issue keys again; also verify PendingDeviceKeys filters old/used rows.
+	if _, _, err := e.svc.IssueDeviceKey(ctx, aAlice, "alice", "personal"); err != nil {
+		t.Fatalf("IssueDeviceKey after suspend/resume: %v", err)
+	}
+	if err := e.st.InsertDeviceKey(&DeviceKey{MemberID: alice.ID, Kind: "personal", HSKeyID: "old-exp", ExpiresAt: now() - 100000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.InsertDeviceKey(&DeviceKey{MemberID: alice.ID, Kind: "personal", HSKeyID: "used-one", ExpiresAt: now() + 3600}); err != nil {
+		t.Fatal(err)
+	}
+	allKeys, _ := e.st.PendingDeviceKeys(now() - 86400)
+	if _, ok := allKeys["old-exp"]; ok {
+		t.Fatal("PendingDeviceKeys should exclude old expired keys")
+	}
+	if dk := allKeys["used-one"]; dk != nil {
+		_ = e.st.MarkDeviceKeyUsed(dk.ID)
+	}
+	allKeys, _ = e.st.PendingDeviceKeys(now() - 86400)
+	if _, ok := allKeys["used-one"]; ok {
+		t.Fatal("PendingDeviceKeys should exclude used keys")
+	}
+
+	// Invite note length & open invite quota.
+	if _, err := e.svc.MintInvite(aAlice, "member", strings.Repeat("x", 17), time.Hour); err == nil {
+		t.Fatal("expected oversized invite note to be rejected")
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := e.svc.MintInvite(aAlice, "member", "ok", time.Hour); err != nil {
+			t.Fatalf("MintInvite #%d: %v", i, err)
+		}
+	}
+	if _, err := e.svc.MintInvite(aAlice, "member", "ok", time.Hour); err == nil {
+		t.Fatal("expected 3rd open invite to hit quota")
+	}
+
+	// Name quota.
+	for _, nm := range []string{"n1", "n2"} {
+		if _, err := e.svc.Claim(aAlice, "alice", nm, aliceSrv.ID); err != nil {
+			t.Fatalf("Claim(%s): %v", nm, err)
+		}
+	}
+	if _, err := e.svc.Claim(aAlice, "alice", "n3", aliceSrv.ID); err == nil {
+		t.Fatal("expected 3rd name to hit quota")
 	}
 }

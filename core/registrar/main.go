@@ -136,9 +136,11 @@ func serve(s *Service) {
 	}()
 
 	pub := &http.Server{Addr: env("PUBLIC_ADDR", ":8081"), Handler: PublicHandler(s),
-		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second}
+		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
+		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	mesh := &http.Server{Addr: env("MESH_ADDR", "127.0.0.1:8082"), Handler: MeshHandler(s),
-		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second}
+		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
+		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	for _, srv := range []*http.Server{pub, mesh} {
 		go func(srv *http.Server) {
 			log.Printf("listening on %s", srv.Addr)
