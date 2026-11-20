@@ -34,6 +34,10 @@ usage: hogman-host <command>
   routes                         rewrite the front door's routes and reload it
   remove <network>               stop a pen (its folder is kept; delete it yourself to destroy it)
 
+  backup-setup <age-public-key>  nightly encrypted backups of every pen (age, https://age-encryption.org)
+  backup-allow '<ssh-public-key>'  let another machine download the encrypted backups, and nothing else
+  backup                         back up every pen now
+
 The control hostname's DNS must point at this server before `add`, so the
 front door can get its certificate.
 EOF
@@ -269,6 +273,115 @@ cmd_remove() {
   info "pen $n stopped and unrouted. Its folder is kept at $PENS/$n"
 }
 
+
+# ---------------------------------------------------------------- backup ----
+#
+# Each pen's essential state, encrypted for a key the server never holds the
+# private half of. Another machine downloads the encrypted files through a
+# dedicated account that can list and fetch backups and do nothing else.
+
+BACKUPS=/var/backups/hogman
+RECIPIENT="$HOGMAN_HOME/backup-recipient.txt"
+SERVE=/usr/local/lib/hogman/backup-serve
+KEEP_LOCAL=7
+
+cmd_backup_setup() {
+  local key="${1:-}"
+  [[ "$key" =~ ^age1[0-9a-z]{58}$ ]] || die "usage: hogman-host backup-setup <age public key, age1...>"
+  command -v age >/dev/null || { apt-get install -yq age >/dev/null || die "could not install age"; }
+  echo "$key" > "$RECIPIENT"
+  id hogman-backup >/dev/null 2>&1 || useradd --system --home-dir /var/lib/hogman-backup --create-home --shell /bin/sh hogman-backup
+  passwd -l hogman-backup >/dev/null 2>&1 || true
+  install -d -m 0750 -o root -g hogman-backup "$BACKUPS"
+  install -d -m 0755 /usr/local/lib/hogman
+  cat > "$SERVE" <<'SERVE'
+#!/bin/sh
+# Forced command for the hogman-backup account: list or fetch one backup file.
+set -eu
+dir=/var/backups/hogman
+set -- ${SSH_ORIGINAL_COMMAND:-}
+case "${1:-}" in
+  list) cd "$dir" && ls -1 -- *.tar.gz.age 2>/dev/null || true ;;
+  get)
+    name="${2:-}"
+    printf '%s' "$name" | grep -Eq '^[a-z0-9-]+-[0-9]{8}T[0-9]{6}Z\.tar\.gz\.age$' || { echo "bad name" >&2; exit 2; }
+    [ -f "$dir/$name" ] || { echo "no such backup" >&2; exit 3; }
+    cat "$dir/$name" ;;
+  *) echo "only: list | get <name>" >&2; exit 2 ;;
+esac
+SERVE
+  chmod 0755 "$SERVE"
+  cat > /etc/systemd/system/hogman-backup.service <<UNIT
+[Unit]
+Description=Hogman: encrypted backup of every pen
+[Service]
+Type=oneshot
+Environment=HOGMAN_HOME=$HOGMAN_HOME
+ExecStart=/usr/local/bin/hogman-host backup
+UNIT
+  cat > /etc/systemd/system/hogman-backup.timer <<'UNIT'
+[Unit]
+Description=Hogman: nightly encrypted backup
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+RandomizedDelaySec=10m
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now hogman-backup.timer >/dev/null
+  info "Nightly backups on (03:30 UTC), encrypted for $key"
+  info "Let a machine download them:  hogman-host backup-allow '<its ssh public key>'"
+}
+
+cmd_backup_allow() {
+  local pub="${1:-}"
+  [[ "$pub" =~ ^(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa)\ [A-Za-z0-9+/=]+(\ [^\"]*)?$ ]] || die "usage: hogman-host backup-allow '<ssh public key>'"
+  id hogman-backup >/dev/null 2>&1 || die "run hogman-host backup-setup first"
+  local home; home="$(getent passwd hogman-backup | cut -d: -f6)"
+  install -d -m 0700 -o hogman-backup -g hogman-backup "$home/.ssh"
+  local line="command=\"$SERVE\",restrict $pub"
+  touch "$home/.ssh/authorized_keys"
+  grep -qxF "$line" "$home/.ssh/authorized_keys" || echo "$line" >> "$home/.ssh/authorized_keys"
+  chown hogman-backup:hogman-backup "$home/.ssh/authorized_keys"; chmod 0600 "$home/.ssh/authorized_keys"
+  info "That key can now list and download encrypted backups as hogman-backup@$(hostname), and nothing else."
+}
+
+backup_pen() {  # backup_pen <name>
+  local n="$1" pen="$PENS/$1" stage ts out
+  stage="$(mktemp -d)"
+  # Everything needed to bring the pen back, minus what returns by itself:
+  # the compiled join tool (every release ships it), web certificates
+  # (re-issued), and step-ca's ACME records (members' servers re-register).
+  rsync -a "$pen/data/" "$stage/data/" \
+    --exclude join-dl/ --exclude edge/ --exclude portal/ --exclude step/db/ --exclude tmp/ \
+    --exclude 'headscale/lib/db.sqlite*' --exclude 'registrar/registrar.db*'
+  # Databases are copied with SQLite's own backup, safe while the pen runs.
+  sqlite3 "$pen/data/headscale/lib/db.sqlite" ".backup '$stage/data/headscale/lib/db.sqlite'"
+  sqlite3 "$pen/data/registrar/registrar.db" ".backup '$stage/data/registrar/registrar.db'"
+  cp "$pen/.env" "$stage/.env"
+  cat "$HOGMAN_HOME/VERSION" > "$stage/VERSION" 2>/dev/null || true
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  out="$BACKUPS/$n-$ts.tar.gz.age"
+  tar -C "$stage" -czf - . | age -r "$(cat "$RECIPIENT")" > "$out.part"
+  rm -rf "$stage"
+  chown root:hogman-backup "$out.part"; chmod 0640 "$out.part"; mv "$out.part" "$out"
+  # Keep the newest few here; the machine that downloads them keeps the history.
+  ls -1t "$BACKUPS/$n"-*.tar.gz.age 2>/dev/null | tail -n +$((KEEP_LOCAL + 1)) | xargs -r rm -f
+  info "$n: $(basename "$out") ($(du -h "$out" | cut -f1))"
+}
+
+cmd_backup() {
+  [ -f "$RECIPIENT" ] || die "run hogman-host backup-setup <age public key> first"
+  local n ok=0
+  for n in $(pen_names); do
+    [ -f "$PENS/$n/.removed" ] && continue
+    backup_pen "$n"; ok=$((ok + 1))
+  done
+  [ "$ok" -gt 0 ] || info "no pens to back up"
+}
+
 case "${1:-}" in
   init)    shift; cmd_init "$@" ;;
   add)     shift; cmd_add "$@" ;;
@@ -277,5 +390,8 @@ case "${1:-}" in
   upgrade) shift; cmd_upgrade "$@" ;;
   routes)  load_host; write_front; reload_front; info "routes rewritten" ;;
   remove)  shift; cmd_remove "$@" ;;
+  backup-setup) shift; cmd_backup_setup "$@" ;;
+  backup-allow) shift; cmd_backup_allow "$@" ;;
+  backup)  cmd_backup ;;
   *)       usage; [ -z "${1:-}" ] || exit 1 ;;
 esac
