@@ -1,0 +1,322 @@
+# Keeper Passkey Recovery & Threat Model (D-12)
+
+Status: draft, for review and red team before any code. P1, decision D-12.
+
+## 1. Problem & Goals
+
+A Hogman pen runs on its own control plane (`registrar` + `headscale` + `edge`) behind a public host (`PUBLIC_HOST`, for example `bobo.pens.example` or `hs.example.com`) and a private mesh zone (`Zone`, for example `bobo.hogman`). Keepers (`owner` and `admin` members) administer the pen over the mesh at `https://home.<zone>`.
+
+If a keeper loses every enrolled device at once (laptop stolen, phone wiped, core host still running), they lose mesh access and can no longer open `home.<zone>` to mint a replacement `/join` link. Per decision **D-12**, Hogman solves this with **keeper passkeys only, with zero operator recovery**:
+
+- There is no operator or host support path to bypass authentication, reset keeper state, or mint a device key from a dashboard ticket.
+- There are no passwords, email/SMS reset codes, TOTP seeds, static printable backup codes, or third-party OIDC logins (no Google/GitHub sign-in).
+- A keeper registers one or more WebAuthn discoverable passkeys (for example in a synced password manager vault such as Bitwarden or iCloud Keychain, or on a hardware security key) tied to `<PUBLIC_HOST>`.
+- Visiting `https://<PUBLIC_HOST>/recover` and presenting a valid registered keeper passkey mints **one** single-use, short-lived `kind="personal"` keeper device link (`https://<PUBLIC_HOST>/join#k=<key>&fp=<rootFP>`), which admits one replacement device back onto the pen.
+
+Non-goals for this design:
+- **Self-service recovery for non-keeper members (`role = "member"`):** regular members ask a keeper on the pen for a new `/join` link.
+- **Remote device wiping from `/recover`:** `/recover` only restores access to one replacement device. Reviewing and removing lost devices happens afterward over the mesh on `home.<zone>`.
+- **Protection against compromise of the registrar host or TLS private key:** whoever controls the registrar process or its SQLite database can call Headscale directly.
+
+## 2. Standards & Library Choice
+
+This design targets the following normative references and known WebAuthn pitfalls:
+
+- **W3C WebAuthn Level 3:**
+  - Discoverable credentials (`residentKey: "required"`, `userVerification: "required"`) so recovery ceremonies require no handle input and expose no account-existence oracle.
+  - Strict relying party ID (`RPID`) and exact origin validation matching browser Same-Origin / effective-domain rules (`Section 5.4`, `Section 7.1`, `Section 7.2`).
+  - Explicit rejection of cross-origin assertions (`crossOrigin == false`), explicit user presence (`UP == 1`) and user verification (`UV == 1`) flag enforcement, Backup Eligibility (`BE`) / Backup State (`BS`) tracking, and `signCount` clone checks appropriate for synced vs. device-bound authenticators.
+- **NIST SP 800-63B-4 (July 2025):**
+  - **Appendix B (Syncable Authenticators) & Section 4:** Syncable passkeys (`BE == 1`, `UV == 1`, protected by an encrypted vault sync fabric with MFA) satisfy **AAL2** and are allowed by default so keepers can recover even if their phone and laptop are lost together. Device-bound authenticators (`BE == 0`, such as hardware FIDO2 keys) satisfy **AAL3**.
+  - **Recovery & Event Notification (Section 4):** Rejects knowledge-based authentication (KBA), SMS, and email fallback channels; requires re-verification of authorization state, strict rate limiting, audit logging of credential enrollment/use, and visibility on the authenticated management surface (`home.<zone>`) so keepers spot unexpected recovery events.
+- **OWASP Authentication & Session Management Cheat Sheets:**
+  - Uniform generic errors on public endpoints to prevent user or credential enumeration.
+  - Cryptographically random single-use challenges and setup tokens (`>= 256` bits), short TTLs, atomic single-use consumption in SQLite, fail-closed authorization checks, and strict anti-framing / `Referrer-Policy` / `Cache-Control: no-store` headers.
+- **2026 WebAuthn Library Origin & RP-ID Bug Class (`CVE-2026-30964` and siblings):**
+  - `CVE-2026-30964` (`web-auth/webauthn-lib < 5.2.4`) demonstrated how origin allowlist checks that reduce an origin URL to its hostname alone silently accept wrong schemes (`http://`) or unexpected ports (`:8443`).
+  - Sibling flaws in other stacks (including `webauthn-rs-core` dot-prefix RP ID boundary bugs and libraries missing `crossOrigin` checks) allowed subdomain/prefix spoofing or embedded-iframe assertions when RP ID matching was implemented permissively.
+- **Go Library Choice:**
+  - Pin **`github.com/go-webauthn/webauthn >= v0.18`** inside `core/registrar/go.mod`. It is pure Go (preserving `CGO_ENABLED=0` static builds in Docker and CI), supports WebAuthn Level 3 `BE`/`BS` flags and `CloneWarning`, enforces exact scheme+host+port origin matching, and validates `crossOrigin`.
+  - Construct the WebAuthn verifier **once at startup** in `NewService` from `cfg.PublicHost` (never dynamically from incoming `Host` or `Origin` request headers).
+
+## 3. Architecture & Flows
+
+### 3.1 The Cross-Origin RP-ID Constraint (`home.<zone>` vs. `<PUBLIC_HOST>`)
+
+Keepers administer their pen over the mesh at `https://home.<zone>` (for example `https://home.bobo.hogman`), while locked-out recovery must happen from the public internet at `https://<PUBLIC_HOST>/recover` (for example `https://bobo.pens.example/recover`).
+
+Per W3C WebAuthn Level 3 (`Section 5.4`), `navigator.credentials.create` only succeeds if the caller page's origin has an effective domain equal to `rp.id` or a subdomain of `rp.id`. A page at `https://home.bobo.hogman` **cannot** register a credential with `rp.id = "bobo.pens.example"` — the browser throws `SecurityError`. Conversely, registering under `bobo.hogman` is unusable during recovery because a locked-out browser on the public internet cannot reach `.hogman`, and private mesh TLDs cannot participate in public Related Origin Requests (`/.well-known/webauthn`).
+
+**Solution:** Use a short-lived, mesh-minted setup handoff:
+
+1. **Enrollment always starts on the authenticated mesh (`https://home.<zone>`):** `home.<zone>` proves who the keeper is via Tailscale/Headscale identity (`identify`) and mints a single-use `setup_token`.
+2. **Enrollment finishes on `https://<PUBLIC_HOST>/recover/setup#t=<setup_token>`:** the browser executes `navigator.credentials.create` on `<PUBLIC_HOST>` itself, where `origin == "https://" + PUBLIC_HOST` and `rp.id == host(PUBLIC_HOST)` match natively.
+3. **Management stays mesh-only:** listing, renaming, and deleting registered passkeys live exclusively behind `MeshHandler` on `home.<zone>`. Public endpoints on `<PUBLIC_HOST>` can never list or delete passkeys.
+
+### 3.2 Passkey Enrollment Flow (`home.<zone>` -> `/recover/setup`)
+
+```
+Keeper browser (on mesh)                core/registrar                   Edge Caddy (<PUBLIC_HOST>)
+  |                                           |                                 |
+  | 1. Click "Add a recovery passkey"         |                                 |
+  | POST https://home.<zone>/api/passkeys/setup                                 |
+  | (MeshHandler: loopback+XFF active keeper) |                                 |
+  |------------------------------------------>|                                 |
+  |   mints 256-bit setup_token (5m TTL)      |                                 |
+  |   stores SHA-256(token) in passkey_setups |                                 |
+  |   returns setup URL with #t=<setup_token> |                                 |
+  |<------------------------------------------|                                 |
+  |                                                                             |
+  | 2. Open https://<PUBLIC_HOST>/recover/setup#t=<setup_token>                 |
+  |---------------------------------------------------------------------------->|
+  |   serves static SPA (Referrer-Policy: no-referrer, CSP, X-Frame-Options: DENY)
+  |<----------------------------------------------------------------------------|
+  |                                                                             |
+  | 3. POST /hogman/v1/recover/register/begin  {"setup_token":"...","label":"..."}
+  |------------------------------------------>|                                 |
+  |   validates & atomically consumes         |                                 |
+  |   setup_token; creates 120s register      |                                 |
+  |   challenge bound to member_id            |                                 |
+  |   returns WebAuthn creation options       |                                 |
+  |<------------------------------------------|                                 |
+  |                                                                             |
+  | 4. navigator.credentials.create(...)                                        |
+  |    (rp.id=<RPID>, residentKey=required, uv=required)                        |
+  |                                                                             |
+  | 5. POST /hogman/v1/recover/register/finish {"challenge_id":"...","credential":...}
+  |------------------------------------------>|                                 |
+  |   consumes challenge, verifies origin/RPID/UP/UV/flags,                     |
+  |   inserts row into passkeys, writes audit |                                 |
+  |<------------------------------------------|                                 |
+```
+
+Design notes for enrollment:
+- **Fragment transport (`#t=<setup_token>`):** Putting `setup_token` in the URL fragment prevents browsers from sending the secret in the initial HTTP `GET /recover/setup` request line, Caddy access logs, or `Referer` headers.
+- **Ceremony parameters:**
+  - `rp.id`: hostname of `cfg.PublicHost` (via `net.SplitHostPort` fallback if a port is present).
+  - `user.id`: opaque 32-byte random `members.webauthn_user_id` (not `members.id`, `handle`, or `hs_user_id`).
+  - `user.name` / `user.displayName`: `<handle>` (e.g. `alice`) and `<handle> (<Zone>)` so the keeper recognizes which pen the passkey belongs to in their vault.
+  - `authenticatorSelection`: `residentKey: "required"`, `requireResidentKey: true`, `userVerification: "required"`, and `authenticatorAttachment` omitted (allows both synced vaults and roaming hardware keys).
+  - `attestation: "none"` to minimize metadata fingerprinting while still recording `BE`, `BS`, `aaguid` (if present), and `transports`.
+  - Per-keeper cap: reject registration if the member already has 10 registered passkeys (`MaxPasskeysPerMember = 10`).
+- **One-shot transition:** `POST /hogman/v1/recover/register/begin` atomically sets `passkey_setups.consumed_at` inside a SQLite transaction before returning the 120-second `recover_challenges` row. If the keeper cancels the WebAuthn prompt or closes the tab, they simply click **Add a recovery passkey** on `home.<zone>` again.
+
+### 3.3 Mesh-Only Management (`home.<zone>` / `core/portal`)
+
+Additions to `MeshHandler(s *Service)` (wrapped by `identify(s, requireSameOriginAndJSON(s.cfg.Zone, mux))`):
+
+- `GET /api/me` (addition): include `passkey_count` (for the active keeper) and `recent_recoveries` (last 24h/7d audit summary if non-empty, for the banner in `#mine`/`#herd`).
+- `GET /api/passkeys`: requires `actor.IsAdmin()` (`owner` or `admin`). Lists only the caller's own passkeys: `id`, `label`, `synced` (`backup_eligible`), `backed_up` (`backup_state`), `created_at`, `last_used_at`. Credential IDs and public keys never leave the registrar.
+- `POST /api/passkeys/setup`: requires `actor.IsAdmin()`. Lazily assigns `members.webauthn_user_id` if null, prunes expired `passkey_setups` rows, enforces the passkey cap, stores `SHA-256(token)` with `now + 5m`, audits `passkey_setup_created`, and returns `{"setup_url": "https://" + s.cfg.PublicHost + "/recover/setup#t=" + token, "expires_at": ...}`.
+- `POST /api/passkeys/rename`: body `{"id": ..., "label": ...}`, verifies ownership (`member_id = actor.Member.ID`), updates trimmed label (max 64 bytes), audits `passkey_renamed`.
+- `POST /api/passkeys/delete`: body `{"id": ...}`, verifies ownership (`member_id = actor.Member.ID`), deletes row, audits `passkey_deleted`. Using `POST` with JSON bodies ensures every mutating endpoint obeys `requireSameOriginAndJSON` (`Sec-Fetch-Site`, `Origin`, `Content-Type: application/json`), blocking `.hogman` sibling CSRF.
+
+In `core/portal/index.html` and `core/portal/portal.js`:
+- Add a **Recovery passkeys** subsection visible only to keepers (`me.is_admin || me.is_owner`), showing each registered passkey's `label`, a `synced` vs. `device-bound` badge derived from `backup_eligible`, timestamps, and the existing inline double-click removal confirmation pattern.
+- All dynamic strings rendered strictly via `textContent` (no `innerHTML`).
+
+### 3.4 Public Recovery Ceremony (`<PUBLIC_HOST>/recover`)
+
+1. Keeper visits `https://<PUBLIC_HOST>/recover` from any browser with access to their passkey vault or security key.
+2. Page clicks **Recover device access** -> sends `POST /hogman/v1/recover/begin` with `{}` (`Content-Type: application/json`, strict `decodeJSON` `DisallowUnknownFields`). No username or handle field exists.
+3. Registrar generates a 256-bit challenge (`kind = "assert"`, 120s TTL), saves the WebAuthn session state in `recover_challenges`, and returns `CredentialRequestOptions` with `rpId`, `userVerification: "required"`, and **empty `allowCredentials`**.
+4. Browser calls `navigator.credentials.get(...)`, presents matching discoverable passkeys for `<RPID>`, verifies user presence and user verification locally, and signs the challenge.
+5. Browser sends `POST /hogman/v1/recover/finish` with `{"challenge_id": "...", "credential": ...}`.
+6. Inside `s.mu` / SQLite serialized transaction, registrar:
+   - Atomically consumes the `recover_challenges` row (`UPDATE ... SET consumed_at = ? WHERE id = ? AND kind = 'assert' AND consumed_at IS NULL AND expires_at > ?`).
+   - Resolves the passkey + owning member via `userHandle` (`members.webauthn_user_id`) and `credential_id`.
+   - Verifies the WebAuthn assertion via `go-webauthn` (`RPID`, `Origin`, `crossOrigin == false`, `UP == 1`, `UV == 1`, signature, algorithm, `signCount` / `CloneWarning`).
+   - Re-checks live member state: rejects if `member.Status != "active"` or `member.Role NOT IN ("owner", "admin")`.
+   - Enforces a per-keeper recovery mint quota (for example max `3` recovery mints per `24h` rolling window) and existing `MaxOpenDeviceKeys`.
+   - Updates `passkeys.sign_count`, `backup_state`, and `last_used_at`.
+   - Mints **one** `kind="personal"` Headscale pre-auth key via `s.issueKey` (with a tight recovery TTL, proposed 15 minutes; see Section 7) and writes a `recover_mint` audit row.
+   - Returns `{"link": s.DeviceLink(key, "personal"), "expires_at": ..., "handle": m.Handle}`.
+7. On any failure (bad signature, expired/replayed challenge, cloned counter, demoted/suspended/removed member, quota exceeded), registrar logs the reason to `audit` and returns HTTP `401` with a uniform generic JSON error (`{"error": "recovery could not be verified"}`) — never revealing whether a passkey exists or why a member failed policy.
+8. Keeper follows the returned `/join#k=...&fp=...` link to enroll their replacement device, then opens `https://home.<zone>` where a portal banner highlights the recent `recover_mint` audit event and prompts them to remove lost devices.
+
+### 3.5 Caddy Routing & Headers (`core/config/edge.Caddyfile` & `deploy/hogman-host`)
+
+Both Caddy edge templates (`core/config/edge.Caddyfile` for self-hosted cores and the `(pen)` snippet in `deploy/hogman-host` for hosted pens) must route:
+
+- Static SPAs at `/recover`, `/recover/setup`, and `/recover/assets/*` with the same security headers used for `/join`:
+  - `X-Frame-Options: DENY`
+  - `X-Content-Type-Options: nosniff`
+  - `Referrer-Policy: no-referrer`
+  - `Cache-Control: no-store`
+  - `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`
+- JSON API endpoints `/hogman/v1/recover/register/begin`, `/hogman/v1/recover/register/finish`, `/hogman/v1/recover/begin`, `/hogman/v1/recover/finish`:
+  - Matched under the existing `/hogman/*` Caddy reverse proxy (`request_body { max_size 16KB }`) forwarding trusted `X-Forwarded-For` to `PublicHandlerWithRateLimit`.
+  - Protected in `PublicHandlerWithRateLimit` by a tighter IP limiter than `/redeem` (proposed: `10` requests per minute per client IP on recovery endpoints) in addition to per-member recovery mint quotas.
+
+### 3.6 SQLite Schema (`core/registrar/store.go`)
+
+Added via an idempotent migration helper in `OpenStore` (following `migrateNamesNote`):
+
+```sql
+ALTER TABLE members ADD COLUMN webauthn_user_id BLOB;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_members_webauthn_user_id
+  ON members(webauthn_user_id) WHERE webauthn_user_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS passkeys (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  member_id       INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+  credential_id   BLOB NOT NULL UNIQUE,
+  public_key      BLOB NOT NULL,
+  attestation_type TEXT NOT NULL DEFAULT '',
+  aaguid          BLOB,
+  sign_count      INTEGER NOT NULL DEFAULT 0,
+  backup_eligible INTEGER NOT NULL DEFAULT 0,
+  backup_state    INTEGER NOT NULL DEFAULT 0,
+  transports      TEXT NOT NULL DEFAULT '',
+  label           TEXT NOT NULL DEFAULT '',
+  created_at      INTEGER NOT NULL,
+  last_used_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_passkeys_member_id ON passkeys(member_id);
+
+CREATE TABLE IF NOT EXISTS passkey_setups (
+  token_hash  BLOB PRIMARY KEY,
+  member_id   INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+  expires_at  INTEGER NOT NULL,
+  consumed_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS recover_challenges (
+  id           TEXT PRIMARY KEY,
+  kind         TEXT NOT NULL CHECK (kind IN ('register', 'assert')),
+  member_id    INTEGER REFERENCES members(id) ON DELETE CASCADE,
+  session_json TEXT NOT NULL,
+  expires_at   INTEGER NOT NULL,
+  consumed_at  INTEGER
+);
+```
+
+Notes:
+- `OpenStore` runs SQLite with `WAL`, `busy_timeout(5000)`, `foreign_keys(1)`, and `SetMaxOpenConns(1)`.
+- Expired rows in `passkey_setups` and `recover_challenges` are pruned on each write to keep table size bounded.
+- When a keeper is deleted or loses status/role (`removed`/`suspended`/demoted), existing foreign-key or explicit cleanup rules must preserve auditability while blocking recovery; `ON DELETE CASCADE` handles hard member deletes, while soft `status`/`role` updates are caught dynamically at recovery time.
+
+## 4. Verification Invariants & Mandatory Negative Unit Test Matrix
+
+### 4.1 Code Invariants (Must Hold in `core/registrar`)
+
+1. **Static RP configuration:** `RPID` (extracted hostname of `cfg.PublicHost`, ignoring `:port` only for `RPID`, never empty, never containing wildcards or leading `.`) and `RPOrigins` (`[]string{"https://" + cfg.PublicHost}`) are constructed once in `NewService` and verified in unit tests. Request `Host`, `Origin`, `X-Forwarded-Host`, and `Referer` headers never configure the verifier.
+2. **Exact origin match:** Scheme (`https`), hostname, and implicit/explicit port must match `https://<cfg.PublicHost>` verbatim.
+3. **Mandatory user flags:** Both `Flags.UserPresent` (`UP`) and `Flags.UserVerified` (`UV`) must be `true` on both registration and assertion.
+4. **No cross-origin assertions:** Reject any `clientDataJSON` with `crossOrigin: true`.
+5. **Algorithm allowlist:** Accept only strong modern COSE algorithms configured on the server (`ES256` / `-7`, `EdDSA` / `-8`, `RS256` / `-257`). Reject `none` or downgraded algorithms.
+6. **SignCount policy (`BE` vs. hardware keys):** Per WebAuthn Level 3, synced passkeys commonly leave `signCount == 0` across devices. Only when `storedSignCount > 0 || authenticatorSignCount > 0` does a non-increasing `signCount` trigger `CloneWarning`, which **must fail closed** and log a security audit event rather than silently authenticating.
+7. **Atomic one-shot challenge and setup consumption:** Both `passkey_setups` consumption (on `register/begin`) and `recover_challenges` consumption (on `register/finish` and `recover/finish`) must happen via conditional `UPDATE ... WHERE consumed_at IS NULL AND expires_at > ?` checking `RowsAffected() == 1`.
+8. **Live authorization re-check:** `recover/finish` must re-verify `m.Status == "active"` and `m.Role == "owner" || m.Role == "admin"` after validating the assertion, failing uniformly with `401` if false.
+
+### 4.2 Mandatory Negative Test Matrix (Unit Tests Before Any Merge)
+
+Every item below must be a concrete unit test in `core/registrar`:
+
+| Case | Attack / Bug Modeled | Expected Result |
+| --- | --- | --- |
+| Origin wrong host (`https://evil.example`) | Cross-origin assertion replay | Reject `401` (`Origin` mismatch) |
+| Origin wrong scheme (`http://bobo.pens.example`) | `CVE-2026-30964` host-only origin reduction | Reject `401` (`https` required) |
+| Origin wrong port (`https://bobo.pens.example:8443`) | `CVE-2026-30964` port-ignoring origin check | Reject `401` (exact origin string required) |
+| RP ID dot-prefix / parent (`pens.example`, `.pens.example`) | Parent-domain / dot-prefix RP ID confusion | Startup rejects invalid `RPID` or assertion fails `rpIdHash` check |
+| RP ID mesh domain (`home.bobo.hogman`) | Using mesh origin inside `<PUBLIC_HOST>` ceremony | Reject `401` (`rpIdHash` & `Origin` mismatch) |
+| `clientData.crossOrigin == true` | Cross-origin iframe phishing / WebAuthn library gap | Reject `401` (`crossOrigin` rejected) |
+| `UP == 0` or `UV == 0` | Silent assertion without biometric/PIN verification | Reject `401` (NIST `AAL2`/`AAL3` `UV` invariant) |
+| `signCount` regresses after `> 0` (`stored=5`, `got=4` or `5`) | Cloned hardware security key (`CloneWarning`) | Reject `401`, log `recover_clone_warning` audit event |
+| `signCount == 0` -> `0` on synced passkey (`BE=1`) | Normal Bitwarden / iCloud Keychain sync behavior | Accept (`200`), mint link |
+| Expired challenge (`> 120s`) | Delayed replay of intercepted WebAuthn assertion | Reject `401` |
+| Replayed `challenge_id` | Resubmitting already-consumed assertion | Reject `401` (second request sees `RowsAffected == 0`) |
+| Parallel `recover/finish` with same `challenge_id` | TOCTOU race to mint 2 device links from 1 tap | Exactly 1 succeeds, 1 rejects `401` |
+| Expired or replayed `setup_token` | Intercepted browser history / second enrollment tab | Reject `401` |
+| Demoted (`member`), `suspended`, or `removed` keeper asserts registered passkey | Stale passkey held by ex-keeper | Reject `401` with same generic error as unknown key |
+| Non-keeper (`role = "member"`) calls `POST /api/passkeys/setup` | Privilege escalation via mesh API | Reject `403` |
+| `.hogman` sibling page sends `POST /api/passkeys/setup` (`Origin: https://app.bobo.hogman`) | Non-PSL `.hogman` same-site CSRF | Reject `403` by `requireSameOriginAndJSON` |
+| Unknown JSON fields or body `> 16KB` on public `/hogman/v1/recover/*` | Parameter smuggling / DoS payload | Reject `400`/`413` via `decodeJSON` |
+
+## 5. Threat Model
+
+**Assets:**
+- Minting a `kind="personal"` Headscale pre-auth key for an active keeper (equivalent to full keeper administrative access once `/join` completes).
+- Keeper passkey enrollment tokens (`setup_token`) and stored public keys.
+- Pen membership metadata (handles, key presence) against public enumeration.
+
+**Attackers:**
+- **A1 — Internet attacker:** can reach `https://<PUBLIC_HOST>/recover*` and `/hogman/v1/recover/*`, spoof headers, flood requests, or phish users onto attacker-controlled domains.
+- **A2 — Malicious `.hogman` app / compromised regular member on the pen:** has network access inside the pen and can host pages under `https://evil.<zone>`, send sibling-origin requests (`Sec-Fetch-Site: same-site`), or observe mesh behavior, but is not an active keeper.
+- **A3 — Demoted or removed former keeper:** still holds a passkey they registered earlier while active.
+- **A4 — Thief with physical/account compromise:** stole a keeper's laptop/phone or compromised their synced password manager account.
+
+### Threats & Mitigations
+
+**T1 — Phishing & Adversary-in-the-Middle (AiTM) Proxy (A1):**
+Attacker tricks keeper into visiting `https://bobo-pens.evil.example/recover` and proxies traffic to `<PUBLIC_HOST>`.
+- *Mitigation:* WebAuthn binds `rpIdHash` and `clientData.origin` inside the authenticator signature. The browser signs `bobo-pens.evil.example`, so verification against static `RPOrigins = ["https://bobo.pens.example"]` fails regardless of proxy headers. Cross-origin embedding is blocked by `X-Frame-Options: DENY`, CSP `frame-ancestors 'none'`, and server-side `crossOrigin == false` verification.
+
+**T2 — Origin / RP-ID Validation Flaws (`CVE-2026-30964` Class) (A1):**
+Permissive host-only origin checks or dot-prefix RP ID checks accept wrong ports, `http://`, or attacker subdomains, or a reverse proxy injects a spoofed `Host` header.
+- *Mitigation:* `RPID` and `RPOrigins` are computed strictly from `cfg.PublicHost` at startup, never from request headers. Pinned `go-webauthn >= v0.18` enforces full scheme+host+port origin equality and exact `rpIdHash` verification, backed by the mandatory negative tests in Section 4.2.
+
+**T3 — Setup Token Interception During Mesh -> Public Handoff (A2, Local Logs):**
+To solve the WebAuthn origin split (`home.<zone>` vs. `<PUBLIC_HOST>`), `home.<zone>` hands the browser a `setup_token`.
+- *Mitigation:* Token is 256-bit random, stored SHA-256 hashed in `passkey_setups`, scoped strictly to enrollment (can never authenticate `/recover`), bound to a single `member_id`, expires in 5 minutes, and is consumed atomically on `register/begin`. Passing it in `#t=` prevents it from crossing the wire in HTTP `GET` logs or `Referer` headers (`Referrer-Policy: no-referrer` + `Cache-Control: no-store`).
+
+**T4 — Cross-Site Request Forgery from `.hogman` Apps (A2):**
+Because `.hogman` is not on the Public Suffix List, `https://rogue.bobo.hogman` is considered `same-site` with `https://home.bobo.hogman`.
+- *Mitigation:* All `home.<zone>` passkey management endpoints (`/api/passkeys/setup`, `/rename`, `/delete`) sit inside `MeshHandler` behind `requireSameOriginAndJSON`, which strictly requires `Sec-Fetch-Site` in `{"same-origin", "none"}`, `Origin == "https://home.<zone>"`, and `Content-Type: application/json`. Using `POST` JSON even for delete avoids bodyless simple-request gaps.
+
+**T5 — Public Handle or Passkey Enumeration Oracle (A1):**
+Attacker probes `/hogman/v1/recover/*` to discover keeper usernames (`alice`), whether keepers exist, or whether a keeper has passkeys configured.
+- *Mitigation:* `POST /hogman/v1/recover/begin` takes `{}` with zero identifier fields and returns empty `allowCredentials` (discoverable credential flow). `recover/finish` returns the same HTTP `401` JSON body for unknown credentials, invalid signatures, expired challenges, and rejected member status/role.
+
+**T6 — Challenge Replay & Concurrent Double-Mint Race (A1):**
+Attacker replays a captured assertion or sends parallel `recover/finish` requests from one valid signature.
+- *Mitigation:* Challenges are 256-bit random with 120-second expiry and consumed via atomic single-statement `UPDATE ... WHERE consumed_at IS NULL AND expires_at > ?` inside SQLite (`SetMaxOpenConns(1)`). Only `RowsAffected() == 1` proceeds.
+
+**T7 — Stale Passkey Used by Former / Suspended / Demoted Keeper (A3):**
+An admin leaves the pen or is demoted to `member`, then uses an old synced passkey at `/recover`.
+- *Mitigation:* `recover/finish` checks live `members.status == 'active' AND members.role IN ('owner', 'admin')` after cryptographic verification and rejects with `401` if demoted, suspended, or removed.
+
+**T8 — Cloned Hardware Key vs. Synced Passkey Counter Semantics (A4):**
+A hardware security key is cloned, or a synced passkey behaves inconsistently across devices.
+- *Mitigation:* Track `backup_eligible` (`BE`), `backup_state` (`BS`), and `sign_count`. Synced passkeys (`BE=1`) routinely keep `signCount == 0` per WebAuthn L3 and are accepted normally. When either stored or presented `signCount > 0` and the counter fails to strictly advance (`CloneWarning`), fail closed and emit a high-severity audit record.
+
+**T9 — Synced Vault Compromise or Single-Device Theft (A4):**
+Attacker compromises the keeper's Bitwarden/iCloud account or unlocks an unattended device and mints a recovery device link.
+- *Mitigation:*
+  - `UV=1` forces device/vault verification (PIN/biometric) on top of possession.
+  - Per **D-12** and **NIST SP 800-63B-4 AAL2**, keeping syncable passkeys enabled is an intentional trade-off against irreversible lockout; keepers should protect their synced vault with strong MFA.
+  - Mitigation after compromise: recovery mints only **one** 15-minute `personal` key, triggers a recovery notice on `home.<zone>` showing timestamp and credential label, and keepers remove unauthorized devices from `home.<zone>` (`Devices`). For higher-assurance pens, an optional future toggle can restrict registration to device-bound `BE=0` keys (Section 7).
+
+**T10 — Rate Exhaustion / Open Device Key Flooding (A1, A4):**
+An attacker floods `/recover/begin` to bloat `recover_challenges`, or a rogue keeper/vault compromise mints endless open `device_keys` hitting `MaxOpenDeviceKeys`.
+- *Mitigation:* Tight per-IP rate limiting in `PublicHandlerWithRateLimit` (`10/min`), Caddy `16KB` request-body cap, pruning expired challenge/setup rows on insert, plus a per-member recovery mint quota (e.g., max 3 recovery mints in 24h) enforced before calling `s.issueKey`.
+
+**T11 — XSS, Clickjacking, and Cache Leakage on `/recover*` (A1):**
+Injected scripts or hidden iframes on `/recover` steal the minted `#k=<key>` `/join` URL from DOM or browser cache.
+- *Mitigation:* Strict CSP (`script-src 'self'`, no inline scripts, `frame-ancestors 'none'`, `form-action 'self'`), `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`, and `textContent`-only DOM rendering matching `core/portal/portal.js`. Note: returned JSON delivers `link` directly in response to `POST /hogman/v1/recover/finish` (never over `GET` query params).
+
+**T12 — Total Loss of Both Mesh Devices and Passkey Vault (Operational):**
+Keeper loses every device and loses access to their synced vault / all hardware keys.
+- *Mitigation:* None by design (**D-12**): operator recovery is intentionally absent. Portal onboarding (`#herd` note added in PR #29) warns keepers up front to store a recovery passkey in a synced manager they can reopen from a new device.
+
+## 6. Operational Limits & What This Does Not Cover
+
+- **Changing `PUBLIC_HOST` invalidates existing passkeys:** WebAuthn binds credentials to `RPID` (`cfg.PublicHost`). Moving a pen to a new public domain breaks old recovery passkeys until keepers register new ones under the new `PUBLIC_HOST` from `home.<zone>`.
+- **Single-keeper total loss is permanent:** If a pen's sole keeper loses all devices and all passkeys, no operator tool can recover the pen without recreating control state from the server host. Pens concerned about human key loss should keep 2+ trusted keepers (`owner`/`admin`) or store passkeys in an independently recoverable vault.
+- **No compromise isolation if the core host itself is breached:** Registrar holds Headscale credentials and SQLite; host compromise bypasses WebAuthn completely.
+
+## 7. Open Questions for Review & Red Team
+
+1. **Eligible roles (`owner` + `admin` vs. `owner` only):** Keeping recovery available to both `owner` and `admin` avoids single-person burnout on multi-keeper pens while still excluding regular `member` accounts. Any reason to restrict `/recover` to `owner` only, or make it configurable?
+2. **Recovered link TTL and mint quota:** Proposal uses a **15-minute** TTL on recovered `kind="personal"` links (instead of the general `DeviceKeyTTL`) and caps recovery mints at **3 per keeper per 24 hours**. Confirm if 15 minutes is enough time when bootstrapping a brand-new laptop.
+3. **Mint-only vs. optional device revocation during `/recover`:** Proposal strictly mints one replacement `/join` link and defers removing stolen devices to `home.<zone>` right afterward (preventing an attacker with stolen passkey access from locking out the legitimate keeper's remaining mesh devices). Confirm we keep `/recover` mint-only.
+4. **Optional AAL3 (`BE=0` device-bound) policy toggle:** Keep default synced+hardware in v1, and decide whether to track a future per-pen toggle requiring `BE=0` (AAL3) for high-sensitivity pens.
+
+## 8. Implementation Plan (After Design Sign-Off)
+
+Only after PR review and red-team sign-off on this document:
+1. Pin `github.com/go-webauthn/webauthn >= v0.18` in `core/registrar/go.mod` and verify `CGO_ENABLED=0` static builds.
+2. Add `store.go` schema migration + `service_passkey.go` / `http_passkey.go` endpoints and the full negative test suite from Section 4.2.
+3. Add `/recover`, `/recover/setup`, and `/recover/assets/*` static SPA routes + Caddy routes in `core/config/edge.Caddyfile` and `deploy/hogman-host`.
+4. Add the **Recovery passkeys** card and post-recovery alert banner to `core/portal/index.html` and `core/portal/portal.js` (`#herd` / `#mine`).
+5. Run full registrar unit tests + Caddy routing tests + CI e2e validation, and update `CHANGELOG.md` in the implementation PR.
