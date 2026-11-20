@@ -1,0 +1,36 @@
+name: spike-own-connection
+
+on:
+  push:
+    branches: [spike/own-connection]
+  workflow_dispatch:
+
+concurrency:
+  group: spike-own-connection-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit-and-linux-spike:
+    name: Option (D) Linux spike (TUN + split-DNS + stock tailscaled)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: core/join/go.mod
+      - name: Unit tests and cross-compile check (core/join)
+        working-directory: core/join
+        run: |
+          CGO_ENABLED=0 go vet ./...
+          CGO_ENABLED=0 go test -v -count=1 ./...
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null .
+      - name: Install stock Tailscale on runner
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+          tailscale version
+      - name: Run Linux Option (D) spike test
+        run: sudo env "PATH=$PATH" core/test/spike-own-connection.sh

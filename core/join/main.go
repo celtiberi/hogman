@@ -73,6 +73,7 @@ type options struct {
 	noService, noSystemProxy     bool
 	pen                          string // share: which pen
 	background                   bool   // share: keep running after the window closes
+	subnet, statusAddr           string // spike-tun options
 }
 
 func main() {
@@ -100,6 +101,8 @@ func main() {
 	fs.BoolVar(&o.noSystemProxy, "no-system-proxy", false, "")
 	fs.StringVar(&o.pen, "pen", "", "")
 	fs.BoolVar(&o.background, "background", false, "")
+	fs.StringVar(&o.subnet, "subnet", "", "")
+	fs.StringVar(&o.statusAddr, "status-addr", "", "")
 	showVersion := fs.Bool("version", false, "")
 
 	// Allow options before or after the link.
@@ -150,6 +153,10 @@ func main() {
 		return
 	case len(pos) >= 1 && pos[0] == "share":
 		err = shareCmd(pos[1:], o)
+	case len(pos) >= 1 && pos[0] == "spike-init":
+		err = spikeInitCmd(pos[1:], o)
+	case len(pos) >= 1 && pos[0] == "spike-tun":
+		err = spikeTunCmd(pos[1:], o)
 	case len(pos) == 1:
 		err = join(pos[0], o)
 	case len(pos) == 2 && pos[0] == "leave":
