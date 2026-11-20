@@ -167,7 +167,9 @@ NTFY_TOPIC=<topic> deploy/hogman-watch.sh hs.example.com ~/hogman-backups   # ev
 ```
 
 It alerts after two failures in a row, reminds you every six hours, and tells you when it's
-fixed. If the watching machine is offline itself, it says nothing.
+fixed. If the watching machine is offline itself, it says nothing. To watch other pages too, such as
+a sign-up page, set `WATCH_URLS` (space-separated), e.g.
+`WATCH_URLS=https://get.example.com/api/status`.
 
 ## Hosting pens for other people
 
