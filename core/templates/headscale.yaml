@@ -15,7 +15,7 @@ noise:
 prefixes:
   v4: 100.64.0.0/10
   v6: fd7a:115c:a1e0::/48
-  allocation: sequential
+  allocation: random
 
 # Our own relay only. Tailscale Inc's relays are not used.
 derp:

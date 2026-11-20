@@ -23,16 +23,20 @@ import (
 )
 
 type Config struct {
-	Zone             string // bobo.hogman
-	PublicHost       string // control server hostname
-	CoreIP           string // mesh IP of the core node (DNS, portal)
-	CAIP             string // mesh IP of the CA
-	ZoneFile         string
-	RootCAFile       string
-	NameHold         time.Duration
-	InviteTTL        time.Duration
-	DeviceKeyTTL     time.Duration
-	MembersCanInvite bool
+	Zone              string // bobo.hogman
+	PublicHost        string // control server hostname
+	CoreIP            string // mesh IP of the core node (DNS, portal)
+	CAIP              string // mesh IP of the CA
+	ZoneFile          string
+	RootCAFile        string
+	NameHold          time.Duration
+	InviteTTL         time.Duration
+	DeviceKeyTTL      time.Duration
+	MembersCanInvite  bool
+	MaxOpenDeviceKeys int
+	MaxNamesPerMember int
+	MaxOpenInvites    int
+	MaxInviteNoteLen  int
 }
 
 // Actor is whoever is performing an action: a member over the mesh API,
@@ -89,6 +93,18 @@ type Service struct {
 }
 
 func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
+	if cfg.MaxOpenDeviceKeys <= 0 {
+		cfg.MaxOpenDeviceKeys = 10
+	}
+	if cfg.MaxNamesPerMember <= 0 {
+		cfg.MaxNamesPerMember = 50
+	}
+	if cfg.MaxOpenInvites <= 0 {
+		cfg.MaxOpenInvites = 25
+	}
+	if cfg.MaxInviteNoteLen <= 0 {
+		cfg.MaxInviteNoteLen = 256
+	}
 	s := &Service{cfg: cfg, st: st, hs: hs, orphans: map[string]bool{}}
 	raw, err := os.ReadFile(cfg.RootCAFile)
 	if err != nil {
@@ -274,6 +290,23 @@ func canRemove(a Actor, m *Member) error {
 	return nil
 }
 
+func (s *Service) revokeOpenKeys(ctx context.Context, memberID int64, action string) int {
+	keys, err := s.st.OpenDeviceKeys(memberID)
+	if err != nil {
+		log.Printf("%s: list device keys: %v", action, err)
+		return 0
+	}
+	count := 0
+	for _, k := range keys {
+		if err := s.hs.ExpireKey(ctx, k.HSKeyID); err != nil {
+			log.Printf("%s: expire key %s: %v", action, k.HSKeyID, err)
+		}
+		_ = s.st.RevokeDeviceKey(k.ID)
+		count++
+	}
+	return count
+}
+
 func (s *Service) Suspend(ctx context.Context, a Actor, handle, reason string) error {
 	m, err := s.member(handle)
 	if err != nil {
@@ -290,6 +323,7 @@ func (s *Service) Suspend(ctx context.Context, a Actor, handle, reason string) e
 	if err := s.st.SetMemberStatus(m.ID, "suspended"); err != nil {
 		return err
 	}
+	s.revokeOpenKeys(ctx, m.ID, "suspend "+handle)
 	s.st.Audit(a.String(), "member.suspend", handle, reason)
 	return s.applyPolicy(ctx) // their devices drop out of every grant
 }
@@ -348,17 +382,7 @@ func (s *Service) Kick(ctx context.Context, a Actor, handle, reason string) (*Ki
 		log.Printf("kick %s: policy: %v", handle, err)
 	}
 	// 3. Unused device keys and invites they minted.
-	keys, err := s.st.OpenDeviceKeys(m.ID)
-	if err != nil {
-		log.Printf("kick %s: list device keys: %v", handle, err)
-	}
-	for _, k := range keys {
-		if err := s.hs.ExpireKey(ctx, k.HSKeyID); err != nil {
-			log.Printf("kick %s: expire key %s: %v", handle, k.HSKeyID, err)
-		}
-		_ = s.st.RevokeDeviceKey(k.ID)
-		rep.Keys++
-	}
+	rep.Keys = s.revokeOpenKeys(ctx, m.ID, "kick "+handle)
 	n, err := s.st.RevokeOpenInvitesBy(m.ID)
 	if err != nil {
 		log.Printf("kick %s: revoke invites: %v", handle, err)
@@ -442,6 +466,18 @@ func (s *Service) MintInvite(a Actor, role, note string, ttl time.Duration) (*Mi
 	if ttl > 30*24*time.Hour {
 		return nil, bad("invites can last at most 30 days")
 	}
+	if len(note) > s.cfg.MaxInviteNoteLen {
+		return nil, bad("invite note must be at most %d characters", s.cfg.MaxInviteNoteLen)
+	}
+	if !a.IsAdmin() && a.memberID() != nil {
+		n, err := s.st.CountOpenInvites(*a.memberID())
+		if err != nil {
+			return nil, err
+		}
+		if n >= s.cfg.MaxOpenInvites {
+			return nil, conflict("too many open invites")
+		}
+	}
 	tok := newToken()
 	inv := &Invite{MintedBy: a.memberID(), Role: role, Note: note, CreatedAt: now(), ExpiresAt: time.Now().Add(ttl).Unix()}
 	if err := s.st.InsertInvite(hashToken(tok), inv); err != nil {
@@ -486,9 +522,24 @@ type Enrolment struct {
 // Redeem turns an invite into a membership plus a key for the first device.
 // This is the only operation reachable from the public internet.
 func (s *Service) Redeem(ctx context.Context, token, handle string) (*Enrolment, error) {
+	tok := strings.TrimSpace(token)
+	if !strings.HasPrefix(tok, "hmi_") {
+		return nil, forbidden("invite not valid")
+	}
+	hash := hashToken(tok)
+	inv, err := s.st.InviteByHash(hash)
+	if errors.Is(err, ErrNotFound) {
+		return nil, forbidden("invite not valid")
+	} else if err != nil {
+		return nil, err
+	}
+	if st := inv.State(); st != "open" {
+		return nil, forbidden("invite %s", st)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	inv, err := s.st.InviteByHash(hashToken(strings.TrimSpace(token)))
+	inv, err = s.st.InviteByHash(hash)
 	if errors.Is(err, ErrNotFound) {
 		return nil, forbidden("invite not valid")
 	} else if err != nil {
@@ -543,8 +594,13 @@ func (s *Service) IssueDeviceKey(ctx context.Context, a Actor, handle, kind stri
 	if err != nil {
 		return "", 0, err
 	}
-	if !a.Is(m) && !a.IsAdmin() {
-		return "", 0, forbidden("you can only add your own devices")
+	if !a.Is(m) {
+		if !a.IsAdmin() {
+			return "", 0, forbidden("you can only add your own devices")
+		}
+		if (m.Role == "owner" || m.Role == "admin") && !a.IsOwner() {
+			return "", 0, forbidden("only the owner can add devices for an owner or admin")
+		}
 	}
 	if m.Status != "active" {
 		return "", 0, conflict("%s is %s", handle, m.Status)
@@ -554,6 +610,15 @@ func (s *Service) IssueDeviceKey(ctx context.Context, a Actor, handle, kind stri
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !a.CLI {
+		open, err := s.st.CountOpenDeviceKeys(m.ID)
+		if err != nil {
+			return "", 0, err
+		}
+		if open >= s.cfg.MaxOpenDeviceKeys {
+			return "", 0, conflict("too many unused device keys; wait for existing keys to be used or expire")
+		}
+	}
 	key, exp, err := s.issueKey(ctx, m, kind)
 	if err == nil {
 		s.st.Audit(a.String(), "device.key", handle, kind)
@@ -595,8 +660,8 @@ func (s *Service) RemoveDevice(ctx context.Context, a Actor, id int64) error {
 		if !a.IsAdmin() {
 			return forbidden("not your device")
 		}
-		if owner.Role == "owner" && !a.IsOwner() {
-			return forbidden("only the owner can remove the owner's devices")
+		if (owner.Role == "owner" || owner.Role == "admin") && !a.IsOwner() {
+			return forbidden("only the owner can remove devices of an owner or admin")
 		}
 	}
 	s.mu.Lock()
@@ -624,6 +689,58 @@ func (s *Service) WhoIs(ip string) (*Member, *Device, error) {
 	return m, d, err
 }
 
+func nodeMatchesDevice(nodes []HSNode, nodeID string, addr netip.Addr) bool {
+	for _, n := range nodes {
+		if n.ID != nodeID {
+			continue
+		}
+		for _, raw := range n.IPAddresses {
+			if parsed, err := netip.ParseAddr(raw); err == nil && parsed == addr {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// VerifyLiveCaller maps a mesh source IP to an enrolled device and verifies
+// against Headscale that the exact Headscale node still owns that IP. If a
+// node left and Headscale reassigned its IP before the periodic Sync tick,
+// VerifyLiveCaller refreshes the ledger once and re-checks.
+func (s *Service) VerifyLiveCaller(ctx context.Context, src string) (*Member, *Device, error) {
+	addr, err := netip.ParseAddr(src)
+	if err != nil {
+		return nil, nil, ErrNotFound
+	}
+	canon := addr.String()
+	m, d, err := s.WhoIs(canon)
+	if err != nil {
+		return nil, nil, err
+	}
+	nodes, err := s.hs.Nodes(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("verify caller: %w", err)
+	}
+	if nodeMatchesDevice(nodes, d.HSNodeID, addr) {
+		return m, d, nil
+	}
+	if err := s.Sync(ctx); err != nil {
+		return nil, nil, err
+	}
+	m, d, err = s.WhoIs(canon)
+	if err != nil {
+		return nil, nil, err
+	}
+	nodes, err = s.hs.Nodes(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("verify caller: %w", err)
+	}
+	if !nodeMatchesDevice(nodes, d.HSNodeID, addr) {
+		return nil, nil, ErrNotFound
+	}
+	return m, d, nil
+}
+
 // ----------------------------------------------------------------- names --
 
 func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64) (string, error) {
@@ -633,8 +750,13 @@ func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64) (string
 	if err != nil {
 		return "", err
 	}
-	if !a.Is(m) && !a.IsAdmin() {
-		return "", forbidden("you can only claim names for yourself")
+	if !a.Is(m) {
+		if !a.IsAdmin() {
+			return "", forbidden("you can only claim names for yourself")
+		}
+		if (m.Role == "owner" || m.Role == "admin") && !a.IsOwner() {
+			return "", forbidden("only the owner can claim names for an owner or admin")
+		}
 	}
 	if m.Status != "active" {
 		return "", conflict("%s is %s", handle, m.Status)
@@ -643,12 +765,26 @@ func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64) (string
 	if err != nil {
 		return "", err
 	}
-	if existing, err := s.st.NameByName(name); err == nil {
+	existing, err := s.st.NameByName(name)
+	if err == nil {
 		if existing.HeldUntil != nil && *existing.HeldUntil > now() && !a.IsOwner() {
 			return "", conflict("%s is held until %s", name, time.Unix(*existing.HeldUntil, 0).UTC().Format("2006-01-02"))
 		}
 		if existing.HeldUntil == nil && existing.MemberID != m.ID && !a.IsOwner() {
 			return "", conflict("%s belongs to %s", name, existing.Member)
+		}
+	} else if !errors.Is(err, ErrNotFound) {
+		return "", err
+	} else {
+		existing = nil
+	}
+	if !a.IsOwner() && (existing == nil || existing.MemberID != m.ID || existing.HeldUntil != nil) {
+		count, err := s.st.CountMemberNames(m.ID)
+		if err != nil {
+			return "", err
+		}
+		if count >= s.cfg.MaxNamesPerMember {
+			return "", conflict("too many names claimed")
 		}
 	}
 	if top := topLabel(name); top != name {
@@ -664,6 +800,19 @@ func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64) (string
 	if d.Kind != "server" {
 		return "", bad("device %d is a personal device; names point at servers (personal devices accept no connections)", deviceID)
 	}
+	if existing != nil && existing.MemberID != m.ID && topLabel(name) == name {
+		all, err := s.st.Names()
+		if err != nil {
+			return "", err
+		}
+		for _, x := range all {
+			if strings.HasSuffix(x.Name, "."+name) && x.MemberID != m.ID {
+				if err := s.st.DeleteName(x.Name); err != nil {
+					return "", err
+				}
+			}
+		}
+	}
 	if err := s.st.UpsertName(name, m.ID, &d.ID); err != nil {
 		return "", err
 	}
@@ -673,6 +822,8 @@ func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64) (string
 
 // Release frees a name and everything under it.
 func (s *Service) Release(a Actor, rawName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	name := strings.TrimSuffix(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rawName)), "."), "."+s.cfg.Zone)
 	n, err := s.st.NameByName(name)
 	if errors.Is(err, ErrNotFound) {
@@ -680,19 +831,33 @@ func (s *Service) Release(a Actor, rawName string) error {
 	} else if err != nil {
 		return err
 	}
-	if a.CLI || a.IsAdmin() || (a.Member != nil && a.Member.ID == n.MemberID && n.HeldUntil == nil) {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		all, _ := s.st.Names()
-		for _, x := range all {
-			if x.Name == name || strings.HasSuffix(x.Name, "."+name) {
-				_ = s.st.DeleteName(x.Name)
-			}
-		}
-		s.st.Audit(a.String(), "name.release", name+"."+s.cfg.Zone, "")
-		return s.writeZone()
+	if n.HeldUntil != nil && *n.HeldUntil > now() && !a.IsOwner() {
+		return forbidden("only the owner can release a held name")
 	}
-	return forbidden("%s is not yours", name)
+	if !a.IsOwner() {
+		owner, err := s.st.MemberByID(n.MemberID)
+		if err != nil {
+			return err
+		}
+		switch {
+		case a.Member != nil && a.Member.ID == n.MemberID && n.HeldUntil == nil:
+			// members and admins may release their own active names
+		case a.IsAdmin() && owner.Role == "member" && n.HeldUntil == nil:
+			// admins may release regular members' active names
+		case a.IsAdmin():
+			return forbidden("only the owner can release names belonging to an owner or admin")
+		default:
+			return forbidden("%s is not yours", name)
+		}
+	}
+	all, _ := s.st.Names()
+	for _, x := range all {
+		if x.Name == name || strings.HasSuffix(x.Name, "."+name) {
+			_ = s.st.DeleteName(x.Name)
+		}
+	}
+	s.st.Audit(a.String(), "name.release", name+"."+s.cfg.Zone, "")
+	return s.writeZone()
 }
 
 // ---------------------------------------------------------- sync, policy --
@@ -707,7 +872,7 @@ func (s *Service) Sync(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	keys, err := s.st.DeviceKeys()
+	keys, err := s.st.PendingDeviceKeys(now() - 86400)
 	if err != nil {
 		return err
 	}
