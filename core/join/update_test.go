@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -293,3 +295,63 @@ func TestParseCLIArgsUpdate(t *testing.T) {
 		t.Fatalf("unexpected positional parse: pos=%v err=%v", pos, err)
 	}
 }
+
+func TestUpdatePenAgentRollbackAndRecovery(t *testing.T) {
+	pen := &penTarget{zone: "bobo.hogman", dir: "/tmp/pen", cfg: &agentConfig{Zone: "bobo.hogman"}}
+	binPath := "/tmp/pen/hogman-join"
+
+	// 1. Stage fails while running -> old agent restarted, restartNew not called.
+	var calls []string
+	ops := penUpdateOps{
+		isRunning:  func(string, *agentConfig) bool { return true },
+		hasService: func(string) bool { return true },
+		stop:       func(string, *agentConfig) { calls = append(calls, "stop") },
+		stage:      func(string, string, string) error { calls = append(calls, "stage"); return errors.New("disk full") },
+		restartNew: func(*penTarget, string, bool, options) error { calls = append(calls, "restartNew"); return nil },
+		restartOld: func(_ *penTarget, _ string, hadService bool, _ options) error {
+			if !hadService {
+				t.Fatal("expected hadService=true")
+			}
+			calls = append(calls, "restartOld")
+			return nil
+		},
+	}
+	err := updatePenAgent(pen, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops)
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("expected disk full error, got %v", err)
+	}
+	if !slices.Equal(calls, []string{"stop", "stage", "restartOld"}) {
+		t.Fatalf("unexpected call sequence on stage failure: %v", calls)
+	}
+
+	// 2. Stage fails AND restartOld fails -> error gives recovery instructions.
+	calls = nil
+	ops.restartOld = func(*penTarget, string, bool, options) error {
+		calls = append(calls, "restartOld")
+		return errors.New("launchd error")
+	}
+	err = updatePenAgent(pen, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops)
+	if err == nil || !strings.Contains(err.Error(), "agent") || !strings.Contains(err.Error(), "link") {
+		t.Fatalf("expected recovery hint in error, got %v", err)
+	}
+
+	// 3. Stage fails while stopped -> no stop or restart attempted.
+	calls = nil
+	ops.isRunning = func(string, *agentConfig) bool { return false }
+	err = updatePenAgent(pen, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops)
+	if err == nil || !slices.Equal(calls, []string{"stage"}) {
+		t.Fatalf("expected only stage on stopped pen, got calls=%v err=%v", calls, err)
+	}
+
+	// 4. Happy path while running -> stop, stage, restartNew in order.
+	calls = nil
+	ops.isRunning = func(string, *agentConfig) bool { return true }
+	ops.stage = func(string, string, string) error { calls = append(calls, "stage"); return nil }
+	if err := updatePenAgent(pen, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops); err != nil {
+		t.Fatalf("unexpected error on happy path: %v", err)
+	}
+	if !slices.Equal(calls, []string{"stop", "stage", "restartNew"}) {
+		t.Fatalf("unexpected happy-path call sequence: %v", calls)
+	}
+}
+

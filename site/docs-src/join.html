@@ -5,7 +5,7 @@
 <nav class="toc" aria-label="On this page">
   <a href="#first">Your first computer</a> · <a href="#how">How it connects</a> ·
   <a href="#side">In practice</a> · <a href="#more">More devices</a> ·
-  <a href="#leave">Leaving</a> · <a href="#options">Options</a>
+  <a href="#update">Updating</a> · <a href="#leave">Leaving</a> · <a href="#options">Options</a>
 </nav>
 
 <h2 class="docs-h2" id="first">Your first computer</h2>
@@ -35,7 +35,7 @@
     computer. On a Mac this has to happen at the Mac itself, not over SSH: macOS only lets a
     person approve a new trusted certificate on screen.</li>
   <li><strong>You're in.</strong> It checks your pen's home page loads over HTTPS and opens it.
-    Keep the <code>hogman-join</code> file: you'll use it to share things and to leave.</li>
+    Keep the <code>hogman-join</code> file: you'll use it to update, share things, and leave.</li>
 </ol>
 <p><strong>If it stops part way</strong> (a password prompt cancelled, DNS not ready), fix what it
   says and run the same command again. If the stop came before your device joined, the invite
@@ -77,6 +77,21 @@
 <p>To put something in the pen, you don't need another device: see
   <a href="/docs/share.html">Putting things in your pen</a>.</p>
 
+<h2 class="docs-h2" id="update">Updating</h2>
+<pre class="term"><span class="p">$</span> ./hogman-join update</pre>
+<p>This downloads the latest <code>hogman-join</code> from your pen's server (or from a host or
+  link you pass: <code>./hogman-join update 'https://your-host.example'</code>), updates this
+  program, updates your pen's installed agent copy and restarts it if it is running, and refreshes
+  any cached <code>share</code> binaries on disk from that server. If you have shares currently
+  running, they stay up on the old process until you restart them
+  (<code>./hogman-join share stop NAME</code>, then start the share again). On more than one
+  pen? Pick one with <code>--pen ZONE</code>. Use <code>--dry-run</code> to see what would change
+  without touching files.</p>
+<p>Before replacing anything on disk, <code>update</code> checks the download's SHA-256 checksum
+  against <code>SHA256SUMS</code> on the same server over the same HTTPS connection. That
+  catches truncated or corrupted downloads and mismatched CDN copies — not a tampered server,
+  which is the same trust model as the first download.</p>
+
 <h2 class="docs-h2" id="leave">Leaving</h2>
 <pre class="term"><span class="p">$</span> ./hogman-join leave '&lt;your link&gt;'</pre>
 <p>This takes down anything you share from this computer, removes the pen's certificate, stops
@@ -93,6 +108,7 @@
     <tr><td><code>--dry-run</code></td><td>Check the link and the pen, change nothing.</td></tr>
     <tr><td><code>--no-trust</code></td><td>Don't add the pen's certificate (you'll handle trust yourself).</td></tr>
     <tr><td><code>--no-open</code></td><td>Don't open the home page at the end.</td></tr>
+    <tr><td><code>--pen ZONE</code></td><td>Which pen to use with <code>share</code> or <code>update</code>, when on more than one.</td></tr>
   </tbody>
 </table>
 <p>Run <code>./hogman-join --help</code> for the full list.</p>

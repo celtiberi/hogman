@@ -117,6 +117,13 @@ optional `--note`). Add `--background` to keep it running after the window close
 the pen can share too: press *Get a share link* on your home page and add the link it gives you
 to the end of the command.
 
+**Keeping up to date.** Run `./hogman-join update` on a joined computer (or pass
+`'https://<host>'` or `--pen ZONE` if you're on more than one pen). It downloads the matching
+binary from `/join/dl/`, checks its SHA-256 digest against `SHA256SUMS` from the same server over
+the same HTTPS connection (catching corrupted or truncated downloads, with the same server trust as
+the initial download), replaces `hogman-join`, restarts the pen's agent if running, and updates
+cached `share` binaries on disk (running shares keep serving until restarted with `share stop`).
+
 ## Under the hood
 
 - **The network:** each pen is a private [WireGuard](https://www.wireguard.com) mesh with its own

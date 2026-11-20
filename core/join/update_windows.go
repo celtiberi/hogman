@@ -23,3 +23,7 @@ func replaceExecutable(tmpPath, dstPath string) error {
 	_ = os.Remove(oldPath)
 	return nil
 }
+
+func startExistingBinary(bin, dir string, _ *agentConfig, _ bool) error {
+	return startDetached(bin, dir)
+}

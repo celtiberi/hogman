@@ -27,10 +27,10 @@ const updateUsage = `hogman-join update: update hogman-join from a pen's server
 usage:
   hogman-join update ['<link|host>']
 
-Downloads the matching binary from https://<host>/join/dl/, verifies its
-SHA-256 digest against SHA256SUMS before replacing anything on disk, updates
-this computer's joined pen agent (restarting it if running) and any cached
-share binaries from that server.
+Downloads the matching binary from https://<host>/join/dl/, checks it against
+SHA256SUMS from the same server over HTTPS (catching broken downloads, not a
+tampered server), updates this computer's joined pen agent (restarting it if
+running), and updates cached share binaries from that server.
 
 options:
   --pen ZONE        which pen to update from, if this computer is on more than one
@@ -485,8 +485,11 @@ func sameFilePath(a, b string) bool {
 	return errA == nil && errB == nil && os.SameFile(fa, fb)
 }
 
+// agentRunning reports whether this pen's agent process is alive: either its
+// local /status endpoint answers for this zone (whether online, still
+// connecting, or holding a startup error) or its recorded agent.pid is alive.
 func agentRunning(dir string, c *agentConfig) bool {
-	if st, err := agentState(c); err == nil && (st.Up || st.Error == "") {
+	if _, err := agentState(c); err == nil {
 		return true
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "agent.pid"))
@@ -497,16 +500,77 @@ func agentRunning(dir string, c *agentConfig) bool {
 	return err == nil && processAlive(pid)
 }
 
-func restartPenAgent(p *penTarget, hadService bool, o options) error {
+type penUpdateOps struct {
+	isRunning  func(dir string, c *agentConfig) bool
+	hasService func(zone string) bool
+	stop       func(dir string, c *agentConfig)
+	stage      func(srcPath, dstPath, wantHex string) error
+	restartNew func(p *penTarget, binPath string, hadService bool, o options) error
+	restartOld func(p *penTarget, binPath string, hadService bool, o options) error
+}
+
+func defaultPenUpdateOps() penUpdateOps {
+	return penUpdateOps{
+		isRunning:  agentRunning,
+		hasService: serviceConfigured,
+		stop:       stopAgent,
+		stage:      stageAndVerify,
+		restartNew: restartPenAgent,
+		restartOld: restartOldPenAgent,
+	}
+}
+
+func restartPenAgent(p *penTarget, _ string, hadService bool, o options) error {
 	restartOpts := o
 	restartOpts.noService = o.noService || !hadService
+	logPath := filepath.Join(p.dir, "agent.log")
 	if err := startAgent(p.dir, p.cfg, restartOpts); err != nil {
-		return errorf("updated %s, but could not restart its agent: %v", p.zone, err)
+		return errorf("updated %s, but its new agent could not start: %v.\n"+
+			"  Log: %s\n"+
+			"  To get back on: run 'hogman-join update' again, or re-run hogman-join with your link.",
+			p.zone, err, logPath)
 	}
 	if _, err := waitAgentUp(p.cfg, 60*time.Second); err != nil {
-		return err
+		return errorf("updated %s, but its new agent did not come online: %v.\n"+
+			"  Log: %s\n"+
+			"  To get back on: fix what the log shows and run 'hogman-join agent %s', or re-run hogman-join with your link.",
+			p.zone, err, logPath, p.dir)
 	}
 	note("%s agent restarted", p.zone)
+	return nil
+}
+
+func restartOldPenAgent(p *penTarget, binPath string, hadService bool, o options) error {
+	noService := o.noService || !hadService
+	if err := startExistingBinary(binPath, p.dir, p.cfg, noService); err != nil {
+		return err
+	}
+	_, err := waitAgentUp(p.cfg, 30*time.Second)
+	return err
+}
+
+func updatePenAgent(p *penTarget, binPath, verifiedSrc, wantHex string, o options, ops penUpdateOps) error {
+	running := ops.isRunning(p.dir, p.cfg)
+	hadService := ops.hasService(p.cfg.Zone)
+	if running {
+		step("Restarting %s agent", p.zone)
+		ops.stop(p.dir, p.cfg)
+	}
+	if err := ops.stage(verifiedSrc, binPath, wantHex); err != nil {
+		if running {
+			if rerr := ops.restartOld(p, binPath, hadService, o); rerr != nil {
+				return errorf("could not update %s agent binary (%v), and restarting the previous agent also failed (%v).\n"+
+					"  To get back on: run '%s agent %s', or re-run hogman-join with your link.",
+					p.zone, err, rerr, binPath, p.dir)
+			}
+			note("restarted the previous %s agent so you stay connected", p.zone)
+		}
+		return errorf("could not update %s agent binary: %v", p.zone, err)
+	}
+	note("updated %s", binPath)
+	if running {
+		return ops.restartNew(p, binPath, hadService, o)
+	}
 	return nil
 }
 
@@ -635,26 +699,14 @@ func updateCmd(args []string, o options) error {
 		note("updated %s", selfPath)
 	}
 
+	ops := defaultPenUpdateOps()
 	for _, u := range updates {
 		if !u.needsCopy {
 			continue
 		}
 		if u.pen != nil {
-			p := u.pen
-			running := agentRunning(p.dir, p.cfg)
-			hadService := serviceConfigured(p.cfg.Zone)
-			if running {
-				step("Restarting %s agent", p.zone)
-				stopAgent(p.dir, p.cfg)
-			}
-			if err := stageAndVerify(verifiedSrc, u.path, wantHex); err != nil {
-				return errorf("could not update %s agent binary: %v", p.zone, err)
-			}
-			note("updated %s", u.path)
-			if running {
-				if err := restartPenAgent(p, hadService, o); err != nil {
-					return err
-				}
+			if err := updatePenAgent(u.pen, u.path, verifiedSrc, wantHex, o, ops); err != nil {
+				return err
 			}
 			continue
 		}
@@ -670,19 +722,21 @@ func updateCmd(args []string, o options) error {
 		}
 	}
 
-	// If selfPath itself IS a pen agent binary, restart that pen's running agent too.
-	for i := range plan.pens {
-		p := &plan.pens[i]
-		pBin := filepath.Join(p.dir, instName)
-		if !sameFilePath(selfPath, pBin) {
-			continue
-		}
-		if agentRunning(p.dir, p.cfg) {
-			hadService := serviceConfigured(p.cfg.Zone)
-			step("Restarting %s agent", p.zone)
-			stopAgent(p.dir, p.cfg)
-			if err := restartPenAgent(p, hadService, o); err != nil {
-				return err
+	// If selfPath itself IS a pen agent binary and was replaced, restart that pen's running agent too.
+	if selfNeedsUpdate {
+		for i := range plan.pens {
+			p := &plan.pens[i]
+			pBin := filepath.Join(p.dir, instName)
+			if !sameFilePath(selfPath, pBin) {
+				continue
+			}
+			if ops.isRunning(p.dir, p.cfg) {
+				hadService := ops.hasService(p.cfg.Zone)
+				step("Restarting %s agent", p.zone)
+				ops.stop(p.dir, p.cfg)
+				if err := ops.restartNew(p, pBin, hadService, o); err != nil {
+					return err
+				}
 			}
 		}
 	}
