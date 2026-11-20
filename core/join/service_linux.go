@@ -4,6 +4,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -74,8 +76,22 @@ func startDetached(bin, dir string) error {
 
 // Linux desktops each keep proxy settings in their own place, so the member
 // sets it in the browser. The message says how.
-func setSystemProxy(c *agentConfig) (string, error) {
-	return "set your browser's (or desktop's) automatic proxy configuration URL to " + c.pacURL(), nil
+func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, error) {
+	pens = normalizePenConfigs(pens, c)
+	if len(pens) <= 1 {
+		return "set your browser's (or desktop's) automatic proxy configuration URL to " + c.pacURL(), nil
+	}
+	return "set your browser's (or desktop's) automatic proxy configuration URL to " + c.pacURL() +
+		" (covers all " + strconv.Itoa(len(pens)) + " pens: " + strings.Join(penZoneNames(pens), ", ") +
+		"; if your browser already uses another pen's proxy.pac, reload proxy settings)", nil
 }
 
-func clearSystemProxy(c *agentConfig) string { return "" }
+func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {
+	remaining = normalizePenConfigs(remaining, nil)
+	host := pickPACHost(remaining)
+	if host == nil {
+		return ""
+	}
+	return "if your browser's automatic proxy configuration was pointing at " + leaving.pacURL() +
+		", update it to " + host.pacURL() + " for your remaining pen(s): " + strings.Join(penZoneNames(remaining), ", ")
+}
