@@ -83,20 +83,25 @@ good free ones), put them in your pen with one command, and Hogman makes them pr
 
 ## How it works
 
-<p align="center">
-  <img src="docs/img/how-it-works.svg" alt="A fenced pen called smith.hogman. Inside: the home page (invites, who's in, the boot), three members' devices, and two websites: blog.smith.hogman shared from Alice's laptop with one command, and photos.smith.hogman on a server in Bob's closet. Members reach the sites over encrypted connections. Outside, the horde of strangers and bots has no address to find. The gate, run by us or by you, checks invite links and hands out names and padlocks, but never sees what anyone says." width="100%">
-</p>
+**A private corner of the internet for you and your people.**
 
-1. **You get a pen.** Sign up, and about a minute later it's up, with its own home page,
-   names and padlocks.
-2. **You invite your people.** They open the link and paste one command. Their laptop is
-   now inside the fence.
-3. **Anyone can put something in.** One command gives a folder, or a website you're
-   building, its own name with the padlock. Only people in the pen can open it.
+1. **Make a pen.** Sign up, and about a minute later you have your pen: your own walled-off
+   space on the internet. You make the rules.
+2. **Invite your people.** Send each person a link. They open it, copy the one command it shows,
+   and they're in. Nobody else gets in without a link from you.
+3. **Private inside, invisible outside.** Inside: your photos, your chat, your own websites,
+   in any ordinary browser. Outside: strangers and bots find nothing at all.
+
+A normal website is open to the whole internet, and bots try its login page all day. A site
+in your pen can't be found from the open internet: to everyone you didn't invite, it
+doesn't exist.
+
+**Putting something in.** Once you're in, one command puts a folder or a website you're
+building into the pen, with its own name and the padlock:
 
 ```text
-$ hogman-join share photos ~/holiday        # a folder, served as a website
-$ hogman-join share blog 3000               # a site you're building, by its port
+$ ./hogman-join share photos ~/holiday        # a folder, served as a website
+$ ./hogman-join share blog 3000               # a site you're building, by its port
 
 ✓ https://blog.smith.hogman is up.
   Everyone in the pen can open it.
@@ -104,7 +109,7 @@ $ hogman-join share blog 3000               # a site you're building, by its por
 
 Each share is a small server device of its own, so your laptop itself still takes no
 visitors, and nothing needs administrator rights or an open port. Add `--background` to keep
-it running after the window closes; `hogman-join share stop blog` takes it down and frees
+it running after the window closes; `./hogman-join share stop blog` takes it down and frees
 the name. A computer that isn't in the pen can share too: press *Add a server* on your home
 page and add the link it gives you to the end of the command.
 

@@ -15,7 +15,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="theme-color" content="#0e080c">
 <link rel="icon" href="/favicon.svg?v=metal5" type="image/svg+xml">
-<link rel="stylesheet" href="/styles.css?v=metal5">
+<link rel="stylesheet" href="/styles.css?v=metal6">
 </head>
 <body>
 <header class="top">
@@ -79,83 +79,30 @@
 <!-- ============================== HOW IT WORKS ============================== -->
 <section id="how">
   <h2>How it works</h2>
-  <p class="sub">One pen, drawn out. Everything inside the fence has a name and a padlock; nothing outside can see in.</p>
-  <figure class="diagram">
-    <svg viewBox="0 0 1000 600" role="img" aria-labelledby="how-title how-desc">
-      <title id="how-title">How a Hogman pen works</title>
-      <desc id="how-desc">A fenced pen called smith.hogman. Inside it: the home page, where the keeper invites people and gives the boot; three members' devices (Alice's laptop, Bob's phone, Carol's laptop); and two websites, blog.smith.hogman shared from Alice's laptop with one command, and photos.smith.hogman on a server in Bob's closet. Members reach the websites over encrypted connections. Outside the fence, the horde of strangers and bots can't find or reach anything. The gate, run by us or by you, checks invite links and hands out names and padlocks, but never sees what anyone says.</desc>
-      <defs>
-        <g id="lock"><rect x="-7" y="-2" width="14" height="11" rx="2"/><path d="M-4.5 -2v-3.5a4.5 4.5 0 0 1 9 0V-2" fill="none" stroke-width="2.4"/></g>
-      </defs>
-      <!-- the pen -->
-      <rect class="pen" x="30" y="40" width="650" height="520" rx="16"/>
-      <text class="pen-label" x="54" y="80">YOUR PEN · smith.hogman</text>
-      <!-- connections -->
-      <path class="wire" d="M250 285 C 340 285, 340 165, 425 165"/>
-      <path class="wire" d="M250 365 C 340 365, 340 185, 425 185"/>
-      <path class="wire" d="M250 445 C 340 445, 330 425, 425 425"/>
-      <path class="wire" d="M250 365 C 340 365, 340 405, 425 405"/>
-      <use href="#lock" class="lockicon" x="332" y="226"/>
-      <use href="#lock" class="lockicon" x="345" y="420"/>
-      <!-- home page -->
-      <rect class="box home" x="60" y="110" width="220" height="80" rx="8"/>
-      <text class="name" x="76" y="142">home.smith.hogman</text>
-      <text class="small" x="76" y="168">invites · who's in · the boot</text>
-      <!-- devices -->
-      <rect class="box dev" x="60" y="262" width="190" height="46" rx="23"/>
-      <text class="dev-t" x="155" y="291">alice · laptop</text>
-      <rect class="box dev" x="60" y="342" width="190" height="46" rx="23"/>
-      <text class="dev-t" x="155" y="371">bob · phone</text>
-      <rect class="box dev" x="60" y="422" width="190" height="46" rx="23"/>
-      <text class="dev-t" x="155" y="451">carol · laptop</text>
-      <text class="small muted" x="60" y="500">Laptops and phones take no visitors.</text>
-      <!-- sites -->
-      <rect class="box site" x="425" y="130" width="240" height="90" rx="8"/>
-      <text class="name" x="441" y="162">blog.smith.hogman</text>
-      <text class="small" x="441" y="186">shared from Alice's laptop</text>
-      <text class="mono" x="441" y="208">hogman-join share blog 3000</text>
-      <rect class="box site" x="425" y="372" width="240" height="90" rx="8"/>
-      <text class="name" x="441" y="404">photos.smith.hogman</text>
-      <text class="small" x="441" y="428">a little server in</text>
-      <text class="small" x="441" y="450">Bob's closet</text>
-      <!-- the horde -->
-      <rect class="box horde" x="740" y="60" width="230" height="150" rx="8"/>
-      <text class="name red" x="760" y="94">THE HORDE</text>
-      <text class="small" x="760" y="122">strangers · bots · scrapers</text>
-      <text class="small" x="760" y="146">no address to find,</text>
-      <text class="small" x="760" y="168">no login page to guess,</text>
-      <text class="small" x="760" y="190">no door to knock on</text>
-      <path class="bounce" d="M740 250 L 700 250"/>
-      <path class="x" d="M688 240 l 16 20 M 704 240 l -16 20"/>
-      <!-- the gate -->
-      <rect class="box gate" x="740" y="330" width="230" height="200" rx="8"/>
-      <text class="name" x="760" y="364">THE GATE</text>
-      <text class="small" x="760" y="390">on our server, or yours</text>
-      <text class="small" x="760" y="420">checks invite links,</text>
-      <text class="small" x="760" y="442">hands out names</text>
-      <text class="small" x="760" y="464">and padlocks</text>
-      <text class="small" x="760" y="500">never sees what anyone says</text>
-      <path class="invite" d="M740 430 L 680 430"/>
-    </svg>
-  </figure>
-  <div class="split">
-    <ol class="steps">
-      <li><strong>You get a pen.</strong> Sign up, and about a minute later your pen is up, with its own home page, its own names and its own padlocks.</li>
-      <li><strong>You invite your people.</strong> They open the link and paste one command. Now their laptop is inside the fence, and so are your sites.</li>
-      <li><strong>Anyone can put something in.</strong> A website you're building, a folder of photos, an app on a spare computer: one command gives it a name like <code>blog.smith.hogman</code>, with the padlock. Only people in the pen can open it.</li>
-    </ol>
-    <pre class="term" aria-label="Example of sharing a folder in a pen"><span class="c"># put a folder in the pen</span>
-<span class="p">$</span> hogman-join share photos ~/holiday
-
-<span class="b">•</span> Adding a server for photos.smith.hogman
-<span class="b">•</span> Sharing the folder ~/holiday
-
-<span class="ok">✓ https://photos.smith.hogman is up.</span>
-  Everyone in the pen can open it.
-
-<span class="c"># or the site you're building, by its port</span>
-<span class="p">$</span> hogman-join share blog 3000</pre>
+  <p class="sub">A private corner of the internet for you and your people.</p>
+  <div class="cards three how">
+    <article class="feature how-step">
+      <p class="how-n" aria-hidden="true">1</p>
+      <h3>Make a pen</h3>
+      <p>Sign up and about a minute later you have your pen: your own walled-off space on the internet.
+        It's yours: you make the rules.</p>
+    </article>
+    <article class="feature how-step">
+      <p class="how-n" aria-hidden="true">2</p>
+      <h3>Invite your people</h3>
+      <p>Send each person a link. They open it, copy the one command it shows, and they're in. Nobody else
+        can get in without a link from you.</p>
+    </article>
+    <article class="feature how-step">
+      <p class="how-n" aria-hidden="true">3</p>
+      <h3>Private inside, invisible outside</h3>
+      <p>Inside: your photos, your chat, your own websites, in any ordinary browser.
+        Outside: strangers and bots find nothing at all. Not even a door to knock on.</p>
+    </article>
   </div>
+  <p class="how-contrast"><strong>A normal website</strong> is open to the whole internet, and bots
+    try its login page all day. <strong>A site in your pen</strong> can't be found from
+    the open internet: to everyone you didn't invite, it doesn't exist.</p>
 </section>
 
 <div class="studs" aria-hidden="true"></div>
@@ -386,6 +333,21 @@
   welcome, alice
 
 <span class="ok">✓ You're in. You are alice on smith.hogman.</span></pre>
+  </div>
+  <h3 class="after-join">Then put something in</h3>
+  <div class="split">
+    <p>Once you're in, one more command puts a folder or a website you're building into the pen,
+      with its own name and the padlock. Only people in the pen can open it, and your laptop
+      itself still takes no visitors. A spare computer that isn't in the pen can do it too:
+      press <em>Add a server</em> on your pen's home page and add its link to the command.</p>
+    <pre class="term" aria-label="Example of sharing a folder in a pen"><span class="c"># a folder, served as a website</span>
+<span class="p">$</span> ./hogman-join share photos ~/holiday
+
+<span class="ok">✓ https://photos.smith.hogman is up.</span>
+  Everyone in the pen can open it.
+
+<span class="c"># or a site you're building, by its port</span>
+<span class="p">$</span> ./hogman-join share blog 3000</pre>
   </div>
 </section>
 

@@ -29,7 +29,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - `hogman-join share NAME WHAT ['<server link>']`: one command puts a port, a local web address or a folder on the pen as `https://NAME.<pen>.hogman`. Each share is its own small `tag:server` device (tsnet) that names itself, gets a certificate from the pen's CA (ACME TLS-ALPN-01 over the mesh) and proxies or serves files; no Caddy, no open ports, no administrator rights. `--background`, `share list`, `share stop NAME`; `leave` takes a pen's shares down first. `/api/me` now includes the pen's network info. End-to-end checks cover a folder shared from a side-by-side laptop and a port shared with only a server link.
-- "How it works" diagram on hogman.network and in the README (`docs/img/how-it-works.svg`).
+- "How it works" on hogman.network and in the README: three plain steps (make a pen, invite your people, private inside and invisible outside) and a before/after line, replacing a short-lived technical diagram. The `share` example moved to the joining section.
 - `deploy/`: `bootstrap.sh` for a fresh Ubuntu server, and `hogman-host`, which runs many pens on one server behind a shared front door (each pen walled off on its own network), with `test-host.sh` (18 checks).
 - Core: front-door mode (`FRONT_DOOR=true`, `compose.front.yaml`, `config/edge-behind-front.Caddyfile`) and a per-pen relay port (`STUN_PORT`).
 - README rewritten in the website's style, with crops of the artwork in `docs/img/`.
