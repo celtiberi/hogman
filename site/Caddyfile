@@ -18,5 +18,10 @@
 	}
 	@assets path *.css *.js *.svg *.webp
 	header @assets Cache-Control "public, max-age=3600"
+	# The installer and the release pointer must never be stale.
+	@fresh path /install.sh /dl/latest /dl/SHA256SUMS
+	header @fresh Cache-Control "no-cache"
+	@script path /install.sh
+	header @script Content-Type "text/plain; charset=utf-8"
 	file_server
 }

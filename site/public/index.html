@@ -9,9 +9,13 @@
 <meta property="og:description" content="You hold the gate. Clean pigs get in. The filthy horde stays outside the fence.">
 <meta property="og:type" content="website">
 <meta property="og:image" content="https://hogman.network/hero.webp">
+<meta property="og:image:alt" content="The Top Hog Farmer on the fence: clean pigs in sunglasses inside, a filthy horde outside.">
+<meta property="og:url" content="https://hogman.network/">
+<meta property="og:site_name" content="Hogman">
+<meta name="twitter:card" content="summary_large_image">
 <meta name="theme-color" content="#0e080c">
-<link rel="icon" href="/favicon.svg?v=metal4" type="image/svg+xml">
-<link rel="stylesheet" href="/styles.css?v=metal4">
+<link rel="icon" href="/favicon.svg?v=metal5" type="image/svg+xml">
+<link rel="stylesheet" href="/styles.css?v=metal5">
 </head>
 <body>
 <header class="top">
@@ -41,8 +45,8 @@
       You hold the gate. Your swine get real names, real websites and real padlocks.
       The filthy horde stays outside the fence, howling.</p>
     <p class="cta">
-      <a class="btn primary" href="#farm">Meet the farm</a>
-      <a class="btn" href="#run">Raise your own pen</a>
+      <a class="btn primary" href="#run">Get Hogman</a>
+      <a class="btn" href="#farm">Meet the farm</a>
     </p>
   </div>
 </section>
@@ -174,34 +178,45 @@
 <!-- ============================== RUN A PEN ============================== -->
 <section id="run">
   <h2>Raise your own pen</h2>
-  <p class="sub">One small server. A handful of commands.</p>
+  <p class="sub">A small Ubuntu server and a hostname pointing at it. Then:</p>
   <div class="split">
-    <pre class="term" aria-label="Commands for the keeper"><span class="c"># build the pen</span>
-<span class="p">$</span> ./hogman init
-<span class="p">$</span> ./hogman up
+    <pre class="term" aria-label="Commands for the keeper"><span class="c"># install: sets the server up and starts the front door</span>
+<span class="p">$</span> curl -fsSL https://hogman.network/install.sh | sudo bash
+
+<span class="c"># raise a pen and make yourself its keeper</span>
+<span class="p">$</span> hogman-host add mypen hs.example.com
+<span class="p">$</span> hogman-host pen mypen member add you --role owner
 
 <span class="c"># let a clean one in</span>
-<span class="p">$</span> ./hogman invite create --note "alice, clean pig"
+<span class="p">$</span> hogman-host pen mypen invite create --note "alice, clean pig"
 
 <span class="c"># show a filthy one out</span>
-<span class="p">$</span> ./hogman member kick gary "rolled in something"
+<span class="p">$</span> hogman-host pen mypen member kick gary "rolled in something"
 removed gary: 2 devices deleted, 0 keys and 1 invites
 revoked, 1 names held until 2027-02-17 20:54</pre>
     <div>
+      <p>Ubuntu 24.04 with 2 GB of memory is plenty, about $12 a month. The installer locks the
+        server down and tells you the rest: manage it over your own Tailscale with SSH closed to
+        the internet, and move the pen's root key somewhere safe.</p>
+      <p>Run the same <code>curl</code> again to update. One server holds as many pens as you
+        like, each walled off from the others.</p>
+      <p class="fine">Invited to someone else's pen? Nothing to install up front. Open your invite
+        link and copy the one command it gives you.</p>
       <h3>On tour now</h3>
       <ul class="status">
         <li class="yes">The pen itself: server, names, certificates, invites, the boot</li>
         <li class="yes">Joining from Linux and from a Mac</li>
         <li class="yes">Side by side with Tailscale: both at once, proven on a real Mac</li>
-        <li class="yes">A test that plays out a whole pen's life: 99 checks, all passing</li>
-        <li class="yes">Many pens on one server, kept apart: tested</li>
+        <li class="yes">Many pens on one server, kept apart</li>
+        <li class="yes">A one-line installer for servers</li>
+        <li class="yes">Tests that play out a pen's life: 99 checks, and 18 for a shared server</li>
       </ul>
       <h3>Not on the bill yet</h3>
       <ul class="status">
         <li class="notyet">Windows: built, never tried</li>
         <li class="notyet">Phones: the app is in the works</li>
-        <li class="notyet">Hosted pens: first server going up now</li>
-        <li class="notyet">Public release. The code is still in the barn.</li>
+        <li class="notyet">Hosted pens: the first server is up and being tested</li>
+        <li class="notyet">A security audit. Until then, don't trust it with anything that matters.</li>
       </ul>
       <p class="fine">Forged from good open-source steel: Headscale, the Tailscale client, CoreDNS, step-ca and Caddy.</p>
     </div>
@@ -266,6 +281,6 @@ revoked, 1 names held until 2027-02-17 20:54</pre>
   <p class="fine">No pigs were excluded in the making of this website, except the filthy ones.</p>
 </footer>
 
-<script src="/boot.js?v=metal4" defer></script>
+<script src="/boot.js?v=metal5" defer></script>
 </body>
 </html>

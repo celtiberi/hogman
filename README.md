@@ -16,6 +16,16 @@
 
 # Your pen. Your rules. Clean pigs only.
 
+**Get Hogman:**
+
+```bash
+curl -fsSL https://hogman.network/install.sh | sudo bash     # on a fresh Ubuntu 24.04 server
+```
+
+Invited to someone's pen? You don't install anything up front: open the invite link and
+copy the one command its page gives you.
+
+
 Hogman lets you run your own **private internet** for the people you choose. You hold the
 gate. Your swine get real names, real websites and real padlocks. The filthy horde stays
 outside the fence, howling.
@@ -86,24 +96,32 @@ gone and their names held so nobody can pretend to be them.
 
 ## Raise your own pen
 
-One small Linux server with Docker, and a public hostname pointing at it.
+You need a small Ubuntu 24.04 server (2 GB is plenty; about $12 a month) and a hostname
+pointing at it, such as `hs.example.com`.
 
 ```bash
-cd core
-cp .env.example .env              # NETWORK, PUBLIC_HOST, PUBLIC_IPV4
-./hogman init                     # creates the pen's certificate authority
-./hogman up
-./hogman member add you --role owner
-./hogman invite create --note "alice, clean pig"
-./hogman member kick gary "rolled in something"
+# 1. Install. Sets the server up (updates, Docker, firewall), installs Hogman, starts the front door.
+curl -fsSL https://hogman.network/install.sh | sudo bash
+
+# 2. Raise a pen and make yourself its keeper.
+hogman-host add mypen hs.example.com
+hogman-host pen mypen member add you --role owner
+
+# 3. Let the clean ones in, and show the filthy ones out.
+hogman-host pen mypen invite create --note "alice, clean pig"
+hogman-host pen mypen member kick gary "rolled in something"
 ```
 
-**Many pens on one server:** [`deploy/`](deploy/) has a setup script for a fresh Ubuntu
-server and `hogman-host`, which runs any number of pens behind one shared front door, each
-walled off from the others.
+The installer prints what's next: managing the server over your own Tailscale network with
+SSH closed to the internet, and moving the pen's root key somewhere safe. Run the same
+`curl` again later to update, then `hogman-host upgrade mypen`.
 
-Full operator guide: [core/README.md](core/README.md). How and why it's built this way:
-[DESIGN.md](DESIGN.md).
+One server can hold many pens: `hogman-host add` again with another name and hostname. Each
+pen is walled off from the others, in its own folder you can move to another server. More in
+[deploy/README.md](deploy/README.md). To run a single pen by hand instead, see
+[core/README.md](core/README.md).
+
+How and why it's built this way: [DESIGN.md](DESIGN.md).
 
 ## Don't want a server? We'll keep your pen
 
@@ -130,7 +148,8 @@ Try it, break it, tell us what you find. Don't trust it with anything that matte
 | The pen: server, names, certificates, invites, the boot | Phones (the app is in the works) |
 | Joining from Linux and a Mac, side by side with Tailscale | Windows (built, never tried) |
 | Many pens on one server, kept apart | Hosted pens (first server going up) |
-| End-to-end tests: 99 checks for a pen, 18 for a shared host | A security audit |
+| A one-line installer for servers | A security audit |
+| End-to-end tests: 99 checks for a pen, 18 for a shared host | |
 
 **Found a security problem?** Please don't open a public issue. Report it privately
 with GitHub's **Security → Report a vulnerability** button on this repository.

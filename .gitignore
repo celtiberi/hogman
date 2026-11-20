@@ -1,1 +1,4 @@
 .DS_Store
+
+# release artifacts, built by deploy/release.sh
+site/public/dl/
