@@ -149,7 +149,7 @@ cmd_init() {
 
   info "Network $NETWORK, zone $ZONE, control host $PUBLIC_HOST"
   mkdir -p "$DATA"/{pki/public,pki/offline,step/config,step/secrets,step/db} \
-           "$DATA"/{headscale/config,headscale/lib,coredns,mesh/core} \
+           "$DATA"/{headscale/config,headscale/lib,mesh/core} \
            "$DATA"/{edge,edge-trust,portal,registrar,secrets/registrar,join-dl,tmp}
   chmod 700 "$DATA/pki/offline" "$DATA/step/secrets" "$DATA/secrets/registrar" \
             "$DATA/mesh" "$DATA/registrar" "$DATA/headscale/lib"
@@ -184,7 +184,6 @@ cmd_init() {
   chmod 600 "$DATA"/pki/offline/* "$DATA"/step/secrets/*
 
   render templates/ca.json "$DATA/step/config/ca.json"
-  render templates/Corefile "$DATA/coredns/Corefile"
   render templates/policy.hujson "$DATA/headscale/config/policy.hujson"
 
   local fp
@@ -221,19 +220,6 @@ render_headscale() {
   fi
   export SPLIT_DNS DERP_IPV4_LINE
   render templates/headscale.yaml "$DATA/headscale/config/config.yaml"
-}
-
-# Core services only. From here on the registrar owns the zone file.
-render_bootstrap_zone() {
-  cat > "$DATA/coredns/db.zone" <<EOF
-\$ORIGIN $ZONE.
-\$TTL 60
-@     IN SOA ns.$ZONE. owner.$ZONE. ( $(date +%s) 3600 600 86400 60 )
-@     IN NS  ns.$ZONE.
-ns    IN A   $CORE_MESH_IP
-home  IN A   $CORE_MESH_IP
-ca    IN A   $CORE_MESH_IP
-EOF
 }
 
 mesh_env() {    # mesh_env <name> <authkey>
@@ -369,7 +355,6 @@ cmd_up() {
     chmod 600 "$DATA/secrets/registrar/headscale_api_key"
 
     render_headscale
-    render_bootstrap_zone
     dc restart headscale
     wait_for "headscale" 60 hs health
   else
@@ -387,6 +372,9 @@ cmd_up() {
   dc up -d --build --remove-orphans
   wait_for "registrar" 60 reg sync
   cleanup_old_ca
+  if [ -d "$DATA/coredns" ]; then
+    rm -rf "$DATA/coredns"
+  fi
   info "Up. Control server: https://$PUBLIC_HOST   Portal (on the mesh): https://home.$ZONE"
   if ! reg member list 2>/dev/null | awk 'NR>1 && $3=="owner" {found=1} END {exit !found}'; then
     info "Next: create yourself as owner:  ./hogman member add <handle> --role owner"

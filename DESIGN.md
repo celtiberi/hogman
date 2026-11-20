@@ -44,8 +44,8 @@ Each deployment is one sovereign **network** with its own name, its own DNS, its
  │  CORE NODE (one VPS, docker compose)                         │
  │                                                              │
  │  Headscale ........ mesh control plane + embedded relay      │
- │  Registrar ........ members, invites, names, kick (custom)   │
- │  CoreDNS .......... authoritative for bobo.hogman            │
+ │  Registrar ........ members, invites, names, kick, and       │
+ │                     authoritative DNS for bobo.hogman        │
  │  step-ca .......... the network's CA, speaks ACME            │
  │  Caddy ............ fronts the public hostname and the       │
  │                     in-mesh portal (home.bobo.hogman)        │
@@ -65,9 +65,9 @@ Each deployment is one sovereign **network** with its own name, its own DNS, its
 | Mesh control | Headscale | Device registration, key exchange, pushes DNS settings and access policy to every device. |
 | Relay | Headscale's embedded DERP | Relays traffic for devices that can't connect directly. Set to serve only known devices. |
 | Mesh client | Stock Tailscale client | Runs on every member device and server. |
-| DNS | CoreDNS | Answers for `*.bobo.hogman` from records the registrar writes. |
+| DNS | Registrar's built-in DNS | Authoritative for `*.bobo.hogman` from the registrar's ledger. |
 | CA | step-ca | Issues certs for `*.bobo.hogman` over ACME, the same protocol Let's Encrypt uses. |
-| **Registrar** | Custom (the main thing to build) | Source of truth for members, devices, invites and names. Drives Headscale, CoreDNS and step-ca. Exposes the owner's admin API and CLI. |
+| **Registrar** | Custom (the main thing to build) | Source of truth for members, devices, invites and names. Drives Headscale and step-ca, and serves authoritative DNS. Exposes the owner's admin API and CLI. |
 | **Join tool** | Custom, small | Run once per device: joins the mesh and installs the network's root cert. |
 | Portal | Part of the registrar | `home.bobo.hogman`: claim names, manage devices, list what exists. |
 
@@ -86,8 +86,8 @@ Public ports on the core node: 443/tcp, 80/tcp (public cert renewal), 3478/udp (
 
 ## 5. Naming
 
-- Network zone: `bobo.hogman`. CoreDNS on the core node is authoritative for it.
-- Headscale pushes a split-DNS rule to every device: queries for `bobo.hogman` go to CoreDNS over the mesh; all other queries use the device's normal DNS. The owner never sees members' ordinary browsing.
+- Network zone: `bobo.hogman`. The registrar on the core node is authoritative for it.
+- Headscale pushes a split-DNS rule to every device: queries for `bobo.hogman` go to the registrar's DNS over the mesh; all other queries use the device's normal DNS. The owner never sees members' ordinary browsing.
 - Device names live under `nodes.bobo.hogman` (Headscale's own device directory).
 - Reserved names: `home`, `ca`, `registrar`, `search`, `nodes`.
 - Member names are first come, first served: `alice.bobo.hogman`, plus anything under it (`blog.alice.bobo.hogman`). A name points at one of that member's servers.
@@ -235,7 +235,7 @@ Members should be told this plainly when they join. The owner:
 
 ## 11. Registrar
 
-One service, one database (SQLite), one binary that is also the `hogman` CLI. Suggested language: Go, since Headscale, step-ca, CoreDNS and Caddy are all Go and expose usable client libraries.
+One service, one database (SQLite), one binary that is also the `hogman` CLI. Suggested language: Go, since Headscale, step-ca and Caddy are all Go and expose usable client libraries.
 
 ### Data
 

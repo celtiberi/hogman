@@ -86,8 +86,10 @@ done
 step "Pens are separate"
 check "bobo has no per-pen edge container"  fails docker inspect pen-bobo-edge-1
 check "zebra has no per-pen edge container" fails docker inspect pen-zebra-edge-1
-check "bobo runs 6 containers"  test "$(docker ps -q --filter name=^/pen-bobo- | wc -l | tr -d ' ')" = 6
-check "zebra runs 6 containers" test "$(docker ps -q --filter name=^/pen-zebra- | wc -l | tr -d ' ')" = 6
+check "bobo has no coredns container"       fails docker inspect pen-bobo-coredns-1
+check "zebra has no coredns container"      fails docker inspect pen-zebra-coredns-1
+check "bobo runs 5 containers"  test "$(docker ps -q --filter name=^/pen-bobo- | wc -l | tr -d ' ')" = 5
+check "zebra runs 5 containers" test "$(docker ps -q --filter name=^/pen-zebra- | wc -l | tr -d ' ')" = 5
 pen_isolated() {  # no container in a pen joins hogman-front or another pen's network
   local pen="$1" nets
   nets="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "pen-$pen-core-mesh-1" "pen-$pen-headscale-1")"

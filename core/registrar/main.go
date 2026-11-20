@@ -1,6 +1,6 @@
 // Command registrar is the source of truth for one Hogman network: members,
 // invites, devices, names, removal and the audit log. It drives Headscale
-// (devices, access policy) and CoreDNS (the zone file).
+// (devices, access policy) and serves authoritative DNS for the network's zone.
 //
 // The same binary is the server ("registrar serve") and the owner's command
 // line on the core node ("registrar member kick alice").
@@ -54,7 +54,6 @@ func setup() *Service {
 		PublicHost:       mustEnv("PUBLIC_HOST"),
 		CoreIP:           coreIP,
 		CAIP:             env("CA_MESH_IP", coreIP),
-		ZoneFile:         env("ZONE_FILE", "/zone/db.zone"),
 		RootCAFile:       env("ROOT_CA", "/pki/root_ca.crt"),
 		NameHold:         durEnv("NAME_HOLD", 90*24*time.Hour),
 		InviteTTL:        durEnv("INVITE_TTL", 7*24*time.Hour),
@@ -106,7 +105,19 @@ func serve(s *Service) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Wait for Headscale, then take control of policy and DNS before serving.
+	// Start DNS first so core service names (ns, home, ca) resolve before Headscale sync.
+	if dnsAddr := env("DNS_ADDR", ":53"); dnsAddr != "" && dnsAddr != "off" {
+		dnsSrv, err := NewDNSServer(s)
+		if err != nil {
+			log.Fatalf("dns: %v", err)
+		}
+		if err := dnsSrv.Start(ctx, dnsAddr); err != nil {
+			log.Fatalf("dns on %s: %v", dnsAddr, err)
+		}
+		log.Printf("dns listening on %s (udp/tcp) for %s", dnsAddr, s.cfg.Zone)
+	}
+
+	// Wait for Headscale, then take control of policy before serving HTTP.
 	for {
 		if err := s.Sync(ctx); err == nil {
 			break

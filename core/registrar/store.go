@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -605,6 +606,32 @@ func (s *Store) HoldNames(memberID, until int64) (int64, error) {
 // of a member who has not been removed.
 func (s *Store) ResolvableNames() ([]*Name, error) {
 	return s.queryNames(`WHERE n.held_until IS NULL AND d.id IS NOT NULL AND m.status != 'removed'`)
+}
+
+// ResolvableName returns one name if it should appear in DNS right now.
+func (s *Store) ResolvableName(name string) (*Name, error) {
+	ns, err := s.queryNames(`WHERE n.name = ? AND n.held_until IS NULL AND d.id IS NOT NULL AND m.status != 'removed'`, name)
+	if err != nil {
+		return nil, err
+	}
+	if len(ns) == 0 {
+		return nil, ErrNotFound
+	}
+	return ns[0], nil
+}
+
+// HasResolvableChild reports whether any resolvable subdomain exists under name.
+func (s *Store) HasResolvableChild(name string) (bool, error) {
+	escaped := "%." + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(name)
+	var one int
+	err := s.db.QueryRow(`SELECT 1 FROM names n
+		JOIN members m ON m.id = n.member_id
+		JOIN devices d ON d.id = n.device_id AND d.removed_at IS NULL
+		WHERE n.held_until IS NULL AND m.status != 'removed' AND n.name LIKE ? ESCAPE '\' LIMIT 1`, escaped).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // ------------------------------------------------------------------ audit --
