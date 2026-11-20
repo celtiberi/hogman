@@ -17,11 +17,17 @@
       "defaultTLSCertDuration": "168h",
       "disableRenewal": false
     },
+    "policy": {
+      "x509": {
+        "deny": { "ip": ["0.0.0.0/0", "::/0"] },
+        "allowWildcardNames": false
+      }
+    },
     "provisioners": [
       {
         "type": "ACME",
         "name": "acme",
-        "challenges": ["http-01", "tls-alpn-01"]
+        "challenges": ["tls-alpn-01"]
       }
     ]
   },

@@ -1,0 +1,15 @@
+# Weekly update PRs for Go modules, base images and the Actions we use.
+# Security updates are also on in the repo settings and arrive sooner.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directories: ["/core/join", "/core/registrar", "/deploy/signup"]
+    schedule: { interval: weekly }
+    groups:
+      go: { patterns: ["*"] }
+  - package-ecosystem: docker
+    directories: ["/core/join", "/core/registrar", "/deploy/signup", "/site"]
+    schedule: { interval: weekly }
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: weekly }
