@@ -12,7 +12,8 @@
 # certificate has 14+ days left; and, given a backup folder (where
 # backup-pull.sh puts them), that a backup arrived in the last 36 hours.
 # Alerts after two failures in a row, reminds every 6 hours, says when it's
-# back. Says nothing if this machine itself is offline.
+# back. Says nothing if this machine itself is offline. WATCH_URLS (space-
+# separated) adds other pages that must answer, such as a sign-up page.
 #
 #   hogman-watch.sh --test     send a test alert
 set -uo pipefail
@@ -42,6 +43,9 @@ c_cert() {
   echo | openssl s_client -connect "$HOST:443" -servername "$HOST" 2>/dev/null \
     | openssl x509 -noout -checkend $((14 * 86400)) >/dev/null 2>&1
 }
+c_pages() {  # WATCH_URLS: other pages that must answer, e.g. the sign-up page
+  local u; for u in $WATCH_URLS; do curl -fsS -m 15 -o /dev/null "$u" || return 1; done
+}
 c_backup() { [ -n "$(find "$BACKUPS" -maxdepth 1 -name '*.tar.gz.age' -mmin -$((36 * 60)) 2>/dev/null | head -1)" ]; }
 
 checks="headscale:Headscale is not answering on $HOST
@@ -49,6 +53,8 @@ pen:$HOST is not answering as a pen
 cert:the certificate for $HOST expires within 14 days (or can't be read)"
 [ -n "$BACKUPS" ] && checks="$checks
 backup:no new backup in $BACKUPS for 36 hours"
+[ -n "${WATCH_URLS:-}" ] && checks="$checks
+pages:one of these isn't answering: $WATCH_URLS"
 
 now=$(date +%s)
 while IFS=: read -r name what; do
