@@ -24,42 +24,53 @@ neither pen able to reach the other.
 
 ## Setting up a server
 
-1. Create an Ubuntu 24.04 server with your SSH key, then copy and run the setup script:
+1. Create an Ubuntu 24.04 server with your SSH key, log in, and install:
 
    ```bash
-   scp deploy/bootstrap.sh root@SERVER:
-   ssh root@SERVER bash bootstrap.sh
-   ssh root@SERVER tailscale up --hostname=hogman-1    # open the link it prints
-   ssh root@hogman-1 bash bootstrap.sh --lock-ssh       # now over Tailscale only
+   curl -fsSL https://hogman.network/install.sh | sudo bash
    ```
 
-2. Copy the code and start the front door:
+   This sets the server up (security updates, Docker, Tailscale, firewall, swap), installs
+   Hogman into `/opt/hogman`, and starts the front door. The code comes from a release on
+   hogman.network, checked against its published SHA-256, with the join tool and registrar
+   already compiled.
+
+2. Manage the server over your own tailnet, and close SSH to the internet:
 
    ```bash
-   rsync -a --exclude data --exclude .env core/ root@hogman-1:/opt/hogman/src/
-   scp deploy/hogman-host root@hogman-1:/usr/local/bin/
-   ssh root@hogman-1 hogman-host init
+   tailscale up --hostname=hogman-1                  # open the link it prints
+   bash /opt/hogman/bootstrap.sh --lock-ssh          # from now on: ssh root@hogman-1
    ```
 
 3. For each pen, point its control hostname at the server (an A record, not proxied, if the
    DNS is on Cloudflare), then:
 
    ```bash
-   ssh root@hogman-1 hogman-host add bobo hs.example.com
-   ssh root@hogman-1 hogman-host pen bobo member add alice --role owner
-   ssh root@hogman-1 hogman-host pen bobo invite create
+   hogman-host add bobo hs.example.com
+   hogman-host pen bobo member add alice --role owner
+   hogman-host pen bobo invite create
    ```
 
 4. **Take each pen's root key off the server.** `add` prints where it is
    (`pens/<name>/data/pki/offline/`). Keep it in your password manager. The pen runs without
    it.
 
+## Updating
+
+```bash
+curl -fsSL https://hogman.network/install.sh | sudo bash   # new code; pens untouched
+hogman-host upgrade bobo                                   # restart a pen on it (under a minute)
+```
+
+Members stay joined; their devices reconnect by themselves after the pen restarts (about 20
+seconds on a small server).
+
 ## Everyday
 
 ```bash
 hogman-host list                        # pens, their hostnames and relay ports
 hogman-host pen <name> <hogman args>    # anything ./hogman does, for one pen
-hogman-host upgrade <name>              # after copying new code into /opt/hogman/src
+hogman-host upgrade <name>              # after running install.sh again
 hogman-host remove <name>               # stop and unroute a pen (its folder stays)
 ```
 
