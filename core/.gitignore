@@ -1,2 +1,4 @@
 data/
 .env
+prebuilt/
+registrar/registrar.bin

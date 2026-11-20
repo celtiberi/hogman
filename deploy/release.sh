@@ -5,7 +5,8 @@
 #
 # Packages committed code only (never the working folder), writes
 #   site/public/dl/hogman-<version>.tar.gz, SHA256SUMS and latest,
-# then deploys the website. Old tarballs stay listed in SHA256SUMS.
+# plus hogman-bin-<version>.tar.gz (compiled join tool and registrar),
+# then deploys the website.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,12 +22,31 @@ tarball="hogman-$ver.tar.gz"
 git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md LICENSE README.md \
   | gzip -9n > "$out/$tarball"
 
+# Compiled parts, so servers don't spend half an hour building them:
+# the join tool for every platform, and the registrar for Linux servers.
+bins="hogman-bin-$ver.tar.gz"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+git archive --format=tar "$REF" core/join core/registrar | tar -x -C "$work"
+echo "building the join tool (5 platforms) and the registrar (linux amd64, arm64)..."
+docker build -q --output "type=local,dest=$work/prebuilt/join" "$work/core/join" >/dev/null
+mkdir -p "$work/prebuilt/registrar"
+docker run --rm -v "$work/core/registrar:/src:ro" -v "$work/prebuilt/registrar:/out" -w /src \
+  -v hogman-gomod:/go/pkg/mod -v hogman-gocache:/root/.cache/go-build golang:1.27-alpine sh -c '
+    set -e
+    CGO_ENABLED=0 go test ./... >/dev/null
+    for a in amd64 arm64; do
+      CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath -ldflags="-s -w" -o /out/registrar-linux-$a .
+    done'
+tar -C "$work" -czf "$out/$bins" prebuilt
+
+# Keep only the newest bundles; the website serves just the current release.
+find "$out" -maxdepth 1 -name 'hogman-*.tar.gz' ! -name "$tarball" ! -name "$bins" -delete
+
 ( cd "$out"
-  touch SHA256SUMS
-  grep -v "  $tarball\$" SHA256SUMS > SHA256SUMS.tmp || true
-  if command -v sha256sum >/dev/null; then sha256sum "$tarball" >> SHA256SUMS.tmp; else shasum -a 256 "$tarball" >> SHA256SUMS.tmp; fi
-  mv SHA256SUMS.tmp SHA256SUMS
+  if command -v sha256sum >/dev/null; then sha256sum "$tarball" "$bins"; else shasum -a 256 "$tarball" "$bins"; fi > SHA256SUMS
   echo "$ver" > latest )
+echo "compiled bundle $bins ($(du -h "$out/$bins" | cut -f1))"
 
 echo "release $ver ($(du -h "$out/$tarball" | cut -f1)) from $REF"
 if [ "${NO_DEPLOY:-}" != 1 ]; then

@@ -252,6 +252,29 @@ infra_key() {
 mesh_ip() { dc exec -T "$1" tailscale ip -4 2>/dev/null | head -1 | tr -d '\r'; }
 has_mesh_ip() { [ -n "$(mesh_ip "$1")" ]; }
 
+# Releases ship the join tool and the registrar already compiled (prebuilt/,
+# checked by install.sh against the release's checksums), so a small server
+# does not spend half an hour compiling. Without prebuilt/, build from source.
+use_prebuilt_or_build() {
+  if [ -f prebuilt/join/SHA256SUMS ]; then
+    info "Using the prebuilt join tool from this release"
+    mkdir -p "$DATA/join-dl"
+    cp prebuilt/join/* "$DATA/join-dl/"
+  else
+    info "Building the join tool for download"
+    docker build -q --output "type=local,dest=$DATA/join-dl" join >/dev/null
+  fi
+  local arch
+  case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) arch="" ;; esac
+  if [ -n "$arch" ] && [ -f "prebuilt/registrar/registrar-linux-$arch" ]; then
+    info "Using the prebuilt registrar from this release"
+    install -m 0755 "prebuilt/registrar/registrar-linux-$arch" registrar/registrar.bin
+    export REGISTRAR_DOCKERFILE=Dockerfile.prebuilt
+  else
+    export REGISTRAR_DOCKERFILE=Dockerfile
+  fi
+}
+
 cmd_up() {
   load_env
   [ -f "$DATA/pki/public/root_ca.crt" ] || die "run ./hogman init first."
@@ -305,8 +328,7 @@ cmd_up() {
     render_headscale
   fi
 
-  info "Building the join tool for download"
-  docker build -q --output "type=local,dest=$DATA/join-dl" join >/dev/null
+  use_prebuilt_or_build
 
   dc up -d --build
   wait_for "registrar" 60 reg sync

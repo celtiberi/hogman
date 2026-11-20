@@ -38,6 +38,17 @@ main() {
   mkdir "$tmp/x" && tar -xzf "$tmp/$tarball" -C "$tmp/x"
   echo "    version $ver, checksum OK"
 
+  # The compiled join tool and registrar, so this server doesn't build them.
+  local bins="hogman-bin-$ver.tar.gz"
+  if curl -fsSL -o "$tmp/$bins" "$base/dl/$bins" 2>/dev/null; then
+    curl -fsSL "$base/dl/SHA256SUMS" | grep "  $bins\$" > "$tmp/BINSUMS" || die "no checksum for $bins"
+    (cd "$tmp" && sha256sum -c --quiet BINSUMS) || die "checksum mismatch for $bins: not installing"
+    tar -xzf "$tmp/$bins" -C "$tmp/x/core"
+    echo "    compiled parts, checksum OK"
+  else
+    echo "    no compiled parts for this version; they will be built on this server (slow on small servers)"
+  fi
+
   local first=true
   [ -f "$home/host.env" ] && first=false
 
@@ -49,6 +60,7 @@ main() {
   say "Installing Hogman $ver into $home"
   mkdir -p "$home/src"
   rsync -a --delete --exclude data --exclude .env "$tmp/x/core/" "$home/src/"
+  [ -d "$tmp/x/core/prebuilt" ] || rm -rf "$home/src/prebuilt"
   install -m 0755 "$tmp/x/deploy/hogman-host" /usr/local/bin/hogman-host
   install -m 0644 "$tmp/x/deploy/bootstrap.sh" "$home/bootstrap.sh"
   echo "$ver" > "$home/VERSION"

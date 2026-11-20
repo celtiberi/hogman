@@ -117,7 +117,10 @@ services:
   #   public  :8081  invite redemption only, via edge at https://<public host>/hogman/
   #   mesh    127.0.0.1:8082  member/admin API, via the portal at https://home.<zone>/api/
   registrar:
-    build: ./registrar
+    build:
+      context: ./registrar
+      # Dockerfile.prebuilt when the release shipped a compiled registrar (see ./hogman).
+      dockerfile: ${REGISTRAR_DOCKERFILE:-Dockerfile}
     image: hogman/registrar:dev
     restart: unless-stopped
     user: "${HOGMAN_UID:-1000}:${HOGMAN_GID:-1000}"
