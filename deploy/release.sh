@@ -46,7 +46,8 @@ docker run --rm -v "$work/deploy/signup:/src:ro" -v "$work/prebuilt/signup:/out"
     for a in amd64 arm64; do
       CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath -ldflags="-s -w" -o /out/hogman-signup-linux-$a .
     done'
-tar -C "$work" -czf "$out/$bins" prebuilt
+# No macOS file metadata in the bundle (Linux tar warns about it).
+COPYFILE_DISABLE=1 tar -C "$work" -czf "$out/$bins" prebuilt
 
 # Keep only the newest bundles; the website serves just the current release.
 find "$out" -maxdepth 1 -name 'hogman-*.tar.gz' ! -name "$tarball" ! -name "$bins" -delete

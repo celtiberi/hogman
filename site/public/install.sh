@@ -26,11 +26,11 @@ main() {
   command -v curl >/dev/null || die "curl is needed"
 
   say "Finding the newest Hogman"
-  local ver tmp
+  local ver
   ver="$(curl -fsSL "$base/dl/latest")" || die "could not reach $base"
   [[ "$ver" =~ ^[0-9A-Za-z._-]+$ ]] || die "unexpected version from $base: $ver"
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
+  trap 'rm -rf "${tmp:-}"' EXIT   # tmp is global: the trap runs after main returns
   local tarball="hogman-$ver.tar.gz"
   curl -fsSL -o "$tmp/$tarball" "$base/dl/$tarball"
   curl -fsSL "$base/dl/SHA256SUMS" | grep "  $tarball\$" > "$tmp/SHA256SUMS" || die "no checksum for $tarball"

@@ -239,7 +239,9 @@ mesh_env() {    # mesh_env <name> <authkey>
       echo "TS_ACCEPT_DNS=false"
       echo "TS_AUTH_ONCE=true"
       echo "TS_EXTRA_ARGS=--login-server=https://$PUBLIC_HOST"
-      [ "$TEST_MODE" = true ] && echo "SSL_CERT_FILE=/edge-trust/root.crt"
+      # An if, not `[ ] && echo`: as the last command here, a false test would
+      # fail this subshell and stop ./hogman on every real (non-test) server.
+      if [ "$TEST_MODE" = true ]; then echo "SSL_CERT_FILE=/edge-trust/root.crt"; fi
     } > "$DATA/mesh/$1.env"
   )
   chmod 600 "$DATA/mesh/$1.env"

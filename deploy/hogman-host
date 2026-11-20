@@ -183,7 +183,16 @@ front_join() {
 reload_front() {
   (
     cd "$FRONT"
-    docker compose up -d --remove-orphans >/dev/null 2>&1 || exit 1
+    # `compose up` only when the front door is down or its compose file changed.
+    # Run on every reload, newer Compose sees the pen networks front_join
+    # attached as drift and recreates the front door, cutting every pen.
+    local sum running
+    sum="$(cksum < compose.yaml)"
+    running="$(docker inspect -f '{{.State.Running}}' hogman-front-front-1 2>/dev/null || true)"
+    if [ "$running" != true ] || [ "$sum" != "$(cat .compose.sum 2>/dev/null)" ]; then
+      docker compose up -d --remove-orphans >/dev/null 2>&1 || exit 1
+      echo "$sum" > .compose.sum
+    fi
     front_join || exit 1
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       docker compose exec -T front caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 && exit 0
@@ -505,7 +514,7 @@ provision_steps() {  # in a subshell: prints the join link, then its expiry
   [[ "$link" =~ ^https://[a-z0-9.-]+/join#k=[A-Za-z0-9_-]+\&fp=[A-Fa-f0-9:]+$ ]] || die "no join link for $owner: $out"
   escrow_root "$n"
   echo "$link"
-  awk '/^valid until/ {print $3, $4}' <<<"$out"
+  awk '/^valid until/ {print $3, $4}' <<<"$out" | tr -d ','  # "valid until <date> <time>, single use"
 }
 
 provision_rollback() {
