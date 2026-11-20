@@ -1,8 +1,12 @@
 (() => {
-  const q = new URLSearchParams(location.hash.slice(1));
+  // The secret is kept for this tab only (so a refresh still works) and taken
+  // out of the address bar and browser history.
+  const KEY = 'hogman-join-link';
+  let hash = location.hash.slice(1);
+  if (hash) sessionStorage.setItem(KEY, hash); else hash = sessionStorage.getItem(KEY) || '';
+  const q = new URLSearchParams(hash);
   const err = m => { const e = document.getElementById('err'); e.textContent = m; e.hidden = false;
                      document.getElementById('what').textContent = ''; };
-  // Keep the secret out of browser history once read.
   history.replaceState(null, '', location.pathname);
   const t = q.get('t');
   const k = q.get('k');
@@ -24,8 +28,8 @@
   // Phones can't run the join command. Say so plainly instead of showing it.
   if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
     document.getElementById('what').textContent = '';
-    return err('This link is for joining from a phone. The Hogman phone app is coming soon. ' +
-               'Until then, open the link on a computer.');
+    return err('Phones can\'t join yet: the Hogman phone app is coming soon. ' +
+               'For now, open this link on a computer (macOS, Linux or Windows).');
   }
   const cleanLink = `https://${host}/join#${t ? 't=' + t : 'k=' + k}&fp=${fp}`;
   const quoted = `'${cleanLink}'`;

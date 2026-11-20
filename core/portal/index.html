@@ -25,14 +25,28 @@
       <div class="qr">
         <img id="qr" alt="QR code for the one-time device link">
         <div class="info">
-          <p><strong>Phone:</strong> scan this with the Hogman app (coming soon).</p>
-          <p><strong>Computer:</strong> open this link on it and follow the steps:</p>
+          <p id="phone-line"><strong>Phone:</strong> scan this with the Hogman app (coming soon).</p>
+          <p id="computer-line">Computer: open this link on it and follow the steps:</p>
           <div class="linkbox" id="linktext"></div>
           <p><button id="copy" type="button">Copy link</button> <span class="muted" id="expires"></span></p>
         </div>
       </div>
     </div>
     <p class="error" id="adderr" hidden></p>
+  </div>
+
+  <div class="card" id="names-card">
+    <strong>Names for your servers</strong>
+    <p class="muted hint">Give a server a name like <code>blog.<span class="zone">&lt;network&gt;.hogman</span></code>.
+      Everyone in the pen can then reach it by that name, with HTTPS (see Host something, below).</p>
+    <ul class="devices" id="names"></ul>
+    <form id="name-form" class="row">
+      <input id="name-input" maxlength="63" placeholder="blog" autocomplete="off" autocapitalize="none" spellcheck="false">
+      <select id="name-device" aria-label="Which server"></select>
+      <button class="primary" type="submit">Claim name</button>
+    </form>
+    <p class="muted hint" id="name-noserver" hidden>Add a server first (above), then name it here.</p>
+    <p class="error" id="name-err" hidden></p>
   </div>
 </section>
 

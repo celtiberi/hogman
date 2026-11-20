@@ -10,6 +10,9 @@
 #
 # usage: test/run.sh [--keep]     --keep leaves the stack running afterwards
 set -uo pipefail
+# shellcheck source=/dev/null
+. "$(dirname "$0")/e2e-lock.sh"
+e2e_lock
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 KEEP=false; [ "${1:-}" = --keep ] && KEEP=true
@@ -48,7 +51,7 @@ cleanup() {
     rm -rf "$WORK"
   fi
 }
-trap cleanup EXIT
+trap 'cleanup; e2e_unlock' EXIT
 
 rsync -a --exclude data --exclude .env "$SRC/" "$WORK/"
 cd "$WORK"

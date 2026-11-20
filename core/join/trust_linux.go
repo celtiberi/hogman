@@ -21,14 +21,32 @@ func linuxStore() (*anchorStore, error) {
 		{"/etc/ca-certificates/trust-source/anchors", []string{"update-ca-trust", "extract"}}, // Arch
 	}
 	for _, s := range stores {
-		if _, err := exec.LookPath(s.update[0]); err != nil {
+		tool := sbinTool(s.update[0])
+		if tool == "" {
 			continue
 		}
 		if fi, err := os.Stat(s.dir); err == nil && fi.IsDir() {
+			s.update = append([]string{tool}, s.update[1:]...)
 			return &s, nil
 		}
 	}
 	return nil, errorf("could not find this system's certificate store (looked for update-ca-certificates and update-ca-trust)")
+}
+
+// sbinTool finds an admin tool. Debian keeps update-ca-certificates in
+// /usr/sbin, which isn't on an ordinary user's PATH, and we run it with sudo
+// anyway, so look there too and use the full path.
+func sbinTool(name string) string {
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	for _, dir := range []string{"/usr/sbin", "/sbin", "/usr/local/sbin"} {
+		p := filepath.Join(dir, name)
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	return ""
 }
 
 func anchorPath(s *anchorStore, r *RootInfo) string {
@@ -62,7 +80,7 @@ func installTrust(r *RootInfo, file string) error {
 	if out, err := run(true, s.update[0], s.update[1:]...); err != nil {
 		return errorf("could not refresh the certificate store: %v\n%s", err, out)
 	}
-	note("browsers on Linux keep their own list; if Chrome or Firefox warn, import %s there", file)
+	note("browsers on Linux keep their own list; if Chrome or Firefox warn, import %s there", anchorPath(s, r))
 	return nil
 }
 
@@ -77,7 +95,12 @@ func removeTrust(r *RootInfo, _ string) error {
 	if out, err := run(true, "rm", "-f", anchorPath(s, r)); err != nil {
 		return errorf("could not remove the certificate: %v\n%s", err, out)
 	}
-	_, err = run(true, s.update[0], s.update[1:]...)
+	// --fresh rebuilds /etc/ssl/certs, so no dangling link to the removed file is left.
+	args := s.update[1:]
+	if filepath.Base(s.update[0]) == "update-ca-certificates" {
+		args = append([]string{"--fresh"}, args...)
+	}
+	_, err = run(true, s.update[0], args...)
 	return err
 }
 

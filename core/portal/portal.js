@@ -42,6 +42,52 @@
       }
       ul.append(li);
     }
+    renderNames();
+  };
+
+  // ------------------------------------------------------------- names --
+
+  const renderNames = () => {
+    const ul = $('names');
+    ul.replaceChildren();
+    for (const n of me.names || []) {
+      const li = document.createElement('li');
+      const nm = document.createElement('span'); nm.className = 'grow'; nm.textContent = `${n.name}.${me.zone}`;
+      const dev = (me.devices || []).find(d => d.id === n.device_id);
+      const to = document.createElement('span'); to.className = 'muted small'; to.textContent = dev ? `→ ${dev.name}` : '';
+      const rel = document.createElement('button'); rel.className = 'link danger'; rel.type = 'button'; rel.textContent = 'Release';
+      rel.onclick = async () => {
+        if (!armed.has('name' + n.name)) {
+          armed.add('name' + n.name); rel.textContent = `Release ${n.name}?`;
+          setTimeout(() => { armed.delete('name' + n.name); rel.textContent = 'Release'; }, 5000);
+          return;
+        }
+        armed.delete('name' + n.name);
+        try { await api('DELETE', '/names/' + encodeURIComponent(n.name)); await load(); }
+        catch (e) { nameErr(e); }
+      };
+      li.append(nm, to, rel);
+      ul.append(li);
+    }
+    const servers = (me.devices || []).filter(d => d.kind === 'server');
+    const sel = $('name-device');
+    sel.replaceChildren(...servers.map(d => { const o = document.createElement('option'); o.value = d.id; o.textContent = d.name; return o; }));
+    $('name-form').hidden = servers.length === 0;
+    $('name-noserver').hidden = servers.length > 0;
+  };
+  const nameErr = e => { const p = $('name-err'); p.textContent = e.message; p.hidden = false; };
+  $('name-form').onsubmit = async ev => {
+    ev.preventDefault();
+    $('name-err').hidden = true;
+    const name = $('name-input').value.trim().toLowerCase();
+    if (!name) return nameErr(new Error('Type a name, like blog.'));
+    try {
+      const r = await api('POST', '/names', { name, device_id: Number($('name-device').value) });
+      $('name-input').value = '';
+      await load();
+      nameErr(new Error(`Done: ${r.name} now points at your server. Give it a minute to reach everyone.`));
+      $('name-err').className = 'muted';
+    } catch (e) { $('name-err').className = 'error'; nameErr(e); }
   };
 
   // A plain inline confirmation instead of a browser dialog.
@@ -61,7 +107,12 @@
     try {
       const r = await api('POST', '/devices', { kind });
       $('qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(r.join_qr_svg || '');
-      $('qr').hidden = !r.join_qr_svg;
+      // A server is a computer: no phone QR, and say where to run it.
+      $('qr').hidden = !r.join_qr_svg || kind === 'server';
+      $('phone-line').hidden = kind === 'server';
+      $('computer-line').textContent = kind === 'server'
+        ? 'Server: open this link on the server (or copy the command its page shows into the server\'s terminal):'
+        : 'Computer: open this link on it and follow the steps:';
       $('linktext').textContent = r.join_link;
       $('newlink').hidden = false;
       $('copy').onclick = async () => {
@@ -98,6 +149,7 @@
     return e;
   };
   const day = t => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const when = t => new Date(t * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
   const errIn = id => e => { const p = $(id); p.textContent = e.message; p.hidden = false; };
 
   // Two presses instead of a browser dialog.
@@ -120,7 +172,7 @@
       $('invite-qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(r.qr_svg || '');
       $('invite-qr').hidden = !r.qr_svg;
       $('invite-link').textContent = r.url;
-      $('invite-exp').textContent = `Works once, until ${day(r.expires_at)}.`;
+      $('invite-exp').textContent = `Works once, until ${when(r.expires_at)}.`;
       $('invite-copy').textContent = 'Copy link';
       $('invite-copy').onclick = async () => {
         await navigator.clipboard.writeText(r.url);
@@ -143,7 +195,7 @@
       const li = el('li');
       li.append(el('span', 'grow', i.note || `invite #${i.id}`));
       if (i.role === 'admin') li.append(el('span', 'tag', 'admin'));
-      li.append(el('span', 'muted small', `until ${day(i.expires_at)}`));
+      li.append(el('span', 'muted small', `until ${when(i.expires_at)}`));
       const rv = el('button', 'link danger', 'Revoke'); rv.type = 'button';
       rv.onclick = async () => {
         if (!pressTwice('inv' + i.id, rv, 'Press again to revoke')) return;

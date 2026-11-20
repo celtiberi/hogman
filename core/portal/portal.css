@@ -27,10 +27,11 @@ ul.devices li { display: flex; flex-wrap: wrap; gap: .7rem; align-items: baselin
 .small { font-size: .85rem; }
 .tag.warn { border-color: #c80; color: #c80; }
 form.row { display: flex; gap: .6rem; flex-wrap: wrap; }
+form.row select { font: inherit; padding: .4rem .5rem; border-radius: 6px; border: 1px solid #999; }
 form.row input { flex: 1; min-width: 12rem; font: inherit; padding: .4rem .6rem; border-radius: 6px; border: 1px solid #999; }
 h3 { margin-top: 1.4rem; font-size: 1rem; }
 @media (prefers-color-scheme: dark) {
   body { background: #111; color: #eee; } .sub, .muted { color: #999; } a { color: #8ab4ff; }
   code, .linkbox { background: #222; } button { background: #222; color: #eee; border-color: #555; }
-  button.primary { background: #eee; color: #111; } button.link { background: none; color: #ccc; } button.link.danger { color: #e66; } form.row input { background: #222; color: #eee; border-color: #555; } ul.devices li { border-color: #333; } .card { border-color: #444; }
+  button.primary { background: #eee; color: #111; } button.link { background: none; color: #ccc; } button.link.danger { color: #e66; } form.row input, form.row select { background: #222; color: #eee; border-color: #555; } ul.devices li { border-color: #333; } .card { border-color: #444; }
 }

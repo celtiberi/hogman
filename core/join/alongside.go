@@ -201,7 +201,9 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 	say("")
 	say("  Browsers: %s", browsers)
 	say("  Other tools reach the pen through its proxy, %s", cfg.proxyURL())
-	say("    curl / most CLIs:  export https_proxy=%s http_proxy=%s", cfg.proxyURL(), cfg.proxyURL())
+	// Per command, not exported: the proxy only serves the pen, so a global
+	// https_proxy would break everything else in that shell.
+	say("    curl / most CLIs:  https_proxy=%s curl https://<site>.%s", cfg.proxyURL(), n.Zone)
 	say("    git:               git config --global http.https://%s/.proxy %s   (per site)", "<site>."+n.Zone, cfg.proxyURL())
 	say("    ssh:               ssh -o ProxyCommand='nc -X connect -x %s %%h %%p' <host>.%s", cfg.ProxyAddr, n.Zone)
 	say("  To leave: hogman-join leave '<this link>'")
