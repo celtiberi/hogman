@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- No account recovery (decision D-16, replacing D-12's passkey plan): no recovery page, no recovery passkeys. Someone who loses every device gets a new invite and a new account, and a keeper gives it back its role. The herd gains **Make owner** and **Make admin** for owners, so a pen can have a second owner from the home page; a lone owner sees a warning to make one. `GET /api/me` tells owners how many owners the pen has. Nobody can make a personal device key for someone else any more, not even the server's own tool (`device key <handle> personal` now only works for a member's very first device, which is how a new pen's owner gets in). FAQ, keeper docs, sign-up page and home page say so.
+
 ### Security
 - `hogman-join`: the agent's own `/status` and `/proxy.pac` answer only requests addressed to its loopback address or `localhost` (no DNS-rebinding reads); `leave` removes the computer's own device from the pen (so old devices don't pile up) and no longer fails on shares that never came up; `share` no longer looks at the system Tailscale; `--tailscale` explains that it was removed. FAQ: what Hogman deliberately doesn't do, reworded, and "What if I lose my laptop?" (no recovery on request, ever: D-12), and that a copied device file works elsewhere until the device is removed (hardware locking is Phase 2: D-13, D-14). `leave` removes the certificate before the device, so cancelling the password prompt leaves the computer still on the pen.
 - Port 80 removed: members reach servers, and the pen's home page, on 443 only (infra keeps 53 for DNS and 9000 for the CA). The join agent answers `http://` pen addresses itself with a 308 redirect to HTTPS instead of carrying HTTP into the pen (its reverse proxy is gone); shares no longer listen on 80 and get certificates over TLS-ALPN on 443.

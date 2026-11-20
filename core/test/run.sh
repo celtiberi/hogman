@@ -380,13 +380,15 @@ check "... and leaves this computer's Tailscale alone" ts_untouched
 check "it installed the network's root in the system store" \
   run carol-laptop test -s /usr/local/share/ca-certificates/hogman-bobo.hogman.crt
 check "the registrar recorded carol's laptop" retry 10 match 'carol.*carol-laptop' $H device list
-DEVICE_LINK="$($H device key carol personal | awk '/^link:/ {print $2}')"
+check "no account recovery: the server won't make a device link for carol, who has joined" not $H device key carol personal
+check "a new member can still be given a first device link from the server" $H member add erin
+DEVICE_LINK="$($H device key erin personal | awk '/^link:/ {print $2}')"
 out="$(join_tool carol-desktop --tailscale --hostname carol-desktop "$DEVICE_LINK" 2>&1)"; rc=$?
 check "joining through the Tailscale app is no longer offered (--tailscale refused)" test $rc != 0
-check "... and the device link is still unused" no_match 'carol.*carol-desktop' $H device list
+check "... and the device link is still unused" no_match 'erin.*carol-desktop' $H device list
 out="$(join_tool carol-desktop --hostname carol-desktop "$DEVICE_LINK" 2>&1)"; rc=$?
-check "a device link adds a second device (exit $rc)" grep -q "You're in. You are carol" <<<"$out"
-check "the registrar recorded it as carol's" retry 10 match 'carol.*carol-desktop' $H device list
+check "a device link joins that member (exit $rc)" grep -q "You're in. You are erin" <<<"$out"
+check "the registrar recorded it as erin's" retry 10 match 'erin.*carol-desktop' $H device list
 out="$(join_tool carol-desktop leave "$DEVICE_LINK" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
 check "leave works (exit $rc)" grep -q "Left bobo.hogman" <<<"$out"

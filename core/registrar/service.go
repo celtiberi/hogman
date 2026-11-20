@@ -598,6 +598,9 @@ func (s *Service) IssueDeviceKey(ctx context.Context, a Actor, handle, kind stri
 	if err != nil {
 		return "", 0, err
 	}
+	if kind != "personal" && kind != "server" {
+		return "", 0, bad("kind must be personal or server")
+	}
 	if !a.Is(m) {
 		if !a.IsAdmin() {
 			return "", 0, forbidden("you can only add your own devices")
@@ -605,12 +608,26 @@ func (s *Service) IssueDeviceKey(ctx context.Context, a Actor, handle, kind stri
 		if (m.Role == "owner" || m.Role == "admin") && !a.IsOwner() {
 			return "", 0, forbidden("only the owner can add devices for an owner or admin")
 		}
+		// No account recovery (D-16): a personal key joins a device as that
+		// member, so nobody makes one for someone else. The one exception is
+		// the server's own tool giving a member their very first device, which
+		// is how a new pen's owner gets in. Anyone who has ever joined and
+		// loses every device starts again with a new invite.
+		if kind == "personal" {
+			if !a.CLI {
+				return "", 0, forbidden("you can only add your own devices")
+			}
+			joined, err := s.st.HasJoined(m.ID)
+			if err != nil {
+				return "", 0, err
+			}
+			if joined {
+				return "", 0, forbidden("%s has already joined a device, and there is no account recovery: invite them again as a new member", handle)
+			}
+		}
 	}
 	if m.Status != "active" {
 		return "", 0, conflict("%s is %s", handle, m.Status)
-	}
-	if kind != "personal" && kind != "server" {
-		return "", 0, bad("kind must be personal or server")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
