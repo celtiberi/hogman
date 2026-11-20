@@ -853,3 +853,75 @@ func TestNoAccountRecoveryKeys(t *testing.T) {
 		t.Fatalf("root's own next device: %v", err)
 	}
 }
+
+// H7 (audit 2026-11): two owners demoting each other at the same moment must
+// never leave the pen with no owner, because there is no recovery (D-16).
+func TestOwnersCannotAllBeDemoted(t *testing.T) {
+	for round := 0; round < 20; round++ {
+		e := newTestEnv(t)
+		ctx := context.Background()
+		cli := Actor{CLI: true}
+		a, err := e.svc.AddMember(ctx, cli, "ann", "owner")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := e.svc.AddMember(ctx, cli, "bea", "owner")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); _ = e.svc.SetRole(Actor{Member: a}, "bea", "admin") }()
+		go func() { defer wg.Done(); _ = e.svc.SetRole(Actor{Member: b}, "ann", "admin") }()
+		wg.Wait()
+		if n, _ := e.st.CountOwners(); n < 1 {
+			t.Fatalf("round %d: pen left with %d owners", round, n)
+		}
+	}
+}
+
+// H7: an invite carries its maker's authority, so it stops working when the
+// maker loses the role that let them make it.
+func TestInvitesFollowTheirMakersRole(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+	if _, err := e.svc.AddMember(ctx, cli, "root", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	carol, err := e.svc.AddMember(ctx, cli, "carol", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dan, err := e.svc.AddMember(ctx, cli, "dan", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminInv, err := e.svc.MintInvite(Actor{Member: carol}, "admin", "", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memberInv, err := e.svc.MintInvite(Actor{Member: dan}, "member", "", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Carol is demoted: her open invites are revoked straight away.
+	if err := e.svc.SetRole(cli, "carol", "member"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := e.st.InviteByID(adminInv.ID); got.State() != "revoked" {
+		t.Fatalf("carol's admin invite is %q after demotion, want revoked", got.State())
+	}
+	if _, err := e.svc.Redeem(ctx, adminInv.Token, "eve"); err == nil {
+		t.Fatal("an admin invite from a demoted owner still worked")
+	}
+
+	// Even an invite that somehow stayed open is checked at redemption.
+	if err := e.st.SetMemberRole(dan.ID, "member"); err != nil { // bypasses SetRole's revoke
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Redeem(ctx, memberInv.Token, "fay"); err == nil {
+		t.Fatal("a member invite from someone who can no longer invite still worked")
+	}
+}

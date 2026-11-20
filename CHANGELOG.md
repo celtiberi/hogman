@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security (audit quick wins, docs/security/audit-2026-11.md)
+- Registrar (audit H7): two owners demoting each other at the same moment can no longer leave a pen with no owner (one conditional update, under the service lock), and an invite carries its maker's authority. A maker's open invites are revoked when their role shrinks, and redemption re-checks that the maker may still hand out that role.
 - The pen's CA offers only TLS-ALPN on 443 (`http-01` removed, matching HTTPS-only) and refuses certificates for IP addresses or wildcard names (step-ca issuance policy). The portal asks for TLS-ALPN explicitly.
 - HSTS (one year) on the website, every pen's public host, the sign-up page and the home page.
 - CI: e2e always reports (a docs-only change skips the suites), so its checks can be required on main; GitHub Actions pinned to commit SHAs; `govulncheck` on every module for PRs, main and weekly; Dependabot for Go modules, base images and Actions. Secret scanning, push protection and Dependabot security updates are on for the repository.
