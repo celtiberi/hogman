@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"io"
 	"net"
@@ -10,6 +11,8 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -288,5 +291,92 @@ func TestRenderLaunchPlist(t *testing.T) {
 	var parsed any
 	if err := xml.Unmarshal([]byte(p), &parsed); err != nil {
 		t.Fatalf("rendered plist is not valid XML: %v\n%s", err, p)
+	}
+}
+
+func TestFetchNetworkValidation(t *testing.T) {
+	var payload networkInfo
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(payload)
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "https://")
+	c := srv.Client()
+
+	payload = networkInfo{
+		Zone:        "bobo.hogman",
+		LoginServer: "https://" + host,
+		Portal:      "https://home.bobo.hogman",
+		DNSServer:   "100.64.0.2",
+	}
+	if _, err := fetchNetwork(c, host); err != nil {
+		t.Fatalf("valid networkInfo rejected: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*networkInfo)
+	}{
+		{"mismatched login_server", func(n *networkInfo) { n.LoginServer = "https://evil.example" }},
+		{"foreign portal", func(n *networkInfo) { n.Portal = "https://evil.example/phish" }},
+		{"non-mesh dns_server", func(n *networkInfo) { n.DNSServer = "8.8.8.8" }},
+	}
+	for _, tc := range cases {
+		bad := payload
+		tc.mutate(&bad)
+		payload = bad
+		if _, err := fetchNetwork(c, host); err == nil {
+			t.Errorf("%s: expected fetchNetwork to reject payload", tc.name)
+		}
+		payload = networkInfo{
+			Zone:        "bobo.hogman",
+			LoginServer: "https://" + host,
+			Portal:      "https://home.bobo.hogman",
+			DNSServer:   "100.64.0.2",
+		}
+	}
+}
+
+func TestAgentForwardRejectsHTTPSScheme(t *testing.T) {
+	a := newAgent(&agentConfig{Zone: "bobo.hogman"}, nil)
+	req := httptest.NewRequest(http.MethodGet, "https://alice.bobo.hogman/", nil)
+	rec := httptest.NewRecorder()
+	a.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("GET https:// through forward proxy: status=%d want 403", rec.Code)
+	}
+}
+
+func TestWriteTempCertPermissions(t *testing.T) {
+	path, cleanup, err := writeTempCert("PEMDATA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(path)
+	dInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("temp cert dir mode = %o, want 0700", dInfo.Mode().Perm())
+	}
+	fInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("temp cert file mode = %o, want 0600", fInfo.Mode().Perm())
+	}
+	cleanup()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("cleanup did not remove %s", dir)
+	}
+}
+
+func TestRenderSystemdUnitQuotesSpaces(t *testing.T) {
+	u := renderSystemdUnit("bobo.hogman", `/opt/my bin/hogman-join`, `/home/a user/.config/hogman/bobo.hogman`)
+	want := `ExecStart="/opt/my bin/hogman-join" agent "/home/a user/.config/hogman/bobo.hogman"`
+	if !strings.Contains(u, want) {
+		t.Fatalf("unit missing quoted ExecStart %q:\n%s", want, u)
 	}
 }

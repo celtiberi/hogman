@@ -19,6 +19,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -179,6 +180,27 @@ func controlClient(caFile string) (*http.Client, error) {
 	return &http.Client{Timeout: 20 * time.Second, Transport: tr}, nil
 }
 
+var zoneRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?\.hogman$`)
+
+func validateNetworkInfo(host string, n *networkInfo) error {
+	if !zoneRE.MatchString(n.Zone) {
+		return errorf("%s sent an unexpected network name %q", host, n.Zone)
+	}
+	if n.LoginServer != "https://"+host {
+		return errorf("refusing: %s redirected login to %q instead of https://%s", host, n.LoginServer, host)
+	}
+	if n.Portal != "https://home."+n.Zone {
+		return errorf("refusing: %s returned unexpected portal address %q", host, n.Portal)
+	}
+	if n.DNSServer != "" {
+		addr, err := netip.ParseAddr(n.DNSServer)
+		if err != nil || !inMeshRanges(addr) {
+			return errorf("refusing: %s returned non-mesh DNS address %q", host, n.DNSServer)
+		}
+	}
+	return nil
+}
+
 func fetchNetwork(c *http.Client, host string) (*networkInfo, error) {
 	resp, err := c.Get("https://" + host + "/hogman/v1/network")
 	if err != nil {
@@ -192,10 +214,27 @@ func fetchNetwork(c *http.Client, host string) (*networkInfo, error) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&n); err != nil {
 		return nil, errorf("%s sent an unreadable answer: %v", host, err)
 	}
-	if !regexp.MustCompile(`^[a-z0-9-]+\.hogman$`).MatchString(n.Zone) {
-		return nil, errorf("%s sent an unexpected network name %q", host, n.Zone)
+	if err := validateNetworkInfo(host, &n); err != nil {
+		return nil, err
 	}
 	return &n, nil
+}
+
+func writeTempCert(pemText string) (string, func(), error) {
+	tmpDir, err := os.MkdirTemp("", "hogman-*")
+	if err != nil {
+		return "", nil, err
+	}
+	if err := os.Chmod(tmpDir, 0o700); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return "", nil, err
+	}
+	certFile := filepath.Join(tmpDir, "root.crt")
+	if err := os.WriteFile(certFile, []byte(pemText), 0o600); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return "", nil, err
+	}
+	return certFile, func() { _ = os.RemoveAll(tmpDir) }, nil
 }
 
 func redeem(c *http.Client, host, token, handle string) (*enrolment, error) {
@@ -303,10 +342,11 @@ func join(raw string, o options) error {
 	}
 
 	// Trust first: if this fails (no admin rights), the invite is still unused.
-	certFile := filepath.Join(os.TempDir(), "hogman-"+n.Zone+"-root.crt")
-	if err := os.WriteFile(certFile, []byte(root.PEM), 0o644); err != nil {
+	certFile, cleanupCert, err := writeTempCert(root.PEM)
+	if err != nil {
 		return err
 	}
+	defer cleanupCert()
 	if !o.noTrust {
 		step("Adding the %s certificate to this computer", n.Zone)
 		if err := installTrust(root, certFile); err != nil {
@@ -475,8 +515,11 @@ func leave(raw string, o options) error {
 	}
 	// The certificate first: it is the part that matters on this computer,
 	// and it needs nothing from the network.
-	certFile := filepath.Join(os.TempDir(), "hogman-"+n.Zone+"-root.crt")
-	_ = os.WriteFile(certFile, []byte(root.PEM), 0o644)
+	certFile, cleanupCert, err := writeTempCert(root.PEM)
+	if err != nil {
+		return err
+	}
+	defer cleanupCert()
 	had := trustInstalled(root)
 	if err := removeTrust(root, certFile); err != nil {
 		return err

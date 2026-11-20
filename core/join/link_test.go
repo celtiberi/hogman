@@ -38,6 +38,7 @@ func TestParseLink(t *testing.T) {
 		{in: "https://hs.example.com/join#t=x", wantErr: "fingerprint"},
 		{in: "https://hs.example.com/join#t=x&fp=ABC", wantErr: "fingerprint"},
 		{in: "https://hs.example.com/join#t=x&k=y&fp=" + fp64, wantErr: "both"},
+		{in: "https://user:pass@hs.example.com/join#t=x&fp=" + fp64, wantErr: "credentials"},
 	}
 	for _, c := range cases {
 		l, err := ParseLink(c.in)
@@ -53,19 +54,27 @@ func TestParseLink(t *testing.T) {
 	}
 }
 
-func makeRoot(t *testing.T, permitted []string, excludeIPs bool) (string, string) {
+func makeCustomRoot(t *testing.T, permitted []string, permIPs, exclIPs []string, notBefore, notAfter time.Time) (string, string) {
 	t.Helper()
 	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	parseCIDRs := func(cidrs []string) []*net.IPNet {
+		var out []*net.IPNet
+		for _, c := range cidrs {
+			_, n, err := net.ParseCIDR(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, n)
+		}
+		return out
+	}
 	tpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test root"},
-		NotBefore: time.Now(), NotAfter: time.Now().Add(time.Hour),
+		NotBefore: notBefore, NotAfter: notAfter,
 		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
 		PermittedDNSDomains: permitted, PermittedDNSDomainsCritical: len(permitted) > 0,
-	}
-	if excludeIPs {
-		_, all4, _ := net.ParseCIDR("0.0.0.0/0")
-		_, all6, _ := net.ParseCIDR("::/0")
-		tpl.ExcludedIPRanges = []*net.IPNet{all4, all6}
+		PermittedIPRanges: parseCIDRs(permIPs),
+		ExcludedIPRanges:  parseCIDRs(exclIPs),
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &k.PublicKey, k)
 	if err != nil {
@@ -73,6 +82,15 @@ func makeRoot(t *testing.T, permitted []string, excludeIPs bool) (string, string
 	}
 	sum := sha256.Sum256(der)
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), strings.ToUpper(hex.EncodeToString(sum[:]))
+}
+
+func makeRoot(t *testing.T, permitted []string, excludeIPs bool) (string, string) {
+	t.Helper()
+	var excl []string
+	if excludeIPs {
+		excl = []string{"0.0.0.0/0", "::/0"}
+	}
+	return makeCustomRoot(t, permitted, nil, excl, time.Now().Add(-time.Minute), time.Now().Add(time.Hour))
 }
 
 func TestCheckRoot(t *testing.T) {
@@ -93,5 +111,25 @@ func TestCheckRoot(t *testing.T) {
 	noIP, noIPFP := makeRoot(t, []string{"bobo.hogman"}, false)
 	if _, err := CheckRoot(noIP, noIPFP, "bobo.hogman"); err == nil || !strings.Contains(err.Error(), "IP") {
 		t.Errorf("root allowing IPs accepted: %v", err)
+	}
+
+	now := time.Now()
+	badCases := []struct {
+		name      string
+		permIPs   []string
+		exclIPs   []string
+		notBefore time.Time
+		notAfter  time.Time
+	}{
+		{"permitted IPv4 range", []string{"0.0.0.0/0"}, []string{"0.0.0.0/0", "::/0"}, now.Add(-time.Minute), now.Add(time.Hour)},
+		{"narrow IP exclusion", nil, []string{"127.0.0.1/32"}, now.Add(-time.Minute), now.Add(time.Hour)},
+		{"IPv4 exclusion without IPv6", nil, []string{"0.0.0.0/0"}, now.Add(-time.Minute), now.Add(time.Hour)},
+		{"expired root", nil, []string{"0.0.0.0/0", "::/0"}, now.Add(-2 * time.Hour), now.Add(-time.Minute)},
+	}
+	for _, tc := range badCases {
+		pemText, fp := makeCustomRoot(t, []string{"bobo.hogman"}, tc.permIPs, tc.exclIPs, tc.notBefore, tc.notAfter)
+		if _, err := CheckRoot(pemText, fp, "bobo.hogman"); err == nil {
+			t.Errorf("%s: expected CheckRoot to reject certificate", tc.name)
+		}
 	}
 }

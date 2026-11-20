@@ -114,10 +114,11 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		return nil
 	}
 
-	certFile := filepath.Join(os.TempDir(), "hogman-"+n.Zone+"-root.crt")
-	if err := os.WriteFile(certFile, []byte(root.PEM), 0o644); err != nil {
+	certFile, cleanupCert, err := writeTempCert(root.PEM)
+	if err != nil {
 		return err
 	}
+	defer cleanupCert()
 	if !o.noTrust {
 		step("Adding the %s certificate to this computer", n.Zone)
 		if err := installTrust(root, certFile); err != nil {
@@ -126,6 +127,7 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 	}
 
 	handle := ""
+	created := existing == nil
 	cfg := existing
 	if cfg != nil {
 		step("This computer is already set up for %s", n.Zone)
@@ -166,14 +168,22 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		}
 	}
 
+	cleanupFailedSetup := func() {
+		if created {
+			stopAgent(dir, cfg)
+			_ = os.RemoveAll(dir)
+		}
+	}
 	step("Starting the pen connection as %q", cfg.Hostname)
 	if st, err := agentState(cfg); err != nil || !st.Up {
 		if err := startAgent(dir, cfg, o); err != nil {
+			cleanupFailedSetup()
 			return err
 		}
 	}
 	st, err := waitAgentUp(cfg, 90*time.Second)
 	if err != nil {
+		cleanupFailedSetup()
 		return err
 	}
 	note("online as %s", strings.Join(st.IPs, ", "))

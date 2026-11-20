@@ -10,15 +10,19 @@ const systemKeychain = "/Library/Keychains/System.keychain"
 func isRoot() bool { return os.Geteuid() == 0 }
 
 // trustInstalled needs both: the certificate in the System keychain, and an
-// admin trust setting for it. A certificate can be present but untrusted, for
-// example after an approval was refused.
+// admin trust setting for it verified by macOS's own trust engine.
 func trustInstalled(r *RootInfo) bool {
 	out, err := run(false, "security", "find-certificate", "-a", "-Z", systemKeychain)
 	if err != nil || !strings.Contains(out, r.SHA1) {
 		return false
 	}
-	settings, err := run(false, "security", "dump-trust-settings", "-d")
-	return err == nil && strings.Contains(settings, r.Cert.Subject.CommonName)
+	certFile, cleanup, err := writeTempCert(r.PEM)
+	if err != nil {
+		return false
+	}
+	defer cleanup()
+	_, err = run(false, "security", "verify-cert", "-L", "-l", "-p", "ssl", "-c", certFile)
+	return err == nil
 }
 
 // dropUntrusted removes a copy that was added but never trusted.
