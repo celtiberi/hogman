@@ -86,14 +86,79 @@ valid_ipv4() {
 
 # ---------------------------------------------------------------- front ----
 
+# Keep the shared front door's public static files (join page and join tool
+# binaries) synced from $SRC without mounting any pen directory into the front door.
+sync_front_assets() {
+  mkdir -p "$FRONT/join-page" "$FRONT/join-dl"
+  if [ -d "$SRC/join-page" ]; then
+    rsync -a --delete "$SRC/join-page/" "$FRONT/join-page/"
+  fi
+  if [ -f "$SRC/prebuilt/join/SHA256SUMS" ]; then
+    rsync -a --delete "$SRC/prebuilt/join/" "$FRONT/join-dl/"
+  elif [ ! -f "$FRONT/join-dl/SHA256SUMS" ] && [ -d "$SRC/join" ]; then
+    info "Building the join tool for the front door"
+    docker build -q --output "type=local,dest=$FRONT/join-dl" "$SRC/join" >/dev/null
+  fi
+}
+
 write_front() {
+  sync_front_assets
   local caddy="$FRONT/Caddyfile.new" compose="$FRONT/compose.yaml.new" aliases="" n host
   {
     echo "# Written by hogman-host. Edit pens, not this file."
     echo "{"
-    [ -n "${FRONT_TLS_MODE:-}" ] && echo "	$FRONT_TLS_MODE"
+    if [ -n "${FRONT_TLS_MODE:-}" ]; then echo "	$FRONT_TLS_MODE"; fi
     echo "}"
     echo
+    cat <<'EOF'
+(pen) {
+	handle /generate_204 {
+		respond 204
+	}
+	# The page an invite link opens, and the join tool downloads.
+	handle /join {
+		root * /srv/join-page
+		rewrite * /index.html
+		header {
+			X-Frame-Options DENY
+			X-Content-Type-Options nosniff
+			Referrer-Policy no-referrer
+			Cache-Control no-store
+			Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+			-Server
+		}
+		file_server
+	}
+	handle_path /join/assets/* {
+		root * /srv/join-page
+		header X-Content-Type-Options nosniff
+		file_server
+	}
+	handle_path /join/dl/* {
+		root * /srv/join-dl
+		file_server
+	}
+	handle /hogman/* {
+		request_body {
+			max_size 16KB
+		}
+		reverse_proxy pen-{args[0]}-core-mesh-1:8081
+	}
+	# Keep Headscale's admin REST API and Swagger UI off the public front door.
+	handle /api/* {
+		respond 404
+	}
+	handle /swagger* {
+		respond 404
+	}
+	handle {
+		reverse_proxy pen-{args[0]}-headscale-1:8080 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+}
+
+EOF
     for n in $(pen_names); do
       [ -f "$PENS/$n/.removed" ] && continue
       host="$(pen_env "$n" PUBLIC_HOST)"
@@ -110,7 +175,7 @@ http://$host {
 	}
 }
 $host {
-	reverse_proxy edge-$n:80
+	import pen $n
 }
 
 EOF
@@ -131,9 +196,10 @@ $SIGNUP_HOST {
 EOF
     fi
   } > "$caddy"
-  # The front door sits on the shared network (to reach each pen's edge) and
-  # on each pen's own private network, where it answers for that pen's
-  # control hostname only. Pens never share a network with each other's core.
+  # The front door joins "hogman-front" (for the sign-up page) and each live
+  # pen's own private network, addressing each pen by its unique container names
+  # (pen-<name>-core-mesh-1, pen-<name>-headscale-1). Pens never share a network
+  # with each other's core or join "hogman-front".
   # Pen networks are attached to the running front door (reload_front), not
   # listed here: listing them would recreate it on every new pen, cutting every
   # pen's connections, including the sign-up request that asked for the pen.
@@ -146,11 +212,16 @@ services:
     restart: unless-stopped
     mem_limit: 128m
     pids_limit: 128
+    environment:
+      GOGC: "25"
+      GOMEMLIMIT: 96MiB
     ports: ["80:80", "443:443"]
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./data:/data
       - ./config:/config
+      - ./join-page:/srv/join-page:ro
+      - ./join-dl:/srv/join-dl:ro
     networks: [hogman-front]
 networks:
   hogman-front:
@@ -275,7 +346,7 @@ EOF
   reload_front
   local front_ca=""
   [ -n "${FRONT_TLS_MODE:-}" ] && front_ca="$FRONT/data/caddy/pki/authorities/local/root.crt"
-  (cd "$PENS/$n" && ./hogman init && FRONT_CA="$front_ca" ./hogman up)
+  (cd "$PENS/$n" && ./hogman init && FRONT_CA="$front_ca" FRONT_JOIN_DL="$FRONT/join-dl" ./hogman up)
   info "Pen $n is up. Create its owner:  hogman-host pen $n member add <handle> --role owner"
   info "Then join your own laptop:      hogman-host pen $n device key <handle> personal  (open the link on it)"
   info "Its root key is in $PENS/$n/data/pki/offline/: move it somewhere safe and delete it here."
@@ -312,7 +383,7 @@ cmd_upgrade() {
   reload_front
   local front_ca=""
   [ -n "${FRONT_TLS_MODE:-}" ] && front_ca="$FRONT/data/caddy/pki/authorities/local/root.crt"
-  (cd "$PENS/$n" && FRONT_CA="$front_ca" ./hogman up)
+  (cd "$PENS/$n" && FRONT_CA="$front_ca" FRONT_JOIN_DL="$FRONT/join-dl" ./hogman up)
 }
 
 cmd_remove() {

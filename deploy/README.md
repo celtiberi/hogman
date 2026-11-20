@@ -84,11 +84,13 @@ Two tools run a real server:
   pens' ports, and swap.
 - **`hogman-host`** runs any number of pens behind one shared **front door**. The front
   door holds ports 80 and 443 and a Let's Encrypt certificate for every pen's control
-  hostname, and hands each pen's traffic to that pen alone.
+  hostname, serves `/join` and the join tool downloads, enforces edge blocks/headers, and
+  hands each pen's Headscale and registrar traffic directly to that pen alone (so pens behind
+  it do not need their own `edge` container).
 
 | Shared by all pens | Each pen's own |
 |---|---|
-| The server, ports 80/443, the front door | Headscale, DNS, certificate authority, registrar, database, keys, relay port |
+| The server, ports 80/443, the front door (TLS, `/join`, `/join/dl`) | Headscale, DNS, certificate authority, registrar, database, keys, relay port |
 
 Each pen lives in its own folder, `/opt/hogman/pens/<name>`. Copy that folder to another
 server and the pen moves with it.

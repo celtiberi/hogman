@@ -5,8 +5,8 @@ its registrar, and the join tool, deployable with one command on a small server.
 
 | Service | Image | Where it is reachable |
 |---|---|---|
-| `headscale` | Headscale 0.29.7 | Behind `edge`; STUN on udp/3478 |
-| `edge` | Caddy 2.11.9 | Public: `https://<PUBLIC_HOST>` (control plane, relay, invite redemption, join page and tool downloads) |
+| `headscale` | Headscale 0.29.7 | Behind `edge` (or shared front door); STUN on udp/3478 |
+| `edge` | Caddy 2.11.9 | Standalone installs only: public `https://<PUBLIC_HOST>` (behind `hogman-host`, the shared front door serves these routes directly) |
 | `core-mesh` | Tailscale 1.104.7 | Mesh identity `core` (tag:infra) |
 | `coredns` | CoreDNS 1.15.0 | `core` mesh IP, port 53; authoritative for `<network>.hogman` |
 | `portal` | Caddy 2.11.9 | `https://home.<network>.hogman`, mesh only; fronts the registrar's API |

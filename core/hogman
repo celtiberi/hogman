@@ -270,6 +270,10 @@ use_prebuilt_or_build() {
     info "Using the prebuilt join tool from this release"
     mkdir -p "$DATA/join-dl"
     cp prebuilt/join/* "$DATA/join-dl/"
+  elif [ -n "${FRONT_JOIN_DL:-}" ] && [ -f "$FRONT_JOIN_DL/SHA256SUMS" ]; then
+    info "Using the join tool built for the front door"
+    mkdir -p "$DATA/join-dl"
+    cp "$FRONT_JOIN_DL"/* "$DATA/join-dl/"
   else
     info "Building the join tool for download"
     docker build -q --output "type=local,dest=$DATA/join-dl" join >/dev/null
@@ -325,7 +329,11 @@ cmd_up() {
   if [ -z "${CORE_MESH_IP:-}" ]; then
     info "First start: bootstrapping"
     render_headscale
-    dc up -d headscale edge
+    if [ "$FRONT_DOOR" = true ]; then
+      dc up -d headscale
+    else
+      dc up -d headscale edge
+    fi
     wait_for "headscale" 60 hs health
 
     # Default-deny from the first moment: nothing but the core may talk.
@@ -371,6 +379,11 @@ cmd_up() {
   render templates/ca.json "$DATA/step/config/ca.json"
   use_prebuilt_or_build
 
+  if [ "$FRONT_DOOR" = true ]; then
+    # Upgraded pens from before the front door took over edge's job may still
+    # have an edge container; profiled services are not removed as orphans.
+    dc --profile standalone rm -sf edge >/dev/null 2>&1 || true
+  fi
   dc up -d --build --remove-orphans
   wait_for "registrar" 60 reg sync
   cleanup_old_ca
@@ -389,7 +402,13 @@ main() {
     init)      cmd_init ;;
     up)        cmd_up ;;
     down)      load_env
-               if [ "$TEST_MODE" = true ]; then dc --profile clients down "$@"; else dc down "$@"; fi ;;
+               if [ "$FRONT_DOOR" = true ]; then
+                 dc --profile standalone down "$@"
+               elif [ "$TEST_MODE" = true ]; then
+                 dc --profile clients down "$@"
+               else
+                 dc down "$@"
+               fi ;;
     status)    load_env; dc ps; echo; reg member list; echo; reg device list ;;
     logs)      load_env; dc logs -f "$@" ;;
     member|invite|device|name|audit|sync)
