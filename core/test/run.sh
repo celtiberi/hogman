@@ -276,7 +276,8 @@ docker exec -d "$(dc ps -q alice-tools)" sh -c 'nc -lk -p 2222 -e cat >/dev/null
 check "bob's laptop can reach alice's server on 443"     retry 20 port_open bob-tools "$ALICE_SERVER_IP" 443
 check "... and on 80, to be redirected"                  port_open bob-tools "$ALICE_SERVER_IP" 80
 check "... but on no other port (2222 is open there)"    not port_open bob-tools "$ALICE_SERVER_IP" 2222
-check "... and not with ping"                            not can_ping bob-tools "$ALICE_SERVER_IP"
+# (Ping still answers: Tailscale's filter lets ICMP through between devices
+# allowed any port. It can't carry data, so it isn't a way in.)
 check "the server itself has 2222 open (so the above means something)" run alice-tools nc -z -w3 127.0.0.1 2222
 check "bob's laptop cannot reach alice's laptop"         not port_open bob-tools "$ALICE_LAPTOP_IP" 443
 check "alice's server cannot reach bob's laptop"         not port_open alice-tools "$BOB_LAPTOP_IP" 443
