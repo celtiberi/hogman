@@ -1,0 +1,296 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+)
+
+// broker raises pens. One at a time: a small server should not build two
+// pens at once, and it makes a sign-up code impossible to use twice.
+type broker struct {
+	home  string // HOGMAN_HOME
+	tool  string // hogman-host
+	token string
+	mu    sync.Mutex
+}
+
+func runBroker() {
+	b := &broker{
+		home:  env("HOGMAN_HOME", "/opt/hogman"),
+		tool:  env("HOGMAN_HOST_TOOL", "hogman-host"),
+		token: readToken(),
+	}
+	addr := env("BROKER_ADDR", ":9090")
+	log.Printf("broker on %s", addr)
+	srv := &http.Server{Addr: addr, Handler: b.handler(), ReadHeaderTimeout: 10 * time.Second}
+	log.Fatal(srv.ListenAndServe())
+}
+
+func (b *broker) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /capacity", b.capacity)
+	mux.HandleFunc("GET /check", b.check)
+	mux.HandleFunc("POST /provision", b.provision)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(got), []byte(b.token)) != 1 {
+			jsonOut(w, 401, map[string]string{"error": "unauthorized"})
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+type capacity struct {
+	Pens int  `json:"pens"`
+	Max  int  `json:"max"`
+	Open bool `json:"open"`
+}
+
+func (b *broker) run(ctx context.Context, args ...string) (stdout []byte, code int, stderr string) {
+	cmd := exec.CommandContext(ctx, b.tool, args...)
+	cmd.Env = append(os.Environ(), "HOGMAN_HOME="+b.home)
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	err := cmd.Run()
+	code = 0
+	if err != nil {
+		code = -1
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			code = ee.ExitCode()
+		}
+	}
+	return out.Bytes(), code, errb.String()
+}
+
+func (b *broker) readCapacity(ctx context.Context) (*capacity, error) {
+	out, code, stderr := b.run(ctx, "capacity")
+	if code != 0 {
+		return nil, fmt.Errorf("capacity: exit %d: %s", code, lastLine(stderr))
+	}
+	var c capacity
+	if err := json.Unmarshal(out, &c); err != nil {
+		return nil, fmt.Errorf("capacity: %v", err)
+	}
+	return &c, nil
+}
+
+func (b *broker) capacity(w http.ResponseWriter, r *http.Request) {
+	c, err := b.readCapacity(r.Context())
+	if err != nil {
+		log.Print(err)
+		jsonOut(w, 500, map[string]string{"error": "internal error"})
+		return
+	}
+	jsonOut(w, 200, c)
+}
+
+func (b *broker) taken(pen string) bool {
+	_, err := os.Stat(filepath.Join(b.home, "pens", pen))
+	return err == nil
+}
+
+func (b *broker) check(w http.ResponseWriter, r *http.Request) {
+	pen := r.URL.Query().Get("pen")
+	if why, ok := validPen(pen); !ok {
+		jsonOut(w, 200, map[string]any{"free": false, "reason": why})
+		return
+	}
+	if b.taken(pen) {
+		jsonOut(w, 200, map[string]any{"free": false, "reason": "that name is taken"})
+		return
+	}
+	jsonOut(w, 200, map[string]any{"free": true})
+}
+
+func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Code  string `json:"code"`
+		Pen   string `json:"pen"`
+		Owner string `json:"owner"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		jsonOut(w, 400, map[string]string{"error": "bad request"})
+		return
+	}
+	in.Code = normCode(in.Code)
+	if why, ok := validPen(in.Pen); !ok {
+		jsonOut(w, 400, map[string]string{"error": "pen name: " + why})
+		return
+	}
+	if why, ok := validHandle(in.Owner); !ok {
+		jsonOut(w, 400, map[string]string{"error": "your name: " + why})
+		return
+	}
+	if !codeRE.MatchString(in.Code) {
+		jsonOut(w, 403, map[string]string{"error": "that sign-up code isn't right"})
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	note, ok, err := b.findCode(in.Code)
+	if err != nil {
+		log.Print(err)
+		jsonOut(w, 500, map[string]string{"error": "internal error"})
+		return
+	}
+	if !ok {
+		jsonOut(w, 403, map[string]string{"error": "that sign-up code isn't right, or it was already used"})
+		return
+	}
+	if b.taken(in.Pen) {
+		jsonOut(w, 409, map[string]string{"error": "that name is taken"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	start := time.Now()
+	out, code, stderr := b.run(ctx, "provision", in.Pen, in.Owner)
+	switch code {
+	case 0:
+	case 2:
+		jsonOut(w, 409, map[string]string{"error": "that name is taken"})
+		return
+	case 3:
+		jsonOut(w, 503, map[string]string{"error": "this server is full right now"})
+		return
+	default:
+		log.Printf("provision %s for %s failed (exit %d): %s", in.Pen, in.Owner, code, strings.TrimSpace(stderr))
+		jsonOut(w, 500, map[string]string{"error": "raising your pen failed. Your code still works; try again later."})
+		return
+	}
+	var res map[string]string
+	if err := json.Unmarshal(lastJSONLine(out), &res); err != nil || res["join_link"] == "" {
+		log.Printf("provision %s: unreadable result %q", in.Pen, out)
+		jsonOut(w, 500, map[string]string{"error": "internal error"})
+		return
+	}
+	if err := b.useCode(in.Code); err != nil {
+		log.Printf("could not mark code used: %v", err) // the pen exists; say so anyway
+	}
+	b.ledger(fmt.Sprintf("%s raised %s for %s with %s (%s) in %s",
+		time.Now().UTC().Format(time.RFC3339), in.Pen, in.Owner, in.Code, note, time.Since(start).Round(time.Second)))
+	jsonOut(w, 201, res)
+}
+
+// --- sign-up codes: $HOGMAN_HOME/signup/codes, one "CODE note" per line ---
+
+func (b *broker) codesPath() string { return filepath.Join(b.home, "signup", "codes") }
+
+func (b *broker) lockCodes() (func(), error) {
+	f, err := os.OpenFile(b.codesPath()+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
+}
+
+func (b *broker) findCode(code string) (note string, ok bool, err error) {
+	unlock, err := b.lockCodes()
+	if err != nil {
+		return "", false, err
+	}
+	defer unlock()
+	f, err := os.Open(b.codesPath())
+	if err != nil {
+		return "", false, err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		c, n, _ := strings.Cut(strings.TrimSpace(sc.Text()), " ")
+		if subtle.ConstantTimeCompare([]byte(c), []byte(code)) == 1 {
+			return n, true, nil
+		}
+	}
+	return "", false, sc.Err()
+}
+
+func (b *broker) useCode(code string) error {
+	unlock, err := b.lockCodes()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	data, err := os.ReadFile(b.codesPath())
+	if err != nil {
+		return err
+	}
+	var keep []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if c, _, _ := strings.Cut(strings.TrimSpace(line), " "); c != "" && c != code {
+			keep = append(keep, line)
+		}
+	}
+	tmp := b.codesPath() + ".new"
+	out := strings.Join(keep, "\n")
+	if out != "" {
+		out += "\n"
+	}
+	if err := os.WriteFile(tmp, []byte(out), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, b.codesPath())
+}
+
+func (b *broker) ledger(line string) {
+	f, err := os.OpenFile(filepath.Join(b.home, "signup", "raised.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		log.Print(err)
+		return
+	}
+	defer f.Close()
+	fmt.Fprintln(f, line)
+	log.Print(line)
+}
+
+// --- helpers ---
+
+func jsonOut(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func lastLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.LastIndexByte(s, '\n'); i >= 0 {
+		return s[i+1:]
+	}
+	return s
+}
+
+func lastJSONLine(b []byte) []byte {
+	lines := bytes.Split(bytes.TrimSpace(b), []byte("\n"))
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := bytes.TrimSpace(lines[i]); len(l) > 0 && l[0] == '{' {
+			return l
+		}
+	}
+	return nil
+}

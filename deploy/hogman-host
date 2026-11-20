@@ -38,6 +38,13 @@ usage: hogman-host <command>
   backup-allow '<ssh-public-key>'  let another machine download the encrypted backups, and nothing else
   backup                         back up every pen now
 
+  signup-setup <pens-domain> <signup-host> [max-pens]
+                                 a sign-up page that raises pens for other people
+                                 (no arguments: rebuild it with the saved settings)
+  signup-code [note]             a single-use sign-up code (sign-ups are invite-only)
+  capacity                       how many pens this server holds, and its limit
+  provision <pen> <owner>        raise a hosted pen (what the sign-up page runs)
+
 The control hostname's DNS must point at this server before `add`, so the
 front door can get its certificate.
 EOF
@@ -105,25 +112,30 @@ $host {
 
 EOF
     done
+    if [ -n "${SIGNUP_HOST:-}" ]; then
+      valid_host "$SIGNUP_HOST" || die "invalid SIGNUP_HOST: $SIGNUP_HOST"
+      cat <<EOF
+# the sign-up page
+http://$SIGNUP_HOST {
+	redir https://{host}{uri} permanent
+}
+$SIGNUP_HOST {
+	reverse_proxy signup:8080 {
+		header_up X-Forwarded-For {remote_host}
+	}
+}
+
+EOF
+    fi
   } > "$caddy"
   # The front door sits on the shared network (to reach each pen's edge) and
   # on each pen's own private network, where it answers for that pen's
   # control hostname only. Pens never share a network with each other's core.
-  local svc_nets="      hogman-front: {}" top_nets="  hogman-front:
-    external: true"
-  for n in $(pen_names); do
-    [ -f "$PENS/$n/.removed" ] && continue
-    host="$(pen_env "$n" PUBLIC_HOST)"
-    [ -n "$host" ] || continue
-    svc_nets="$svc_nets
-      pen-$n-core:
-        aliases: [\"$host\"]"
-    top_nets="$top_nets
-  pen-$n-core:
-    external: true"
-  done
+  # Pen networks are attached to the running front door (reload_front), not
+  # listed here: listing them would recreate it on every new pen, cutting every
+  # pen's connections, including the sign-up request that asked for the pen.
   cat > "$compose" <<EOF
-# Written by hogman-host.
+# Written by hogman-host. Pens' networks are attached by hogman-host, not here.
 name: hogman-front
 services:
   front:
@@ -136,19 +148,43 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./data:/data
       - ./config:/config
-    networks:
-$svc_nets
+    networks: [hogman-front]
 networks:
-$top_nets
+  hogman-front:
+    external: true
 EOF
-  mv "$caddy" "$FRONT/Caddyfile"
+  # Rewritten in place, not renamed over: the front door mounts this one file,
+  # and a mounted file that is replaced stays the old one inside the container.
+  cat "$caddy" > "$FRONT/Caddyfile"; rm -f "$caddy"
   mv "$compose" "$FRONT/compose.yaml"
+}
+
+# front_join: attach the running front door to each live pen's network (with
+# the pen's control hostname as its name there) and detach it from the rest.
+front_join() {
+  local c=hogman-front-front-1 n host attached
+  attached="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$c" 2>/dev/null)" || return 1
+  for n in $(pen_names); do
+    [ -f "$PENS/$n/.removed" ] && continue
+    host="$(pen_env "$n" PUBLIC_HOST)"
+    [ -n "$host" ] || continue
+    grep -qw "pen-$n-core" <<<"$attached" && continue
+    docker network connect --alias "$host" "pen-$n-core" "$c" || return 1
+  done
+  for net in $attached; do
+    case "$net" in pen-*-core) ;; *) continue ;; esac
+    n="${net#pen-}"; n="${n%-core}"
+    if [ ! -d "$PENS/$n" ] || [ -f "$PENS/$n/.removed" ]; then
+      docker network disconnect "$net" "$c" >/dev/null 2>&1 || true
+    fi
+  done
 }
 
 reload_front() {
   (
     cd "$FRONT"
     docker compose up -d --remove-orphans >/dev/null 2>&1 || exit 1
+    front_join || exit 1
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       docker compose exec -T front caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 && exit 0
       sleep 1
@@ -389,8 +425,213 @@ cmd_backup() {
   [ "$ok" -gt 0 ] || info "no pens to back up"
 }
 
+# --------------------------------------------------------------- hosting ----
+# Pens raised for other people from the sign-up page. The page's broker runs
+# `provision`; a person runs the rest.
+
+SIGNUP="$HOGMAN_HOME/signup"
+HOSTED_RE='^[a-z][a-z0-9-]{1,28}[a-z0-9]$'   # 3-30 characters
+HANDLE_RE='^[a-z][a-z0-9-]{0,30}[a-z0-9]$'   # the registrar's rule
+
+live_pens() { local n c=0; for n in $(pen_names); do [ -f "$PENS/$n/.removed" ] || c=$((c + 1)); done; echo "$c"; }
+
+set_host_var() {  # set_host_var KEY value: in host.env, replacing any old value
+  local tmp; tmp="$(mktemp)"
+  grep -v "^$1=" "$HOSTENV" > "$tmp" || true
+  echo "$1=$2" >> "$tmp"
+  install -m 0600 "$tmp" "$HOSTENV"; rm -f "$tmp"
+}
+
+# The root key of a hosted pen never stays on the server in the clear: it is
+# encrypted to the operator's backup key and the plain copy is deleted. The
+# pen runs on its intermediate (5 years); the root is needed only to renew it.
+escrow_root() {
+  local n="$1" off="$PENS/$1/data/pki/offline" out="$PENS/$1/data/pki/root-escrow.tar.gz.age"
+  [ -s "$RECIPIENT" ] || die "no backup key: run hogman-host backup-setup first"
+  [ -n "$(ls -A "$off" 2>/dev/null)" ] || return 0
+  tar -C "$off" -czf - . | age -r "$(cat "$RECIPIENT")" > "$out.part"
+  [ -s "$out.part" ] || die "escrowing $n's root key failed"
+  chmod 0600 "$out.part"; mv "$out.part" "$out"
+  rm -f "$off"/*
+}
+
+cmd_capacity() {
+  load_host
+  local n max="${MAX_PENS:-8}"; n="$(live_pens)"
+  printf '{"pens":%d,"max":%d,"open":%s}\n' "$n" "$max" "$([ "$n" -lt "$max" ] && echo true || echo false)"
+}
+
+# provision <pen> <owner>: raise <pen>.<PENS_DOMAIN> with <owner> as its keeper
+# and print, as JSON, the one-time link that joins the keeper's first device.
+# Exit 2: the name is taken. Exit 3: the server is full.
+cmd_provision() {
+  load_host
+  local n="${1:-}" owner="${2:-}"
+  [ -n "${PENS_DOMAIN:-}" ] || die "sign-ups are not set up: hogman-host signup-setup"
+  [[ "$n" =~ $HOSTED_RE ]] || die "pen names are 3-30 lowercase letters, digits and dashes, starting with a letter"
+  [[ "$owner" =~ $HANDLE_RE ]] || die "invalid handle: $owner"
+  [ -s "$RECIPIENT" ] || die "no backup key: run hogman-host backup-setup first"
+  [ -e "$PENS/$n" ] && { echo "hogman-host: pen $n already exists" >&2; exit 2; }
+  [ "$(live_pens)" -lt "${MAX_PENS:-8}" ] || { echo "hogman-host: this server is full" >&2; exit 3; }
+  # All or nothing: a pen that fails half-way is taken down again, so its name
+  # and memory aren't stuck, and kept in failed/ to see what went wrong.
+  # (Not `if ! ( ... )`: bash ignores set -e inside a subshell used as a condition.)
+  local res rc; res="$(mktemp)"
+  set +e
+  ( set -e; provision_steps "$n" "$owner" ) > "$res"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$res"
+    provision_rollback "$n"
+    die "raising $n failed; rolled back (its folder is in $HOGMAN_HOME/failed/)"
+  fi
+  local link exp
+  link="$(sed -n 1p "$res")"; exp="$(sed -n 2p "$res")"; rm -f "$res"
+  info "pen $n raised for $owner"
+  printf '{"pen":"%s","zone":"%s.hogman","host":"%s","owner":"%s","join_link":"%s","valid_until":"%s"}\n' \
+    "$n" "$n" "$n.$PENS_DOMAIN" "$owner" "$link" "$exp"
+}
+
+# signup-setup <pens-domain> <signup-host> [max-pens]: turn on the sign-up page.
+# Pens get <name>.<pens-domain>; point *.<pens-domain> and <signup-host> here.
+provision_steps() {  # in a subshell: prints the join link, then its expiry
+  local n="$1" owner="$2" out link
+  cmd_add "$n" "$n.$PENS_DOMAIN" >&2
+  echo "HOSTED=true" >> "$PENS/$n/.env"
+  (cd "$PENS/$n" && ./hogman member add "$owner" --role owner) >&2
+  out="$(cd "$PENS/$n" && ./hogman device key "$owner" personal)"
+  link="$(awk '/^link:/ {print $2}' <<<"$out")"
+  [[ "$link" =~ ^https://[a-z0-9.-]+/join#k=[A-Za-z0-9_-]+\&fp=[A-Fa-f0-9:]+$ ]] || die "no join link for $owner: $out"
+  escrow_root "$n"
+  echo "$link"
+  awk '/^valid until/ {print $3, $4}' <<<"$out"
+}
+
+provision_rollback() {
+  local n="$1"
+  [ -d "$PENS/$n" ] || return 0
+  (cd "$PENS/$n" && ./hogman down -v --remove-orphans >/dev/null 2>&1) || true
+  mkdir -p "$HOGMAN_HOME/failed"
+  mv "$PENS/$n" "$HOGMAN_HOME/failed/$n-$(date -u +%Y%m%dT%H%M%SZ)"
+  write_front; reload_front
+  docker network rm "pen-$n-core" >/dev/null 2>&1 || true
+}
+
+cmd_signup_setup() {
+  load_host
+  # With no arguments: refresh it with the saved settings (install.sh does this).
+  local domain="${1:-${PENS_DOMAIN:-}}" host="${2:-${SIGNUP_HOST:-}}" max="${3:-${MAX_PENS:-8}}"
+  valid_host "$domain" && valid_host "$host" || die "usage: hogman-host signup-setup <pens-domain> <signup-host> [max-pens]"
+  [[ "$max" =~ ^[0-9]+$ ]] && [ "$max" -ge 1 ] && [ "$max" -le 100 ] || die "max-pens is 1-100"
+  [ -s "$RECIPIENT" ] || die "set up backups first (hosted pens' root keys are escrowed to the backup key): hogman-host backup-setup"
+  [ -d "$HOGMAN_HOME/signup-src" ] || die "no sign-up code in $HOGMAN_HOME/signup-src (install.sh puts it there)"
+  set_host_var PENS_DOMAIN "$domain"
+  set_host_var SIGNUP_HOST "$host"
+  set_host_var MAX_PENS "$max"
+  load_host
+  mkdir -p "$SIGNUP"; chmod 700 "$SIGNUP"
+  [ -f "$SIGNUP/codes" ] || install -m 0600 /dev/null "$SIGNUP/codes"
+  # Readable inside the page's container (it runs as nobody); the folder
+  # around it keeps everyone else on this server out.
+  [ -s "$SIGNUP/token" ] || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$SIGNUP/token"
+  chmod 0644 "$SIGNUP/token"
+  rsync -a --delete "$HOGMAN_HOME/signup-src/" "$SIGNUP/build/"
+  local arch dockerfile=Dockerfile
+  case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) arch="" ;; esac
+  if [ -n "$arch" ] && [ -f "$SRC/prebuilt/signup/hogman-signup-linux-$arch" ]; then
+    install -m 0755 "$SRC/prebuilt/signup/hogman-signup-linux-$arch" "$SIGNUP/build/hogman-signup.bin"
+    dockerfile=Dockerfile.prebuilt
+  fi
+  # The broker runs this very script; Docker needs its absolute path.
+  local hostbin; hostbin="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  cat > "$SIGNUP/compose.yaml" <<EOF
+# Written by hogman-host signup-setup.
+name: hogman-signup
+services:
+  # The public page. No privileges; it can only ask the broker.
+  web:
+    build: { context: ./build, dockerfile: $dockerfile, target: web }
+    image: hogman/signup-web:local
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    user: "65534:65534"
+    mem_limit: 64m
+    pids_limit: 64
+    environment:
+      ROLE: web
+      BROKER_URL: http://broker:9090
+      BROKER_TOKEN_FILE: /run/secrets/token
+      PENS_DOMAIN: $PENS_DOMAIN
+    volumes: ["./token:/run/secrets/token:ro"]
+    networks:
+      hogman-front: { aliases: [signup] }
+      signup: {}
+  # Raises pens. It drives Docker, so it is as powerful as root: it listens
+  # only on the private network it shares with the page, and does three things.
+  broker:
+    build: { context: ./build, dockerfile: $dockerfile, target: broker }
+    image: hogman/signup-broker:local
+    restart: unless-stopped
+    mem_limit: 128m
+    pids_limit: 256
+    environment:
+      ROLE: broker
+      HOGMAN_HOME: $HOGMAN_HOME
+      HOGMAN_HOST_TOOL: /usr/local/bin/hogman-host
+      BROKER_TOKEN_FILE: $SIGNUP/token
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - $HOGMAN_HOME:$HOGMAN_HOME
+      - $hostbin:/usr/local/bin/hogman-host:ro
+    # signup: the page reaches it here. out: it reaches the internet (image and
+    # build pulls); nothing else is on that network, so nothing reaches it there.
+    networks: [signup, out]
+networks:
+  hogman-front: { external: true }
+  signup: { internal: true }
+  out: {}
+EOF
+  (cd "$SIGNUP" && docker compose up -d --build --remove-orphans >&2) || die "the sign-up page did not start: cd $SIGNUP && docker compose logs"
+  write_front
+  reload_front
+  info "Sign-ups on: https://$SIGNUP_HOST, pens at <name>.$PENS_DOMAIN, at most $MAX_PENS here."
+  info "DNS: point $SIGNUP_HOST and *.$PENS_DOMAIN at this server. Then: hogman-host signup-code"
+}
+
+# rand_chars N: N random characters from an alphabet without 0/O or 1/I.
+# (No `tr </dev/urandom | head`: head closing the pipe fails under pipefail.)
+rand_chars() {
+  od -An -N "$1" -tu1 /dev/urandom | awk -v a=ABCDEFGHJKLMNPQRSTUVWXYZ23456789 \
+    '{ for (i = 1; i <= NF; i++) printf "%s", substr(a, $i % 32 + 1, 1) }'
+}
+
+# signup-code [note]: a single-use code for the sign-up page (invite-only
+# sign-ups). Prints a link that fills it in.
+cmd_signup_code() {
+  load_host
+  [ -n "${SIGNUP_HOST:-}" ] && [ -f "$SIGNUP/codes" ] || die "sign-ups are not set up: hogman-host signup-setup"
+  local note="${*:-}" code
+  note="$(printf '%s' "$note" | tr -cd 'A-Za-z0-9 ,.@_-' | cut -c1-80)"
+  # No 0/O or 1/I: codes get read out loud and typed.
+  code="PIG-$(rand_chars 4)-$(rand_chars 4)"
+  if command -v flock >/dev/null; then
+    ( flock 9; echo "$code $note" >> "$SIGNUP/codes" ) 9>"$SIGNUP/codes.lock"
+  else
+    echo "$code $note" >> "$SIGNUP/codes"
+  fi
+  echo "code: $code"
+  echo "link: https://$SIGNUP_HOST/#code=$code"
+  echo "works once"
+}
+
 case "${1:-}" in
   init)    shift; cmd_init "$@" ;;
+  capacity) cmd_capacity ;;
+  provision) shift; cmd_provision "$@" ;;
+  signup-setup) shift; cmd_signup_setup "$@" ;;
+  signup-code) shift; cmd_signup_code "$@" ;;
   add)     shift; cmd_add "$@" ;;
   list)    cmd_list ;;
   pen)     shift; cmd_pen "$@" ;;

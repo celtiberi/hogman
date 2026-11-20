@@ -169,6 +169,34 @@ NTFY_TOPIC=<topic> deploy/hogman-watch.sh hs.example.com ~/hogman-backups   # ev
 It alerts after two failures in a row, reminds you every six hours, and tells you when it's
 fixed. If the watching machine is offline itself, it says nothing.
 
+## Hosting pens for other people
+
+A sign-up page lets people get a pen of their own on your server without a shell, the way
+hogman.network does at [get.hogman.network](https://get.hogman.network). They name the pen and
+themselves; about a minute later it's up at `<name>.<your pens domain>` and they get a one-time
+link that joins their laptop. They run it from the pen's home page: invites, the herd, the boot.
+
+```bash
+hogman-host backup-setup age1...                          # first: hosted root keys are escrowed to this key
+hogman-host signup-setup pens.example.com get.example.com 8   # pens domain, sign-up page, at most 8 pens
+hogman-host signup-code "for alice"                       # a single-use code, and a link that fills it in
+```
+
+Point `get.example.com` and `*.pens.example.com` at the server first (DNS only). Sign-ups are
+by code, one pen per code, so you decide who gets one. `hogman-host capacity` shows how full
+the server is; the page says so when it's full. Each new pen gets its own Let's Encrypt
+certificate, and Let's Encrypt allows about 50 new names a week per domain.
+
+How it's built: the page runs unprivileged and can only ask a **broker**, over a private
+network the two share, to report capacity, check a name, or raise a pen with a valid code. The
+broker drives Docker, so it is as powerful as root; it does only those three things, one at a
+time, and a failed attempt doesn't use up the code. Each hosted pen's **root key never stays
+on the server in the clear**: it's encrypted to your backup key
+(`data/pki/root-escrow.tar.gz.age`) and the plain copy deleted. The pen runs on its
+intermediate certificate for five years; you need the root only to renew that.
+
+Who signed up, and with which code, is in `/opt/hogman/signup/raised.log`.
+
 ## Everyday
 
 ```bash

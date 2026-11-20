@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Get a pen · Hogman</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/signup.css">
+</head>
+<body>
+<main>
+  <a href="https://hogman.network/" class="logo"><img src="/logo.webp" alt="Hogman" width="200" height="200"></a>
+  <h1>Get a pen</h1>
+  <p class="sub">Your own private internet, on our server. Your people get names inside it,
+    real HTTPS, and nobody gets in unless you let them.</p>
+
+  <p class="notice" id="closed" hidden>The farm is full right now. Check back soon.</p>
+  <p class="notice" id="down" hidden>The sign-up service is resting. Try again in a bit.</p>
+
+  <form id="form" class="panel" novalidate>
+    <label for="code">Sign-up code</label>
+    <input id="code" name="code" placeholder="PIG-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="13" required>
+    <p class="hint">Sign-ups are by invitation while we test. Got a link? The code is already filled in.</p>
+
+    <label for="pen">Name your pen</label>
+    <div class="suffix"><input id="pen" name="pen" placeholder="smith" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30" required><span>.hogman</span></div>
+    <p class="hint" id="pen-hint">Your network's name. Everything in it ends in .<span class="penname">smith</span>.hogman</p>
+
+    <label for="handle">Your name in it</label>
+    <div class="suffix"><input id="handle" name="handle" placeholder="you" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" required><span>.<span class="penname">smith</span>.hogman</span></div>
+    <p class="hint">You'll be the pen's keeper: you invite people, and you can show anyone out.</p>
+
+    <button class="btn" id="go" type="submit">Raise my pen</button>
+    <p class="error" id="err" role="alert" hidden></p>
+  </form>
+
+  <section id="working" class="panel" hidden aria-live="polite">
+    <h2>Raising your pen</h2>
+    <p>Building the fence, minting your certificate authority, opening the gate. About a minute.
+      Keep this page open.</p>
+    <div class="bar"><div></div></div>
+  </section>
+
+  <section id="done" class="panel" hidden>
+    <h2>Your pen is up</h2>
+    <p><strong id="done-zone"></strong> is yours. Now get your laptop in.</p>
+    <ol>
+      <li>Open this link <strong>on your laptop</strong> (macOS or Linux):
+        <div class="linkbox" id="link"></div>
+        <button class="btn small" id="copy" type="button">Copy link</button></li>
+      <li>It shows one command. Paste it into a terminal. It checks your pen's certificate,
+        trusts it, and joins.</li>
+      <li>You land on your pen's home page. That's where you add your other devices, invite
+        people, and run the herd.</li>
+    </ol>
+    <div class="qr"><img id="qr" alt="QR code of the same link"><p>Same link, for the phone app (coming soon).</p></div>
+    <p class="warn">The link works <strong>once, within an hour</strong>, and this page is the only
+      place it's shown. Keep it open until your laptop is in.</p>
+  </section>
+
+  <footer>
+    <p>Free while we test it. Experimental: not audited, so don't trust it with anything that matters yet.</p>
+    <p>Rather run your own server? It's open source: <a href="https://github.com/celtiberi/hogman/blob/main/deploy/README.md">the keeper's guide</a>.</p>
+  </footer>
+</main>
+<script src="/signup.js" defer></script>
+</body>
+</html>

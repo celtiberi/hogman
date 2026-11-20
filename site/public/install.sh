@@ -63,6 +63,9 @@ main() {
   [ -d "$tmp/x/core/prebuilt" ] || rm -rf "$home/src/prebuilt"
   install -m 0755 "$tmp/x/deploy/hogman-host" /usr/local/bin/hogman-host
   install -m 0644 "$tmp/x/deploy/bootstrap.sh" "$home/bootstrap.sh"
+  if [ -d "$tmp/x/deploy/signup" ]; then
+    rsync -a --delete "$tmp/x/deploy/signup/" "$home/signup-src/"
+  fi
   echo "$ver" > "$home/VERSION"
 
   if [ "$first" = true ]; then
@@ -93,6 +96,10 @@ EOF
 EOF
     hogman-host list | sed 's/^/    /'
     echo
+    if grep -q '^SIGNUP_HOST=.' "$home/host.env" 2>/dev/null; then
+      say "Updating the sign-up page"
+      hogman-host signup-setup
+    fi
     echo "  hogman-host upgrade <pen>     (restarts that pen on the new version)"
   fi
 }

@@ -5,7 +5,7 @@
 #
 # Packages committed code only (never the working folder), writes
 #   site/public/dl/hogman-<version>.tar.gz, SHA256SUMS and latest,
-# plus hogman-bin-<version>.tar.gz (compiled join tool and registrar),
+# plus hogman-bin-<version>.tar.gz (compiled join tool, registrar and sign-up page),
 # then deploys the website.
 set -euo pipefail
 
@@ -19,7 +19,7 @@ out="$REPO/site/public/dl"
 mkdir -p "$out"
 
 tarball="hogman-$ver.tar.gz"
-git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md LICENSE README.md \
+git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md deploy/signup LICENSE README.md \
   | gzip -9n > "$out/$tarball"
 
 # Compiled parts, so servers don't spend half an hour building them:
@@ -27,8 +27,8 @@ git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstr
 bins="hogman-bin-$ver.tar.gz"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-git archive --format=tar "$REF" core/join core/registrar | tar -x -C "$work"
-echo "building the join tool (5 platforms) and the registrar (linux amd64, arm64)..."
+git archive --format=tar "$REF" core/join core/registrar deploy/signup | tar -x -C "$work"
+echo "building the join tool (5 platforms), the registrar and the sign-up page (linux amd64, arm64)..."
 docker build -q --output "type=local,dest=$work/prebuilt/join" "$work/core/join" >/dev/null
 mkdir -p "$work/prebuilt/registrar"
 docker run --rm -v "$work/core/registrar:/src:ro" -v "$work/prebuilt/registrar:/out" -w /src \
@@ -37,6 +37,14 @@ docker run --rm -v "$work/core/registrar:/src:ro" -v "$work/prebuilt/registrar:/
     CGO_ENABLED=0 go test ./... >/dev/null
     for a in amd64 arm64; do
       CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath -ldflags="-s -w" -o /out/registrar-linux-$a .
+    done'
+mkdir -p "$work/prebuilt/signup"
+docker run --rm -v "$work/deploy/signup:/src:ro" -v "$work/prebuilt/signup:/out" -w /src \
+  -v hogman-gomod:/go/pkg/mod -v hogman-gocache:/root/.cache/go-build golang:1.27-alpine sh -c '
+    set -e
+    CGO_ENABLED=0 go test ./... >/dev/null
+    for a in amd64 arm64; do
+      CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath -ldflags="-s -w" -o /out/hogman-signup-linux-$a .
     done'
 tar -C "$work" -czf "$out/$bins" prebuilt
 

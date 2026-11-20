@@ -16,7 +16,10 @@
 
 # Your pen. Your rules. Clean pigs only.
 
-**Get Hogman:**
+**Get a pen:** [get.hogman.network](https://get.hogman.network). Free while we test it; sign-ups
+are by invitation for now.
+
+**Or run your own server:**
 
 ```bash
 curl -fsSL https://hogman.network/install.sh | sudo bash     # on a fresh Ubuntu 24.04 server
@@ -59,17 +62,21 @@ outside the fence, howling.
 3. **You're in.** Open your ordinary browser and go.
 
 ```text
-$ ./hogman-join 'https://hs.example.com/join#t=…'
+# the command your invite page gives you: copy, paste, enter
+$ curl -fsSLo hogman-join https://smith.pens.hogman.network/join/dl/hogman-join-Darwin-arm64 \
+    && chmod +x hogman-join \
+    && ./hogman-join 'https://smith.pens.hogman.network/join#t=(your invite)&fp=(the pen's fingerprint)'
 
-• Checking the network at hs.example.com
-  network: bobo.hogman
+• Checking the network at smith.pens.hogman.network
+  network: smith.hogman
   its certificate matches the link
-  and can only vouch for names ending in .bobo.hogman
+  and can only vouch for names ending in .smith.hogman
 
 • Redeeming the invite
+  Choose your name on the network: alice
   welcome, alice
 
-✓ You're in. You are alice on bobo.hogman.
+✓ You're in. You are alice on smith.hogman.
 ```
 
 **No Tailscale needed, and it won't fight yours.** If you already use Tailscale for
@@ -93,6 +100,20 @@ gone and their names held so nobody can pretend to be them.
 | **2.0 s** | **0.8 s** | **2.1 s** |
 
 *Measured on a real Mac over an ordinary home network, from pressing enter to the door closing.*
+
+## Get a pen
+
+1. **Sign up** at [get.hogman.network](https://get.hogman.network): name your pen and
+   yourself. About a minute later it's up on our server, with its own gate, names and
+   certificate authority. While we test, you need a sign-up code from someone already in.
+2. **Get your laptop in.** Open the link you're given on your laptop and copy one command.
+3. **Let your people in.** Your pen's home page makes invite links and QR codes, and shows
+   the herd: suspend anyone, or give them the boot. No server, no shell.
+
+Same software as a self-hosted pen, so you can take your pen's folder and leave whenever you
+like. Hosting your pen means we can see who's in it (not what anyone says), and could in
+principle add a device to it, the same catch as Tailscale. If that's too much trust, raise
+your own.
 
 ## Raise your own pen
 
@@ -123,17 +144,10 @@ One server can hold many pens: `hogman-host add` again with another name and hos
 pen is walled off from the others, in its own folder you can move to another server.
 
 **[The keeper's guide](deploy/README.md)** goes step by step from an empty server, and covers
-nightly backups and alerts on your phone. To run a single pen by hand instead, see
+nightly backups, alerts on your phone, and a sign-up page if you want to host pens for others. To run a single pen by hand instead, see
 [core/README.md](core/README.md).
 
 How and why it's built this way: [DESIGN.md](DESIGN.md).
-
-## Don't want a server? We'll keep your pen
-
-Hosted pens are coming: we run the server, you run the pen. Same software, so you can take
-your pen's folder and leave whenever you like. Hosting your pen means we can see who's in it
-(not what anyone says), and could in principle add a device to it, the same catch as
-Tailscale. If that's too much trust, raise your own.
 
 ## The honest bit
 
@@ -145,19 +159,21 @@ Tailscale. If that's too much trust, raise your own.
 
 ## Status
 
-**Experimental.** Young security software, not audited, with one public pen so far.
+**Experimental.** Young security software, not audited, running its first public server.
 Try it, break it, tell us what you find. Don't trust it with anything that matters yet.
 
 | On tour now | Not on the bill yet |
 |---|---|
 | The pen: server, names, certificates, invites, the boot | Phones (the app is in the works) |
 | Joining from Linux and a Mac, side by side with Tailscale | Windows (built, never tried) |
-| Many pens on one server, kept apart | Hosted pens (first server going up) |
+| Many pens on one server, kept apart | Open sign-ups for everyone |
 | A one-line installer for servers; updates in under a minute | A security audit |
 | A real pen live on the internet: `farm.hogman`, joined from a Mac | |
 | Nightly encrypted backups, pulled to a machine you own; restore tested | |
 | Alerts on your phone when the server or its backups stop | |
-| End-to-end tests: 105 checks for a pen, 32 for a shared host | |
+| Pens on our server: sign up by invitation while we test | |
+| Run your pen from its home page: invites, the herd, the boot | |
+| End-to-end tests: 112 checks for a pen, 52 for a shared host | |
 
 **Found a security problem?** Please don't open a public issue. Report it privately
 with GitHub's **Security → Report a vulnerability** button on this repository.
