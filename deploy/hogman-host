@@ -27,9 +27,9 @@ usage() {
 usage: hogman-host <command>
 
   init [--test]                  set up the front door (--test: self-signed certificates, for local trials)
-  add <network> <public-host>    create a pen, e.g.  add patrick hs.hogman.network
+  add <network> <public-host>    create a pen, e.g.  add bobo hs.example.com
   list                           pens on this host
-  pen <network> <args...>        run ./hogman in a pen, e.g.  pen patrick member list
+  pen <network> <args...>        run ./hogman in a pen, e.g.  pen bobo member list
   upgrade <network>              update a pen's code from src/ and restart it
   routes                         rewrite the front door's routes and reload it
   remove <network>               stop a pen (its folder is kept; delete it yourself to destroy it)
@@ -48,6 +48,28 @@ pen_env() { grep -h "^$2=" "$PENS/$1/.env" 2>/dev/null | head -1 | cut -d= -f2-;
 
 pen_names() { [ -d "$PENS" ] && find "$PENS" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort; }
 
+valid_name() {
+  local n="$1"
+  [ -n "$n" ] && [ "${#n}" -le 63 ] || return 1
+  case "$n" in *[!a-z0-9-]*|-*|*-) return 1 ;; esac
+}
+
+valid_host() {
+  local h="$1"
+  [ -n "$h" ] && [ "${#h}" -le 253 ] || return 1
+  [[ "$h" != *$'\n'* ]] && [[ "$h" != *$'\r'* ]] || return 1
+  [[ "$h" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$ ]]
+}
+
+valid_ipv4() {
+  local ip="$1" o
+  [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  for o in "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"; do
+    [[ "$o" =~ ^0[0-9] ]] && return 1
+    [ "$o" -le 255 ] || return 1
+  done
+}
+
 # ---------------------------------------------------------------- front ----
 
 write_front() {
@@ -62,6 +84,7 @@ write_front() {
       [ -f "$PENS/$n/.removed" ] && continue
       host="$(pen_env "$n" PUBLIC_HOST)"
       [ -n "$host" ] || continue
+      valid_host "$host" || die "invalid PUBLIC_HOST in pen $n: $host"
       cat <<EOF
 # pen: $n
 http://$host {
@@ -102,6 +125,8 @@ services:
   front:
     image: $CADDY_IMAGE
     restart: unless-stopped
+    mem_limit: 128m
+    pids_limit: 128
     ports: ["80:80", "443:443"]
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
@@ -117,9 +142,15 @@ EOF
 }
 
 reload_front() {
-  (cd "$FRONT" && docker compose up -d --remove-orphans >/dev/null 2>&1 && \
-     docker compose exec -T front caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1) \
-    || die "the front door did not reload; see: cd $FRONT && docker compose logs front"
+  (
+    cd "$FRONT"
+    docker compose up -d --remove-orphans >/dev/null 2>&1 || exit 1
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      docker compose exec -T front caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 && exit 0
+      sleep 1
+    done
+    exit 1
+  ) || die "the front door did not reload; see: cd $FRONT && docker compose logs front"
 }
 
 # ------------------------------------------------------------- commands ----
@@ -129,15 +160,23 @@ cmd_init() {
   [ "${1:-}" = --test ] && tls="local_certs"
   command -v docker >/dev/null || die "Docker is not installed"
   mkdir -p "$SRC" "$FRONT/data" "$FRONT/config" "$PENS"
+  chmod 700 "$FRONT/data"
   [ -f "$SRC/hogman" ] || die "copy the core/ code into $SRC first (deploy/README.md explains)"
   local ip4=""
   if [ -z "$tls" ]; then
     ip4="$(curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
+    if [ -n "$ip4" ] && ! valid_ipv4 "$ip4"; then
+      echo "hogman-host: ignoring invalid IPv4 response from ipify" >&2
+      ip4=""
+    fi
   fi
-  cat > "$HOSTENV" <<EOF
+  (
+    umask 077
+    cat > "$HOSTENV" <<EOF
 FRONT_TLS_MODE=$tls
 HOST_IPV4=$ip4
 EOF
+  )
   docker network inspect hogman-front >/dev/null 2>&1 || docker network create hogman-front >/dev/null
   load_host
   write_front
@@ -158,7 +197,8 @@ cmd_add() {
   load_host
   local n="${1:-}" host="${2:-}"
   [ -n "$n" ] && [ -n "$host" ] || die "usage: hogman-host add <network> <public-host>"
-  case "$n" in *[!a-z0-9-]*|-*|*-) die "network names are lowercase letters, digits and dashes" ;; esac
+  valid_name "$n" || die "network names are lowercase letters, digits and dashes (max 63 chars)"
+  valid_host "$host" || die "invalid public hostname: $host"
   [ -e "$PENS/$n" ] && die "pen $n already exists"
   for o in $(pen_names); do
     [ "$(pen_env "$o" PUBLIC_HOST)" = "$host" ] && die "$host is already used by pen $o"
@@ -200,6 +240,7 @@ cmd_list() {
 
 cmd_pen() {
   local n="${1:-}"; shift || true
+  valid_name "$n" || die "invalid network name: $n"
   [ -d "$PENS/$n" ] || die "no pen $n"
   (cd "$PENS/$n" && ./hogman "$@")
 }
@@ -207,6 +248,7 @@ cmd_pen() {
 cmd_upgrade() {
   load_host
   local n="${1:-}"
+  valid_name "$n" || die "invalid network name: $n"
   [ -d "$PENS/$n" ] || die "no pen $n"
   rsync -a --exclude data --exclude .env "$SRC/" "$PENS/$n/"
   local front_ca=""
@@ -217,6 +259,7 @@ cmd_upgrade() {
 cmd_remove() {
   load_host
   local n="${1:-}"
+  valid_name "$n" || die "invalid network name: $n"
   [ -d "$PENS/$n" ] || die "no pen $n"
   (cd "$PENS/$n" && ./hogman down) || true
   touch "$PENS/$n/.removed"

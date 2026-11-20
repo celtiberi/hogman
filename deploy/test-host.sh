@@ -15,6 +15,14 @@ pass=0; fail=0
 step()  { echo; echo "== $*"; }
 check() { local d="$1"; shift
   if "$@" >/dev/null 2>&1; then echo "  PASS  $d"; pass=$((pass + 1)); else echo "  FAIL  $d"; fail=$((fail + 1)); fi; }
+fails() { ! "$@" >/dev/null 2>&1; }
+perm()  { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+secret_dirs_ok() {
+  local d
+  for d in pki/offline step/secrets secrets/registrar mesh registrar headscale/lib; do
+    [ "$(perm "$HOGMAN_HOME/pens/bobo/data/$d")" = 700 ] || return 1
+  done
+}
 retry() { local n="$1"; shift; for _ in $(seq "$n"); do "$@" >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
 
 cleanup() {
@@ -87,6 +95,16 @@ fp_b="$(in_client bobo curl -sf https://control.bobo.example/hogman/v1/network |
 fp_z="$(in_client zebra curl -sf https://control.zebra.example/hogman/v1/network | jq -r .root_fingerprint)"
 check "each pen has its own certificate authority" test -n "$fp_b" -a "$fp_b" != "$fp_z"
 check "bobo's members are not zebra's" sh -c "! '$HOST' pen zebra member list | grep -q bobo-owner"
+
+step "Host & secret hardening"
+check "hogman-host pen rejects path traversal"     fails "$HOST" pen ../front status
+check "hogman-host upgrade rejects path traversal" fails "$HOST" upgrade ../front
+check "hogman-host remove rejects path traversal"  fails "$HOST" remove ../front
+check "hogman-host add rejects Caddy block in host" fails "$HOST" add badpen 'hs.example.com { respond 200 }'
+check "hogman-host add rejects semicolon in host"   fails "$HOST" add badpen 'hs.example.com;id'
+check "front data dir is mode 700"  test "$(perm "$HOGMAN_HOME/front/data")" = 700
+check "host.env is mode 600"        test "$(perm "$HOGMAN_HOME/host.env")" = 600
+check "pen secret dirs are mode 700" secret_dirs_ok
 
 echo
 echo "Result: $pass passed, $fail failed"
