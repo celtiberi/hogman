@@ -45,9 +45,9 @@ neither pen able to reach the other.
    DNS is on Cloudflare), then:
 
    ```bash
-   ssh root@hogman-1 hogman-host add patrick hs.hogman.network
-   ssh root@hogman-1 hogman-host pen patrick member add patrick --role owner
-   ssh root@hogman-1 hogman-host pen patrick invite create
+   ssh root@hogman-1 hogman-host add bobo hs.example.com
+   ssh root@hogman-1 hogman-host pen bobo member add alice --role owner
+   ssh root@hogman-1 hogman-host pen bobo invite create
    ```
 
 4. **Take each pen's root key off the server.** `add` prints where it is

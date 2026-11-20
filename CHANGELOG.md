@@ -9,6 +9,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Security
 - Enforce same-origin (`Origin` / `Sec-Fetch-Site`) and `Content-Type: application/json` checks on mutating mesh API endpoints to block CSRF from member-hosted or external sites.
 - Restrict `server` devices on the mesh API to read-only `GET /api/me` (minimal `{member, this_device, zone}` payload) and `GET /api/directory`, returning `403` on all mutations and `/api/admin/*` endpoints.
+- Switch Headscale IP allocation to `random`, verify caller mesh IPs against live Headscale nodes in `identify()`, harden admin-vs-owner RBAC and subdomain cleanup, rate-limit `POST /hogman/v1/redeem`, cap per-member invites/keys/names, revoke open keys on suspend, and configure server timeouts (PR #5).
+- Add strict anti-framing (`X-Frame-Options: DENY`, `frame-ancestors 'none'`), CSP (`script-src 'self'`, `style-src 'self'`), `nosniff`, and `no-store` headers on `portal` and `/join`, block `/api/*` and `/swagger*` on edge proxies, bind `edge-behind-front` strictly to `{$PUBLIC_HOST}`, and enable `trusted_proxies_strict` + forward `X-Forwarded-For: {client_ip}` on `/hogman/*` behind the shared front door (PR #6).
+- Harden `hogman-join`: reject URL credentials, require full IPv4/IPv6 exclusions and valid cert dates on the root CA, validate `/hogman/v1/network` metadata, store temp root certs at `0700`/`0600`, restrict proxy `forward()` to `http`, and quote systemd `ExecStart` paths (PR #7).
+- Validate pen names, hostnames, and IPv4 addresses strictly in `deploy/hogman-host` and `core/hogman`, tighten host/pen secret directory and file permissions (`700`/`600`), add SSH lockdown verification and `sshd` key-only config in `deploy/bootstrap.sh`, scrub personal examples from `deploy/`, and add `mem_limit`, `pids_limit`, `read_only`, non-root user, and capability drops in `core/compose.yaml` (PR #8).
 
 ### Fixed
 - Use a deterministic non-ephemeral local proxy port (`17000`–`26999`) in `hogman-join` side-by-side mode, share one `http.Transport` across plain-HTTP proxy requests, preserve TCP half-close (`CloseWrite`) in `CONNECT` tunnels, and fall back to Tailscale peer status for `.nodes.<zone>` MagicDNS names.
@@ -17,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Hold `Service.mu` across the full `Redeem()` and `Claim()` paths, roll back partial member/invite/Headscale user/device-key writes on failure, allow owners to seize active names directly in `Claim()`, and log errors during `Kick()`.
 - Use unique temp files via `os.CreateTemp` in `writeZone()` and emit `AAAA` DNS records alongside `A` records for dual-stack servers.
 - Run `go test` in `core/registrar/Dockerfile` and add registrar unit tests (`core/registrar/http_test.go`, `core/registrar/service_test.go`) plus server-device and CSRF checks in `core/test/run.sh`.
+- Retry `caddy reload` briefly in `deploy/hogman-host:reload_front()` to avoid cold-start races against Caddy's admin socket, and add traversal, host-validation, and file-permission regression checks to `deploy/test-host.sh` (PR #8).
 
 ### Changed
 - Redirect `www.hogman.network` permanently (`301`) to `https://hogman.network{uri}` in `site/Caddyfile` while keeping `hogman.fly.dev` as a direct fallback.

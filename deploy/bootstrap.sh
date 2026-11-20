@@ -19,8 +19,31 @@ say() { echo; echo "==> $*"; }
 if [ "${1:-}" = --lock-ssh ]; then
   tailscale status >/dev/null 2>&1 || { echo "Tailscale is not up; refusing to close SSH" >&2; exit 1; }
   say "Closing SSH to the internet (it stays open over Tailscale)"
-  ufw delete allow OpenSSH >/dev/null 2>&1 || true
   ufw allow in on tailscale0 to any port 22 proto tcp >/dev/null
+  ufw delete allow OpenSSH >/dev/null 2>&1 || true
+  ufw delete allow 22/tcp >/dev/null 2>&1 || true
+  ufw delete allow 22 >/dev/null 2>&1 || true
+  if ufw status | grep -E '^(22(/tcp)?|OpenSSH)[[:space:]]+ALLOW[[:space:]]+Anywhere' >/dev/null; then
+    echo "WARNING: an unrestricted public SSH rule is still present in UFW; remove it manually" >&2
+    ufw status numbered >&2
+    exit 1
+  fi
+  auth_keys="/root/.ssh/authorized_keys"
+  if [ ! -s "$auth_keys" ] && [ -n "${SUDO_USER:-}" ]; then
+    sudo_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+    [ -n "$sudo_home" ] && auth_keys="$sudo_home/.ssh/authorized_keys"
+  fi
+  if [ -s "$auth_keys" ] && grep -Eq '^(ssh-|ecdsa-|sk-)' "$auth_keys"; then
+    install -d -m 0755 /etc/ssh/sshd_config.d
+    cat > /etc/ssh/sshd_config.d/99-hogman-hardening.conf <<'EOF'
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+EOF
+    chmod 644 /etc/ssh/sshd_config.d/99-hogman-hardening.conf
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+  else
+    echo "Note: no SSH public key found in authorized_keys; leaving SSH password auth unchanged" >&2
+  fi
   ufw status verbose
   exit 0
 fi
@@ -59,6 +82,8 @@ if ! swapon --show | grep -q /swapfile; then
   grep -q /swapfile /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab
 fi
 
+# Docker publishes ports via iptables DOCKER chains, bypassing UFW; keep
+# internal services unpublished or bound to 127.0.0.1.
 say "Firewall"
 ufw default deny incoming >/dev/null
 ufw default allow outgoing >/dev/null
