@@ -99,10 +99,10 @@ func TestDNSAuthoritativeAndRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, srv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.20", "fd7a:115c:a1e0::20")
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "alice", srv.ID); err != nil {
+	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "alice", srv.ID, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "blog.alice", srv.ID); err != nil {
+	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "blog.alice", srv.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -238,7 +238,7 @@ func TestDNSLiveCrossProcessAndKick(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svcCLI.Claim(Actor{CLI: true}, "bob", "radio", srv.ID); err != nil {
+	if _, err := svcCLI.Claim(Actor{CLI: true}, "bob", "radio", srv.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := mustResolveA(t, dnsSrv, "radio.bobo.hogman."); got != "100.64.0.30" {

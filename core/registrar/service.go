@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 type Config struct {
@@ -740,25 +741,50 @@ func (s *Service) VerifyLiveCaller(ctx context.Context, src string) (*Member, *D
 
 // ----------------------------------------------------------------- names --
 
-func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64) (string, error) {
+const maxNameNoteRunes = 140
+
+// cleanNameNote turns a site description into a single plain-text line capped at
+// 140 runes, replacing line/tab breaks with spaces and dropping control chars.
+func cleanNameNote(raw string) string {
+	var b strings.Builder
+	b.Grow(len(raw))
+	for _, r := range raw {
+		switch {
+		case r == '\r' || r == '\n' || r == '\t' || r == '\u2028' || r == '\u2029':
+			b.WriteByte(' ')
+		case unicode.IsControl(r):
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	collapsed := strings.Join(strings.Fields(b.String()), " ")
+	runes := []rune(collapsed)
+	if len(runes) > maxNameNoteRunes {
+		return strings.TrimRight(string(runes[:maxNameNoteRunes]), " ")
+	}
+	return collapsed
+}
+
+func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64, note string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.claimLocked(a, handle, rawName, deviceID, nil)
+	return s.claimLocked(a, handle, rawName, deviceID, note, nil)
 }
 
 // ServerClaim is a server naming itself (what `hogman-join share` does). The
 // checks run under s.mu together with the claim, so two servers can't race.
-func (s *Service) ServerClaim(a Actor, d *Device, rawName string) (string, error) {
+func (s *Service) ServerClaim(a Actor, d *Device, rawName, note string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.serverMayUse(d, rawName); err != nil {
 		return "", err
 	}
-	return s.claimLocked(a, a.Member.Handle, rawName, d.ID, d)
+	return s.claimLocked(a, a.Member.Handle, rawName, d.ID, note, d)
 }
 
 // claimLocked: s.mu held. server is the calling server device, or nil.
-func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, server *Device) (string, error) {
+func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, rawNote string, server *Device) (string, error) {
 	m, err := s.member(handle)
 	if err != nil {
 		return "", err
@@ -828,7 +854,8 @@ func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, s
 			}
 		}
 	}
-	if err := s.st.UpsertName(name, m.ID, &d.ID); err != nil {
+	note := cleanNameNote(rawNote)
+	if err := s.st.UpsertName(name, m.ID, &d.ID, note); err != nil {
 		return "", err
 	}
 	s.st.Audit(a.String(), "name.claim", name+"."+s.cfg.Zone, fmt.Sprintf("member=%s device=%d", handle, d.ID))

@@ -216,6 +216,7 @@ func MeshHandler(s *Service) http.Handler {
 		var in struct {
 			Name     string `json:"name"`
 			DeviceID int64  `json:"device_id"`
+			Note     string `json:"note"`
 		}
 		if !readJSON(w, r, &in) {
 			return
@@ -227,9 +228,9 @@ func MeshHandler(s *Service) http.Handler {
 				fail(w, forbidden("a server can only name itself"))
 				return
 			}
-			fqdn, err = s.ServerClaim(c.actor(), c.device, in.Name)
+			fqdn, err = s.ServerClaim(c.actor(), c.device, in.Name, in.Note)
 		} else {
-			fqdn, err = s.Claim(c.actor(), c.member.Handle, in.Name, in.DeviceID)
+			fqdn, err = s.Claim(c.actor(), c.member.Handle, in.Name, in.DeviceID, in.Note)
 		}
 		if err != nil {
 			fail(w, err)
@@ -254,7 +255,7 @@ func MeshHandler(s *Service) http.Handler {
 		}
 		out := []map[string]string{}
 		for _, n := range names {
-			out = append(out, map[string]string{"name": n.Name + "." + s.cfg.Zone, "member": n.Member})
+			out = append(out, map[string]string{"name": n.Name + "." + s.cfg.Zone, "member": n.Member, "note": n.Note})
 		}
 		writeJSON(w, 200, out)
 	})

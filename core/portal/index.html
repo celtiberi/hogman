@@ -11,6 +11,14 @@
 <h1 id="hello">You're in.</h1>
 <p class="sub" id="whoami">This page is only reachable from inside the network.</p>
 
+<section id="sites" hidden>
+  <h2>Sites in this pen</h2>
+  <p class="muted hint" id="sites-empty" hidden>No sites yet. Put a folder or a website here with
+    <code>./hogman-join share NAME FOLDER-or-PORT</code> (see Host something, below).</p>
+  <ul class="devices" id="directory"></ul>
+  <p class="error" id="sites-err" hidden></p>
+</section>
+
 <section id="mine" hidden>
   <h2>Your devices</h2>
   <ul class="devices" id="devices"></ul>
@@ -42,6 +50,7 @@
     <ul class="devices" id="names"></ul>
     <form id="name-form" class="row">
       <input id="name-input" maxlength="63" placeholder="blog" autocomplete="off" autocapitalize="none" spellcheck="false">
+      <input id="name-note" maxlength="140" placeholder="What is it for? (optional)" autocomplete="off">
       <select id="name-device" aria-label="Which server"></select>
       <button class="primary" type="submit">Claim name</button>
     </form>
@@ -91,7 +100,7 @@
 <h2>Host something</h2>
 <p>One command puts a folder or a website in the pen, with its own name and the padlock.
 Run it with the same <code>hogman-join</code> you joined with, on a computer that's in the pen:</p>
-<pre><code>./hogman-join share photos ~/holiday     # a folder, served as a website
+<pre><code>./hogman-join share photos ~/holiday --note "Summer trip photos"
 ./hogman-join share blog 3000            # a site you're building, by its port</code></pre>
 <p class="muted">Everyone in the pen can then open <code>https://blog.<span class="zone">&lt;network&gt;.hogman</span></code>.
 Add <code>--background</code> to keep it running after the window closes;

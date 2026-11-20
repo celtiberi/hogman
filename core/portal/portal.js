@@ -45,6 +45,39 @@
     renderNames();
   };
 
+  // --------------------------------------------------------- directory --
+
+  const loadDirectory = async () => {
+    const sites = await api('GET', '/directory');
+    $('sites').hidden = false;
+    $('sites-err').hidden = true;
+    const ul = $('directory');
+    ul.replaceChildren();
+    $('sites-empty').hidden = sites.length > 0;
+    for (const s of sites) {
+      const li = document.createElement('li');
+      const main = document.createElement('div');
+      main.className = 'site-main';
+      const a = document.createElement('a');
+      a.className = 'site-link';
+      a.href = 'https://' + s.name;
+      a.rel = 'noopener';
+      a.textContent = s.name;
+      main.append(a);
+      if (s.note) {
+        const note = document.createElement('div');
+        note.className = 'muted small';
+        note.textContent = s.note;
+        main.append(note);
+      }
+      const by = document.createElement('span');
+      by.className = 'muted small';
+      by.textContent = `run by ${s.member}`;
+      li.append(main, by);
+      ul.append(li);
+    }
+  };
+
   // ------------------------------------------------------------- names --
 
   const renderNames = () => {
@@ -52,7 +85,15 @@
     ul.replaceChildren();
     for (const n of me.names || []) {
       const li = document.createElement('li');
-      const nm = document.createElement('span'); nm.className = 'grow'; nm.textContent = `${n.name}.${me.zone}`;
+      const main = document.createElement('div'); main.className = 'site-main';
+      const nm = document.createElement('div'); nm.textContent = `${n.name}.${me.zone}`;
+      main.append(nm);
+      if (n.note) {
+        const note = document.createElement('div');
+        note.className = 'muted small';
+        note.textContent = n.note;
+        main.append(note);
+      }
       const dev = (me.devices || []).find(d => d.id === n.device_id);
       const to = document.createElement('span'); to.className = 'muted small'; to.textContent = dev ? `→ ${dev.name}` : '';
       const rel = document.createElement('button'); rel.className = 'link danger'; rel.type = 'button'; rel.textContent = 'Release';
@@ -66,7 +107,7 @@
         try { await api('DELETE', '/names/' + encodeURIComponent(n.name)); await load(); }
         catch (e) { nameErr(e); }
       };
-      li.append(nm, to, rel);
+      li.append(main, to, rel);
       ul.append(li);
     }
     const servers = (me.devices || []).filter(d => d.kind === 'server');
@@ -80,10 +121,12 @@
     ev.preventDefault();
     $('name-err').hidden = true;
     const name = $('name-input').value.trim().toLowerCase();
+    const note = $('name-note').value.trim();
     if (!name) return nameErr(new Error('Type a name, like blog.'));
     try {
-      const r = await api('POST', '/names', { name, device_id: Number($('name-device').value) });
+      const r = await api('POST', '/names', { name, device_id: Number($('name-device').value), note });
       $('name-input').value = '';
+      $('name-note').value = '';
       await load();
       nameErr(new Error(`Done: ${r.name} now points at your server. Give it a minute to reach everyone.`));
       $('name-err').className = 'muted';
@@ -281,6 +324,7 @@
   const load = async () => {
     try { me = await api('GET', '/me'); render(); }
     catch (e) { $('whoami').textContent = 'Could not load your details: ' + e.message; return; }
+    loadDirectory().catch(errIn('sites-err'));
     if (!me.devices) return;   // a server
     if (me.can_invite) { $('invite').hidden = false; loadInvites().catch(errIn('invite-err')); }
     if (me.is_admin) { $('herd').hidden = false; loadHerd().catch(errIn('herd-err')); }

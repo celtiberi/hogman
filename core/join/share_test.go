@@ -74,3 +74,46 @@ func TestShareFolderStaysInside(t *testing.T) {
 		t.Fatalf("a symlink out of the folder was followed: %d %q", code, body)
 	}
 }
+
+func TestShareNoteResolutionAndFlags(t *testing.T) {
+	// Fresh share without --note has empty note.
+	if got := resolveShareNote(nil, "", false); got != "" {
+		t.Fatalf("fresh omit = %q want empty", got)
+	}
+	if got := resolveShareNote(nil, "  hello  ", true); got != "hello" {
+		t.Fatalf("fresh --note = %q want hello", got)
+	}
+	// Bare restart preserves saved note; --note updates; --note "" clears.
+	prev := &shareConfig{Note: "saved description"}
+	if got := resolveShareNote(prev, "", false); got != "saved description" {
+		t.Fatalf("restart without --note = %q want saved description", got)
+	}
+	if got := resolveShareNote(prev, "new note", true); got != "new note" {
+		t.Fatalf("restart with --note = %q want new note", got)
+	}
+	if got := resolveShareNote(prev, "", true); got != "" {
+		t.Fatalf("restart with --note '' = %q want empty", got)
+	}
+
+	// Flag parser tracks --note presence regardless of argument order.
+	cases := []struct {
+		args    []string
+		wantPos []string
+		note    string
+		noteSet bool
+		bg      bool
+	}{
+		{[]string{"share", "notes", "./dir"}, []string{"share", "notes", "./dir"}, "", false, false},
+		{[]string{"share", "notes", "./dir", "--note", "Summer trip", "--background"}, []string{"share", "notes", "./dir"}, "Summer trip", true, true},
+		{[]string{"share", "--note", "", "notes", "./dir"}, []string{"share", "notes", "./dir"}, "", true, false},
+	}
+	for _, tc := range cases {
+		pos, o, ver, err := parseCLIArgs(tc.args)
+		if err != nil || ver {
+			t.Fatalf("parseCLIArgs(%v): ver=%v err=%v", tc.args, ver, err)
+		}
+		if strings.Join(pos, ",") != strings.Join(tc.wantPos, ",") || o.note != tc.note || o.noteSet != tc.noteSet || o.background != tc.bg {
+			t.Fatalf("parseCLIArgs(%v) = pos:%v note:%q noteSet:%v bg:%v", tc.args, pos, o.note, o.noteSet, o.background)
+		}
+	}
+}

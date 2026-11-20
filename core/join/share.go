@@ -54,6 +54,7 @@ WHAT is a port on this computer (3000), a local web address
 NAME becomes https://NAME.<pen>.hogman, open to everyone in the pen.
 
 options:
+  --note TEXT    short one-line description shown on the pen's home page (--note "" clears it)
   --background   keep running after this window closes (until the computer restarts)
   --pen ZONE     which pen, if this computer is on more than one
 `
@@ -66,6 +67,7 @@ type shareConfig struct {
 	RootCA      string `json:"root_ca"`
 	Target      string `json:"target"` // http://host:port, or an absolute folder path
 	Folder      bool   `json:"folder,omitempty"`
+	Note        string `json:"note,omitempty"`
 	ControlCA   string `json:"control_ca,omitempty"`
 }
 
@@ -171,6 +173,16 @@ func shareCmd(args []string, o options) error {
 	return nil
 }
 
+func resolveShareNote(old *shareConfig, note string, noteSet bool) string {
+	if noteSet {
+		return strings.TrimSpace(note)
+	}
+	if old != nil {
+		return old.Note
+	}
+	return ""
+}
+
 func shareStart(name, what, rawLink string, o options) error {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if !shareNameRE.MatchString(name) || name == "list" || name == "stop" {
@@ -194,15 +206,18 @@ func shareStart(name, what, rawLink string, o options) error {
 	cfg.Target, cfg.Folder = target, folder
 
 	dir := shareDir(cfg.Zone, name)
+	var prev *shareConfig
 	if old, err := loadShare(dir); err == nil {
 		if pid := sharePID(dir); pid != 0 {
 			return errorf("%s is already being shared from this computer (process %d). Stop it first: hogman-join share stop %s", old.url(), pid, name)
 		}
 		key = "" // this share already has its device; reuse it
 		cfg.ControlCA = old.ControlCA
+		prev = old
 	} else if key == "" {
 		return errorf("no way to add a device for this share")
 	}
+	cfg.Note = resolveShareNote(prev, o.note, o.noteSet)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -503,7 +518,7 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 
 	// Name ourselves.
 	err = untilOK(ctx, 90*time.Second, func() (bool, error) {
-		code, err := homeAPI(hc, c.Zone, "POST", "/names", map[string]string{"name": c.Name}, nil)
+		code, err := homeAPI(hc, c.Zone, "POST", "/names", map[string]string{"name": c.Name, "note": c.Note}, nil)
 		if err == nil {
 			return false, nil
 		}

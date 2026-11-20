@@ -102,7 +102,7 @@ doesn't exist.
 building into the pen, with its own name and the padlock:
 
 ```text
-$ ./hogman-join share photos ~/holiday        # a folder, served as a website
+$ ./hogman-join share photos ~/holiday --note "Summer trip photos"
 $ ./hogman-join share blog 3000               # a site you're building, by its port
 
 ✓ https://blog.smith.hogman is up.
@@ -110,10 +110,12 @@ $ ./hogman-join share blog 3000               # a site you're building, by its p
 ```
 
 Each share is a small server device of its own, so your laptop itself still takes no
-visitors, and nothing needs administrator rights or an open port. Add `--background` to keep
-it running after the window closes; `./hogman-join share stop blog` takes it down and frees
-the name. A computer that isn't in the pen can share too: press *Add a server* on your home
-page and add the link it gives you to the end of the command.
+visitors, and nothing needs administrator rights or an open port. Everything shared or named
+shows up in the **Sites in this pen** list on your home page (with who runs it and its
+optional `--note`). Add `--background` to keep it running after the window closes;
+`./hogman-join share stop blog` takes it down and frees the name. A computer that isn't in
+the pen can share too: press *Add a server* on your home page and add the link it gives you
+to the end of the command.
 
 ## Under the hood
 
