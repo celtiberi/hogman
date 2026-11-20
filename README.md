@@ -29,18 +29,19 @@ Invited to someone's pen? You don't install anything up front: open the invite l
 copy the one command its page gives you.
 
 
-Hogman lets you run your own **private internet** for the people you choose. You hold the
-gate. Your swine get real names, real websites and real padlocks. The filthy horde stays
-outside the fence, howling.
+Hogman gives you your own **private internet** for the people you choose. Get a pen on our
+server in about a minute, or raise one on your own. You hold the gate. Your swine get real
+names, real websites and real padlocks. The filthy horde stays outside the fence, howling.
 
 - **Proper names.** Every pen has its own name, and so does everything in it:
   `alice.yourpen.hogman`, `blog.alice.yourpen.hogman`. Nobody outside can look them up.
 - **The padlock, without the paperwork.** Each pen runs its own certificate authority, so
   sites get HTTPS automatically. That authority can only vouch for names inside the pen.
 - **Invitation only.** Single-use invite links. How someone earns one is up to you.
-- **The boot.** One command and a member is back outside the fence, every device at once.
-- **Nobody upstream.** One small server you control. Traffic between members is encrypted
-  end to end; the keeper never sees it.
+- **The boot.** One press and a member is back outside the fence, every device at once.
+- **Walled off from everyone else.** Every pen has its own gate, names and certificate
+  authority. Traffic between members is encrypted end to end; whoever keeps the pen never
+  sees it. Want nobody upstream at all? Raise it on a server of your own.
 
 ## Meet the farm
 
