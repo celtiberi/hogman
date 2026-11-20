@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Configure RFC1918 `trusted_proxies` CIDRs in `core/templates/headscale.yaml` so Headscale honors `X-Real-IP` forwarded by Caddy `edge`.
 
 ### Added
+- Website (`site/`): cookieless first-party PostHog traffic analytics on `hogman.network` via a Caddy reverse proxy at `/e` (configured via `POSTHOG_KEY`).
 - `deploy/`: `bootstrap.sh` for a fresh Ubuntu server, and `hogman-host`, which runs many pens on one server behind a shared front door (each pen walled off on its own network), with `test-host.sh` (18 checks).
 - Core: front-door mode (`FRONT_DOOR=true`, `compose.front.yaml`, `config/edge-behind-front.Caddyfile`) and a per-pen relay port (`STUN_PORT`).
 - README rewritten in the website's style, with crops of the artwork in `docs/img/`.

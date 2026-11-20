@@ -1,4 +1,9 @@
 .DS_Store
 
+# local environment secrets
+.env
+.env.*
+!.env.example
+
 # release artifacts, built by deploy/release.sh
 site/public/dl/
