@@ -118,8 +118,9 @@ page and add the link it gives you to the end of the command.
 - **The network:** each pen is a private [WireGuard](https://www.wireguard.com) mesh with its own
   [Headscale](https://github.com/juanfont/headscale) (the open-source Tailscale control server);
   devices use the stock Tailscale client. Traffic is end-to-end encrypted, device to device,
-  through the pen's own relay only when a firewall blocks a direct path. The control server
-  hands out keys and rules; it never carries or sees traffic.
+  through the pen's own relay (built into its control server) only when a firewall blocks a
+  direct path. Relaying, it carries only encrypted WireGuard packets and never sees what
+  anyone sends.
 - **Names:** a private DNS zone per pen (`smith.hogman`), answered only on the mesh. `.hogman`
   isn't a public top-level domain, so nothing in a pen exists on the open internet.
 - **Padlocks (certificates):** each pen runs [step-ca](https://smallstep.com/certificates/). Its root carries

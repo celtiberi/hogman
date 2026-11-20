@@ -121,8 +121,9 @@
           own <a href="https://github.com/juanfont/headscale">Headscale</a>, the open-source Tailscale
           control server, and devices use the stock Tailscale client. Devices talk to each other
           directly and end to end encrypted. When a firewall blocks that, traffic goes through
-          the pen's own encrypted relay. The control server hands out keys and rules; it never
-          carries or sees your traffic.</dd>
+          the pen's own relay, built into its control server. The control server hands out keys
+          and rules; when it relays, it carries only encrypted WireGuard packets and never sees
+          what anyone sends.</dd>
         <dt>Names: a private DNS zone per pen</dt>
         <dd>Each pen has its own zone, like <code>smith.hogman</code>. Its DNS server only answers
           on the mesh, and <code>.hogman</code> isn't a public top-level domain, so nothing in a pen
@@ -178,8 +179,9 @@
       <ul class="status">
         <li class="yes">Headscale 0.29 and the Tailscale client 1.104</li>
         <li class="yes">step-ca 0.30 and Caddy 2.11</li>
-        <li class="yes">Hogman's own pieces, in Go: the registrar (members, invites, names,
-          policy, DNS), <code>hogman-join</code>, and the host tools</li>
+        <li class="yes">Hogman's own pieces: the registrar (members, invites, names, policy,
+          DNS), <code>hogman-join</code> and the sign-up service in Go, plus shell tools to run
+          pens and hosts</li>
       </ul>
       <p class="fine">Not audited yet. The keeper (and we, for hosted pens) can see who's in a pen
         and which names get looked up, never what members send each other.</p>
