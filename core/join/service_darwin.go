@@ -10,8 +10,6 @@ import (
 	"syscall"
 )
 
-func launchLabel(zone string) string { return "network.hogman." + zone }
-
 func launchPlist(zone string) string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "LaunchAgents", launchLabel(zone)+".plist")
@@ -55,6 +53,59 @@ func stopAgent(dir string, c *agentConfig) {
 	_, _ = run(false, "launchctl", "bootout", domain+"/"+launchLabel(c.Zone))
 	_ = os.Remove(launchPlist(c.Zone))
 	stopDetached(dir)
+}
+
+func sharePlist(c *shareConfig) string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "LaunchAgents", shareLaunchLabel(c)+".plist")
+}
+
+func shareServiceConfigured(c *shareConfig) bool {
+	_, err := os.Stat(sharePlist(c))
+	return err == nil
+}
+
+func startShareBackground(dir string, c *shareConfig, o options) (bool, int, error) {
+	bin, err := installedBinary(dir)
+	if err != nil {
+		return false, 0, err
+	}
+	return startShareServiceWithBinary(bin, dir, c, o.noService)
+}
+
+func startShareServiceWithBinary(bin, dir string, c *shareConfig, noService bool) (bool, int, error) {
+	logPath := filepath.Join(dir, "share.log")
+	if noService {
+		pid, err := spawnDetached(logPath, bin, "__share-run", dir)
+		return false, pid, err
+	}
+	plist, err := renderShareLaunchPlist(c, bin, dir)
+	if err != nil {
+		return false, 0, err
+	}
+	path := sharePlist(c)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, 0, err
+	}
+	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
+		return false, 0, err
+	}
+	domain := "gui/" + strconv.Itoa(os.Getuid())
+	_, _ = run(false, "launchctl", "bootout", domain+"/"+shareLaunchLabel(c))
+	if out, err := run(false, "launchctl", "bootstrap", domain, path); err != nil {
+		_ = os.Remove(path)
+		note("could not register a login item (%s); running in the background until restart", firstLine(out))
+		pid, serr := spawnDetached(logPath, bin, "__share-run", dir)
+		return false, pid, serr
+	}
+	note("it will start by itself when you log in")
+	return true, 0, nil
+}
+
+func stopShareService(c *shareConfig) {
+	domain := "gui/" + strconv.Itoa(os.Getuid())
+	_, _ = run(false, "launchctl", "bootout", domain+"/"+shareLaunchLabel(c))
+	_ = os.Remove(sharePlist(c))
 }
 
 func startDetached(bin, dir string) error {

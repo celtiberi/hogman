@@ -163,10 +163,16 @@ func main() {
 		}
 		return
 	case len(pos) == 2 && pos[0] == "__share-run":
-		// Internal: a share running in the background.
+		// Internal: a share running in the background. Permanent failures exit 0
+		// after recording "error" in status.json so launchd (SuccessfulExit=false)
+		// and systemd (Restart=on-failure) do not restart them in a loop.
 		if serr := runShareProcess(pos[1]); serr != nil {
-			fmt.Fprintln(os.Stderr, serr.Error())
-			os.Exit(1)
+			if isPermanentShareError(serr) {
+				fmt.Fprintf(os.Stderr, "%s (permanent failure; stopping automatic restarts)\n", serr.Error())
+			} else {
+				fmt.Fprintln(os.Stderr, serr.Error())
+			}
+			os.Exit(shareExitCode(serr))
 		}
 		return
 	case len(pos) >= 1 && pos[0] == "update":

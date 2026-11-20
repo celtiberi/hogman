@@ -85,9 +85,9 @@
 <p>This downloads the latest <code>hogman-join</code> from your pen's server (or from a host or
   link you pass: <code>./hogman-join update 'https://your-host.example'</code>), updates this
   program, updates your pen's installed agent copy and restarts it if it is running, and refreshes
-  any cached <code>share</code> binaries on disk from that server. If you have shares currently
-  running, they stay up on the old process until you restart them
-  (<code>./hogman-join share stop NAME</code>, then start the share again). On more than one
+  any cached <code>share</code> binaries on disk from that server, restarting background
+  service-managed shares cleanly while leaving foreground or unmanaged shares running until you
+  restart them. On more than one
   pen? Pick one with <code>--pen ZONE</code>. Use <code>--dry-run</code> to see what would change
   without touching files.</p>
 <p>Before replacing anything on disk, <code>update</code> checks the download's SHA-256 checksum
