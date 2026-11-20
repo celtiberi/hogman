@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Link is what a person is handed:
@@ -35,6 +36,9 @@ func ParseLink(raw string) (*Link, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return nil, fmt.Errorf("not a link: %w", err)
+	}
+	if u.User != nil {
+		return nil, errors.New("the link must not contain credentials")
 	}
 	if u.Scheme != "https" || u.Host == "" {
 		return nil, errors.New("the link must start with https://")
@@ -88,11 +92,30 @@ func CheckRoot(pemText, wantFP, zone string) (*RootInfo, error) {
 	if !c.IsCA {
 		return nil, errors.New("the network's certificate is not a certificate authority")
 	}
+	now := time.Now()
+	if now.Before(c.NotBefore) || now.After(c.NotAfter) {
+		return nil, errors.New("the network's certificate is expired or not yet valid")
+	}
 	if !c.PermittedDNSDomainsCritical || len(c.PermittedDNSDomains) != 1 || c.PermittedDNSDomains[0] != zone {
 		return nil, fmt.Errorf("refusing: the network's certificate is not limited to .%s (it permits %v). "+
 			"Installing it would let it vouch for any website", zone, c.PermittedDNSDomains)
 	}
-	if len(c.ExcludedIPRanges) == 0 && len(c.PermittedIPRanges) == 0 {
+	if len(c.PermittedIPRanges) > 0 {
+		return nil, errors.New("refusing: the network's certificate permits IP address ranges")
+	}
+	var excl4, excl6 bool
+	for _, n := range c.ExcludedIPRanges {
+		if n == nil {
+			continue
+		}
+		ones, bits := n.Mask.Size()
+		if ones == 0 && bits == 32 && n.IP.To4() != nil {
+			excl4 = true
+		} else if ones == 0 && bits == 128 && n.IP.To16() != nil && n.IP.To4() == nil {
+			excl6 = true
+		}
+	}
+	if !excl4 || !excl6 {
 		return nil, errors.New("refusing: the network's certificate is not barred from vouching for IP addresses")
 	}
 	s1 := sha1Hex(blk.Bytes)

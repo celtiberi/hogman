@@ -70,7 +70,9 @@ The join tool ([join/](join/)) then:
   computer's Tailscale and everything else are left alone, so a member can be in a pen
   and on their own tailnet at once. Browsers use it through a proxy rules file the tool
   serves; curl, git and ssh need one line of proxy config, which the tool prints.
-  Force it with `--alongside`; force the whole-device way with `--switch`.
+  Force it with `--alongside`; force the whole-device way with `--switch`. On a shared
+  multi-user computer, note that any local user on the machine can connect to that
+  loopback proxy on `127.0.0.1`.
 
 Trust is added before the invite is redeemed, so if that step fails the invite is still
 unused. More devices: `./hogman device key <handle> personal` (or `POST /api/devices` from

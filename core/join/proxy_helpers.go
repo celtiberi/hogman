@@ -68,3 +68,24 @@ func renderLaunchPlist(label, bin, dir, logPath string) (string, error) {
 </dict></plist>
 `, el, eb, ed, ep, ep), nil
 }
+
+func systemdQuote(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	return `"` + r.Replace(s) + `"`
+}
+
+// renderSystemdUnit builds a systemd user service unit with quoted ExecStart paths.
+func renderSystemdUnit(zone, bin, dir string) string {
+	return fmt.Sprintf(`[Unit]
+Description=Hogman pen connection (%s)
+After=network-online.target
+
+[Service]
+ExecStart=%s agent %s
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+`, zone, systemdQuote(bin), systemdQuote(dir))
+}

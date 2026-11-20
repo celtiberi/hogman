@@ -114,10 +114,11 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		return nil
 	}
 
-	certFile := filepath.Join(os.TempDir(), "hogman-"+n.Zone+"-root.crt")
-	if err := os.WriteFile(certFile, []byte(root.PEM), 0o644); err != nil {
+	certFile, cleanupCert, err := writeTempCert(root.PEM)
+	if err != nil {
 		return err
 	}
+	defer cleanupCert()
 	if !o.noTrust {
 		step("Adding the %s certificate to this computer", n.Zone)
 		if err := installTrust(root, certFile); err != nil {

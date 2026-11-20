@@ -100,6 +100,15 @@ func (c *agentConfig) inZone(host string) bool {
 
 var meshRanges = []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("fd7a:115c:a1e0::/48")}
 
+func inMeshRanges(ip netip.Addr) bool {
+	for _, r := range meshRanges {
+		if r.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 func newNode(dir string, c *agentConfig, authKey string) *tsnet.Server {
 	s := &tsnet.Server{
 		Dir:        filepath.Join(dir, "node"),
@@ -275,10 +284,8 @@ func (a *agent) dial(ctx context.Context, hostport string) (net.Conn, error) {
 		return nil, err
 	}
 	if ip, err := netip.ParseAddr(host); err == nil {
-		for _, r := range meshRanges {
-			if r.Contains(ip) {
-				return a.dialMesh(ctx, "tcp", hostport)
-			}
+		if inMeshRanges(ip) {
+			return a.dialMesh(ctx, "tcp", hostport)
 		}
 		return nil, errOutside
 	}
@@ -385,12 +392,16 @@ func (a *agent) connect(w http.ResponseWriter, r *http.Request) {
 
 // forward handles plain-HTTP requests sent through the proxy.
 func (a *agent) forward(w http.ResponseWriter, r *http.Request) {
+	if !strings.EqualFold(r.URL.Scheme, "http") {
+		http.Error(w, "use CONNECT for HTTPS", http.StatusForbidden)
+		return
+	}
 	host := r.URL.Host
 	if _, _, err := net.SplitHostPort(host); err != nil {
 		host = net.JoinHostPort(host, "80")
 	}
 	if h, _, _ := net.SplitHostPort(host); !a.cfg.inZone(h) {
-		if ip, err := netip.ParseAddr(h); err != nil || !(meshRanges[0].Contains(ip) || meshRanges[1].Contains(ip)) {
+		if ip, err := netip.ParseAddr(h); err != nil || !inMeshRanges(ip) {
 			http.Error(w, errOutside.Error(), http.StatusForbidden)
 			return
 		}

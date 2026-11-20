@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,18 +35,7 @@ func startAgent(dir string, c *agentConfig, o options) error {
 		}
 		return startDetached(bin, dir)
 	}
-	unit := fmt.Sprintf(`[Unit]
-Description=Hogman pen connection (%s)
-After=network-online.target
-
-[Service]
-ExecStart=%s agent %s
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-`, c.Zone, bin, dir)
+	unit := renderSystemdUnit(c.Zone, bin, dir)
 	path := unitPath(c.Zone)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
