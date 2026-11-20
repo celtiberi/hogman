@@ -448,9 +448,12 @@ HANDLE_RE='^[a-z][a-z0-9-]{0,30}[a-z0-9]$'   # the registrar's rule
 live_pens() { local n c=0; for n in $(pen_names); do [ -f "$PENS/$n/.removed" ] || c=$((c + 1)); done; echo "$c"; }
 
 set_host_var() {  # set_host_var KEY value: in host.env, replacing any old value
-  local tmp; tmp="$(mktemp)"
+  # host.env is sourced, so quote the value (a sender like "Hogman <x@y>"
+  # would otherwise be read as a redirection). Single quotes, with any ' escaped.
+  local tmp v; tmp="$(mktemp)"
+  v="$(printf '%s' "$2" | sed "s/'/'\\\\''/g")"
   grep -v "^$1=" "$HOSTENV" > "$tmp" || true
-  echo "$1=$2" >> "$tmp"
+  printf "%s='%s'\n" "$1" "$v" >> "$tmp"
   install -m 0600 "$tmp" "$HOSTENV"; rm -f "$tmp"
 }
 

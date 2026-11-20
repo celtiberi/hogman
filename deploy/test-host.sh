@@ -202,6 +202,11 @@ check "inviting from the list makes a working code and the message to send" invi
 check "and marks them invited" sh -c "'$HOST' waitlist | grep -q 'invited $wcode.*wanda@example.com'"
 "$HOST" waitlist remove 2 >/dev/null 2>&1
 check "the keeper can remove someone" sh -c "! '$HOST' waitlist | grep -q xavier"
+mail_setup() {  # a sender with <...> must not break the host settings file
+  echo re_testkeyonly_not_real | "$HOST" signup-mail "Hogman <pens@example.com>" >/dev/null 2>&1 \
+    && "$HOST" capacity | jq -e '.max == 3' && grep -q "^SIGNUP_FROM='Hogman <pens@example.com>'$" "$HOGMAN_HOME/host.env"
+}
+check "signup-mail stores a sender like 'Hogman <pens@...>' safely" mail_setup
 check "the page cannot reach Docker or the pens" sh -c "! docker inspect hogman-signup-web-1 | grep -q docker.sock"
 broker_unreachable() {  # only the page shares a network with the broker
   local n; for n in $(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' hogman-signup-broker-1); do

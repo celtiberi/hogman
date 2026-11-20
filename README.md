@@ -206,7 +206,7 @@ Try it, break it, tell us what you find. Don't trust it with anything that matte
 | Alerts on your phone when the server or its backups stop | |
 | Pens on our server: sign up by invitation while we test, or join the waiting list | |
 | Run your pen from its home page: invites, the herd, the boot | |
-| End-to-end tests: 115 checks for a pen, 59 for a shared host | |
+| End-to-end tests: 115 checks for a pen, 60 for a shared host | |
 
 **Found a security problem?** Please don't open a public issue. Report it privately
 with GitHub's **Security → Report a vulnerability** button on this repository.
