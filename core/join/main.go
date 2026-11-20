@@ -482,11 +482,9 @@ func leave(raw string, o options) error {
 			}
 		}
 	}
-	// This computer's own device next, through its connection while it's
-	// still up, so old devices don't pile up in "Your devices".
-	removeOwnDevice(n.Zone, root)
-	// The certificate: it is the part that matters on this computer, and it
-	// needs nothing from the network.
+	// The certificate next: it is the part that matters on this computer, and
+	// it needs nothing from the network. It goes before the device, so that
+	// cancelling the password prompt leaves this computer still on the pen.
 	certFile, cleanupCert, err := writeTempCert(root.PEM)
 	if err != nil {
 		return err
@@ -501,6 +499,9 @@ func leave(raw string, o options) error {
 	} else {
 		note("the %s certificate was not installed", n.Zone)
 	}
+	// This computer's own device, through its connection while it's still up,
+	// so old devices don't pile up in "Your devices".
+	removeOwnDevice(n.Zone, root)
 	leaveAlongside(n.Zone)
 	if ts, err := findTailscale(); err == nil {
 		if st, err := ts.Status(); err == nil && st.OnNetwork(n.Zone) {
