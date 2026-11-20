@@ -353,11 +353,13 @@ EOF
 }
 
 cmd_list() {
+  local running
+  running="$(docker ps --format '{{.Names}}')"
   printf "%-16s %-28s %-6s %s\n" NETWORK PUBLIC-HOST RELAY STATE
   for n in $(pen_names); do
     local state="running"
     [ -f "$PENS/$n/.removed" ] && state="stopped"
-    if [ "$state" = running ] && ! docker ps --format '{{.Names}}' | grep -q "^pen-$n-headscale-1$"; then state="down"; fi
+    if [ "$state" = running ] && ! grep -qx "pen-$n-headscale-1" <<<"$running"; then state="down"; fi
     printf "%-16s %-28s %-6s %s\n" "$n" "$(pen_env "$n" PUBLIC_HOST)" "$(pen_env "$n" STUN_PORT)" "$state"
   done
 }

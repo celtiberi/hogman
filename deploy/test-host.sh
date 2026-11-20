@@ -16,9 +16,28 @@ FRONT_CA="$HOGMAN_HOME/front/data/caddy/pki/authorities/local/root.crt"
 
 pass=0; fail=0
 step()  { echo; echo "== $*"; }
-check() { local d="$1"; shift
-  if "$@" >/dev/null 2>&1; then echo "  PASS  $d"; pass=$((pass + 1)); else echo "  FAIL  $d"; fail=$((fail + 1)); fi; }
+check() {
+  local d="$1" log="$HOGMAN_HOME/.check.out"; shift
+  if "$@" >"$log" 2>&1; then echo "  PASS  $d"; pass=$((pass + 1))
+  else
+    echo "  FAIL  $d"; fail=$((fail + 1))
+    [ -s "$log" ] && tail -n 5 "$log" | sed 's/^/        | /'
+  fi
+}
 fails() { ! "$@" >/dev/null 2>&1; }
+# Capture command stdout before grepping: under pipefail, piping docker exec /
+# curl directly into `grep -q` closes the pipe on the first match and makes the
+# producer exit 255/141 (EPIPE/SIGPIPE).
+match() {    # match <grep-pattern> <command...>
+  local pat="$1" out; shift
+  out="$("$@")" || return 1
+  grep -q -- "$pat" <<<"$out"
+}
+no_match() { # no_match <grep-pattern> <command...>: command succeeds and stdout does not match
+  local pat="$1" out; shift
+  out="$("$@")" || return 1
+  ! grep -q -- "$pat" <<<"$out"
+}
 perm()  { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 secret_dirs_ok() {
   local d
@@ -73,13 +92,17 @@ for pen in bobo zebra; do
   retry 20 in_client "$pen" test -s /etc/ssl/certs/ca-certificates.crt
   info_ok() { in_client "$pen" curl -sf "https://$host/hogman/v1/network" | jq -e --arg z "$pen.hogman" '.zone == $z'; }
   check "https://$host answers as pen $pen" info_ok
-  check "the join page is served for $pen" sh -c "docker exec client-$pen curl -sf https://$host/join | grep -q hogman-join"
+  check "the join page is served for $pen" match hogman-join in_client "$pen" curl -sf "https://$host/join"
   out="$(in_client "$pen" sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open --handle member1 --hostname laptop "$1"' _ "$link" 2>&1)"; rc=$?
   [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
   check "a member joins $pen (exit $rc)" grep -q "You're in. You are member1 on $pen.hogman" <<<"$out"
-  check "the registrar of $pen recorded the device" retry 10 sh -c "'$HOST' pen $pen device list | grep -q 'member1.*laptop'"
+  check "the registrar of $pen recorded the device" retry 10 match 'member1.*laptop' "$HOST" pen "$pen" device list
   stun="$(grep -h ^STUN_PORT= "$HOGMAN_HOME/pens/$pen/.env" | cut -d= -f2)"
-  derp_port() { docker exec "pen-$pen-core-mesh-1" tailscale debug derp-map 2>/dev/null | jq -r '.Regions[].Nodes[].STUNPort' | grep -qx "$stun"; }
+  derp_port() {
+    local out
+    out="$(docker exec "pen-$pen-core-mesh-1" tailscale debug derp-map 2>/dev/null | jq -r '.Regions[].Nodes[].STUNPort')" || return 1
+    grep -qx -- "$stun" <<<"$out"
+  }
   check "$pen's relay advertises its own port ($stun)" derp_port
 done
 
@@ -102,8 +125,8 @@ front_dns_ok() {  # the front door resolves each pen's unique container names on
   want_core="$(docker inspect -f '{{(index .NetworkSettings.Networks "pen-'"$pen"'-core").IPAddress}}' "pen-$pen-core-mesh-1")"
   want_hs="$(docker inspect -f '{{(index .NetworkSettings.Networks "pen-'"$pen"'-core").IPAddress}}' "pen-$pen-headscale-1")"
   for _ in 1 2 3 4 5 6; do
-    got_core="$(docker exec hogman-front-front-1 getent hosts "pen-$pen-core-mesh-1" | awk '{print $1}' | head -1)"
-    got_hs="$(docker exec hogman-front-front-1 getent hosts "pen-$pen-headscale-1" | awk '{print $1}' | head -1)"
+    got_core="$(docker exec hogman-front-front-1 getent hosts "pen-$pen-core-mesh-1" | awk 'NR==1 {print $1}')"
+    got_hs="$(docker exec hogman-front-front-1 getent hosts "pen-$pen-headscale-1" | awk 'NR==1 {print $1}')"
     [ "$got_core" = "$want_core" ] && [ "$got_hs" = "$want_hs" ] || return 1
   done
 }
@@ -120,7 +143,7 @@ check "both control hosts answer through the same front door" cross
 fp_b="$(in_client bobo curl -sf https://control.bobo.example/hogman/v1/network | jq -r .root_fingerprint)"
 fp_z="$(in_client zebra curl -sf https://control.zebra.example/hogman/v1/network | jq -r .root_fingerprint)"
 check "each pen has its own certificate authority" test -n "$fp_b" -a "$fp_b" != "$fp_z"
-check "bobo's members are not zebra's" sh -c "! '$HOST' pen zebra member list | grep -q bobo-owner"
+check "bobo's members are not zebra's" no_match bobo-owner "$HOST" pen zebra member list
 
 step "Restore a pen from a backup, as on a new server"
 # What hogman-host backup keeps: .env and data/, minus what the pen rebuilds.
@@ -135,9 +158,9 @@ out="$("$HOST" upgrade zebra 2>&1)"; rc=$?
 check "hogman-host upgrade brings the restored pen up (exit $rc)" test $rc = 0
 restored() { in_client zebra curl -sf https://control.zebra.example/hogman/v1/network | jq -e --arg f "$fp_z" '.root_fingerprint == $f'; }
 check "the restored pen answers with its own certificate authority" retry 30 restored
-check "the restored pen kept its members" sh -c "'$HOST' pen zebra member list | grep -q zebra-owner"
-check "the restored pen kept its devices" sh -c "'$HOST' pen zebra device list | grep -q 'member1.*laptop'"
-check "the restored pen is listed as running" sh -c "'$HOST' list | grep zebra | grep -q running"
+check "the restored pen kept its members" match zebra-owner "$HOST" pen zebra member list
+check "the restored pen kept its devices" match 'member1.*laptop' "$HOST" pen zebra device list
+check "the restored pen is listed as running" match 'zebra.*running' "$HOST" list
 
 step "Get a pen: the sign-up page raises one for a stranger"
 # The operator's backup key: hosted pens' root keys are escrowed to it.
@@ -170,7 +193,7 @@ create_pen() {  # create_pen <json>: start a sign-up and follow its job, like th
   done
   echo '{"error":"timed out"}'
 }
-check "the page is served at https://get.example" sh -c "docker exec client-signup curl -sf https://get.example/ | grep -q 'Get a pen'"
+check "the page is served at https://get.example" match 'Get a pen' docker exec client-signup curl -sf https://get.example/
 check "it says sign-ups are open" sh -c "docker exec client-signup curl -sf https://get.example/api/status | jq -e '.open'"
 check "a reserved name is refused" sh -c "docker exec client-signup curl -sf 'https://get.example/api/check?pen=www' | jq -e '.free == false'"
 wrong_code() { [ "$(create_pen '{"code":"PIG-AAAA-AAAA","pen":"smithy","handle":"keeper"}' | jq -r .status)" = 403 ]; }
@@ -193,15 +216,17 @@ check "the pen is marked hosted" grep -q '^HOSTED=true' "$HOGMAN_HOME/pens/smith
 no_plain_root() { local d="$HOGMAN_HOME/pens/smithy/data/pki/offline"; [ -d "$d" ] && [ -z "$(ls -A "$d")" ]; }
 check "its root key is not on the server in the clear" no_plain_root
 escrow_opens() {
-  docker run --rm -v "$HOGMAN_HOME:/h:ro" alpine:3.22 sh -c \
-    'apk add -q age >/dev/null && age -d -i /h/age-secret.txt /h/pens/smithy/data/pki/root-escrow.tar.gz.age | tar -tz' | grep -q root_ca_key
+  local out
+  out="$(docker run --rm -v "$HOGMAN_HOME:/h:ro" alpine:3.22 sh -c \
+    'apk add -q age >/dev/null && age -d -i /h/age-secret.txt /h/pens/smithy/data/pki/root-escrow.tar.gz.age | tar -tz')" || return 1
+  grep -q root_ca_key <<<"$out"
 }
 check "it is escrowed to the operator's backup key" escrow_opens
 docker cp "$HOGMAN_HOME/pens/smithy/data/join-dl" client-signup:/dl >/dev/null
 out="$(docker exec client-signup sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open --hostname laptop "$1"' _ "$link" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | tail -8 | sed 's/^/        | /'
 check "the keeper joins with the link (exit $rc)" grep -q "You're in. You are keeper on smithy.hogman" <<<"$out"
-check "and is the pen's owner" sh -c "'$HOST' pen smithy member list | grep -q 'keeper.*owner'"
+check "and is the pen's owner" match 'keeper.*owner' "$HOST" pen smithy member list
 code2="$("$HOST" signup-code | awk '/^code:/ {print $2}')"
 check "the server is full at 3 pens" sh -c "docker exec client-signup curl -sf https://get.example/api/status | jq -e '.open == false'"
 full="$(create_pen "{\"code\":\"$code2\",\"pen\":\"jones\",\"handle\":\"keeper\"}" | jq -r .status)"
@@ -214,20 +239,20 @@ check "joining twice keeps one place" bash -c "jq -e '.already and .place == 1' 
 bad_email() { wl '{"email":"nope"}' | jq -e '.error | test("email")'; }
 check "a bad email is refused" bad_email
 wl '{"email":"xavier@example.org"}' >/dev/null
-check "the keeper sees who's waiting" sh -c "'$HOST' waitlist | grep -q 'wanda@example.com.*wanda.*for the band'"
+check "the keeper sees who's waiting" match 'wanda@example.com.*wanda.*for the band' "$HOST" waitlist
 inv="$("$HOST" waitlist invite 1 2>&1)"
 wcode="$(grep -o 'PIG-[A-Z0-9]\{4\}-[A-Z0-9]\{4\}' <<<"$inv" | head -1)"
 invite_ok() {
   [ -n "$wcode" ] && grep -q "^$wcode " "$HOGMAN_HOME/signup/codes" && grep -qF "get.example/#code=$wcode" <<<"$inv"
 }
 check "inviting from the list makes a working code and the message to send" invite_ok
-check "and marks them invited" sh -c "'$HOST' waitlist | grep -q 'invited $wcode.*wanda@example.com'"
+check "and marks them invited" match "invited $wcode.*wanda@example.com" "$HOST" waitlist
 "$HOST" waitlist remove 2 >/dev/null 2>&1
-check "the keeper can remove someone" sh -c "! '$HOST' waitlist | grep -q xavier"
+check "the keeper can remove someone" no_match xavier "$HOST" waitlist
 wl '{"email":"yolanda@example.com"}' >/dev/null
 self_leave() {
   docker exec client-signup curl -s -H 'content-type: application/json' -d '{"email":"yolanda@example.com"}' https://get.example/api/waitlist/leave | jq -e '.ok' \
-    && ! "$HOST" waitlist | grep -q yolanda
+    && no_match yolanda "$HOST" waitlist
 }
 check "someone can take themselves off the list" self_leave
 mail_setup() {  # a sender with <...> must not break the host settings file
@@ -235,7 +260,7 @@ mail_setup() {  # a sender with <...> must not break the host settings file
     && "$HOST" capacity | jq -e '.max == 3' && grep -q "^SIGNUP_FROM='Hogman <pens@example.com>'$" "$HOGMAN_HOME/host.env"
 }
 check "signup-mail stores a sender like 'Hogman <pens@...>' safely" mail_setup
-check "the page cannot reach Docker or the pens" sh -c "! docker inspect hogman-signup-web-1 | grep -q docker.sock"
+check "the page cannot reach Docker or the pens" no_match docker.sock docker inspect hogman-signup-web-1
 broker_unreachable() {  # only the page shares a network with the broker
   local n; for n in $(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' hogman-signup-broker-1); do
     docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' "$n" | tr ' ' '\n' | grep -v '^$' \

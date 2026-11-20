@@ -25,9 +25,12 @@ PUBLIC_HOST=control.bobo-test.example
 pass=0; fail=0
 step()  { echo; echo "== $*"; }
 check() {   # check <description> <command...>
-  local d="$1"; shift
-  if "$@" >/dev/null 2>&1; then echo "  PASS  $d"; pass=$((pass + 1))
-  else echo "  FAIL  $d"; fail=$((fail + 1)); fi
+  local d="$1" log="$WORK/.check.out"; shift
+  if "$@" >"$log" 2>&1; then echo "  PASS  $d"; pass=$((pass + 1))
+  else
+    echo "  FAIL  $d"; fail=$((fail + 1))
+    [ -s "$log" ] && tail -n 5 "$log" | sed 's/^/        | /'
+  fi
 }
 retry() {   # retry <seconds> <command...>
   local n="$1"; shift
@@ -41,6 +44,19 @@ timed() {   # timed <var> <seconds> <command...>: retry, store elapsed seconds i
   return $rc
 }
 not() { ! "$@"; }
+# Capture command stdout before grepping: under pipefail, piping docker exec /
+# curl directly into `grep -q` closes the pipe on the first match and makes the
+# producer exit 255/141 (EPIPE/SIGPIPE).
+match() {    # match <grep-pattern> <command...>
+  local pat="$1" out; shift
+  out="$("$@")" || return 1
+  grep -q -- "$pat" <<<"$out"
+}
+no_match() { # no_match <grep-pattern> <command...>: command succeeds and stdout does not match
+  local pat="$1" out; shift
+  out="$("$@")" || return 1
+  ! grep -q -- "$pat" <<<"$out"
+}
 
 cleanup() {
   if [ "$KEEP" = true ]; then
@@ -70,7 +86,12 @@ dc() {
     -f compose.yaml -f test/compose.test.yaml --profile clients "$@"
 }
 run()   { local c="$1"; shift; dc exec -T "$c" "$@"; }
-ip_of() { run "$1" tailscale ip -4 2>/dev/null | head -1 | tr -d '\r'; }
+ip_of() {
+  local out line
+  out="$(run "$1" tailscale ip -4 2>/dev/null)" || return 1
+  IFS= read -r line <<<"${out//$'\r'/}"
+  printf '%s\n' "$line"
+}
 has_ip(){ [ -n "$(ip_of "$1")" ]; }
 
 # --- from "the internet": a machine that can reach only the public edge ---
@@ -98,10 +119,14 @@ api_raw_status() {  # api_raw_status <tools-container> <METHOD> <path> <curl arg
 status_is() { [ "$(api_status "$@" 2>/dev/null | tail -c 3)" = "$EXPECT" ]; }
 expect() { EXPECT="$1"; shift; status_is "$@"; }
 
-resolves_to()  { run bob-tools dig +short "$1" | tr -d '\r' | grep -qx "$2"; }
+resolves_to() {
+  local out
+  out="$(run bob-tools dig +short "$1")" || return 1
+  grep -qx -- "$2" <<<"${out//$'\r'/}"
+}
 resolves_none(){ [ -z "$(run bob-tools dig +short "$1" | tr -d '\r')" ]; }
-resolves_any() { run bob-tools dig +short "$1" | grep -q .; }
-refused()      { run bob-tools dig "@$CORE_MESH_IP" "$1" | grep -q REFUSED; }
+resolves_any() { match . run bob-tools dig +short "$1"; }
+refused()      { match REFUSED run bob-tools dig "@$CORE_MESH_IP" "$1"; }
 fetch() {
   local body
   body="$(run "${FROM:-bob-tools}" curl -sf -m3 --cacert $ROOT "https://$1")" || return 1
@@ -111,8 +136,12 @@ can_ping()     { run "$1" ping -c2 -W2 "$2"; }
 port_open()    { run "$1" nc -z -w3 "$2" "$3"; }
 verify_cert()  { openssl verify -CAfile data/pki/public/root_ca.crt \
                    -untrusted data/pki/public/intermediate_ca.crt "$1"; }
-has_device()   { $H device list | grep -q "$1"; }
-no_device_of() { ! $H device list | awk '{print $2}' | grep -qx "$1"; }
+has_device()   { match "$1" $H device list; }
+no_device_of() {
+  local out
+  out="$($H device list)" || return 1
+  ! awk -v u="$1" '$2 == u { found=1 } END { exit !found }' <<<"$out"
+}
 
 site_cert() { run bob-tools sh -c "echo | openssl s_client -connect $1:443 -servername $1 \
                 -CAfile $ROOT 2>/dev/null | openssl x509"; }
@@ -161,7 +190,12 @@ export ALICE_LAPTOP_KEY BOB_LAPTOP_KEY STRAY_KEY
 dc up -d alice-laptop bob-laptop stray-device alice-laptop-tools bob-tools stray-tools
 for d in alice-laptop bob-laptop stray-device; do retry 90 has_ip $d; done
 ALICE_LAPTOP_IP="$(ip_of alice-laptop)"; BOB_LAPTOP_IP="$(ip_of bob-laptop)"; STRAY_IP="$(ip_of stray-device)"
-check "alice's and bob's laptops are recorded as theirs" retry 20 sh -c "$H device list | grep -q 'alice.*personal' && $H device list | grep -q 'bob.*personal'"
+both_laptops() {
+  local out
+  out="$($H device list)" || return 1
+  grep -q 'alice.*personal' <<<"$out" && grep -q 'bob.*personal' <<<"$out"
+}
+check "alice's and bob's laptops are recorded as theirs" retry 20 both_laptops
 retry 30 api alice-laptop-tools GET /api/me
 me="$(api alice-laptop-tools GET /api/me)"
 check "the portal knows alice from her mesh address (alice, admin)" \
@@ -190,7 +224,7 @@ check "portal external JS/CSS load" portal_assets_ok
 export ALICE_SERVER_KEY
 dc up -d alice-server alice-web alice-tools
 retry 90 has_ip alice-server; ALICE_SERVER_IP="$(ip_of alice-server)"
-check "her server is recorded as hers" retry 20 sh -c "$H device list | grep -q 'alice.*server'"
+check "her server is recorded as hers" retry 20 match 'alice.*server' $H device list
 SERVER_ID="$(api alice-laptop-tools GET /api/me | jq -r '.devices[] | select(.kind=="server") | .id')"
 echo "  core=$CORE_MESH_IP alice-laptop=$ALICE_LAPTOP_IP bob-laptop=$BOB_LAPTOP_IP alice-server=$ALICE_SERVER_IP (#$SERVER_ID) stray=$STRAY_IP"
 LAPTOP_ID="$(api alice-laptop-tools GET /api/me | jq -r '.devices[] | select(.kind=="personal") | .id')"
@@ -209,7 +243,7 @@ check "bob resolves ca.$ZONE to the core node"     resolves_to ca.$ZONE "$CORE_M
 check "device names work (alice-server.nodes.$ZONE)" resolves_to alice-server.nodes.$ZONE "$ALICE_SERVER_IP"
 check "ordinary names still resolve (example.com)" resolves_any example.com
 check "the network's DNS refuses outside names (not an open resolver)" refused example.com
-in_directory() { api bob-tools GET /api/directory | grep -q "$1"; }
+in_directory() { match "$1" api bob-tools GET /api/directory; }
 check "the directory lists alice's sites" in_directory "blog.alice.$ZONE"
 
 step "HTTPS with the network's own CA"
@@ -248,7 +282,7 @@ page_invite() {  # an invite made from the home page comes with its link and QR 
     | jq -e --arg h "$PUBLIC_HOST" '(.url | startswith("https://\($h)/join#t=")) and (.qr_svg | startswith("<svg"))'
 }
 check "alice (admin) makes an invite from the home page" page_invite
-invite_open()  { $H invite list | grep 'from the page' | grep -q open; }
+invite_open()  { match 'open.*from the page' $H invite list; }
 offers_keeper(){ api "$1" GET /api/me | jq -e '.can_invite and .is_admin'; }
 offers_none()  { api "$1" GET /api/me | jq -e '(.can_invite or .is_admin) | not'; }
 check "the ledger lists it as open"   invite_open
@@ -274,7 +308,7 @@ check "mesh API rejects same-site browser requests (403)" \
   test "$(api_raw_status alice-laptop-tools POST /api/devices -H 'Content-Type: application/json' -H 'Sec-Fetch-Site: same-site' -d '{"kind":"personal"}')" = 403
 
 step "A device that bypassed the registrar gets nothing"
-check "it is not recorded as anyone's device" not has_device stray-device
+check "it is not recorded as anyone's device" no_match stray-device $H device list
 check "it cannot reach the portal"     not port_open stray-tools "$CORE_MESH_IP" 443
 check "it cannot reach the CA"         not port_open stray-tools "$CORE_MESH_IP" 9000
 check "it cannot reach alice's server" not can_ping stray-tools "$ALICE_SERVER_IP"
@@ -302,7 +336,7 @@ page_ok() {
   html="$(from_internet "https://$PUBLIC_HOST/join")" || return 1
   grep -q 'hogman-join' <<<"$html"
 }
-net_ok()   { from_internet "https://$PUBLIC_HOST/hogman/v1/network" | grep -q '"zone":"bobo.hogman"'; }
+net_ok()   { match '"zone":"bobo.hogman"' from_internet "https://$PUBLIC_HOST/hogman/v1/network"; }
 check "https://<host>/join serves the join page" page_ok
 join_hdrs="$(from_internet -sI "https://$PUBLIC_HOST/join" | tr -d '\r')"
 check "the join page sets anti-framing headers" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\"" _ "$join_hdrs"
@@ -328,18 +362,18 @@ CAROL_LINK="$($H invite create --note carol | awk '/^link:/ {print $2}')"
 BAD_LINK="${CAROL_LINK%fp=*}fp=$(printf '%064d' 0)"
 out="$(join_tool carol-laptop --handle carol "$BAD_LINK" 2>&1)"
 check "a link with the wrong fingerprint is refused" grep -q 'fingerprint mismatch' <<<"$out"
-check "... before the invite is used" sh -c "$H invite list | grep carol | grep -q open"
+check "... before the invite is used" match 'open.*carol' $H invite list
 out="$(join_tool carol-laptop --handle carol --hostname carol-laptop "$CAROL_LINK" 2>&1)"; rc=$?
 echo "$out" | sed 's/^/        | /'
 check "the join tool succeeds (exit $rc)" test $rc = 0
 check "it reports carol is in" grep -q "You're in. You are carol on bobo.hogman" <<<"$out"
 check "it installed the network's root in the system store" \
   run carol-laptop test -s /usr/local/share/ca-certificates/hogman-bobo.hogman.crt
-check "the registrar recorded carol's laptop" retry 10 sh -c "$H device list | grep -q 'carol.*carol-laptop'"
+check "the registrar recorded carol's laptop" retry 10 match 'carol.*carol-laptop' $H device list
 DEVICE_LINK="$($H device key carol personal | awk '/^link:/ {print $2}')"
 out="$(join_tool carol-desktop --hostname carol-desktop "$DEVICE_LINK" 2>&1)"; rc=$?
 check "a device link adds a second device (exit $rc)" grep -q "You're in. You are carol" <<<"$out"
-check "the registrar recorded it as carol's" retry 10 sh -c "$H device list | grep -q 'carol.*carol-desktop'"
+check "the registrar recorded it as carol's" retry 10 match 'carol.*carol-desktop' $H device list
 out="$(join_tool carol-desktop leave "$DEVICE_LINK" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
 check "leave works (exit $rc)" grep -q "Left bobo.hogman" <<<"$out"
@@ -357,16 +391,20 @@ echo "$out" | sed 's/^/        | /'
 check "the join tool succeeds without Tailscale installed (exit $rc)" test $rc = 0
 check "it chose side-by-side mode by itself" grep -q "joining side by side" <<<"$out"
 check "it reports dave is in" grep -q "You're in. You are dave on bobo.hogman" <<<"$out"
-check "the registrar recorded dave's laptop" retry 10 sh -c "$H device list | grep -q 'dave.*dave-laptop'"
+check "the registrar recorded dave's laptop" retry 10 match 'dave.*dave-laptop' $H device list
 PROXY="$(run dave-laptop sh -c 'grep -o "127.0.0.1:[0-9]*" /root/.config/hogman/bobo.hogman/config.json | head -1' | tr -d '\r')"
 via_pen()   { run dave-laptop curl -sf -m10 --proxy "http://$PROXY" "$1"; }
-alice_via() { via_pen https://alice.$ZONE | grep -q "hello from alice.$ZONE"; }
+alice_via() { match "hello from alice.$ZONE" via_pen "https://alice.$ZONE"; }
 check "dave loads alice's site through the pen, trusted by the system store" retry 20 alice_via
 outside_code() { run dave-laptop curl -s -m10 -o /dev/null -w '%{http_code}' --proxy "http://$PROXY" http://example.com | tr -d '\r'; }
 check "the pen's proxy refuses anything outside the pen (HTTP $(outside_code))" test "$(outside_code)" = 403
-pac_ok() { run dave-laptop curl -sf "http://$PROXY/proxy.pac" | grep -q 'dnsDomainIs(host, ".bobo.hogman")'; }
+pac_ok() { match 'dnsDomainIs(host, ".bobo.hogman")' run dave-laptop curl -sf "http://$PROXY/proxy.pac"; }
 check "its rules file sends only pen names through the pen" pac_ok
-no_tun() { ! run dave-laptop ip -o link | grep -qi tailscale; }
+no_tun() {
+  local out
+  out="$(run dave-laptop ip -o link)" || return 1
+  ! grep -qi tailscale <<<"$out"
+}
 check "no network interface was added to the computer" no_tun
 direct_ok() { run dave-laptop curl -sf -m10 -o /dev/null https://example.com; }
 check "dave's ordinary internet is untouched" direct_ok
@@ -376,22 +414,26 @@ run dave-laptop sh -c 'mkdir -p /tmp/notes && echo "notes from dave" > /tmp/note
 out="$(join_tool dave-laptop share notes /tmp/notes --note "Dave's test notes" --background 2>&1)"; rc=$?
 echo "$out" | sed 's/^/        | /'
 check "share puts a folder on the pen in one command (exit $rc)" grep -q "https://notes.$ZONE is up" <<<"$out"
-notes_via() { via_pen https://notes.$ZONE | grep -q "notes from dave"; }
+notes_via() { match "notes from dave" via_pen "https://notes.$ZONE"; }
 check "dave's laptop loads https://notes.$ZONE" retry 20 notes_via
 check "bob loads it too (with Tailscale)" retry 30 fetch notes.$ZONE "notes from dave"
-check "the name is dave's" sh -c "$H name list | grep notes | grep -q dave"
+check "the name is dave's" match 'notes.*dave' $H name list
 share_dir_note() { api bob-tools GET /api/directory | jq -e --arg n "notes.$ZONE" --arg desc "Dave's test notes" 'any(.[]; .name == $n and .member == "dave" and .note == $desc)'; }
 check "the directory shows the share's note" share_dir_note
-notes_listed() { join_tool dave-laptop share list | grep -q "notes.*running"; }
+notes_listed() { match "notes.*running" join_tool dave-laptop share list; }
 check "share list shows it running" notes_listed
-notes_device() { $H device list | awk '$2 == "dave" && $4 == "notes"' | grep -q .; }
+notes_device() {
+  local out
+  out="$($H device list)" || return 1
+  awk '$2 == "dave" && $4 == "notes" { found=1 } END { exit !found }' <<<"$out"
+}
 check "it is a server of dave's, called notes" notes_device
 out="$(join_tool dave-laptop share notes /tmp/notes 2>&1)"
 check "sharing the same name twice is refused while it runs" grep -q "already being shared" <<<"$out"
 out="$(join_tool dave-laptop share stop notes 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
 check "share stop takes it down (exit $rc)" grep -q "notes.$ZONE is down" <<<"$out"
-check "... and gives the name back" sh -c "! $H name list | grep -q notes"
+check "... and gives the name back" no_match notes $H name list
 check "... and removes its server" retry 10 not notes_device
 check "bob can't load it any more" retry 15 not fetch notes.$ZONE "notes from dave"
 
@@ -409,7 +451,7 @@ check "dave names it daveweb.$ZONE" sh -c "$H name claim dave daveweb $DS_ID >/d
 DS_PROXY="$(grep -o 'HTTPS_PROXY=http://127.0.0.1:[0-9]*' <<<"$out" | head -1 | cut -d/ -f3)"
 check "it prints the proxy to run Caddy with" test -n "$DS_PROXY"
 docker exec -d "$(dc ps -q dave-server)" sh -c "ZONE=$ZONE HTTPS_PROXY=http://$DS_PROXY caddy run --config /etc/caddy/dave.Caddyfile >/tmp/caddy.log 2>&1"
-dave_site() { via_pen https://daveweb.$ZONE | grep -q "hello from daveweb.$ZONE"; }
+dave_site() { match "hello from daveweb.$ZONE" via_pen "https://daveweb.$ZONE"; }
 check "its Caddy gets a certificate and dave's laptop loads the site over HTTPS" retry 90 dave_site
 [ "$(dave_site && echo ok)" = ok ] || run dave-server sh -c 'grep -v "\"level\":\"debug\"" /tmp/caddy.log | tail -12 | cut -c1-400' | sed 's/^/        caddy| /'
 check "other members load it too (bob, with Tailscale)" retry 30 fetch daveweb.$ZONE "hello from daveweb"
@@ -458,8 +500,8 @@ check "all of alice's devices are gone from the mesh" no_device_of alice
 check "alice's laptop can no longer reach the portal" retry 30 not port_open alice-laptop-tools "$CORE_MESH_IP" 443
 check "alice's server can no longer reach anyone" retry 30 not can_ping alice-tools "$BOB_LAPTOP_IP"
 check "her name is held: bob can't claim alice" expect 409 bob-tools POST /api/names '{"name":"alice","device_id":1}'
-check "the kick is in the audit log" sh -c "$H audit | grep -q 'member.kick.*alice'"
-$H audit | grep -q 'member.kick.*alice' || { $H audit | tail -8; dc logs --tail 20 registrar 2>&1 | grep -i audit; } | sed 's/^/        audit| /'
+check "the kick is in the audit log" match 'member.kick.*alice' $H audit
+match 'member.kick.*alice' $H audit || { $H audit | tail -8; dc logs --tail 20 registrar 2>&1 | grep -i audit; } | sed 's/^/        audit| /'
 check "bob is unaffected" fetch home.$ZONE "You're in"
 
 echo

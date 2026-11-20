@@ -15,10 +15,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -684,5 +686,131 @@ func TestCASharesCoreMeshIPAndPort9000(t *testing.T) {
 	}
 	if !strings.Contains(pol, `"9000"`) {
 		t.Fatalf("policy missing CA port 9000:\n%s", pol)
+	}
+}
+
+func TestStoreConcurrentSubprocesses(t *testing.T) {
+	if dbPath := os.Getenv("GO_TEST_STORE_HELPER_DB"); dbPath != "" {
+		st, err := OpenStore(dbPath)
+		if err != nil {
+			t.Fatalf("OpenStore: %v", err)
+		}
+		defer st.Close()
+
+		ds, err := st.LiveDevices()
+		if err != nil {
+			t.Fatalf("LiveDevices: %v", err)
+		}
+		found := false
+		for _, d := range ds {
+			if d.Name == "bob-laptop" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("bob-laptop missing from LiveDevices (%d rows)", len(ds))
+		}
+		if _, err := st.AuditLog(50); err != nil {
+			t.Fatalf("AuditLog: %v", err)
+		}
+		st.Audit("cli", "member.check", "bob", os.Getenv("GO_TEST_STORE_HELPER_ID"))
+		return
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "registrar.db")
+	st, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer st.Close()
+
+	bob := &Member{Handle: "bob", Role: "member", Status: "active", HSUserID: "u-bob"}
+	if err := st.InsertMember(bob); err != nil {
+		t.Fatalf("InsertMember: %v", err)
+	}
+	if err := st.InsertDevice(&Device{
+		MemberID: bob.ID,
+		Kind:     "personal",
+		HSNodeID: "n-bob",
+		Name:     "bob-laptop",
+		IPv4:     "100.64.0.2",
+	}); err != nil {
+		t.Fatalf("InsertDevice: %v", err)
+	}
+	st.Audit("cli", "member.init", "bob", "seed")
+
+	stop := make(chan struct{})
+	var writerErr atomic.Value
+	var writerWG sync.WaitGroup
+	writerWG.Add(1)
+	go func() {
+		defer writerWG.Done()
+		tkr := time.NewTicker(5 * time.Millisecond)
+		defer tkr.Stop()
+		statuses := []string{"suspended", "active"}
+		for i := 0; ; i++ {
+			status := statuses[i%2]
+			if err := st.SetMemberStatus(bob.ID, status); err != nil {
+				writerErr.Store(fmt.Errorf("SetMemberStatus(%s): %w", status, err))
+				return
+			}
+			st.Audit("cli", "member."+status, "bob", fmt.Sprintf("iter-%d", i))
+			select {
+			case <-stop:
+				return
+			case <-tkr.C:
+			}
+		}
+	}()
+
+	const workers = 6
+	const perWorker = 4
+	var childWG sync.WaitGroup
+	errs := make(chan error, workers*perWorker)
+	for w := 0; w < workers; w++ {
+		childWG.Add(1)
+		go func(worker int) {
+			defer childWG.Done()
+			for j := 0; j < perWorker; j++ {
+				id := fmt.Sprintf("w%d-j%d", worker, j)
+				cmd := exec.Command(os.Args[0], "-test.run=^TestStoreConcurrentSubprocesses$")
+				cmd.Env = append(os.Environ(),
+					"GO_TEST_STORE_HELPER_DB="+dbPath,
+					"GO_TEST_STORE_HELPER_ID="+id,
+				)
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					errs <- fmt.Errorf("subprocess %s failed: %w\n%s", id, err, string(out))
+				} else if strings.Contains(string(out), "audit ") {
+					errs <- fmt.Errorf("subprocess %s logged audit error:\n%s", id, string(out))
+				}
+			}
+		}(w)
+	}
+	childWG.Wait()
+	close(stop)
+	writerWG.Wait()
+	close(errs)
+
+	if v := writerErr.Load(); v != nil {
+		t.Fatalf("background writer failed: %v", v.(error))
+	}
+	for err := range errs {
+		t.Fatal(err)
+	}
+
+	entries, err := st.AuditLog(1000000)
+	if err != nil {
+		t.Fatalf("AuditLog: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, e := range entries {
+		if e.Action == "member.check" && e.Target == "bob" {
+			seen[e.Detail] = true
+		}
+	}
+	if len(seen) != workers*perWorker {
+		t.Fatalf("got %d member.check audit entries, want %d", len(seen), workers*perWorker)
 	}
 }
