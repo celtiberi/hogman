@@ -5,35 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Home</title>
-<style>
-  body { font: 17px/1.55 system-ui, sans-serif; max-width: 42rem; margin: 3rem auto; padding: 0 1.25rem; color: #1d1d1f; }
-  h1 { font-size: 1.8rem; margin-bottom: .25rem; }
-  h2 { margin-top: 2.2rem; }
-  .sub, .muted { color: #666; }
-  .sub { margin-top: 0; }
-  code { background: #f2f2f2; padding: .1rem .35rem; border-radius: 4px; }
-  pre code { display: block; padding: .8rem 1rem; }
-  button { font: inherit; padding: .4rem 1rem; border-radius: 6px; border: 1px solid #999; background: #fff; cursor: pointer; }
-  button.primary { background: #1d1d1f; color: #fff; border-color: #1d1d1f; }
-  button.link { border: 0; background: none; color: #a33; padding: 0 .2rem; text-decoration: underline; }
-  button:disabled { opacity: .5; cursor: default; }
-  ul.devices { list-style: none; padding: 0; }
-  ul.devices li { display: flex; gap: .7rem; align-items: baseline; padding: .45rem 0; border-bottom: 1px solid #ddd; }
-  .tag { font-size: .8rem; padding: 0 .45rem; border-radius: 999px; border: 1px solid #aaa; }
-  .here { font-size: .8rem; color: #2a7a2a; }
-  .grow { flex: 1; }
-  .card { border: 1px solid #ccc; border-radius: 10px; padding: 1rem 1.2rem; margin-top: 1rem; }
-  .qr { display: flex; gap: 1.2rem; flex-wrap: wrap; align-items: center; }
-  .qr img { width: 220px; height: 220px; image-rendering: pixelated; border-radius: 6px; }
-  .qr .info { flex: 1; min-width: 14rem; }
-  .linkbox { font: .78rem ui-monospace, Menlo, monospace; word-break: break-all; background: #f2f2f2; padding: .5rem .6rem; border-radius: 6px; }
-  .error { color: #a33; }
-  @media (prefers-color-scheme: dark) {
-    body { background: #111; color: #eee; } .sub, .muted { color: #999; } a { color: #8ab4ff; }
-    code, .linkbox { background: #222; } button { background: #222; color: #eee; border-color: #555; }
-    button.primary { background: #eee; color: #111; } ul.devices li { border-color: #333; } .card { border-color: #444; }
-  }
-</style>
+<link rel="stylesheet" href="/portal.css">
 </head>
 <body>
 <h1 id="hello">You're in.</h1>
@@ -45,15 +17,15 @@
 
   <div class="card">
     <strong>Add a device</strong>
-    <p class="muted" style="margin:.3rem 0 .8rem">Get a one-time link for another computer or your phone. It joins as you,
+    <p class="muted hint">Get a one-time link for another computer or your phone. It joins as you,
       works once, and expires in an hour.</p>
     <button class="primary" id="add-personal" type="button">Add a device</button>
     <button id="add-server" type="button">Add a server</button>
     <div id="newlink" hidden>
-      <div class="qr" style="margin-top:1rem">
+      <div class="qr">
         <img id="qr" alt="QR code for the one-time device link">
         <div class="info">
-          <p style="margin-top:0"><strong>Phone:</strong> scan this with the Hogman app (coming soon).</p>
+          <p><strong>Phone:</strong> scan this with the Hogman app (coming soon).</p>
           <p><strong>Computer:</strong> open this link on it and follow the steps:</p>
           <div class="linkbox" id="linktext"></div>
           <p><button id="copy" type="button">Copy link</button> <span class="muted" id="expires"></span></p>
@@ -77,100 +49,6 @@ yourname.<span class="zone">&lt;network&gt;.hogman</span> {
 <p>Download it again: <a href="/root_ca.crt">root_ca.crt</a>. It can only vouch
 for names inside this network.</p>
 
-<script>
-(() => {
-  const $ = id => document.getElementById(id);
-  const api = async (method, path, body) => {
-    const r = await fetch('/api' + path, {
-      method, headers: body ? { 'Content-Type': 'application/json' } : {},
-      body: body ? JSON.stringify(body) : undefined, cache: 'no-store',
-    });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
-    return data;
-  };
-
-  let me = null;
-  let timer = null;
-
-  const render = () => {
-    $('hello').textContent = `You're in, ${me.member.handle}.`;
-    $('whoami').textContent = `On ${me.zone} from ${me.this_device.name}. This page is only reachable from inside the network.`;
-    document.querySelectorAll('.zone').forEach(e => { e.textContent = me.zone; });
-    if (!me.devices) return;   // servers get a short answer and no device controls
-    $('mine').hidden = false;
-    const ul = $('devices');
-    ul.replaceChildren();
-    for (const d of me.devices) {
-      const li = document.createElement('li');
-      const name = document.createElement('span'); name.className = 'grow'; name.textContent = d.name;
-      const kind = document.createElement('span'); kind.className = 'tag'; kind.textContent = d.kind;
-      li.append(name, kind);
-      if (d.id === me.this_device.id) {
-        const here = document.createElement('span'); here.className = 'here'; here.textContent = 'this device';
-        li.append(here);
-      } else {
-        const rm = document.createElement('button'); rm.className = 'link'; rm.type = 'button'; rm.textContent = 'Remove';
-        rm.onclick = async () => {
-          if (!confirmRemove(d.name)) return;
-          rm.disabled = true;
-          try { await api('DELETE', '/devices/' + d.id); await load(); }
-          catch (e) { rm.disabled = false; showError(e); }
-        };
-        li.append(rm);
-      }
-      ul.append(li);
-    }
-  };
-
-  // A plain inline confirmation instead of a browser dialog.
-  const confirmRemove = name => {
-    const key = 'armed-' + name;
-    if (confirmRemove[key]) { delete confirmRemove[key]; return true; }
-    confirmRemove[key] = true;
-    showError(new Error(`Press Remove again to take ${name} off the network.`));
-    setTimeout(() => { delete confirmRemove[key]; }, 5000);
-    return false;
-  };
-
-  const showError = e => { const p = $('adderr'); p.textContent = e.message; p.hidden = false; };
-
-  const add = async kind => {
-    $('adderr').hidden = true;
-    $('add-personal').disabled = $('add-server').disabled = true;
-    try {
-      const r = await api('POST', '/devices', { kind });
-      $('qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(r.join_qr_svg || '');
-      $('qr').hidden = !r.join_qr_svg;
-      $('linktext').textContent = r.join_link;
-      $('newlink').hidden = false;
-      $('copy').onclick = async () => {
-        await navigator.clipboard.writeText(r.join_link);
-        $('copy').textContent = 'Copied';
-      };
-      $('copy').textContent = 'Copy link';
-      clearInterval(timer);
-      const tick = () => {
-        const left = r.expires_at - Date.now() / 1000;
-        if (left <= 0) {
-          $('expires').textContent = 'Expired. Make a new one.';
-          $('qr').style.opacity = .15; clearInterval(timer); return;
-        }
-        $('expires').textContent = `${kind === 'server' ? 'Server link. ' : ''}Works once, expires in ${Math.ceil(left / 60)} min.`;
-      };
-      $('qr').style.opacity = 1; tick(); timer = setInterval(tick, 15000);
-    } catch (e) { showError(e); }
-    finally { $('add-personal').disabled = $('add-server').disabled = false; }
-  };
-  $('add-personal').onclick = () => add('personal');
-  $('add-server').onclick = () => add('server');
-
-  const load = async () => {
-    try { me = await api('GET', '/me'); render(); }
-    catch (e) { $('whoami').textContent = 'Could not load your details: ' + e.message; }
-  };
-  load();
-})();
-</script>
+<script src="/portal.js" defer></script>
 </body>
 </html>

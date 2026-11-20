@@ -9,7 +9,7 @@
 	}
 }
 
-:80 {
+http://{$PUBLIC_HOST} {
 	handle /generate_204 {
 		respond 204
 	}
@@ -17,7 +17,19 @@
 	handle /join {
 		root * /srv/join-page
 		rewrite * /index.html
-		header Cache-Control no-store
+		header {
+			X-Frame-Options DENY
+			X-Content-Type-Options nosniff
+			Referrer-Policy no-referrer
+			Cache-Control no-store
+			Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+			-Server
+		}
+		file_server
+	}
+	handle_path /join/assets/* {
+		root * /srv/join-page
+		header X-Content-Type-Options nosniff
 		file_server
 	}
 	handle_path /join/dl/* {
@@ -29,6 +41,13 @@
 			max_size 16KB
 		}
 		reverse_proxy core-mesh:8081
+	}
+	# Keep Headscale's admin REST API and Swagger UI off the public edge.
+	handle /api/* {
+		respond 404
+	}
+	handle /swagger* {
+		respond 404
 	}
 	handle {
 		reverse_proxy headscale:8080 {
