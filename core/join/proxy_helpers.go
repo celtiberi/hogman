@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strconv"
@@ -48,8 +49,11 @@ func validPACProxyAddr(addr string) bool {
 	if err != nil {
 		return false
 	}
-	if net.ParseIP(host) == nil && host != "localhost" {
-		return false
+	if host != "localhost" {
+		ip, err := netip.ParseAddr(host)
+		if err != nil || ip.Zone() != "" || !ip.Unmap().IsLoopback() {
+			return false
+		}
 	}
 	port, err := strconv.Atoi(portStr)
 	return err == nil && port >= 1 && port <= 65535

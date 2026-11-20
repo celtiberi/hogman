@@ -281,12 +281,46 @@ func TestParseAutoProxyOutput(t *testing.T) {
 	}
 }
 
+func TestValidPACProxyAddrLoopbackOnly(t *testing.T) {
+	for _, valid := range []string{
+		"127.0.0.1:18123",
+		"127.0.0.2:18123",
+		"[::1]:18123",
+		"localhost:18123",
+	} {
+		if !validPACProxyAddr(valid) {
+			t.Fatalf("validPACProxyAddr(%q) = false, want true", valid)
+		}
+	}
+	for _, bad := range []string{
+		"10.0.0.5:18123",
+		"192.168.1.10:18123",
+		"100.64.0.5:18123",
+		"198.51.100.1:8080",
+		"[2001:db8::1]:8080",
+		"0.0.0.0:18123",
+		"[::]:18123",
+		"[::1%lo0]:18123",
+		"evil.example:8080",
+		"127.0.0.1:0",
+		"127.0.0.1:65536",
+	} {
+		if validPACProxyAddr(bad) {
+			t.Fatalf("validPACProxyAddr(%q) = true, want false", bad)
+		}
+	}
+}
+
 func TestShouldLeaveAutoProxy(t *testing.T) {
 	p1 := &agentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}
 	p2 := &agentConfig{Zone: "zebra.hogman", ProxyAddr: "127.0.0.1:18124"}
-	known := []*agentConfig{p1, p2}
+	tampered := &agentConfig{Zone: "evil.hogman", ProxyAddr: "198.51.100.1:8080"}
+	known := []*agentConfig{p1, p2, tampered}
 	if !shouldLeaveAutoProxy("http://corp.example/proxy.pac", true, known) {
 		t.Fatal("must leave active corporate /proxy.pac alone")
+	}
+	if !shouldLeaveAutoProxy("http://198.51.100.1:8080/proxy.pac", true, known) {
+		t.Fatal("must not claim non-loopback proxy as Hogman")
 	}
 	if !shouldLeaveAutoProxy("http://127.0.0.1:19999/proxy.pac", true, known) {
 		t.Fatal("must leave unknown local port /proxy.pac alone")
@@ -523,11 +557,12 @@ func TestRenderPACSingleAndMulti(t *testing.T) {
 	badZone := &agentConfig{Zone: "bad\";return \"PROXY evil", ProxyAddr: "127.0.0.1:18127"}
 	badDot := &agentConfig{Zone: ".bobo.hogman", ProxyAddr: "127.0.0.1:18128"}
 	badAddr := &agentConfig{Zone: "z.hogman", ProxyAddr: "evil.example:8080"}
+	badRemote := &agentConfig{Zone: "remote.hogman", ProxyAddr: "198.51.100.1:8080"}
 	badPort := &agentConfig{Zone: "z2.hogman", ProxyAddr: "127.0.0.1:99999"}
 	override := &agentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:19123"}
 
 	multi := renderPAC(normalizePenConfigs(
-		[]*agentConfig{p1, p3, p2, nested, badZone, badDot, badAddr, badPort},
+		[]*agentConfig{p1, p3, p2, nested, badZone, badDot, badAddr, badRemote, badPort},
 		override,
 	))
 	if !strings.Contains(multi, "only pen names use their pen's proxy") {
@@ -543,7 +578,7 @@ func TestRenderPACSingleAndMulti(t *testing.T) {
 			t.Fatalf("multi PAC missing %q:\n%s", want, multi)
 		}
 	}
-	if strings.Contains(multi, "18123") || strings.Contains(multi, "evil") || strings.Contains(multi, "99999") {
+	if strings.Contains(multi, "18123") || strings.Contains(multi, "evil") || strings.Contains(multi, "198.51.100.1") || strings.Contains(multi, "99999") {
 		t.Fatalf("multi PAC kept invalid or overridden entry:\n%s", multi)
 	}
 	idxNested := strings.Index(multi, `"team.bobo.hogman"`)
