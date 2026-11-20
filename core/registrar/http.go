@@ -220,18 +220,17 @@ func MeshHandler(s *Service) http.Handler {
 		if !readJSON(w, r, &in) {
 			return
 		}
+		var fqdn string
+		var err error
 		if c.device.Kind == "server" {
 			if in.DeviceID != 0 && in.DeviceID != c.device.ID {
 				fail(w, forbidden("a server can only name itself"))
 				return
 			}
-			in.DeviceID = c.device.ID
-			if err := s.serverMayUse(c.device, in.Name); err != nil {
-				fail(w, err)
-				return
-			}
+			fqdn, err = s.ServerClaim(c.actor(), c.device, in.Name)
+		} else {
+			fqdn, err = s.Claim(c.actor(), c.member.Handle, in.Name, in.DeviceID)
 		}
-		fqdn, err := s.Claim(c.actor(), c.member.Handle, in.Name, in.DeviceID)
 		if err != nil {
 			fail(w, err)
 			return
@@ -241,10 +240,8 @@ func MeshHandler(s *Service) http.Handler {
 
 	h("DELETE /api/names/{name}", false, true, func(w http.ResponseWriter, r *http.Request, c caller) {
 		if c.device.Kind == "server" {
-			if err := s.serverOwnsName(c.device, r.PathValue("name")); err != nil {
-				fail(w, err)
-				return
-			}
+			done(w, s.ServerRelease(c.actor(), c.device, r.PathValue("name")))
+			return
 		}
 		done(w, s.Release(c.actor(), r.PathValue("name")))
 	})

@@ -150,12 +150,40 @@ func TestMeshServerNamesItself(t *testing.T) {
 	want(409, "POST", "/api/names", "100.64.0.12", `{"name":"blog"}`)                       // B can't take A's name
 	want(403, "POST", "/api/names", "100.64.0.12", `{"name":"c","device_id":`+id(srvA)+`}`) // nor name A
 	want(403, "DELETE", "/api/names/blog", "100.64.0.12", "")                               // nor release A's name
+	want(403, "POST", "/api/names", "100.64.0.12", `{"name":"z.blog"}`)                     // B can't squat under A's name
 	want(201, "POST", "/api/names", "100.64.0.10", `{"name":"y.blog","device_id":`+id(srvB)+`}`)
 	want(403, "DELETE", "/api/names/blog", "100.64.0.11", "") // y.blog points at B now
 	want(200, "DELETE", "/api/names/x.blog", "100.64.0.11", "")
 	want(403, "DELETE", "/api/devices/"+id(srvB), "100.64.0.11", "")   // not another server
 	want(403, "DELETE", "/api/devices/"+id(laptop), "100.64.0.11", "") // nor the laptop
 	want(200, "DELETE", "/api/devices/"+id(srvA), "100.64.0.11", "")   // itself: yes
+}
+
+// The owner's server still counts against the names cap: a leaked server
+// link can't claim names without limit.
+func TestMeshOwnerServerNameCap(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	if _, err := e.svc.AddMember(ctx, Actor{CLI: true}, "root", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	e.addDevice(t, "root", "server", "srv", "100.64.0.11", "")
+	h := MeshHandler(e.svc)
+	js := map[string]string{"Content-Type": "application/json"}
+	got409 := false
+	for i := 0; i <= e.svc.cfg.MaxNamesPerMember; i++ {
+		rec := doMeshReq(h, "POST", "/api/names", "100.64.0.11", `{"name":"n`+strconv.Itoa(i)+`"}`, js)
+		if rec.Code == http.StatusConflict {
+			got409 = true
+			break
+		}
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("claim n%d: status=%d body=%s", i, rec.Code, rec.Body.String())
+		}
+	}
+	if !got409 {
+		t.Fatalf("the owner's server claimed more than %d names", e.svc.cfg.MaxNamesPerMember)
+	}
 }
 
 func TestMeshServerDeviceRestricted(t *testing.T) {

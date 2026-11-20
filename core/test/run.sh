@@ -448,6 +448,7 @@ check "alice's laptop can no longer reach the portal" retry 30 not port_open ali
 check "alice's server can no longer reach anyone" retry 30 not can_ping alice-tools "$BOB_LAPTOP_IP"
 check "her name is held: bob can't claim alice" expect 409 bob-tools POST /api/names '{"name":"alice","device_id":1}'
 check "the kick is in the audit log" sh -c "$H audit | grep -q 'member.kick.*alice'"
+$H audit | grep -q 'member.kick.*alice' || { $H audit | tail -8; dc logs --tail 20 registrar 2>&1 | grep -i audit; } | sed 's/^/        audit| /'
 check "bob is unaffected" fetch home.$ZONE "You're in"
 
 echo

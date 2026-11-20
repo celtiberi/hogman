@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -645,7 +646,10 @@ type AuditEntry struct {
 }
 
 func (s *Store) Audit(actor, action, target, detail string) {
-	_, _ = s.db.Exec(`INSERT INTO audit (at, actor, action, target, detail) VALUES (?,?,?,?,?)`, now(), actor, action, target, detail)
+	if _, err := s.db.Exec(`INSERT INTO audit (at, actor, action, target, detail) VALUES (?,?,?,?,?)`, now(), actor, action, target, detail); err != nil {
+		// Never fail the action over its audit line, but don't lose it silently either.
+		log.Printf("audit %s %s %s: %v", actor, action, target, err)
+	}
 }
 
 func (s *Store) AuditLog(limit int) ([]*AuditEntry, error) {

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -42,5 +45,32 @@ func TestShareNames(t *testing.T) {
 		if shareNameRE.MatchString(n) {
 			t.Errorf("%q should not be a valid share name", n)
 		}
+	}
+}
+
+func TestShareFolderStaysInside(t *testing.T) {
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret")
+	_ = os.WriteFile(secret, []byte("do not serve"), 0o600)
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "index.html"), []byte("hello"), 0o600)
+	if err := os.Symlink(secret, filepath.Join(dir, "leak")); err != nil {
+		t.Skip("no symlinks here:", err)
+	}
+	h, done, err := shareHandler(&shareConfig{Name: "x", Zone: "z.hogman", Target: dir, Folder: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer done()
+	get := func(path string) (int, string) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		return rec.Code, rec.Body.String()
+	}
+	if code, body := get("/"); code != 200 || !strings.Contains(body, "hello") {
+		t.Fatalf("index: %d %q", code, body)
+	}
+	if code, body := get("/leak"); code == 200 || strings.Contains(body, "do not serve") {
+		t.Fatalf("a symlink out of the folder was followed: %d %q", code, body)
 	}
 }

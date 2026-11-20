@@ -485,9 +485,16 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 	if err != nil {
 		return err
 	}
+	// Foreground or background, the pid file says a share is running, so
+	// list, stop and a second start all see it.
+	pidFile := filepath.Join(dir, "share.pid")
+	_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
+	defer os.Remove(pidFile)
 	writeShareStatus(dir, "starting", "")
 	fail := func(err error) error { writeShareStatus(dir, "error", err.Error()); return err }
 
+	_, statErr := os.Stat(filepath.Join(dir, "certs"))
+	fresh := os.IsNotExist(statErr) // never got as far as a certificate
 	node, _, hc, err := shareNode(ctx, dir, c)
 	if err != nil {
 		return fail(err)
@@ -504,6 +511,14 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 		return code == 0 || strings.Contains(err.Error(), "not enrolled"), err
 	})
 	if err != nil {
+		if fresh {
+			// A brand-new share that can't have its name: take its device back
+			// out, so nothing is left behind on the pen or here.
+			_ = giveBackDevice(ctx, hc, c)
+			node.Close()
+			_ = os.RemoveAll(filepath.Join(dir, "node"))
+			_ = os.Remove(filepath.Join(dir, "share.json"))
+		}
 		return fail(errorf("could not claim %s: %v", c.fqdn(), err))
 	}
 
@@ -514,10 +529,11 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 		RenewBefore: 56 * time.Hour, // the pen's certificates last a week
 		Client:      &acme.Client{DirectoryURL: "https://ca." + c.Zone + ":9000/acme/acme/directory", HTTPClient: hc},
 	}
-	h, err := shareHandler(c)
+	h, closeH, err := shareHandler(c)
 	if err != nil {
 		return fail(err)
 	}
+	defer closeH()
 	ln443, err := node.Listen("tcp", ":443")
 	if err != nil {
 		return fail(err)
@@ -556,13 +572,19 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 	return nil
 }
 
-func shareHandler(c *shareConfig) (http.Handler, error) {
+func shareHandler(c *shareConfig) (http.Handler, func(), error) {
 	if c.Folder {
-		return http.FileServer(http.Dir(c.Target)), nil
+		// os.Root keeps every read inside the folder: a symlink pointing out
+		// of it (to ~/.ssh, say) is refused, not followed.
+		root, err := os.OpenRoot(c.Target)
+		if err != nil {
+			return nil, nil, errorf("cannot open the folder %s: %v", c.Target, err)
+		}
+		return http.FileServerFS(root.FS()), func() { _ = root.Close() }, nil
 	}
 	u, err := url.Parse(c.Target)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -572,10 +594,10 @@ func shareHandler(c *shareConfig) (http.Handler, error) {
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusBadGateway)
-			fmt.Fprintf(w, "%s is shared from a computer where nothing answers on %s right now.\n", c.fqdn(), c.Target)
+			fmt.Fprintf(w, "%s is shared from a computer where the app isn't answering right now.\n", c.fqdn())
 		},
 		ErrorLog: log.New(io.Discard, "", 0),
-	}, nil
+	}, func() {}, nil
 }
 
 // ------------------------------------------------- background, status --
@@ -617,13 +639,19 @@ func shareBackground(dir string, c *shareConfig) error {
 	}
 	_ = os.Remove(filepath.Join(dir, "status.json"))
 	step("Sharing %s as %s, in the background", c.showing(), c.url())
-	if err := spawnDetached(filepath.Join(dir, "share.log"), bin, "__share-run", dir); err != nil {
+	logPath := filepath.Join(dir, "share.log")
+	pid, err := spawnDetached(logPath, bin, "__share-run", dir)
+	if err != nil {
 		return err
 	}
 	deadline := time.Now().Add(4 * time.Minute)
 	for time.Now().Before(deadline) {
 		time.Sleep(time.Second)
-		switch st := readShareStatus(dir); st.State {
+		st := readShareStatus(dir)
+		if st.State != "up" && st.State != "error" && !processAlive(pid) {
+			return errorf("the share stopped before it came up. Log: %s", logPath)
+		}
+		switch st.State {
 		case "up":
 			shareReady(c, true)
 			return nil
@@ -636,9 +664,6 @@ func shareBackground(dir string, c *shareConfig) error {
 
 // runShareProcess is the background process (`__share-run DIR`).
 func runShareProcess(dir string) error {
-	pidFile := filepath.Join(dir, "share.pid")
-	_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
-	defer os.Remove(pidFile)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return serveShare(ctx, dir, func(c *shareConfig) { log.Printf("%s is up, showing %s", c.url(), c.showing()) })
@@ -747,8 +772,24 @@ func giveBack(ctx context.Context, hc *http.Client, c *shareConfig) error {
 		return errorf("could not give back %s: %v", c.fqdn(), err)
 	}
 	note("gave back the name %s", c.fqdn())
-	// The pen drops this device as it answers, so the answer may never arrive.
-	_, _ = homeAPI(hc, c.Zone, "DELETE", "/devices/"+strconv.FormatInt(me.ThisDevice.ID, 10), nil, nil)
+	if err := giveBackDevice(ctx, hc, c); err != nil {
+		return err
+	}
 	note("removed its server from your devices")
+	return nil
+}
+
+// giveBackDevice removes the share's own device from the pen.
+func giveBackDevice(ctx context.Context, hc *http.Client, c *shareConfig) error {
+	var me meView
+	if _, err := homeAPI(hc, c.Zone, "GET", "/me", nil, &me); err != nil {
+		return errorf("could not reach home.%s from the share: %v", c.Zone, err)
+	}
+	code, err := homeAPI(hc, c.Zone, "DELETE", "/devices/"+strconv.FormatInt(me.ThisDevice.ID, 10), nil, nil)
+	// The pen drops this device as it answers, so the answer may never
+	// arrive (code 0); a 404 means it is already gone. Anything else is real.
+	if err != nil && code != 0 && code != 404 {
+		return errorf("the pen would not remove the share's server: %v", err)
+	}
 	return nil
 }
