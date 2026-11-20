@@ -226,7 +226,7 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 	// https_proxy would break everything else in that shell.
 	say("    curl / most CLIs:  https_proxy=%s curl https://<site>.%s", cfg.proxyURL(), n.Zone)
 	say("    git:               git config --global http.https://%s/.proxy %s   (per site)", "<site>."+n.Zone, cfg.proxyURL())
-	say("  The pen carries HTTPS only (and HTTP to redirect).")
+	say("  The pen carries HTTPS only.")
 	say("  To leave: hogman-join leave '<this link>'")
 	if !o.noOpen {
 		openURL(n.Portal)

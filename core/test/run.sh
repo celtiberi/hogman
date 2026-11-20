@@ -271,10 +271,10 @@ check "a cert for inside.$ZONE verifies"                         verify_cert dat
 check "a cert for www.google.com from our own CA key is rejected" not verify_cert data/www.google.com.crt
 
 step "Default-deny access policy"
-# HTTPS only (D-11): members reach servers on 443 (and 80, to redirect), nothing else.
+# HTTPS only (D-11): members reach servers on 443 and nothing else.
 docker exec -d "$(dc ps -q alice-tools)" sh -c 'nc -lk -p 2222 -e cat >/dev/null 2>&1 || nc -lk 2222'
 check "bob's laptop can reach alice's server on 443"     retry 20 port_open bob-tools "$ALICE_SERVER_IP" 443
-check "... and on 80, to be redirected"                  port_open bob-tools "$ALICE_SERVER_IP" 80
+check "... but not on 80"                                 not port_open bob-tools "$ALICE_SERVER_IP" 80
 check "... but on no other port (2222 is open there)"    not port_open bob-tools "$ALICE_SERVER_IP" 2222
 # (Ping still answers: Tailscale's filter lets ICMP through between devices
 # allowed any port. It can't carry data, so it isn't a way in.)

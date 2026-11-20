@@ -129,7 +129,7 @@ https://blog.smith.hogman                http://127.0.0.1:3000  (running in the 
 <p>Each share is a small device of its own, a server, run inside <code>hogman-join</code> with
   Tailscale's <code>tsnet</code>. It joins the pen (with a one-time key the tool asks for in your
   name, or the server link), claims its name, gets a 7-day certificate from the pen's own CA and
-  renews it, and listens on ports 443 and 80 inside the mesh. Your laptop itself still accepts no
+  renews it, and listens on port 443 inside the mesh. Your laptop itself still accepts no
   connections; nothing opens a port on your computer, and nothing needs administrator rights.</p>
 <p>For developers: requests are passed to your app with <code>X-Forwarded-For</code>,
   <code>-Host</code> and <code>-Proto</code>, and with the app's own Host header, so dev servers

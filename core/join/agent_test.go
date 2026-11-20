@@ -179,8 +179,8 @@ func TestAgentConnectAndForwardZoneGuards(t *testing.T) {
 		}
 	}
 
-	// HTTPS only (D-11): pen names on any port but 443 (CONNECT) or 80 (HTTP) are refused.
-	for _, target := range []string{"alice.bobo.hogman:22", "alice.bobo.hogman:8080", "alice.bobo.hogman:9000"} {
+	// HTTPS only (D-11): pen names on any port but 443 are refused, :80 included.
+	for _, target := range []string{"alice.bobo.hogman:22", "alice.bobo.hogman:80", "alice.bobo.hogman:8080", "alice.bobo.hogman:9000"} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodConnect, target, nil)
 		req.Host = target
@@ -189,29 +189,32 @@ func TestAgentConnectAndForwardZoneGuards(t *testing.T) {
 			t.Fatalf("CONNECT %s status=%d want 403", target, rec.Code)
 		}
 	}
-	if resp, err := client.Get("http://alice.bobo.hogman:8080/"); err != nil {
+
+	// Plain HTTP to a pen name is answered by the agent itself with a redirect
+	// to HTTPS; nothing is dialed.
+	dialled := false
+	a.dialMesh = func(context.Context, string, string) (net.Conn, error) { dialled = true; return nil, io.EOF }
+	noFollow := &http.Client{
+		Transport:     &http.Transport{Proxy: http.ProxyURL(pu)},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err := noFollow.Get("http://alice.bobo.hogman/photos?x=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusPermanentRedirect || resp.Header.Get("Location") != "https://alice.bobo.hogman/photos?x=1" {
+		t.Fatalf("http:// status=%d location=%q, want 308 to https", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	if dialled {
+		t.Fatal("plain HTTP was dialed into the pen")
+	}
+	if resp, err := noFollow.Get("http://alice.bobo.hogman:8080/"); err != nil {
 		t.Fatal(err)
 	} else {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusForbidden {
 			t.Fatalf("GET :8080 status=%d want 403", resp.StatusCode)
-		}
-	}
-
-	// Plain HTTP forward to alice.bobo.hogman succeeds and reuses the single Transport on a.rp.
-	trBefore := a.rp.Transport
-	for i := 0; i < 2; i++ {
-		resp, err := client.Get("http://alice.bobo.hogman/")
-		if err != nil {
-			t.Fatal(err)
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK || string(body) != "ok:alice.bobo.hogman" {
-			t.Fatalf("forward #%d: status=%d body=%q", i, resp.StatusCode, string(body))
-		}
-		if a.rp.Transport != trBefore {
-			t.Fatal("agent reverse proxy transport changed across requests")
 		}
 	}
 }

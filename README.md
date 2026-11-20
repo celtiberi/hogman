@@ -133,8 +133,7 @@ to the end of the command.
   offline, encrypted.
 - **Access:** default deny. Hogman's registrar keeps the member list and writes the access
   policy. A *personal* device is a member's laptop or phone; a *server* is anything set up to
-  host sites (a share, say). Members' devices can reach servers (on 443, and 80 to
-  redirect, only) and the pen's services; personal devices accept no incoming connections; a
+  host sites (a share, say). Members' devices can reach servers (on 443 only) and the pen's services; personal devices accept no incoming connections; a
   device that joins without an invite gets nothing. A pen carries HTTPS and nothing else: no
   ssh, no other ports (decision D-11: the best fix for a surface is to delete it).
 - **Invites:** a single-use token in a link that also carries the SHA-256 fingerprint of the
