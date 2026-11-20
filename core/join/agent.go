@@ -167,19 +167,15 @@ func runAgent(dir string) error {
 		}
 		a.up = true
 		log.Printf("on %s as %s", c.Zone, strings.Join(a.ips, ", "))
-		// A server hosts sites: pass the pen's web ports to this computer, where
-		// Caddy (or anything else) listens. Personal devices get no visitors
-		// (the pen's access rules refuse them), so they don't need it.
+		// A computer joins as a personal device only. Things that serve the pen
+		// are shares, each a device of its own (D-11): nothing on this computer
+		// is ever exposed to the pen. If the pen made this a server (an old,
+		// unmarked server link), report it; joinAlongside refuses and leaves.
 		if st.Self != nil && st.Self.Tags != nil {
 			for _, t := range st.Self.Tags.All() {
 				if t == "tag:server" {
 					a.server = true
 				}
-			}
-		}
-		if a.server {
-			for _, port := range []string{"80", "443"} {
-				go forwardPort(node, port)
 			}
 		}
 	}()
@@ -193,44 +189,6 @@ func runAgent(dir string) error {
 	return nil
 }
 
-// forwardPort passes connections to the pen's port to the same port on this
-// computer, untouched (TLS stays end to end, so Caddy here gets its HTTP-01
-// and TLS-ALPN challenges and its visitors as if it were on the mesh itself).
-func forwardPort(node *tsnet.Server, port string) {
-	ln, err := node.Listen("tcp", ":"+port)
-	if err != nil {
-		log.Printf("cannot take the pen's port %s: %v", port, err)
-		return
-	}
-	for {
-		in, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go func() {
-			defer in.Close()
-			out, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 5*time.Second)
-			if err != nil {
-				log.Printf("a visitor came to port %s, but nothing listens on 127.0.0.1:%s", port, port)
-				return
-			}
-			defer out.Close()
-			done := make(chan struct{}, 2)
-			pipe := func(dst, src net.Conn) {
-				_, _ = io.Copy(dst, src)
-				if cw, ok := dst.(closeWriter); ok {
-					_ = cw.CloseWrite()
-				}
-				done <- struct{}{}
-			}
-			go pipe(out, in)
-			go pipe(in, out)
-			<-done
-			<-done
-		}()
-	}
-}
-
 type agent struct {
 	cfg        *agentConfig
 	node       *tsnet.Server
@@ -239,6 +197,11 @@ type agent struct {
 	dialMesh   func(ctx context.Context, network, addr string) (net.Conn, error)
 	lookupDNS  func(ctx context.Context, host string) ([]string, error)
 	peerLookup func(ctx context.Context, host string) ([]string, error)
+	// isPeer reports whether ip belongs to a device this pen's node knows.
+	// Only those may be dialed: tsnet's Dial quietly uses the computer's own
+	// network for anything else, so a pen whose DNS answered 127.0.0.1, a LAN
+	// address or another tailnet's 100.x address would otherwise reach it.
+	isPeer func(ctx context.Context, ip netip.Addr) bool
 
 	mu     sync.Mutex
 	up     bool
@@ -251,13 +214,27 @@ func newAgent(c *agentConfig, node *tsnet.Server) *agent {
 	a := &agent{cfg: c, node: node}
 	if node != nil {
 		a.resolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return node.Dial(ctx, network, net.JoinHostPort(c.DNSServer, "53"))
+			// The pen's DNS server is a dial like any other: only to a device
+			// this pen's node knows.
+			ip, err := netip.ParseAddr(c.DNSServer)
+			if err != nil || !a.allowed(ctx, ip) {
+				return nil, errOutside
+			}
+			return node.Dial(ctx, network, net.JoinHostPort(ip.Unmap().String(), "53"))
 		}}
 		a.dialMesh = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return node.Dial(ctx, network, addr)
 		}
 		a.lookupDNS = func(ctx context.Context, host string) ([]string, error) {
 			return a.resolver.LookupHost(ctx, host)
+		}
+		a.isPeer = func(ctx context.Context, ip netip.Addr) bool {
+			lc, err := node.LocalClient()
+			if err != nil {
+				return false
+			}
+			_, err = lc.WhoIs(ctx, ip.String())
+			return err == nil
 		}
 		a.peerLookup = func(ctx context.Context, host string) ([]string, error) {
 			lc, err := node.LocalClient()
@@ -328,7 +305,7 @@ type agentStatus struct {
 	Up     bool     `json:"up"`
 	Error  string   `json:"error,omitempty"`
 	IPs    []string `json:"ips,omitempty"`
-	Server bool     `json:"server,omitempty"` // a server: the pen's 80/443 reach this computer
+	Server bool     `json:"server,omitempty"` // the pen tagged this device a server (refused)
 }
 
 // dial opens a connection to a pen host. Anything outside the pen is refused:
@@ -339,8 +316,10 @@ func (a *agent) dial(ctx context.Context, hostport string) (net.Conn, error) {
 		return nil, err
 	}
 	if ip, err := netip.ParseAddr(host); err == nil {
-		if inMeshRanges(ip) {
-			return a.dialMesh(ctx, "tcp", hostport)
+		if a.allowed(ctx, ip) {
+			// Dial the unmapped form: tsnet looks peers up by the exact
+			// address, so ::ffff:<peer> would miss and fall back to the host.
+			return a.dialMesh(ctx, "tcp", net.JoinHostPort(ip.Unmap().String(), port))
 		}
 		return nil, errOutside
 	}
@@ -357,7 +336,13 @@ func (a *agent) dial(ctx context.Context, hostport string) (net.Conn, error) {
 			ips = pips
 		}
 	}
-	ordered := orderIPs(ips)
+	// Whatever the pen's DNS answered, dial only its own devices.
+	var ordered []string
+	for _, raw := range orderIPs(ips) {
+		if ip, err := netip.ParseAddr(raw); err == nil && a.allowed(ctx, ip) {
+			ordered = append(ordered, ip.Unmap().String())
+		}
+	}
 	if len(ordered) == 0 {
 		return nil, fmt.Errorf("no such name in the pen: %s", host)
 	}
@@ -373,6 +358,28 @@ func (a *agent) dial(ctx context.Context, hostport string) (net.Conn, error) {
 }
 
 var errOutside = fmt.Errorf("this proxy only serves the pen")
+
+var errPort = fmt.Errorf("this proxy only carries HTTPS (port 443) and HTTP (port 80) to the pen")
+
+// webPort: Hogman carries HTTPS to pen names, and HTTP only so a site can
+// redirect to HTTPS (decision D-11). Nothing else goes through the proxy.
+func webPort(hostport string) bool {
+	_, port, err := net.SplitHostPort(hostport)
+	return err == nil && (port == "443" || port == "80")
+}
+
+// allowed: a mesh address of a device this pen's node knows (with no node,
+// as in tests, the mesh ranges alone).
+func (a *agent) allowed(ctx context.Context, ip netip.Addr) bool {
+	ip = ip.Unmap()
+	if !inMeshRanges(ip) {
+		return false
+	}
+	if a.isPeer == nil {
+		return true
+	}
+	return a.isPeer(ctx, ip)
+}
 
 func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
@@ -399,6 +406,10 @@ type closeWriter interface{ CloseWrite() error }
 // connect handles "CONNECT host:443", which is how browsers reach HTTPS sites
 // through a proxy. The proxy only moves bytes; TLS stays end to end.
 func (a *agent) connect(w http.ResponseWriter, r *http.Request) {
+	if !webPort(r.Host) {
+		http.Error(w, errPort.Error(), http.StatusForbidden)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	up, err := a.dial(ctx, r.Host)
 	cancel()
@@ -454,6 +465,10 @@ func (a *agent) forward(w http.ResponseWriter, r *http.Request) {
 	host := r.URL.Host
 	if _, _, err := net.SplitHostPort(host); err != nil {
 		host = net.JoinHostPort(host, "80")
+	}
+	if !webPort(host) {
+		http.Error(w, errPort.Error(), http.StatusForbidden)
+		return
 	}
 	if h, _, _ := net.SplitHostPort(host); !a.cfg.inZone(h) {
 		if ip, err := netip.ParseAddr(h); err != nil || !inMeshRanges(ip) {

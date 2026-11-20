@@ -42,7 +42,6 @@
       }
       ul.append(li);
     }
-    renderNames();
   };
 
   // --------------------------------------------------------- directory --
@@ -78,63 +77,6 @@
     }
   };
 
-  // ------------------------------------------------------------- names --
-
-  const renderNames = () => {
-    const ul = $('names');
-    ul.replaceChildren();
-    for (const n of me.names || []) {
-      const li = document.createElement('li');
-      const main = document.createElement('div'); main.className = 'site-main';
-      const nm = document.createElement('div'); nm.textContent = `${n.name}.${me.zone}`;
-      main.append(nm);
-      if (n.note) {
-        const note = document.createElement('div');
-        note.className = 'muted small';
-        note.textContent = n.note;
-        main.append(note);
-      }
-      const dev = (me.devices || []).find(d => d.id === n.device_id);
-      const to = document.createElement('span'); to.className = 'muted small'; to.textContent = dev ? `→ ${dev.name}` : '';
-      const rel = document.createElement('button'); rel.className = 'link danger'; rel.type = 'button'; rel.textContent = 'Release';
-      rel.onclick = async () => {
-        if (!armed.has('name' + n.name)) {
-          armed.add('name' + n.name); rel.textContent = `Release ${n.name}?`;
-          setTimeout(() => { armed.delete('name' + n.name); rel.textContent = 'Release'; }, 5000);
-          return;
-        }
-        armed.delete('name' + n.name);
-        try { await api('DELETE', '/names/' + encodeURIComponent(n.name)); await load(); }
-        catch (e) { nameErr(e); }
-      };
-      li.append(main, to, rel);
-      ul.append(li);
-    }
-    const servers = (me.devices || []).filter(d => d.kind === 'server');
-    const sel = $('name-device');
-    sel.replaceChildren(...servers.map(d => { const o = document.createElement('option'); o.value = d.id; o.textContent = d.name; return o; }));
-    $('name-form').hidden = servers.length === 0;
-    $('name-noserver').hidden = servers.length > 0;
-  };
-  const nameErr = e => { const p = $('name-err'); p.textContent = e.message; p.hidden = false; };
-  $('name-form').onsubmit = async ev => {
-    ev.preventDefault();
-    $('name-err').hidden = true;
-    const name = $('name-input').value.trim().toLowerCase();
-    const note = $('name-note').value.trim();
-    if (!name) return nameErr(new Error('Type a name, like blog.'));
-    try {
-      const body = { name, device_id: Number($('name-device').value) };
-      if (note) body.note = note;
-      const r = await api('POST', '/names', body);
-      $('name-input').value = '';
-      $('name-note').value = '';
-      await load();
-      nameErr(new Error(`Done: ${r.name} now points at your server. Give it a minute to reach everyone.`));
-      $('name-err').className = 'muted';
-    } catch (e) { $('name-err').className = 'error'; nameErr(e); }
-  };
-
   // A plain inline confirmation instead of a browser dialog.
   const confirmRemove = (id, name) => {
     if (armed.has(id)) { armed.delete(id); return true; }
@@ -152,11 +94,11 @@
     try {
       const r = await api('POST', '/devices', { kind });
       $('qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(r.join_qr_svg || '');
-      // A server is a computer: no phone QR, and say where to run it.
+      // A share link is for a computer: no phone QR, and say what to run.
       $('qr').hidden = !r.join_qr_svg || kind === 'server';
       $('phone-line').hidden = kind === 'server';
       $('computer-line').textContent = kind === 'server'
-        ? 'Server: to put one thing in the pen, run ./hogman-join share NAME PORT \'<this link>\' on that computer (see Host something, below). To join the whole computer, open this link on it and follow the steps:'
+        ? 'Share link: on the computer that runs the thing you want to share, open this link (it shows the command), or run ./hogman-join share NAME PORT-or-FOLDER \'<this link>\':'
         : 'Computer: open this link on it and follow the steps:';
       $('linktext').textContent = r.join_link;
       $('newlink').hidden = false;
@@ -174,7 +116,7 @@
           clearInterval(timer);
           return;
         }
-        $('expires').textContent = `${kind === 'server' ? 'Server link. ' : ''}Works once, expires in ${Math.ceil(left / 60)} min.`;
+        $('expires').textContent = `${kind === 'server' ? 'Share link. ' : ''}Works once, expires in ${Math.ceil(left / 60)} min.`;
       };
       $('qr').classList.remove('expired');
       tick();

@@ -29,8 +29,15 @@
     zone, and your browser and operating system refuse it for anything else. Leaving the pen
     removes it.</dd>
   <dt>Can I be in more than one pen?</dt>
-  <dd>Yes. Join each with its own link. With Tailscale, each pen is its own profile; side by side,
-    each pen gets its own background connection and proxy, and they run at the same time.</dd>
+  <dd>Yes. Join each with its own link. Each pen gets its own background connection and proxy,
+    and they run at the same time.</dd>
+  <dt id="not">What does Hogman deliberately not do?</dt>
+  <dd>Anything but HTTPS. No ssh, no other ports, no games or voice over UDP, no joining a
+    whole computer to the pen, no exit nodes or routes, and nobody can connect to members'
+    own computers. Each of those would be one more way in for an attacker, on your computer
+    and on everyone else's in the pen, so they don't exist and there's no setting to turn
+    them on. <em>Sometimes the best security fix for a surface is just to delete the
+    surface.</em></dd>
   <dt>Phones?</dt>
   <dd>Not yet. A phone app is in the works.</dd>
   <dt>What does it cost?</dt>
@@ -43,18 +50,16 @@
   <dd>macOS only lets a person at the Mac approve a new trusted certificate, even for an
     administrator. Run the join command in Terminal on the Mac itself, not over SSH.</dd>
 
-  <dt>The browser can't find pen sites (side by side)</dt>
-  <dd>In side-by-side mode only programs that use the pen's proxy reach the pen. On a Mac the
+  <dt>The browser can't find pen sites</dt>
+  <dd>Only programs that use the pen's proxy reach the pen. On a Mac the
     join sets your automatic proxy setting; if another tool already set one, it leaves yours
     alone and prints the address to use. On Linux and Windows, set your browser's or desktop's
     automatic proxy configuration URL to the <code>proxy.pac</code> address the join printed
     (it's <code>http://127.0.0.1:&lt;port&gt;/proxy.pac</code>). For command-line tools, see
-    <a href="/docs/join.html#side">side by side, in practice</a>.</dd>
+    <a href="/docs/join.html#side">joining, in practice</a>.</dd>
 
   <dt>"This computer cannot find the network's names yet"</dt>
-  <dd>With Tailscale, check its DNS setting is on (<code>tailscale set --accept-dns=true</code>)
-    and that the pen's profile is the active one (<code>tailscale switch --list</code>). Then run
-    the same join command again. Your invite was already used to add this device, so the rerun
+  <dd>Run the same join command again. Your invite was already used to add this device, so the rerun
     sees the device is in, skips the invite, and goes on to check your home page. (The link
     won't work on another computer: ask for a device link instead.)</dd>
 
@@ -78,11 +83,6 @@ SSL_CERT_FILE="$HOME/ca-plus-pen.crt" REQUESTS_CA_BUNDLE="$HOME/ca-plus-pen.crt"
   <dd>Add <code>--no-open</code>. On a machine with no desktop there's nothing to open; the home
     page address is printed either way.</dd>
 
-  <dt>Caddy can't listen on port 80 or 443</dt>
-  <dd>On Linux, low ports need permission. Run Caddy as root or through systemd, or once:
-    <code>sudo setcap cap_net_bind_service=+ep "$(command -v caddy)"</code>.
-    Only relevant if you run your own web server
-    (<a href="/docs/servers.html">the advanced page</a>); shares don't need it.</dd>
 
   <dt>"is already being shared from this computer"</dt>
   <dd>That share is already running, perhaps in the background or another window. See it with

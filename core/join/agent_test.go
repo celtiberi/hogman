@@ -179,6 +179,25 @@ func TestAgentConnectAndForwardZoneGuards(t *testing.T) {
 		}
 	}
 
+	// HTTPS only (D-11): pen names on any port but 443 (CONNECT) or 80 (HTTP) are refused.
+	for _, target := range []string{"alice.bobo.hogman:22", "alice.bobo.hogman:8080", "alice.bobo.hogman:9000"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodConnect, target, nil)
+		req.Host = target
+		a.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("CONNECT %s status=%d want 403", target, rec.Code)
+		}
+	}
+	if resp, err := client.Get("http://alice.bobo.hogman:8080/"); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("GET :8080 status=%d want 403", resp.StatusCode)
+		}
+	}
+
 	// Plain HTTP forward to alice.bobo.hogman succeeds and reuses the single Transport on a.rp.
 	trBefore := a.rp.Transport
 	for i := 0; i < 2; i++ {
@@ -378,5 +397,75 @@ func TestRenderSystemdUnitQuotesSpaces(t *testing.T) {
 	want := `ExecStart="/opt/my bin/hogman-join" agent "/home/a user/.config/hogman/bobo.hogman"`
 	if !strings.Contains(u, want) {
 		t.Fatalf("unit missing quoted ExecStart %q:\n%s", want, u)
+	}
+}
+
+// A hostile pen's DNS can answer anything. Only the pen's own devices may be
+// dialed: never loopback, the LAN, or a 100.x address of another tailnet
+// (tsnet's Dial would reach those through the computer's own network).
+func TestAgentDialsOnlyPenDevices(t *testing.T) {
+	a := newAgent(&agentConfig{Zone: "bobo.hogman"}, nil)
+	peer := netip.MustParseAddr("100.70.0.5")
+	a.isPeer = func(_ context.Context, ip netip.Addr) bool { return ip == peer }
+	answers := map[string][]string{
+		"evil.bobo.hogman":  {"127.0.0.1", "192.168.1.1", "::ffff:127.0.0.1", "100.99.0.9", "100.70.0.5"},
+		"local.bobo.hogman": {"127.0.0.1", "::ffff:127.0.0.1"},
+		"work.bobo.hogman":  {"100.99.0.9"},
+	}
+	a.lookupDNS = func(_ context.Context, host string) ([]string, error) { return answers[host], nil }
+	var dialed []string
+	a.dialMesh = func(_ context.Context, _, addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		c1, c2 := net.Pipe()
+		go c2.Close()
+		return c1, nil
+	}
+	ctx := context.Background()
+
+	if c, err := a.dial(ctx, "evil.bobo.hogman:443"); err != nil {
+		t.Fatalf("evil: %v", err)
+	} else {
+		c.Close()
+	}
+	if len(dialed) != 1 || dialed[0] != "100.70.0.5:443" {
+		t.Fatalf("dialed %v, want only the pen's own device 100.70.0.5:443", dialed)
+	}
+	for _, target := range []string{"local.bobo.hogman:80", "work.bobo.hogman:80", "100.99.0.9:22", "127.0.0.1:22", "[::ffff:127.0.0.1]:22"} {
+		dialed = nil
+		if c, err := a.dial(ctx, target); err == nil {
+			c.Close()
+			t.Fatalf("%s: dial allowed, dialed %v", target, dialed)
+		}
+		if len(dialed) != 0 {
+			t.Fatalf("%s: dialed %v", target, dialed)
+		}
+	}
+}
+
+// An IPv4-mapped form of a real peer must be dialed unmapped: tsnet looks
+// peers up by the exact address, and the mapped form would miss and fall
+// back to the host network.
+func TestAgentDialsUnmapped(t *testing.T) {
+	a := newAgent(&agentConfig{Zone: "bobo.hogman"}, nil)
+	peer := netip.MustParseAddr("100.70.0.5")
+	a.isPeer = func(_ context.Context, ip netip.Addr) bool { return ip == peer }
+	a.lookupDNS = func(context.Context, string) ([]string, error) { return []string{"::ffff:100.70.0.5"}, nil }
+	var dialed []string
+	a.dialMesh = func(_ context.Context, _, addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		c1, c2 := net.Pipe()
+		go c2.Close()
+		return c1, nil
+	}
+	for _, target := range []string{"[::ffff:100.70.0.5]:443", "mapped.bobo.hogman:443"} {
+		dialed = nil
+		c, err := a.dial(context.Background(), target)
+		if err != nil {
+			t.Fatalf("%s: %v", target, err)
+		}
+		c.Close()
+		if len(dialed) != 1 || dialed[0] != "100.70.0.5:443" {
+			t.Fatalf("%s: dialed %v, want 100.70.0.5:443", target, dialed)
+		}
 	}
 }

@@ -49,13 +49,8 @@ usage:
 options:
   --handle NAME     the name you want on the network (invite links only; asked if missing)
   --hostname NAME   what this device is called on the network (default: this computer's name)
-  --alongside       join side by side: a small agent of its own, leaving this computer's
-                    Tailscale (and everything else) alone. Chosen automatically when
-                    Tailscale is missing or already on another network.
-  --switch          use this computer's Tailscale even if it is on another network
-                    (that network is paused until you switch back)
-  --no-service      side by side: don't register a login item, just run in the background
-  --no-system-proxy side by side: don't change this computer's automatic proxy setting
+  --no-service      don't register a login item, just run in the background
+  --no-system-proxy don't change this computer's automatic proxy setting
   --dry-run         check the link and the network, then stop without changing anything
   --no-trust        don't add the network's certificate to this computer
   --no-open         don't open the portal in a browser at the end
@@ -69,7 +64,7 @@ Quote the link: it contains '#' and '&'.
 type options struct {
 	handle, hostname, controlCA  string
 	yes, dryRun, noTrust, noOpen bool
-	alongside, switchNet         bool
+	alongside                    bool // accepted for old scripts; it's the only way now
 	noService, noSystemProxy     bool
 	pen                          string // share: which pen
 	background                   bool   // share: keep running after the window closes
@@ -95,7 +90,7 @@ func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err 
 	fs.BoolVar(&o.noOpen, "no-open", false, "")
 	fs.BoolVar(&verbose, "verbose", false, "")
 	fs.BoolVar(&o.alongside, "alongside", false, "")
-	fs.BoolVar(&o.switchNet, "switch", false, "")
+
 	fs.BoolVar(&o.noService, "no-service", false, "")
 	fs.BoolVar(&o.noSystemProxy, "no-system-proxy", false, "")
 	fs.StringVar(&o.pen, "pen", "", "")
@@ -316,6 +311,10 @@ func join(raw string, o options) error {
 	if err != nil {
 		return errorf("%v", err)
 	}
+	if link.ForShare {
+		return errorf("that's a server link: it's for putting something in the pen, not for joining a computer.\n" +
+			"  Use it with share, for example: hogman-join share blog 8080 '<this link>'")
+	}
 	client, err := controlClient(o.controlCA)
 	if err != nil {
 		return err
@@ -334,102 +333,19 @@ func join(raw string, o options) error {
 	note("its certificate matches the link (%s)", short(root.Fingerprint))
 	note("and can only vouch for names ending in .%s", n.Zone)
 
-	// Which way in? Side by side unless this computer's Tailscale is free to use.
-	ts, tsErr := findTailscale()
-	var st *TSStatus
-	if tsErr == nil {
-		st, tsErr = ts.Status()
-	}
-	switch {
-	case o.alongside:
-		return joinAlongside(link, n, root, client, o, "side-by-side mode was asked for")
-	case hasAlongside(n.Zone):
-		return joinAlongside(link, n, root, client, o, "this computer already has a side-by-side connection to "+n.Zone)
-	case tsErr != nil:
-		return joinAlongside(link, n, root, client, o, "Tailscale is not installed or not running here, which is fine")
-	case st.OnOtherNetwork(n.Zone) != "" && !o.switchNet:
-		return joinAlongside(link, n, root, client, o,
-			"this computer's Tailscale is on another network ("+st.OnOtherNetwork(n.Zone)+"); leaving it alone")
-	}
-	already := st.BackendState == "Running" && st.OnNetwork(n.Zone)
-	if other := st.OnOtherNetwork(n.Zone); other != "" {
-		note("this device is currently on another Tailscale network: %s", other)
-		note("switching it to %s, as asked; switch back any time with: tailscale switch --list", n.Zone)
-	}
-
-	hostname := o.hostname
-	if hostname == "" {
-		hostname = defaultHostname()
-	}
-
-	if o.dryRun {
-		step("Dry run: nothing changed. Would:")
-		if link.InviteToken != "" {
-			note("redeem the invite (handle: %s)", orAsk(o.handle))
-		}
-		if !o.noTrust {
-			note("add the %s certificate to this computer's trust store (trusted now: %v)", n.Zone, trustInstalled(root))
-		}
-		note("join with Tailscale as %q via %s (already on it: %v)", hostname, n.LoginServer, already)
-		return nil
-	}
-
-	// Trust first: if this fails (no admin rights), the invite is still unused.
-	certFile, cleanupCert, err := writeTempCert(root.PEM)
-	if err != nil {
-		return err
-	}
-	defer cleanupCert()
-	if !o.noTrust {
-		step("Adding the %s certificate to this computer", n.Zone)
-		if err := installTrust(root, certFile); err != nil {
-			return err
+	// One way in (D-11): the agent, which runs as this user and carries HTTPS to
+	// the pen's names and nothing else. Joining through this computer's
+	// Tailscale app was removed: it put every program on the pen and gave the
+	// pen's control server this computer's DNS, a choice that should never be
+	// one member's to make for the whole pen.
+	if ts, err := findTailscale(); err == nil {
+		if st, err := ts.Status(); err == nil && st.BackendState == "Running" && st.OnNetwork(n.Zone) {
+			return errorf("this computer is on %s through its Tailscale app, which Hogman no longer uses.\n"+
+				"  First get a fresh one-time link: open %s, press Add a device, copy the link.\n"+
+				"  Then run hogman-join leave '<this link>', and join with the fresh link.", n.Zone, n.Portal)
 		}
 	}
-
-	handle := ""
-	if already {
-		step("This device is already on %s", n.Zone)
-		if link.InviteToken != "" {
-			note("not using the invite; it stays valid for another device or person")
-		}
-	} else {
-		key := link.DeviceKey
-		if link.InviteToken != "" {
-			step("Redeeming the invite")
-			en, err := redeemWithHandle(client, link, o)
-			if err != nil {
-				return err
-			}
-			key, handle = en.AuthKey, en.Handle
-			note("welcome, %s", handle)
-		}
-		step("Joining %s as %q", n.Zone, hostname)
-		if err := ts.Login(n.LoginServer, key, hostname); err != nil {
-			return err
-		}
-	}
-	st, err = ts.WaitRunning(n.Zone, 60*time.Second)
-	if err != nil {
-		return err
-	}
-	note("online as %s", strings.Join(st.Self.TailscaleIPs, ", "))
-
-	step("Checking %s loads securely", n.Portal)
-	who, err := checkPortalFresh(n.Portal)
-	if err != nil {
-		return err
-	}
-	if handle == "" {
-		handle = who
-	}
-	say("\n✓ You're in. You are %s on %s.", handle, n.Zone)
-	say("  Start at %s", n.Portal)
-	say("  To leave: hogman-join leave '<this link>'")
-	if !o.noOpen {
-		openURL(n.Portal)
-	}
-	return nil
+	return joinAlongside(link, n, root, client, o, "the pen's own small connection: HTTPS to the pen and nothing else")
 }
 
 func firstLine(s string) string { return strings.SplitN(strings.TrimSpace(s), "\n", 2)[0] }

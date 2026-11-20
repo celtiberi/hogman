@@ -564,6 +564,13 @@ func (s *Store) UpdateDevice(id int64, name, v4, v6 string) error {
 	return err
 }
 
+// DeleteNamesOfDevice frees the active names pointing at a device. Names
+// under them that point at other devices are left alone.
+func (s *Store) DeleteNamesOfDevice(deviceID int64) error {
+	_, err := s.db.Exec(`DELETE FROM names WHERE device_id = ? AND held_until IS NULL`, deviceID)
+	return err
+}
+
 // MarkDeviceRemoved retires a device and unpoints any names aimed at it.
 func (s *Store) MarkDeviceRemoved(id int64) error {
 	tx, err := s.db.Begin()

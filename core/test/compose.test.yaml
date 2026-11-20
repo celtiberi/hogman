@@ -119,8 +119,8 @@ services:
       - ./data/edge-trust:/edge-trust:ro
       - ./data/join-dl:/dl:ro
 
-  # A server with no Tailscale either: it joins side by side and hosts a site
-  # with Caddy, so the join tool must pass the pen's 80/443 through to it.
+  # A computer that isn't in the pen: it shares an app with a server (share)
+  # link, and must not be able to join as a whole computer with one.
   dave-server:
     image: caddy:2.11.9
     hostname: dave-server
@@ -135,7 +135,6 @@ services:
     volumes:
       - ./data/edge-trust:/edge-trust:ro
       - ./data/join-dl:/dl:ro
-      - ./test/dave.Caddyfile:/etc/caddy/dave.Caddyfile:ro
 
   # Alice's website, running on her server exactly as a member would run it.
   alice-web:

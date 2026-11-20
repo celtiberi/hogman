@@ -151,8 +151,15 @@ func (s *Service) InviteLink(token string) string {
 	return fmt.Sprintf("https://%s/join#t=%s&fp=%s", s.cfg.PublicHost, token, s.rootFP)
 }
 
-func (s *Service) DeviceLink(key string) string {
-	return fmt.Sprintf("https://%s/join#k=%s&fp=%s", s.cfg.PublicHost, key, s.rootFP)
+// DeviceLink is the one-time link for a device key. A server key's link is
+// marked for=share: server links only put things in the pen with
+// `hogman-join share`, they don't join a whole computer (D-11).
+func (s *Service) DeviceLink(key, kind string) string {
+	link := fmt.Sprintf("https://%s/join#k=%s&fp=%s", s.cfg.PublicHost, key, s.rootFP)
+	if kind == "server" {
+		link += "&for=share"
+	}
+	return link
 }
 
 // ------------------------------------------------------------- validation --
@@ -670,6 +677,11 @@ func (s *Service) RemoveDevice(ctx context.Context, a Actor, id int64) error {
 	if err := s.hs.DeleteNode(ctx, d.HSNodeID); err != nil {
 		return err
 	}
+	// Removing a device on purpose gives back the names it served (a share's
+	// name, say), so they aren't stuck. A kick holds names instead (Kick).
+	if err := s.st.DeleteNamesOfDevice(d.ID); err != nil {
+		return err
+	}
 	if err := s.st.MarkDeviceRemoved(d.ID); err != nil {
 		return err
 	}
@@ -1134,7 +1146,9 @@ func (s *Service) buildPolicy() (string, error) {
 	}
 	grants := []grant{{Src: src, Dst: []string{"tag:infra"}, IP: []string{"53", "80", "443", "9000"}}}
 	if len(servers) > 0 {
-		grants = append(grants, grant{Src: src, Dst: servers, IP: []string{"*"}})
+		// HTTPS only (D-11): members reach servers on 443, and 80 only so it
+		// can redirect to HTTPS. Nothing else: no ssh, no raw ports.
+		grants = append(grants, grant{Src: src, Dst: servers, IP: []string{"80", "443"}})
 	}
 	pol := map[string]any{
 		"tagOwners": map[string][]string{"tag:infra": {}, "tag:server": {}},

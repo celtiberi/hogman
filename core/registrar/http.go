@@ -183,7 +183,7 @@ func MeshHandler(s *Service) http.Handler {
 			fail(w, err)
 			return
 		}
-		link := s.DeviceLink(key)
+		link := s.DeviceLink(key, in.Kind)
 		out := map[string]any{"auth_key": key, "expires_at": exp, "login_server": s.LoginServer(),
 			"kind": in.Kind, "join_link": link}
 		if svg, err := qrSVG(link); err == nil {

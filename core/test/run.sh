@@ -271,9 +271,16 @@ check "a cert for inside.$ZONE verifies"                         verify_cert dat
 check "a cert for www.google.com from our own CA key is rejected" not verify_cert data/www.google.com.crt
 
 step "Default-deny access policy"
-check "bob's laptop can reach alice's server"            can_ping bob-tools "$ALICE_SERVER_IP"
-check "bob's laptop cannot reach alice's laptop"         not can_ping bob-tools "$ALICE_LAPTOP_IP"
-check "alice's server cannot reach bob's laptop"         not can_ping alice-tools "$BOB_LAPTOP_IP"
+# HTTPS only (D-11): members reach servers on 443 (and 80, to redirect), nothing else.
+docker exec -d "$(dc ps -q alice-tools)" sh -c 'nc -lk -p 2222 -e cat >/dev/null 2>&1 || nc -lk 2222'
+check "bob's laptop can reach alice's server on 443"     retry 20 port_open bob-tools "$ALICE_SERVER_IP" 443
+check "... and on 80, to be redirected"                  port_open bob-tools "$ALICE_SERVER_IP" 80
+check "... but on no other port (2222 is open there)"    not port_open bob-tools "$ALICE_SERVER_IP" 2222
+# (Ping still answers: Tailscale's filter lets ICMP through between devices
+# allowed any port. It can't carry data, so it isn't a way in.)
+check "the server itself has 2222 open (so the above means something)" run alice-tools nc -z -w3 127.0.0.1 2222
+check "bob's laptop cannot reach alice's laptop"         not port_open bob-tools "$ALICE_LAPTOP_IP" 443
+check "alice's server cannot reach bob's laptop"         not port_open alice-tools "$BOB_LAPTOP_IP" 443
 check "members cannot reach other ports on the core (22)" not port_open bob-tools "$CORE_MESH_IP" 22
 check "bob can't use the admin API"   expect 403 bob-tools GET /api/admin/members
 check "alice (admin) can"             expect 200 alice-laptop-tools GET /api/admin/members
@@ -311,7 +318,7 @@ step "A device that bypassed the registrar gets nothing"
 check "it is not recorded as anyone's device" no_match stray-device $H device list
 check "it cannot reach the portal"     not port_open stray-tools "$CORE_MESH_IP" 443
 check "it cannot reach the CA"         not port_open stray-tools "$CORE_MESH_IP" 9000
-check "it cannot reach alice's server" not can_ping stray-tools "$ALICE_SERVER_IP"
+check "it cannot reach alice's server" not port_open stray-tools "$ALICE_SERVER_IP" 443
 check "bob cannot reach it"            not can_ping bob-tools "$STRAY_IP"
 
 step "Relay"
@@ -367,10 +374,16 @@ out="$(join_tool carol-laptop --handle carol --hostname carol-laptop "$CAROL_LIN
 echo "$out" | sed 's/^/        | /'
 check "the join tool succeeds (exit $rc)" test $rc = 0
 check "it reports carol is in" grep -q "You're in. You are carol on bobo.hogman" <<<"$out"
+check "with Tailscale installed, it still joins the usual HTTPS-only way" grep -q "own small connection" <<<"$out"
+ts_untouched() { [ "$(run carol-laptop tailscale status --json | jq -r .BackendState)" != Running ]; }
+check "... and leaves this computer's Tailscale alone" ts_untouched
 check "it installed the network's root in the system store" \
   run carol-laptop test -s /usr/local/share/ca-certificates/hogman-bobo.hogman.crt
 check "the registrar recorded carol's laptop" retry 10 match 'carol.*carol-laptop' $H device list
 DEVICE_LINK="$($H device key carol personal | awk '/^link:/ {print $2}')"
+out="$(join_tool carol-desktop --tailscale --hostname carol-desktop "$DEVICE_LINK" 2>&1)"; rc=$?
+check "joining through the Tailscale app is no longer offered (--tailscale refused)" test $rc != 0
+check "... and the device link is still unused" no_match 'carol.*carol-desktop' $H device list
 out="$(join_tool carol-desktop --hostname carol-desktop "$DEVICE_LINK" 2>&1)"; rc=$?
 check "a device link adds a second device (exit $rc)" grep -q "You're in. You are carol" <<<"$out"
 check "the registrar recorded it as carol's" retry 10 match 'carol.*carol-desktop' $H device list
@@ -379,8 +392,8 @@ out="$(join_tool carol-desktop leave "$DEVICE_LINK" 2>&1)"; rc=$?
 check "leave works (exit $rc)" grep -q "Left bobo.hogman" <<<"$out"
 check "leave removed the root from the system store" \
   run carol-desktop sh -c '! test -e /usr/local/share/ca-certificates/hogman-bobo.hogman.crt'
-logged_out() { [ "$(run carol-desktop tailscale status --json | jq -r .BackendState)" != Running ]; }
-check "leave logged the device out" logged_out
+conn_gone() { ! run carol-desktop test -e /root/.config/hogman/bobo.hogman; }
+check "leave removed the pen's connection and its settings" conn_gone
 
 step "Side by side: a computer with no Tailscale at all"
 dc up -d dave-laptop
@@ -389,7 +402,7 @@ DAVE_LINK="$($H invite create --note dave | awk '/^link:/ {print $2}')"
 out="$(join_tool dave-laptop --handle dave --hostname dave-laptop "$DAVE_LINK" 2>&1)"; rc=$?
 echo "$out" | sed 's/^/        | /'
 check "the join tool succeeds without Tailscale installed (exit $rc)" test $rc = 0
-check "it chose side-by-side mode by itself" grep -q "joining side by side" <<<"$out"
+check "it joined the usual way (side by side)" grep -q "joining side by side" <<<"$out"
 check "it reports dave is in" grep -q "You're in. You are dave on bobo.hogman" <<<"$out"
 check "the registrar recorded dave's laptop" retry 10 match 'dave.*dave-laptop' $H device list
 PROXY="$(run dave-laptop sh -c 'grep -o "127.0.0.1:[0-9]*" /root/.config/hogman/bobo.hogman/config.json | head -1' | tr -d '\r')"
@@ -437,30 +450,21 @@ check "... and gives the name back" no_match notes $H name list
 check "... and removes its server" retry 10 not notes_device
 check "bob can't load it any more" retry 15 not fetch notes.$ZONE "notes from dave"
 
-# Dave's server, also with no Tailscale: it hosts a site anyway.
+# Server links only put something in the pen with share (D-11): joining a
+# whole computer with one is refused before the link is used, and the same
+# link then works with share.
 dc up -d dave-server
 retry 20 run dave-server test -s /etc/ssl/certs/ca-certificates.crt
-DAVE_SERVER_LINK="$($H device key dave server | awk '/^link:/ {print $2}')"
-out="$(join_tool dave-server --hostname dave-server "$DAVE_SERVER_LINK" 2>&1)"; rc=$?
-[ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
-check "a server joins side by side too (exit $rc)" grep -q "You're in" <<<"$out"
-check "the join tool says the pen's web ports reach it" grep -q "This is a server" <<<"$out"
-DS_ID="$($H device list | awk '$2 == "dave" && $4 == "dave-server" {print $1}')"
-check "dave names it daveweb.$ZONE" sh -c "$H name claim dave daveweb $DS_ID >/dev/null"
-# Use exactly what the join tool told dave to run.
-DS_PROXY="$(grep -o 'HTTPS_PROXY=http://127.0.0.1:[0-9]*' <<<"$out" | head -1 | cut -d/ -f3)"
-check "it prints the proxy to run Caddy with" test -n "$DS_PROXY"
-docker exec -d "$(dc ps -q dave-server)" sh -c "ZONE=$ZONE HTTPS_PROXY=http://$DS_PROXY caddy run --config /etc/caddy/dave.Caddyfile >/tmp/caddy.log 2>&1"
-dave_site() { match "hello from daveweb.$ZONE" via_pen "https://daveweb.$ZONE"; }
-check "its Caddy gets a certificate and dave's laptop loads the site over HTTPS" retry 90 dave_site
-[ "$(dave_site && echo ok)" = ok ] || run dave-server sh -c 'grep -v "\"level\":\"debug\"" /tmp/caddy.log | tail -12 | cut -c1-400' | sed 's/^/        caddy| /'
-check "other members load it too (bob, with Tailscale)" retry 30 fetch daveweb.$ZONE "hello from daveweb"
-out="$(join_tool dave-server leave "$DAVE_SERVER_LINK" 2>&1)"
-check "the server leaves cleanly" grep -q "Left bobo.hogman" <<<"$out"
+SHARE_LINK="$($H device key dave server | awk '/^link:/ {print $2}')"
+check "a server link is marked for share" grep -q 'for=share' <<<"$SHARE_LINK"
+out="$(join_tool dave-server --hostname dave-server "$SHARE_LINK" 2>&1)"; rc=$?
+check "joining a whole computer with a server link is refused (exit $rc)" test $rc != 0
+check "... and says to use it with share" grep -q "hogman-join share" <<<"$out"
+no_dave_server() { local out; out="$($H device list)" || return 1; [ -z "$(awk '$2 == "dave" && $4 == "dave-server"' <<<"$out")" ]; }
+check "... and adds no device" no_dave_server
 
 # A computer that isn't on the pen at all: one server link, one command.
 docker exec -d "$(dc ps -q dave-server)" sh -c 'mkdir -p /tmp/www && echo "app from a server link" > /tmp/www/index.html && caddy file-server --listen 127.0.0.1:8080 --root /tmp/www >/tmp/fs.log 2>&1'
-SHARE_LINK="$($H device key dave server | awk '/^link:/ {print $2}')"
 out="$(join_tool dave-server share app 8080 "$SHARE_LINK" --background 2>&1)"; rc=$?
 echo "$out" | sed 's/^/        | /'
 check "a server link plus one command shares a port (exit $rc)" grep -q "https://app.$ZONE is up" <<<"$out"
@@ -498,7 +502,7 @@ check "bob can no longer reach alice's site (${t}s after the kick)" not fetch al
 check "alice.$ZONE no longer resolves" retry 20 resolves_none alice.$ZONE
 check "all of alice's devices are gone from the mesh" no_device_of alice
 check "alice's laptop can no longer reach the portal" retry 30 not port_open alice-laptop-tools "$CORE_MESH_IP" 443
-check "alice's server can no longer reach anyone" retry 30 not can_ping alice-tools "$BOB_LAPTOP_IP"
+check "alice's server can no longer reach anyone" retry 30 not port_open alice-tools "$CORE_MESH_IP" 443
 check "her name is held: bob can't claim alice" expect 409 bob-tools POST /api/names '{"name":"alice","device_id":1}'
 check "the kick is in the audit log" match 'member.kick.*alice' $H audit
 match 'member.kick.*alice' $H audit || { $H audit | tail -8; dc logs --tail 20 registrar 2>&1 | grep -i audit; } | sed 's/^/        audit| /'

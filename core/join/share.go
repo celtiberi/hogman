@@ -259,7 +259,7 @@ func shareFromLink(name, raw string, o options) (*shareConfig, string, error) {
 		return nil, "", errorf("%v", err)
 	}
 	if link.DeviceKey == "" {
-		return nil, "", errorf("that is an invite. Use a server link: on your pen's home page, press Add a server")
+		return nil, "", errorf("that is an invite. Use a share link: on your pen's home page, press Get a share link")
 	}
 	client, err := controlClient(o.controlCA)
 	if err != nil {
@@ -464,7 +464,7 @@ func shareNode(ctx context.Context, dir string, c *shareConfig) (*tsnet.Server, 
 	}
 	if !server {
 		node.Close()
-		return nil, nil, nil, errorf("that link adds a personal device, which can't be visited. Use a server link (Add a server on your home page)")
+		return nil, nil, nil, errorf("that link adds a personal device, which can't be visited. Use a share link (Get a share link on your home page)")
 	}
 	a := newAgent(ac, node)
 	pool := x509.NewCertPool()

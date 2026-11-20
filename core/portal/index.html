@@ -26,9 +26,10 @@
   <div class="card">
     <strong>Add a device</strong>
     <p class="muted hint">Get a one-time link for another computer or your phone. It joins as you,
-      works once, and expires in an hour.</p>
+      works once, and expires in an hour. A share link is for putting something in the pen from
+      a computer that isn't in it.</p>
     <button class="primary" id="add-personal" type="button">Add a device</button>
-    <button id="add-server" type="button">Add a server</button>
+    <button id="add-server" type="button">Get a share link</button>
     <div id="newlink" hidden>
       <div class="qr">
         <img id="qr" alt="QR code for the one-time device link">
@@ -43,20 +44,6 @@
     <p class="error" id="adderr" hidden></p>
   </div>
 
-  <div class="card" id="names-card">
-    <strong>Names for your servers</strong>
-    <p class="muted hint">Give a server a name like <code>blog.<span class="zone">&lt;network&gt;.hogman</span></code>.
-      Everyone in the pen can then reach it by that name, with HTTPS (see Host something, below).</p>
-    <ul class="devices" id="names"></ul>
-    <form id="name-form" class="row">
-      <input id="name-input" maxlength="63" placeholder="blog" autocomplete="off" autocapitalize="none" spellcheck="false">
-      <input id="name-note" maxlength="140" placeholder="What is it for? (optional)" autocomplete="off">
-      <select id="name-device" aria-label="Which server"></select>
-      <button class="primary" type="submit">Claim name</button>
-    </form>
-    <p class="muted hint" id="name-noserver" hidden>Add a server first (above), then name it here.</p>
-    <p class="error" id="name-err" hidden></p>
-  </div>
 </section>
 
 <section id="invite" hidden>
@@ -105,18 +92,9 @@ Run it with the same <code>hogman-join</code> you joined with, on a computer tha
 <p class="muted">Everyone in the pen can then open <code>https://blog.<span class="zone">&lt;network&gt;.hogman</span></code>.
 Add <code>--background</code> to keep it running after the window closes;
 <code>./hogman-join share stop blog</code> takes it down and frees the name.</p>
-<p>A computer that isn't in the pen, like a spare box in the closet? Press <em>Add a server</em>
-above, and put its link at the end: <code>./hogman-join share blog 3000 '&lt;server link&gt;'</code>.</p>
-<details>
-<summary>Running your own web server instead</summary>
-<p>Add a server above, name it, and point Caddy (or any ACME client) at the pen's CA:</p>
-<pre><code>{
-	acme_ca https://ca.<span class="zone">&lt;network&gt;.hogman</span>:9000/acme/acme/directory
-}
-yourname.<span class="zone">&lt;network&gt;.hogman</span> {
-	respond "hello"
-}</code></pre>
-</details>
+<p>A computer that isn't in the pen, like a spare box in the closet? Press <em>Get a share link</em>
+above, and put the link at the end: <code>./hogman-join share blog 3000 '&lt;share link&gt;'</code>.
+Already run a web server such as Caddy or nginx? Share its port.</p>
 
 <h2>Root certificate</h2>
 <p>Download it again: <a href="/root_ca.crt">root_ca.crt</a>. It can only vouch
