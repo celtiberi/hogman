@@ -29,6 +29,25 @@ func stateDir(zone string) string {
 	return filepath.Join(base, "hogman", zone)
 }
 
+func hogmanConfigBase() string { return filepath.Dir(stateDir("x")) }
+
+func pickPACHost(remaining []*agentConfig) *agentConfig {
+	if len(remaining) == 0 {
+		return nil
+	}
+	for _, p := range remaining {
+		if st, err := agentState(p); err == nil && st.Up {
+			return p
+		}
+	}
+	for _, p := range remaining {
+		if _, err := agentState(p); err == nil {
+			return p
+		}
+	}
+	return remaining[0]
+}
+
 func hasAlongside(zone string) bool {
 	_, err := os.Stat(filepath.Join(stateDir(zone), "config.json"))
 	return err == nil
@@ -200,9 +219,10 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 	}
 	note("online as %s", strings.Join(st.IPs, ", "))
 
+	pens := normalizePenConfigs(loadInstalledPenConfigs(hogmanConfigBase()), cfg)
 	browsers := "set your browser's automatic proxy configuration to " + cfg.pacURL()
 	if !o.noSystemProxy {
-		if msg, err := setSystemProxy(cfg); err != nil {
+		if msg, err := setSystemProxy(cfg, pens); err != nil {
 			note("could not point browsers at the pen automatically: %v", err)
 		} else if msg != "" {
 			browsers = msg
@@ -308,14 +328,15 @@ func leaveAlongside(zone string) bool {
 	if err != nil {
 		return false
 	}
-	if msg := clearSystemProxy(cfg); msg != "" {
-		note("%s", msg)
-	}
 	stopAgent(dir, cfg)
 	if self, err := os.Executable(); err == nil {
 		_, _ = run(false, self, "__agent-logout", dir)
 	}
 	_ = os.RemoveAll(dir)
+	remaining := loadInstalledPenConfigs(hogmanConfigBase())
+	if msg := clearSystemProxy(cfg, remaining); msg != "" {
+		note("%s", msg)
+	}
 	note("stopped the pen connection and removed its settings")
 	return true
 }

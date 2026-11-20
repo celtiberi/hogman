@@ -82,14 +82,20 @@ func (c *agentConfig) proxyURL() string { return "http://" + c.ProxyAddr }
 func (c *agentConfig) pacURL() string   { return "http://" + c.ProxyAddr + "/proxy.pac" }
 
 // pac tells browsers: pen names go through the agent, everything else direct.
-func (c *agentConfig) pac() string {
-	return fmt.Sprintf(`// Hogman: only names in %[1]s use the pen. Everything else is untouched.
-function FindProxyForURL(url, host) {
-  host = host.toLowerCase();
-  if (host === "%[1]s" || dnsDomainIs(host, ".%[1]s")) return "PROXY %[2]s";
-  return "DIRECT";
-}
-`, c.Zone, c.ProxyAddr)
+func (c *agentConfig) pac() string { return renderPAC([]*agentConfig{c}) }
+
+func loadInstalledPenConfigs(configBase string) []*agentConfig {
+	matches, err := filepath.Glob(filepath.Join(configBase, "*", "config.json"))
+	if err != nil {
+		return nil
+	}
+	var pens []*agentConfig
+	for _, m := range matches {
+		if cfg, err := loadAgentConfig(filepath.Dir(m)); err == nil {
+			pens = append(pens, cfg)
+		}
+	}
+	return normalizePenConfigs(pens, nil)
 }
 
 func (c *agentConfig) inZone(host string) bool {
@@ -140,6 +146,7 @@ func runAgent(dir string) error {
 	defer node.Close()
 
 	a := newAgent(c, node)
+	a.configBase = filepath.Dir(dir)
 
 	// Serve the proxy straight away, so the setup step can watch us come up.
 	ln, err := net.Listen("tcp", c.ProxyAddr)
@@ -190,6 +197,7 @@ func runAgent(dir string) error {
 
 type agent struct {
 	cfg        *agentConfig
+	configBase string
 	node       *tsnet.Server
 	resolver   *net.Resolver
 	dialMesh   func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -371,6 +379,13 @@ func (a *agent) allowed(ctx context.Context, ip netip.Addr) bool {
 	return a.isPeer(ctx, ip)
 }
 
+func (a *agent) pac() string {
+	if a.configBase != "" {
+		return renderPAC(normalizePenConfigs(loadInstalledPenConfigs(a.configBase), a.cfg))
+	}
+	return a.cfg.pac()
+}
+
 func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodConnect:
@@ -383,7 +398,8 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	case r.URL.Path == "/proxy.pac":
 		w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
-		_, _ = io.WriteString(w, a.cfg.pac())
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, a.pac())
 	case r.URL.Path == "/status":
 		a.mu.Lock()
 		st := agentStatus{Zone: a.cfg.Zone, Up: a.up, Error: a.err, IPs: a.ips, Server: a.server}
