@@ -10,8 +10,8 @@
 <meta property="og:type" content="website">
 <meta property="og:image" content="https://hogman.network/hero.webp">
 <meta name="theme-color" content="#0e080c">
-<link rel="icon" href="/favicon.svg?v=metal3" type="image/svg+xml">
-<link rel="stylesheet" href="/styles.css?v=metal3">
+<link rel="icon" href="/favicon.svg?v=metal4" type="image/svg+xml">
+<link rel="stylesheet" href="/styles.css?v=metal4">
 </head>
 <body>
 <header class="top">
@@ -21,6 +21,7 @@
     <a href="#inside">Inside the fence</a>
     <a href="#boot">The boot</a>
     <a href="#run">Raise a pen</a>
+    <a href="#hosted">We'll keep it</a>
   </nav>
 </header>
 
@@ -151,6 +152,7 @@
     <ol class="steps">
       <li><strong>You get a link.</strong> It carries your invitation and the fingerprint of the pen's certificate, so you know you're at the right gate.</li>
       <li><strong>You run one command.</strong> It checks that fingerprint, asks what you'd like to be called, and adds the pen's certificate to your computer. That certificate can only ever vouch for the pen.</li>
+      <li><strong>Bring your other devices.</strong> In your pen's home page, press <em>Add a device</em> for a one-time link and QR code. The new device joins as you, under your name.</li>
       <li><strong>You're in.</strong> Open your ordinary browser and go. Nothing else to install. Already use Tailscale for something else? The tool notices and joins side by side, with its own small connection, so your other network keeps running untouched.</li>
     </ol>
     <pre class="term" aria-label="Example of joining a pen"><span class="p">$</span> ./hogman-join 'https://hs.example.com/join#t=…'
@@ -192,16 +194,47 @@ revoked, 1 names held until 2027-02-17 20:54</pre>
         <li class="yes">Joining from Linux and from a Mac</li>
         <li class="yes">Side by side with Tailscale: both at once, proven on a real Mac</li>
         <li class="yes">A test that plays out a whole pen's life: 99 checks, all passing</li>
+        <li class="yes">Many pens on one server, kept apart: tested</li>
       </ul>
       <h3>Not on the bill yet</h3>
       <ul class="status">
         <li class="notyet">Windows: built, never tried</li>
-        <li class="notyet">Phones</li>
+        <li class="notyet">Phones: the app is in the works</li>
+        <li class="notyet">Hosted pens: first server going up now</li>
         <li class="notyet">Public release. The code is still in the barn.</li>
       </ul>
       <p class="fine">Forged from good open-source steel: Headscale, the Tailscale client, CoreDNS, step-ca and Caddy.</p>
     </div>
   </div>
+</section>
+
+<div class="studs" aria-hidden="true"></div>
+
+<!-- ============================== HOSTED ============================== -->
+<section id="hosted">
+  <h2>Don't want a server? We'll keep your pen</h2>
+  <p class="sub">Same pen, same rules. You skip the server.</p>
+  <div class="cards three">
+    <article class="feature">
+      <h3>Raise it yourself</h3>
+      <p>Free and open source. One small server, a handful of commands, and nobody but you holds the gate. This is the whole point of Hogman, and it always will be.</p>
+    </article>
+    <article class="feature">
+      <h3>Or let us keep it</h3>
+      <p>We run the server; you run the pen. You still decide who gets in, who gets the boot and what everything is called. Every pen gets its own gate, its own certificate authority and its own name book, walled off from every other pen on the farm.</p>
+    </article>
+    <article class="feature">
+      <h3>Leave whenever you like</h3>
+      <p>A hosted pen is the same software as a self-hosted one. Ask, and you get your pen's folder: put it on your own server and carry on. Nobody gets locked in.</p>
+    </article>
+  </div>
+  <h3 style="margin-top:2.2rem">What hosting your pen lets us do</h3>
+  <ul class="status">
+    <li class="notyet"><strong>We can't read anything your swine say to each other.</strong> It's encrypted from one device to the other.</li>
+    <li class="yes"><strong>We can see who's in your pen</strong>, their devices, and which pen names get looked up. The same as any keeper sees.</li>
+    <li class="yes"><strong>We could, in principle, add a device to your pen</strong> or vouch for its names, because we'd run its gate. Tailscale has the same catch. If that's too much trust, raise your own pen: same software, nobody upstream.</li>
+  </ul>
+  <p class="fine">Hosted pens are being set up now. They aren't open to sign-ups yet.</p>
 </section>
 
 <div class="studs" aria-hidden="true"></div>
@@ -233,6 +266,6 @@ revoked, 1 names held until 2027-02-17 20:54</pre>
   <p class="fine">No pigs were excluded in the making of this website, except the filthy ones.</p>
 </footer>
 
-<script src="/boot.js?v=metal3" defer></script>
+<script src="/boot.js?v=metal4" defer></script>
 </body>
 </html>

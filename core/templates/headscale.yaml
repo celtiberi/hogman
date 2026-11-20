@@ -25,7 +25,7 @@ derp:
     region_code: hogman
     region_name: "@@NETWORK@@ relay"
     verify_clients: true          # relay serves only this network's devices
-    stun_listen_addr: 0.0.0.0:3478
+    stun_listen_addr: 0.0.0.0:@@STUN_PORT@@
     private_key_path: /var/lib/headscale/derp_server_private.key
     automatically_add_embedded_derp_region: true
 @@DERP_IPV4_LINE@@

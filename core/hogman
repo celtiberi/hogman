@@ -54,6 +54,10 @@ load_env() {
     *[!a-z0-9-]*|-*|*-) die "NETWORK must be lowercase letters, digits and dashes" ;;
   esac
   export ZONE="${NETWORK}.hogman"
+  export STUN_PORT="${STUN_PORT:-3478}"
+  # FRONT_DOOR=true: this pen sits behind a shared front door (deploy/hogman-host)
+  # that holds ports 80/443 and the public certificate for every pen on the host.
+  export FRONT_DOOR="${FRONT_DOOR:-false}"
   export TEST_MODE="${TEST_MODE:-false}"
   if [ "$TEST_MODE" = true ]; then
     export EDGE_TLS_MODE="local_certs"
@@ -66,8 +70,10 @@ dc() {
   local args=(--env-file .env)
   [ -f "$STATE" ] && args+=(--env-file "$STATE")
   local files=(-f compose.yaml)
-  [ "$TEST_MODE" = true ] && [ -f test/compose.test.yaml ] && files+=(-f test/compose.test.yaml)
-  ZONE="$ZONE" EDGE_TLS_MODE="$EDGE_TLS_MODE" docker compose "${args[@]}" "${files[@]}" "$@"
+  [ "$FRONT_DOOR" = true ] && files+=(-f compose.front.yaml)
+  [ "$TEST_MODE" = true ] && [ "$FRONT_DOOR" != true ] && [ -f test/compose.test.yaml ] && files+=(-f test/compose.test.yaml)
+  ZONE="$ZONE" EDGE_TLS_MODE="$EDGE_TLS_MODE" docker compose -p "${COMPOSE_PROJECT_NAME:-hogman}" \
+    "${args[@]}" "${files[@]}" "$@"
 }
 
 hs()  { dc exec -T headscale headscale "$@"; }
@@ -232,7 +238,9 @@ cmd_up() {
     hs policy set --file /etc/headscale/policy.hujson >/dev/null
 
     if [ "$TEST_MODE" = true ]; then
-      local root="$DATA/edge/caddy/pki/authorities/local/root.crt"
+      # The control host's test certificate comes from whoever terminates TLS:
+      # this pen's edge, or the shared front door (FRONT_CA points at its root).
+      local root="${FRONT_CA:-$DATA/edge/caddy/pki/authorities/local/root.crt}"
       wait_for "edge test certificate" 60 test -s "$root"
       cp "$root" "$DATA/edge-trust/root.crt"
     fi

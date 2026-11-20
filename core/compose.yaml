@@ -24,7 +24,7 @@ services:
       - ./data/headscale/config:/etc/headscale:ro
       - ./data/headscale/lib:/var/lib/headscale
     ports:
-      - "3478:3478/udp"          # STUN for the embedded relay
+      - "${STUN_PORT:-3478}:${STUN_PORT:-3478}/udp"   # STUN for the embedded relay (unique per pen on a shared host)
     networks: [core]
     healthcheck:
       test: ["CMD", "headscale", "health"]

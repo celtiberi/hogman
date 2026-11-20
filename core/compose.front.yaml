@@ -1,0 +1,32 @@
+# Front-door mode (FRONT_DOOR=true in .env): this pen shares a host with other
+# pens. The host's front door (deploy/hogman-host) holds ports 80/443 and the
+# public certificate for every pen, and passes this pen's traffic to its edge
+# as plain HTTP.
+#
+# Isolation: only this pen's edge joins the shared "hogman-front" network, and
+# only under a name unique to this pen. Nothing else of the pen is on it. (Every
+# container on a network answers to its service name there, so a shared
+# "core-mesh" would mix pens up.) The front door instead joins this pen's own
+# private network, where it answers for the pen's control hostname, so the
+# pen's core reaches its control server the way members do.
+
+services:
+  edge:
+    ports: !reset []
+    volumes: !override
+      - ./config/edge-behind-front.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/edge:/data
+      - ./join-page:/srv/join-page:ro
+      - ./data/join-dl:/srv/join-dl:ro
+    networks: !override
+      core: {}
+      hogman-front:
+        aliases: ["edge-${NETWORK}"]
+
+networks:
+  core:
+    # Created by hogman-host before the pen starts, so the front door can join it.
+    name: pen-${NETWORK}-core
+    external: true
+  hogman-front:
+    external: true
