@@ -814,3 +814,42 @@ func TestStoreConcurrentSubprocesses(t *testing.T) {
 		t.Fatalf("got %d member.check audit entries, want %d", len(seen), workers*perWorker)
 	}
 }
+
+// D-16: no account recovery. Nobody makes a personal device key for someone
+// else, except the server's tool for a member's very first device.
+func TestNoAccountRecoveryKeys(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+	root, err := e.svc.AddMember(ctx, cli, "root", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.AddMember(ctx, cli, "bob", "member"); err != nil {
+		t.Fatal(err)
+	}
+	// First device: the server's tool may (how a new pen's owner gets in).
+	if _, _, err := e.svc.IssueDeviceKey(ctx, cli, "root", "personal"); err != nil {
+		t.Fatalf("first device for root: %v", err)
+	}
+	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
+	e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.13", "")
+	// Once joined, never again, not even from the server.
+	for _, h := range []string{"root", "bob"} {
+		if _, _, err := e.svc.IssueDeviceKey(ctx, cli, h, "personal"); err == nil {
+			t.Fatalf("server tool made a personal key for %s, who has joined", h)
+		}
+	}
+	// An owner can't make one for someone else either; a server key is fine.
+	owner := Actor{Member: root}
+	if _, _, err := e.svc.IssueDeviceKey(ctx, owner, "bob", "personal"); err == nil {
+		t.Fatal("owner made a personal key for bob")
+	}
+	if _, _, err := e.svc.IssueDeviceKey(ctx, owner, "bob", "server"); err != nil {
+		t.Fatalf("owner server key for bob: %v", err)
+	}
+	// Your own next device still works.
+	if _, _, err := e.svc.IssueDeviceKey(ctx, owner, "root", "personal"); err != nil {
+		t.Fatalf("root's own next device: %v", err)
+	}
+}

@@ -25,7 +25,7 @@ cp .env.example .env      # set NETWORK, PUBLIC_HOST, PUBLIC_IPV4
 ./hogman init             # creates the network's CA; prints its fingerprint
 ./hogman up
 ./hogman member add <you> --role owner
-./hogman device key <you> personal   # open the link it prints on your laptop to join
+./hogman device key <you> personal   # open the link it prints on your laptop to join (first device only)
 ```
 
 `init` leaves the root key in `data/pki/offline/`. Once the network works, move that
@@ -74,8 +74,9 @@ The join tool ([join/](join/)) then:
   loopback proxy on `127.0.0.1`.
 
 Trust is added before the invite is redeemed, so if that step fails the invite is still
-unused. More devices: `./hogman device key <handle> personal` (or `POST /api/devices` from
-the portal) prints a device link for the same tool. `hogman-join leave '<link>'` removes
+unused. More devices: each member adds their own from the home page (`POST /api/devices`), which
+prints a device link for the same tool. Nobody can make one for someone else: there is no
+account recovery. `hogman-join leave '<link>'` removes
 the certificate and logs out.
 
 Built for macOS (Apple silicon, Intel), Linux (x86-64, ARM64) and Windows (x86-64).
