@@ -112,7 +112,8 @@ $ ./hogman-join share blog 3000               # a site you're building, by its p
 Each share is a small server device of its own, so your laptop itself still takes no
 visitors, and nothing needs administrator rights or an open port. Everything shared or named
 shows up in the **Sites in this pen** list on your home page (with who runs it and its
-optional `--note`). Add `--background` to keep it running after the window closes;
+optional `--note`). Add `--background` to run in the background and start automatically at login
+(Mac and Linux systemd; use `--no-service` to run only until restart);
 `./hogman-join share stop blog` takes it down and frees the name. A computer that isn't in
 the pen can share too: press *Get a share link* on your home page and add the link it gives you
 to the end of the command.
@@ -122,7 +123,8 @@ to the end of the command.
 binary from `/join/dl/`, checks its SHA-256 digest against `SHA256SUMS` from the same server over
 the same HTTPS connection (catching corrupted or truncated downloads, with the same server trust as
 the initial download), replaces `hogman-join`, restarts the pen's agent if running, and updates
-cached `share` binaries on disk (running shares keep serving until restarted with `share stop`).
+cached `share` binaries on disk (restarting service-managed background shares automatically while
+foreground shares keep serving until restarted).
 
 ## Under the hood
 

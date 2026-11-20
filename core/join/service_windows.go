@@ -21,6 +21,24 @@ func startAgent(dir string, c *agentConfig, o options) error {
 
 func stopAgent(dir string, c *agentConfig) { stopDetached(dir) }
 
+func shareServiceConfigured(*shareConfig) bool { return false }
+
+func startShareBackground(dir string, c *shareConfig, _ options) (bool, int, error) {
+	bin, err := installedBinary(dir)
+	if err != nil {
+		return false, 0, err
+	}
+	note("on Windows shares do not yet restart by themselves; run this command again after a restart")
+	return startShareServiceWithBinary(bin, dir, c, true)
+}
+
+func startShareServiceWithBinary(bin, dir string, _ *shareConfig, _ bool) (bool, int, error) {
+	pid, err := spawnDetached(filepath.Join(dir, "share.log"), bin, "__share-run", dir)
+	return false, pid, err
+}
+
+func stopShareService(*shareConfig) {}
+
 func startDetached(bin, dir string) error {
 	logf, err := os.OpenFile(filepath.Join(dir, "agent.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
