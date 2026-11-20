@@ -173,7 +173,7 @@ check "the device link comes with a QR code drawn inside the pen" grep -q '^<svg
 portal_has_ui() { run alice-laptop-tools curl -sf -m5 --cacert $ROOT "https://home.$ZONE/" | grep -q 'id="add-personal"'; }
 check "the portal offers 'Add a device'" portal_has_ui
 portal_hdrs="$(run alice-laptop-tools curl -sI -m5 --cacert $ROOT "https://home.$ZONE/" | tr -d '\r')"
-check "the portal sets anti-framing headers" sh -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\"" _ "$portal_hdrs"
+check "the portal sets anti-framing headers" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\"" _ "$portal_hdrs"
 portal_assets_ok() {
   run alice-laptop-tools curl -sf -m5 --cacert $ROOT "https://home.$ZONE/portal.js" >/dev/null &&
     run alice-laptop-tools curl -sf -m5 --cacert $ROOT "https://home.$ZONE/portal.css" >/dev/null
@@ -296,7 +296,7 @@ page_ok() {
 net_ok()   { from_internet "https://$PUBLIC_HOST/hogman/v1/network" | grep -q '"zone":"bobo.hogman"'; }
 check "https://<host>/join serves the join page" page_ok
 join_hdrs="$(from_internet -sI "https://$PUBLIC_HOST/join" | tr -d '\r')"
-check "the join page sets anti-framing headers" sh -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\"" _ "$join_hdrs"
+check "the join page sets anti-framing headers" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\"" _ "$join_hdrs"
 join_assets_ok() {
   from_internet "https://$PUBLIC_HOST/join/assets/join.js" >/dev/null &&
     from_internet "https://$PUBLIC_HOST/join/assets/join.css" >/dev/null

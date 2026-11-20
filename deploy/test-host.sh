@@ -112,7 +112,7 @@ check "front door reaches only zebra's core and headscale" front_dns_ok zebra
 check "front door hides Headscale admin API (404)" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/api/v1/node)" = 404
 check "front door hides Headscale Swagger (404)"   test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/swagger)" = 404
 join_hdrs="$(in_client bobo curl -sI https://control.bobo.example/join | tr -d '\r')"
-check "front door sets anti-framing headers on /join" sh -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\"" _ "$join_hdrs"
+check "front door sets anti-framing headers on /join" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\"" _ "$join_hdrs"
 check "front door serves /join/assets/join.js" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/join/assets/join.js)" = 200
 check "front door serves /join/dl/SHA256SUMS"  test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/join/dl/SHA256SUMS)" = 200
 cross() { in_client bobo curl -sf "https://control.zebra.example/hogman/v1/network" | jq -e '.zone == "zebra.hogman"'; }
@@ -209,8 +209,8 @@ check "a full server says so (503)" test "$full" = 503
 
 # The waiting list, now that the server is full.
 wl() { docker exec client-signup curl -s -H 'content-type: application/json' -d "$1" https://get.example/api/waitlist; }
-check "a full server's page takes you onto the waiting list" sh -c "jq -e '.place == 1' <<<'$(wl '{"email":"Wanda@Example.com","pen":"wanda","note":"for the band"}')'"
-check "joining twice keeps one place" sh -c "jq -e '.already and .place == 1' <<<'$(wl '{"email":"wanda@example.com"}')'"
+check "a full server's page takes you onto the waiting list" bash -c "jq -e '.place == 1' <<<'$(wl '{"email":"Wanda@Example.com","pen":"wanda","note":"for the band"}')'"
+check "joining twice keeps one place" bash -c "jq -e '.already and .place == 1' <<<'$(wl '{"email":"wanda@example.com"}')'"
 bad_email() { wl '{"email":"nope"}' | jq -e '.error | test("email")'; }
 check "a bad email is refused" bad_email
 wl '{"email":"xavier@example.org"}' >/dev/null
