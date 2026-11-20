@@ -127,7 +127,6 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 	}
 
 	handle := ""
-	created := existing == nil
 	cfg := existing
 	if cfg != nil {
 		step("This computer is already set up for %s", n.Zone)
@@ -168,22 +167,14 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		}
 	}
 
-	cleanupFailedSetup := func() {
-		if created {
-			stopAgent(dir, cfg)
-			_ = os.RemoveAll(dir)
-		}
-	}
 	step("Starting the pen connection as %q", cfg.Hostname)
 	if st, err := agentState(cfg); err != nil || !st.Up {
 		if err := startAgent(dir, cfg, o); err != nil {
-			cleanupFailedSetup()
 			return err
 		}
 	}
 	st, err := waitAgentUp(cfg, 90*time.Second)
 	if err != nil {
-		cleanupFailedSetup()
 		return err
 	}
 	note("online as %s", strings.Join(st.IPs, ", "))

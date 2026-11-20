@@ -154,7 +154,6 @@ func runAgent(dir string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		st, err := node.Up(ctx)
-		_ = os.Remove(keyFile) // single use; never leave spent or failed keys on disk
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		if err != nil {
@@ -162,6 +161,7 @@ func runAgent(dir string) error {
 			log.Printf("could not join the pen: %v", err)
 			return
 		}
+		_ = os.Remove(keyFile) // single use, and now spent
 		for _, ip := range st.TailscaleIPs {
 			a.ips = append(a.ips, ip.String())
 		}
