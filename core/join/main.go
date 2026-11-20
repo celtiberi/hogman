@@ -341,7 +341,8 @@ func join(raw string, o options) error {
 	if ts, err := findTailscale(); err == nil {
 		if st, err := ts.Status(); err == nil && st.BackendState == "Running" && st.OnNetwork(n.Zone) {
 			return errorf("this computer is on %s through its Tailscale app, which Hogman no longer uses.\n"+
-				"  Run hogman-join leave '<this link>' first, then join again with the same link.", n.Zone)
+				"  First get a fresh one-time link: open %s, press Add a device, copy the link.\n"+
+				"  Then run hogman-join leave '<this link>', and join with the fresh link.", n.Zone, n.Portal)
 		}
 	}
 	return joinAlongside(link, n, root, client, o, "the pen's own small connection: HTTPS to the pen and nothing else")

@@ -214,7 +214,13 @@ func newAgent(c *agentConfig, node *tsnet.Server) *agent {
 	a := &agent{cfg: c, node: node}
 	if node != nil {
 		a.resolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return node.Dial(ctx, network, net.JoinHostPort(c.DNSServer, "53"))
+			// The pen's DNS server is a dial like any other: only to a device
+			// this pen's node knows.
+			ip, err := netip.ParseAddr(c.DNSServer)
+			if err != nil || !a.allowed(ctx, ip) {
+				return nil, errOutside
+			}
+			return node.Dial(ctx, network, net.JoinHostPort(ip.Unmap().String(), "53"))
 		}}
 		a.dialMesh = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return node.Dial(ctx, network, addr)
@@ -311,7 +317,9 @@ func (a *agent) dial(ctx context.Context, hostport string) (net.Conn, error) {
 	}
 	if ip, err := netip.ParseAddr(host); err == nil {
 		if a.allowed(ctx, ip) {
-			return a.dialMesh(ctx, "tcp", hostport)
+			// Dial the unmapped form: tsnet looks peers up by the exact
+			// address, so ::ffff:<peer> would miss and fall back to the host.
+			return a.dialMesh(ctx, "tcp", net.JoinHostPort(ip.Unmap().String(), port))
 		}
 		return nil, errOutside
 	}
@@ -332,7 +340,7 @@ func (a *agent) dial(ctx context.Context, hostport string) (net.Conn, error) {
 	var ordered []string
 	for _, raw := range orderIPs(ips) {
 		if ip, err := netip.ParseAddr(raw); err == nil && a.allowed(ctx, ip) {
-			ordered = append(ordered, raw)
+			ordered = append(ordered, ip.Unmap().String())
 		}
 	}
 	if len(ordered) == 0 {

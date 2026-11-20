@@ -114,6 +114,16 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		return nil
 	}
 
+	// A pen can't take over a name this computer already uses for another pen:
+	// two roots trusted for one zone would let either impersonate the other.
+	// Refuse before trusting anything.
+	if existing != nil && existing.LoginServer != n.LoginServer {
+		return errorf("this computer is already in a pen called %s (at %s), and %s claims the same name.\n"+
+			"  Refusing: two pens with one name could impersonate each other. If you meant to switch,\n"+
+			"  leave the other one first: hogman-join leave '<its link>'",
+			n.Zone, strings.TrimPrefix(existing.LoginServer, "https://"), link.Host)
+	}
+
 	certFile, cleanupCert, err := writeTempCert(root.PEM)
 	if err != nil {
 		return err

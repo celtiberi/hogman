@@ -373,7 +373,7 @@ out="$(join_tool carol-laptop --handle carol --hostname carol-laptop "$CAROL_LIN
 echo "$out" | sed 's/^/        | /'
 check "the join tool succeeds (exit $rc)" test $rc = 0
 check "it reports carol is in" grep -q "You're in. You are carol on bobo.hogman" <<<"$out"
-check "with Tailscale installed, it still joins the usual HTTPS-only way" grep -q "the usual way" <<<"$out"
+check "with Tailscale installed, it still joins the usual HTTPS-only way" grep -q "own small connection" <<<"$out"
 ts_untouched() { [ "$(run carol-laptop tailscale status --json | jq -r .BackendState)" != Running ]; }
 check "... and leaves this computer's Tailscale alone" ts_untouched
 check "it installed the network's root in the system store" \

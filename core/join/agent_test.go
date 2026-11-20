@@ -441,3 +441,31 @@ func TestAgentDialsOnlyPenDevices(t *testing.T) {
 		}
 	}
 }
+
+// An IPv4-mapped form of a real peer must be dialed unmapped: tsnet looks
+// peers up by the exact address, and the mapped form would miss and fall
+// back to the host network.
+func TestAgentDialsUnmapped(t *testing.T) {
+	a := newAgent(&agentConfig{Zone: "bobo.hogman"}, nil)
+	peer := netip.MustParseAddr("100.70.0.5")
+	a.isPeer = func(_ context.Context, ip netip.Addr) bool { return ip == peer }
+	a.lookupDNS = func(context.Context, string) ([]string, error) { return []string{"::ffff:100.70.0.5"}, nil }
+	var dialed []string
+	a.dialMesh = func(_ context.Context, _, addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		c1, c2 := net.Pipe()
+		go c2.Close()
+		return c1, nil
+	}
+	for _, target := range []string{"[::ffff:100.70.0.5]:443", "mapped.bobo.hogman:443"} {
+		dialed = nil
+		c, err := a.dial(context.Background(), target)
+		if err != nil {
+			t.Fatalf("%s: %v", target, err)
+		}
+		c.Close()
+		if len(dialed) != 1 || dialed[0] != "100.70.0.5:443" {
+			t.Fatalf("%s: dialed %v, want 100.70.0.5:443", target, dialed)
+		}
+	}
+}
