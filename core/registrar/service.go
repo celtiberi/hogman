@@ -93,6 +93,9 @@ type Service struct {
 }
 
 func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
+	if cfg.CAIP == "" {
+		cfg.CAIP = cfg.CoreIP
+	}
 	if cfg.MaxOpenDeviceKeys <= 0 {
 		cfg.MaxOpenDeviceKeys = 10
 	}
@@ -1017,7 +1020,7 @@ func (s *Service) buildPolicy() (string, error) {
 		Dst []string `json:"dst"`
 		IP  []string `json:"ip"`
 	}
-	grants := []grant{{Src: src, Dst: []string{"tag:infra"}, IP: []string{"53", "80", "443"}}}
+	grants := []grant{{Src: src, Dst: []string{"tag:infra"}, IP: []string{"53", "80", "443", "9000"}}}
 	if len(servers) > 0 {
 		grants = append(grants, grant{Src: src, Dst: servers, IP: []string{"*"}})
 	}

@@ -197,6 +197,7 @@ check "bob can't point a name at alice's server" expect 400 bob-tools POST /api/
 step "Naming"
 check "bob resolves alice.$ZONE to alice's server" retry 30 resolves_to alice.$ZONE "$ALICE_SERVER_IP"
 check "bob resolves home.$ZONE to the core node"   resolves_to home.$ZONE "$CORE_MESH_IP"
+check "bob resolves ca.$ZONE to the core node"     resolves_to ca.$ZONE "$CORE_MESH_IP"
 check "device names work (alice-server.nodes.$ZONE)" resolves_to alice-server.nodes.$ZONE "$ALICE_SERVER_IP"
 check "ordinary names still resolve (example.com)" resolves_any example.com
 check "the network's DNS refuses outside names (not an open resolver)" refused example.com
@@ -204,9 +205,15 @@ in_directory() { api bob-tools GET /api/directory | grep -q "$1"; }
 check "the directory lists alice's sites" in_directory "blog.alice.$ZONE"
 
 step "HTTPS with the network's own CA"
+legacy_acme_dir_ok() {
+  run bob-tools curl -sf -m5 --cacert $ROOT "https://ca.$ZONE/acme/acme/directory" \
+    | jq -e --arg p "https://ca.$ZONE/" \
+      '(.newNonce | startswith($p)) and (.newAccount | startswith($p)) and (.newOrder | startswith($p))'
+}
+check "legacy CA URL https://ca.$ZONE/acme/acme/directory serves port-443 links" retry 60 legacy_acme_dir_ok
 check "portal https://home.$ZONE is trusted"                    retry 60 fetch home.$ZONE "You're in"
 check "alice's site https://alice.$ZONE is trusted (ACME cert)" retry 150 fetch alice.$ZONE "hello from alice.$ZONE"
-check "sub-names work (https://blog.alice.$ZONE)"               retry 150 fetch blog.alice.$ZONE "hello from blog.alice"
+check "sub-names work via legacy port-443 CA URL (https://blog.alice.$ZONE)" retry 150 fetch blog.alice.$ZONE "hello from blog.alice"
 check "site certs are short-lived (expire within 7 days)" retry 10 expires_within alice.$ZONE 168
 check "the CA is healthy" retry 30 sh -c "[ \"\$(docker inspect -f '{{.State.Health.Status}}' $COMPOSE_PROJECT_NAME-step-ca-1)\" = healthy ]"
 
@@ -260,6 +267,7 @@ check "mesh API rejects same-site browser requests (403)" \
 step "A device that bypassed the registrar gets nothing"
 check "it is not recorded as anyone's device" not has_device stray-device
 check "it cannot reach the portal"     not port_open stray-tools "$CORE_MESH_IP" 443
+check "it cannot reach the CA"         not port_open stray-tools "$CORE_MESH_IP" 9000
 check "it cannot reach alice's server" not can_ping stray-tools "$ALICE_SERVER_IP"
 check "bob cannot reach it"            not can_ping bob-tools "$STRAY_IP"
 

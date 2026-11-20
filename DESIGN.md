@@ -99,11 +99,11 @@ There is no global `.hogman` layer. `search.bobo.hogman` belongs to the `bobo` n
 
 - At deploy time the stack generates a **root CA** for the network, restricted by name constraint to `.bobo.hogman`. It cannot sign for any other name, so installing it does not let the owner intercept members' other traffic.
 - The root key is taken offline by the owner after setup. An online **intermediate** does day-to-day signing.
-- step-ca exposes ACME at `ca.bobo.hogman`, reachable only on the mesh. A server proves it controls a name by answering a challenge at the address DNS gives for that name. Since the registrar controls DNS, **owning a name in the registrar is what entitles you to a cert for it.**
+- step-ca exposes ACME at `ca.bobo.hogman:9000`, reachable only on the mesh. A server proves it controls a name by answering a challenge at the address DNS gives for that name. Since the registrar controls DNS, **owning a name in the registrar is what entitles you to a cert for it.**
 - The zone restriction is enforced by the name constraints in the root and intermediate certificates, not by step-ca's own policy settings: step-ca's policy can only match one label under a wildcard, so it cannot allow `blog.alice.bobo.hogman`. The core test signs a `www.google.com` cert directly with the intermediate key and confirms it fails verification.
-- The CA runs on its own mesh address, separate from the portal, since both serve port 443.
+- The CA shares the `core` mesh IP with the portal on its own port (`9000`).
 - Certs are short-lived (7 days, auto-renewed). Short lifetime is the revocation mechanism: a removed member's certs simply expire.
-- Hosting a site is: join a server, claim a name, run Caddy pointed at `ca.bobo.hogman`. HTTPS is automatic from there.
+- Hosting a site is: join a server, claim a name, run Caddy pointed at `ca.bobo.hogman:9000`. HTTPS is automatic from there.
 
 ### Trust install per platform
 
@@ -161,8 +161,8 @@ As built: Headscale runs in database policy mode and the **registrar generates t
 {
   "tagOwners": { "tag:infra": [], "tag:server": [] },
   "grants": [
-    // every active member's device, plus the core, may reach the core's DNS/HTTP/HTTPS
-    { "src": ["<active device IPs>", "tag:infra"], "dst": ["tag:infra"], "ip": ["53", "80", "443"] },
+    // every active member's device, plus the core, may reach the core's DNS/HTTP/HTTPS/CA
+    { "src": ["<active device IPs>", "tag:infra"], "dst": ["tag:infra"], "ip": ["53", "80", "443", "9000"] },
     // ... and anything on every active member's servers
     { "src": ["<active device IPs>", "tag:infra"], "dst": ["<active server IPs>"], "ip": ["*"] }
   ]

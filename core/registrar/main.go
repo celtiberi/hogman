@@ -48,11 +48,12 @@ func durEnv(k string, def time.Duration) time.Duration {
 }
 
 func setup() *Service {
+	coreIP := mustEnv("CORE_MESH_IP")
 	cfg := Config{
 		Zone:             mustEnv("ZONE"),
 		PublicHost:       mustEnv("PUBLIC_HOST"),
-		CoreIP:           mustEnv("CORE_MESH_IP"),
-		CAIP:             mustEnv("CA_MESH_IP"),
+		CoreIP:           coreIP,
+		CAIP:             env("CA_MESH_IP", coreIP),
 		ZoneFile:         env("ZONE_FILE", "/zone/db.zone"),
 		RootCAFile:       env("ROOT_CA", "/pki/root_ca.crt"),
 		NameHold:         durEnv("NAME_HOLD", 90*24*time.Hour),
