@@ -1,0 +1,36 @@
+# Known vulnerabilities in our Go code and its dependencies (govulncheck only
+# reports ones our code can actually reach). Runs on every PR, on main, and
+# weekly, so a new advisory against an old dependency shows up without a push.
+name: vuln
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [core/join, core/registrar, deploy/signup]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache: false
+      - name: govulncheck ${{ matrix.module }}
+        working-directory: ${{ matrix.module }}
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+          "$(go env GOPATH)/bin/govulncheck" ./...

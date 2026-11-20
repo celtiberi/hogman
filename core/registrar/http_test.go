@@ -690,3 +690,36 @@ func TestRemoveDeviceFreesItsNames(t *testing.T) {
 		t.Fatalf("name after device removal: err=%v, want ErrNotFound", err)
 	}
 }
+
+// D-16: there is no account recovery. An owner is told how many owners the
+// pen has, so a lone owner can be warned to make a second one.
+func TestOwnerCount(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+	for _, m := range []struct{ handle, role string }{
+		{"root", "owner"}, {"carol", "owner"}, {"ann", "admin"},
+	} {
+		if _, err := e.svc.AddMember(ctx, cli, m.handle, m.role); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
+	e.addDevice(t, "ann", "personal", "ann-laptop", "100.64.0.12", "")
+	h := MeshHandler(e.svc)
+	owners := func(ip string) float64 {
+		rec := doMeshReq(h, "GET", "/api/me", ip, "", nil)
+		var me map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil {
+			t.Fatalf("GET /api/me: %v (%s)", err, rec.Body.String())
+		}
+		n, _ := me["owners"].(float64)
+		return n
+	}
+	if n := owners("100.64.0.10"); n != 2 {
+		t.Fatalf("owner sees owners=%v, want 2", n)
+	}
+	if n := owners("100.64.0.12"); n != 0 {
+		t.Fatalf("admin sees owners=%v, want 0", n)
+	}
+}

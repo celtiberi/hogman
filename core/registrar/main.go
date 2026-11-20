@@ -189,7 +189,8 @@ const usage = `registrar: members, invites, devices and names for one Hogman net
   invite list
   invite revoke <id>
 
-  device key <handle> personal|server    one-time key to join a device
+  device key <handle> personal|server    one-time key to join a device (personal: a member's
+                                         first device only; there is no account recovery)
   device list
   device rm <id>
 

@@ -91,42 +91,61 @@ func autoProxyState(svc string) (string, bool) {
 }
 
 // setSystemProxy points the Mac's automatic proxy setting at the agent's
-// rules file, which sends only pen names through the pen. It never replaces
-// an enabled setting someone else put there.
-func setSystemProxy(c *agentConfig) (string, error) {
+// rules file, which sends only pen names through their pens. It never replaces
+// an enabled non-Hogman setting someone else put there.
+func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, error) {
+	known := normalizePenConfigs(pens, c)
+	want := pacURLWithVersion(c, known)
 	manual := "set System Settings → Network → (your network) → Proxies → Automatic proxy configuration to " + c.pacURL()
 	var done []string
 	for _, svc := range networkServices() {
 		cur, enabled := autoProxyState(svc)
-		if shouldLeaveAutoProxy(cur, enabled, c.pacURL()) {
+		switch planAutoProxyAction(cur, enabled, known, want) {
+		case "leave":
 			return "this Mac already uses an automatic proxy (" + cur + "), so it was left alone. To use the pen in browsers, " + manual, nil
-		}
-		if enabled && cur == c.pacURL() {
+		case "noop":
 			done = append(done, svc)
-			continue
+		case "set":
+			if out, err := run(true, "networksetup", "-setautoproxyurl", svc, want); err != nil {
+				return "", fmt.Errorf("%s (%s). To do it by hand, %s", firstLine(out), svc, manual)
+			}
+			done = append(done, svc)
 		}
-		if out, err := run(true, "networksetup", "-setautoproxyurl", svc, c.pacURL()); err != nil {
-			return "", fmt.Errorf("%s (%s). To do it by hand, %s", firstLine(out), svc, manual)
-		}
-		done = append(done, svc)
 	}
 	if len(done) == 0 {
 		return manual, nil
 	}
+	if len(known) > 1 {
+		return fmt.Sprintf("Safari, Chrome and others now find all %d pens (%s) by themselves (set on: %s)",
+			len(known), strings.Join(penZoneNames(known), ", "), strings.Join(done, ", ")), nil
+	}
 	return "Safari, Chrome and others now find the pen by themselves (set on: " + strings.Join(done, ", ") + ")", nil
 }
 
-func clearSystemProxy(c *agentConfig) string {
-	cleared := false
+func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {
+	known := normalizePenConfigs(remaining, leaving)
+	nextURL := ""
+	if host := pickPACHost(remaining); host != nil {
+		nextURL = pacURLWithVersion(host, remaining)
+	}
+	turnedOff, updated := false, false
 	for _, svc := range networkServices() {
 		cur, enabled := autoProxyState(svc)
-		if enabled && cur == c.pacURL() {
+		switch planClearAutoProxyAction(cur, enabled, known, nextURL) {
+		case "off":
 			if _, err := run(true, "networksetup", "-setautoproxystate", svc, "off"); err == nil {
-				cleared = true
+				turnedOff = true
+			}
+		case "set":
+			if _, err := run(true, "networksetup", "-setautoproxyurl", svc, nextURL); err == nil {
+				updated = true
 			}
 		}
 	}
-	if cleared {
+	if updated {
+		return "updated the automatic proxy setting for your remaining pen(s): " + strings.Join(penZoneNames(remaining), ", ")
+	}
+	if turnedOff {
 		return "removed the pen's automatic proxy setting"
 	}
 	return ""

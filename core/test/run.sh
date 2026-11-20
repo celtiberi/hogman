@@ -380,13 +380,15 @@ check "... and leaves this computer's Tailscale alone" ts_untouched
 check "it installed the network's root in the system store" \
   run carol-laptop test -s /usr/local/share/ca-certificates/hogman-bobo.hogman.crt
 check "the registrar recorded carol's laptop" retry 10 match 'carol.*carol-laptop' $H device list
-DEVICE_LINK="$($H device key carol personal | awk '/^link:/ {print $2}')"
+check "no account recovery: the server won't make a device link for carol, who has joined" not $H device key carol personal
+check "a new member can still be given a first device link from the server" $H member add erin
+DEVICE_LINK="$($H device key erin personal | awk '/^link:/ {print $2}')"
 out="$(join_tool carol-desktop --tailscale --hostname carol-desktop "$DEVICE_LINK" 2>&1)"; rc=$?
 check "joining through the Tailscale app is no longer offered (--tailscale refused)" test $rc != 0
-check "... and the device link is still unused" no_match 'carol.*carol-desktop' $H device list
+check "... and the device link is still unused" no_match 'erin.*carol-desktop' $H device list
 out="$(join_tool carol-desktop --hostname carol-desktop "$DEVICE_LINK" 2>&1)"; rc=$?
-check "a device link adds a second device (exit $rc)" grep -q "You're in. You are carol" <<<"$out"
-check "the registrar recorded it as carol's" retry 10 match 'carol.*carol-desktop' $H device list
+check "a device link joins that member (exit $rc)" grep -q "You're in. You are erin" <<<"$out"
+check "the registrar recorded it as erin's" retry 10 match 'erin.*carol-desktop' $H device list
 out="$(join_tool carol-desktop leave "$DEVICE_LINK" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
 check "leave works (exit $rc)" grep -q "Left bobo.hogman" <<<"$out"
@@ -471,6 +473,18 @@ check "a server link plus one command shares a port (exit $rc)" grep -q "https:/
 check "members load https://app.$ZONE" retry 30 fetch app.$ZONE "app from a server link"
 out="$(join_tool dave-server share stop app 2>&1)"; rc=$?
 check "and it stops cleanly (exit $rc)" grep -q "app.$ZONE is down" <<<"$out"
+
+out="$(join_tool dave-laptop update --dry-run 2>&1)"; rc=$?
+check "hogman-join update --dry-run checks SHA256SUMS cleanly (exit $rc)" bash -c 'test "$1" = 0 && grep -q "already up to date" <<<"$2"' _ "$rc" "$out"
+BEFORE_PID="$(run dave-laptop cat /root/.config/hogman/bobo.hogman/agent.pid 2>/dev/null | tr -d '\r')"
+run dave-laptop sh -c 'printf "#!/bin/sh\nexit 1\n" > /root/.config/hogman/bobo.hogman/.stale-join && chmod 755 /root/.config/hogman/bobo.hogman/.stale-join && mv /root/.config/hogman/bobo.hogman/.stale-join /root/.config/hogman/bobo.hogman/hogman-join'
+out="$(join_tool dave-laptop update 2>&1)"; rc=$?
+[ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
+check "hogman-join update repairs stale pen copy and restarts agent (exit $rc)" bash -c 'test "$1" = 0 && grep -q "Updated " <<<"$2"' _ "$rc" "$out"
+AFTER_PID="$(run dave-laptop cat /root/.config/hogman/bobo.hogman/agent.pid 2>/dev/null | tr -d '\r')"
+check "... restarted agent with a new process" test -n "$BEFORE_PID" -a -n "$AFTER_PID" -a "$BEFORE_PID" != "$AFTER_PID"
+check "... and installed binary matches /join/dl exactly" run dave-laptop sh -c 'cmp -s /root/.config/hogman/bobo.hogman/hogman-join "/dl/hogman-join-$(uname -s)-$(uname -m)"'
+check "... and restarted agent still loads alice.$ZONE" retry 20 alice_via
 
 out="$(join_tool dave-laptop leave "$DAVE_LINK" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'

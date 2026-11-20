@@ -212,7 +212,7 @@ func TestWebPageAndHeaders(t *testing.T) {
 		`Network name (your pen)`,
 		`Your personal name in it`,
 		`Back up your keeper access`,
-		`never recover a pen on request`,
+		`only way back in`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("page missing %q", want)
