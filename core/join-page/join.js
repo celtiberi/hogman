@@ -32,28 +32,36 @@
   if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
     document.getElementById('what').textContent = '';
     return err('Phones can\'t join yet: the Hogman phone app is coming soon. ' +
-               'For now, open this link on a computer (macOS, Linux or Windows).');
+               'For now, open this link on a macOS or Linux computer.');
   }
   const cleanLink = `https://${host}/join#${t ? 't=' + t : 'k=' + k}&fp=${fp}${forShare ? '&for=share' : ''}`;
   const quoted = `'${cleanLink}'`;
   const verb = forShare ? 'share blog 8080 ' : '';
-  const cmds = {
-    unix: `curl -fsSLo hogman-join "https://${host}/join/dl/hogman-join-$(uname -s)-$(uname -m)" && chmod +x hogman-join && ./hogman-join ${verb}${quoted}`,
-    win:  `iwr https://${host}/join/dl/hogman-join-windows-amd64.exe -OutFile hogman-join.exe; .\\hogman-join.exe ${verb}${quoted}`,
-  };
+  const unixCmd = `curl -fsSLo hogman-join "https://${host}/join/dl/hogman-join-$(uname -s)-$(uname -m)" && chmod +x hogman-join && ./hogman-join ${verb}${quoted}`;
+  document.getElementById('cmd').textContent = unixCmd;
+  if (forShare) {
+    document.getElementById('lead').textContent =
+      'Copy this into a terminal on the computer hosting your app or folder. It downloads hogman-join (no other software needed):';
+  }
   const show = os => {
-    document.getElementById('cmd').textContent = cmds[os];
-    document.querySelectorAll('.tabs button').forEach(b => b.setAttribute('aria-pressed', b.dataset.os === os));
+    const isWin = os === 'win';
+    document.getElementById('unix-panel').hidden = isWin;
+    document.getElementById('win-panel').hidden = !isWin;
+    document.getElementById('lead').hidden = isWin;
+    document.getElementById('join-details').hidden = isWin || forShare;
+    document.getElementById('share-details').hidden = isWin || !forShare;
+    document.getElementById('sums-line').hidden = isWin;
+    document.querySelectorAll('.tabs button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.os === os)));
   };
   document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => show(b.dataset.os));
   show(/Windows/.test(navigator.userAgent) ? 'win' : 'unix');
   document.getElementById('copy').onclick = async () => {
-    await navigator.clipboard.writeText(document.getElementById('cmd').textContent);
+    await navigator.clipboard.writeText(unixCmd);
     document.getElementById('copied').textContent = 'Copied.';
   };
   document.getElementById('redeem').textContent = kind === 'invite' ? 'asks you to pick your name,' : '';
   fetch('/hogman/v1/network').then(r => r.json()).then(n => {
-    document.getElementById('zone').textContent = '.' + n.zone;
+    document.querySelectorAll('.zone').forEach(el => { el.textContent = '.' + n.zone; });
     document.getElementById('title').textContent = (forShare ? 'Share into ' : 'Join ') + n.zone;
     document.getElementById('what').textContent = kind === 'invite'
       ? 'You have been invited. This link works once.'

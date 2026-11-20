@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Retry `caddy reload` briefly in `deploy/hogman-host:reload_front()` to avoid cold-start races against Caddy's admin socket, and add traversal, host-validation, and file-permission regression checks to `deploy/test-host.sh` (PR #8).
 
 ### Changed
+- Clarify the sign-up (`deploy/signup/web`) and `/join` (`core/join-page`) pages: separate network vs. personal labels without `'smith'`-style field suffixes, show `https://home.<pen>.hogman` on sign-up completion, note that the command/link embeds a one-time secret, tailor `/join` details for `for=share` links (no trust install or password), and mark Windows as coming soon (Phase 2).
 - Redirect `www.hogman.network` permanently (`301`) to `https://hogman.network{uri}` in `site/Caddyfile` while keeping `hogman.fly.dev` as a direct fallback.
 - Configure RFC1918 `trusted_proxies` CIDRs in `core/templates/headscale.yaml` so Headscale honors `X-Real-IP` forwarded by Caddy `edge`.
 

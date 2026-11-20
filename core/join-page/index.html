@@ -12,21 +12,29 @@
 <p class="sub" id="what">Checking your link…</p>
 
 <div id="main" hidden>
-  <p>Copy this into a terminal on the device you want to join. Nothing else to install:</p>
+  <p id="lead">Copy this into a terminal on the computer you want to join. It downloads <code>hogman-join</code> (no other software needed):</p>
   <div class="tabs">
-    <button data-os="unix">Mac / Linux</button>
-    <button data-os="win">Windows</button>
+    <button data-os="unix" type="button">Mac / Linux</button>
+    <button data-os="win" type="button">Windows</button>
   </div>
-  <pre id="cmd"></pre>
-  <p><button id="copy">Copy</button> <span class="muted" id="copied"></span></p>
+  <div id="unix-panel">
+    <pre id="cmd"></pre>
+    <p><button id="copy" type="button">Copy</button> <span class="muted" id="copied"></span></p>
+    <p class="warn">This command embeds a one-time key — treat it like a password and don't share it.</p>
+  </div>
+  <div id="win-panel" hidden>
+    <p class="warn">Windows support is coming soon (not available yet). For now, open this link on a macOS or Linux computer.</p>
+  </div>
 
-  <p class="muted">The <code>hogman-join</code> tool checks the network's certificate against the
+  <p class="muted" id="join-details">The <code>hogman-join</code> tool checks the network's certificate against the
   fingerprint in your link, <span id="redeem"></span> adds the certificate to this
-  computer (you'll be asked for your password once), and joins. The certificate can
-  only vouch for names ending in <b id="zone"></b>; it cannot be used to read your
+  computer (you'll be asked for your password once), and connects you. The certificate can
+  only vouch for names ending in <b class="zone"></b>; it cannot be used to read your
   other traffic.</p>
-  <p class="muted">Windows: run the terminal as administrator.</p>
-  <p class="muted">Want to check the download first? <a href="/join/dl/SHA256SUMS">SHA-256 checksums</a> for every platform.</p>
+  <p class="muted" id="share-details" hidden>The <code>hogman-join</code> tool checks the network's certificate
+  against the fingerprint in your link and publishes only that port or folder on <b class="zone"></b> over HTTPS.
+  No system certificate is installed, no password is asked, and nothing else on the computer is exposed.</p>
+  <p class="muted" id="sums-line">Want to check the download first? <a href="/join/dl/SHA256SUMS">SHA-256 checksums</a> for every platform.</p>
 </div>
 <p class="warn" id="err" hidden></p>
 
