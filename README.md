@@ -62,6 +62,24 @@ good free ones) and run them on a server in your pen; Hogman makes them private.
 - **Your own projects:** the home server or side project, reachable from your laptop or phone
   anywhere, with real HTTPS.
 
+**Questions people ask.**
+
+- *Do I need to be technical?* To get a pen and invite people, no: you sign up on a web page,
+  and your guests click a link and paste one command. To host your own sites in it, a little
+  server know-how helps.
+- *Do my people install anything?* A small program, once; the invite link walks them through
+  it on a Mac or Linux (Windows and a phone app are coming).
+- *Can strangers find my pen?* No. Nothing in it has a public address.
+- *Is it a VPN?* No. A VPN hides your browsing; a pen is a private place with its own sites
+  and its own guest list, and your normal internet keeps working.
+- *Why not just use Tailscale?* If you're technical and only want your own devices
+  connected, do: Hogman is built on Tailscale's open-source pieces and runs alongside it.
+  Hogman is for running a private place for a group of people: guests join from a link, the
+  keeper runs the guest list from a web page, every pen has its own names, and its
+  certificates stay inside the pen instead of appearing in public certificate logs.
+- *Can you see what we do?* What members send each other is encrypted end to end. If we host
+  your pen we can see who is in it, not what anyone says. Run your own if that's too much trust.
+
 ## What you get
 
 - **Proper names.** Every pen has its own name, and so does everything in it:
