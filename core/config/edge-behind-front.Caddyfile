@@ -6,6 +6,7 @@
 	servers {
 		# Only the front door talks to us; take the visitor's address from it.
 		trusted_proxies static private_ranges
+		trusted_proxies_strict
 	}
 }
 
@@ -40,7 +41,9 @@ http://{$PUBLIC_HOST} {
 		request_body {
 			max_size 16KB
 		}
-		reverse_proxy core-mesh:8081
+		reverse_proxy core-mesh:8081 {
+			header_up X-Forwarded-For {client_ip}
+		}
 	}
 	# Keep Headscale's admin REST API and Swagger UI off the public edge.
 	handle /api/* {
