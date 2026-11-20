@@ -52,34 +52,8 @@
   no ssh, no other ports, no games, no raw network access between devices. Every one of those
   would be one more way in for an attacker, on your computer and on everyone else's.</p>
 
-<p>This page is for people who know exactly what they're giving up and want it anyway. Nothing
-  here is needed to use a pen. <strong>If you're not sure, don't.</strong></p>
-
-<h2 class="docs-h2" id="tailscale">Joining through your own Tailscale app</h2>
-<p>Normally a computer joins through Hogman's own small connection, which runs as you (never as
-  administrator) and carries HTTPS to the pen's names only. You can instead join through the
-  Tailscale app on your computer:</p>
-<pre class="term"><span class="p">$</span> ./hogman-join --tailscale '&lt;your link&gt;'</pre>
-<p><strong>What that opens up:</strong></p>
-<ul>
-  <li>Your whole computer is on the pen, at the network level. Every program on it, including
-    anything malicious, and every other account on the computer, can reach the pen as you.</li>
-  <li>Your Tailscale app can only be on one network at a time. If it's on another one (your
-    work network, say), joining the pen switches it off that one until you switch back
-    (add <code>--switch</code> to allow it).</li>
-  <li>Your computer takes its DNS settings from the pen's control server. A trustworthy pen
-    only answers its own names, but a hostile keeper could point those names at your own
-    computer or your router, or tell your computer to send <em>all</em> its DNS lookups to
-    them, so they could see and redirect your ordinary browsing. (The usual connection
-    never does this: it answers only the pen's names and only ever connects to the pen's own
-    devices.)</li>
-  <li>What stays the same: other members still can't connect <em>to</em> your computer
-    (personal devices accept nothing), and the pen's rules still only let you reach its
-    servers on ports 443 and 80. The Tailscale app is told to refuse any routes the pen
-    offers.</li>
-</ul>
-<p>Only do this for a pen whose keeper you'd trust with your computer's DNS. To go back to the usual way: <code>./hogman-join leave '&lt;your link&gt;'</code>, then join
-  again without <code>--tailscale</code>.</p>
+<p>This page is for people who want to know where the line is, and what's on the other side
+  of it. Nothing here is needed to use a pen. <strong>If you're not sure, don't.</strong></p>
 
 <h2 class="docs-h2" id="own-server">Running your own web server</h2>
 <p>Still HTTPS only, but you run and patch the web server yourself instead of letting
@@ -89,6 +63,11 @@
 
 <h2 class="docs-h2" id="not">What Hogman deliberately doesn't do</h2>
 <ul>
+  <li><strong>Joining through your own Tailscale app.</strong> It used to be an option. It put
+    every program on the member's computer (malware included) onto the pen at the network
+    level, and handed the pen's control server that computer's DNS. That's one member widening
+    the risk for everyone in the pen, without the keeper getting a say, so it's gone. Every
+    computer joins through Hogman's own small connection.</li>
   <li><strong>Other ports and protocols</strong> (ssh, databases, game servers, voice over UDP):
     the pen's rules allow only 443 and 80 to servers, and its connection only carries those. If
     you need them, a tool built for that (your own Tailscale network, say) is the right one.</li>

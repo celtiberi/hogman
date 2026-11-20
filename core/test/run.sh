@@ -381,16 +381,18 @@ check "it installed the network's root in the system store" \
 check "the registrar recorded carol's laptop" retry 10 match 'carol.*carol-laptop' $H device list
 DEVICE_LINK="$($H device key carol personal | awk '/^link:/ {print $2}')"
 out="$(join_tool carol-desktop --tailscale --hostname carol-desktop "$DEVICE_LINK" 2>&1)"; rc=$?
-check "a device link adds a second device, the advanced way (--tailscale) (exit $rc)" grep -q "You're in. You are carol" <<<"$out"
-check "... which warns that every app and port reaches the pen" grep -q "every app and port reaches the pen" <<<"$out"
+check "joining through the Tailscale app is no longer offered (--tailscale refused)" test $rc != 0
+check "... and the device link is still unused" no_match 'carol.*carol-desktop' $H device list
+out="$(join_tool carol-desktop --hostname carol-desktop "$DEVICE_LINK" 2>&1)"; rc=$?
+check "a device link adds a second device (exit $rc)" grep -q "You're in. You are carol" <<<"$out"
 check "the registrar recorded it as carol's" retry 10 match 'carol.*carol-desktop' $H device list
 out="$(join_tool carol-desktop leave "$DEVICE_LINK" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
 check "leave works (exit $rc)" grep -q "Left bobo.hogman" <<<"$out"
 check "leave removed the root from the system store" \
   run carol-desktop sh -c '! test -e /usr/local/share/ca-certificates/hogman-bobo.hogman.crt'
-logged_out() { [ "$(run carol-desktop tailscale status --json | jq -r .BackendState)" != Running ]; }
-check "leave logged the device out" logged_out
+conn_gone() { ! run carol-desktop test -e /root/.config/hogman/bobo.hogman; }
+check "leave removed the pen's connection and its settings" conn_gone
 
 step "Side by side: a computer with no Tailscale at all"
 dc up -d dave-laptop

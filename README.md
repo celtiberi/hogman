@@ -212,9 +212,7 @@ $ curl -fsSLo hogman-join https://smith.pens.hogman.network/join/dl/hogman-join-
 
 **No Tailscale needed, and it won't fight yours.** The join tool runs its own small
 connection, as you, never as administrator. It carries only HTTPS to the pen's names, and
-leaves everything else on your computer, including any Tailscale of your own, alone. (Joining
-through your own Tailscale app instead is possible, but less safe: see
-[Advanced](https://hogman.network/docs/advanced.html).)
+leaves everything else on your computer, including any Tailscale of your own, alone.
 
 **More devices:** your pen's home page has *Add a device*: a one-time link and QR code. The
 new device joins as you, under your name.
