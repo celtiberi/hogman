@@ -813,6 +813,52 @@ func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64) (string
 	return name + "." + s.cfg.Zone, nil
 }
 
+// serverMayUse: a server claiming a name for itself may take a free name or
+// one that already points at it, never one of its member's other names.
+func (s *Service) serverMayUse(d *Device, rawName string) error {
+	name, err := s.normaliseName(rawName)
+	if err != nil {
+		return err
+	}
+	n, err := s.st.NameByName(name)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if n.MemberID == d.MemberID && n.HeldUntil == nil && n.DeviceID != nil && *n.DeviceID == d.ID {
+		return nil
+	}
+	return conflict("%s is already taken; pick another name", name)
+}
+
+// serverOwnsName: a server may release a name only if it, and every name
+// under it, points at that server.
+func (s *Service) serverOwnsName(d *Device, rawName string) error {
+	name, err := s.normaliseName(rawName)
+	if err != nil {
+		return err
+	}
+	all, err := s.st.Names()
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, x := range all {
+		if x.Name != name && !strings.HasSuffix(x.Name, "."+name) {
+			continue
+		}
+		if x.MemberID != d.MemberID || x.HeldUntil != nil || x.DeviceID == nil || *x.DeviceID != d.ID {
+			return forbidden("%s does not point at this server", x.Name)
+		}
+		found = found || x.Name == name
+	}
+	if !found {
+		return missing("%s is not claimed", name)
+	}
+	return nil
+}
+
 // Release frees a name and everything under it.
 func (s *Service) Release(a Actor, rawName string) error {
 	s.mu.Lock()

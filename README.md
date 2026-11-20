@@ -48,7 +48,7 @@ There's no login page for them to guess at.
 misbehaves you remove them, every device at once, in about two seconds.
 
 **What people use it for.** You bring the apps (a photo gallery, a forum, a wiki: there are
-good free ones) and run them on a server in your pen; Hogman makes them private.
+good free ones), put them in your pen with one command, and Hogman makes them private.
 
 - **A family:** photo albums, a shared calendar, recipes, the family chat, seen by nobody else.
 - **Friends, clubs and teams:** your own private Facebook, with a message board, events and a
@@ -65,8 +65,9 @@ good free ones) and run them on a server in your pen; Hogman makes them private.
 **Questions people ask.**
 
 - *Do I need to be technical?* To get a pen and invite people, no: you sign up on a web page,
-  and your guests click a link and paste one command. To host your own sites in it, a little
-  server know-how helps.
+  and your guests click a link and paste one command. Putting a folder or a website in the
+  pen is one command too (`hogman-join share photos ~/holiday`). Running bigger apps on a
+  spare computer helps to know a little about servers.
 - *Do my people install anything?* A small program, once; the invite link walks them through
   it on a Mac or Linux (Windows and a phone app are coming).
 - *Can strangers find my pen?* No. Nothing in it has a public address.
@@ -79,6 +80,33 @@ good free ones) and run them on a server in your pen; Hogman makes them private.
   certificates stay inside the pen instead of appearing in public certificate logs.
 - *Can you see what we do?* What members send each other is encrypted end to end. If we host
   your pen we can see who is in it, not what anyone says. Run your own if that's too much trust.
+
+## How it works
+
+<p align="center">
+  <img src="docs/img/how-it-works.svg" alt="A fenced pen called smith.hogman. Inside: the home page (invites, who's in, the boot), three members' devices, and two websites: blog.smith.hogman shared from Alice's laptop with one command, and photos.smith.hogman on a server in Bob's closet. Members reach the sites over encrypted connections. Outside, the horde of strangers and bots has no address to find. The gate, run by us or by you, checks invite links and hands out names and padlocks, but never sees what anyone says." width="100%">
+</p>
+
+1. **You get a pen.** Sign up, and about a minute later it's up, with its own home page,
+   names and padlocks.
+2. **You invite your people.** They open the link and paste one command. Their laptop is
+   now inside the fence.
+3. **Anyone can put something in.** One command gives a folder, or a website you're
+   building, its own name with the padlock. Only people in the pen can open it.
+
+```text
+$ hogman-join share photos ~/holiday        # a folder, served as a website
+$ hogman-join share blog 3000               # a site you're building, by its port
+
+✓ https://blog.smith.hogman is up.
+  Everyone in the pen can open it.
+```
+
+Each share is a small server device of its own, so your laptop itself still takes no
+visitors, and nothing needs administrator rights or an open port. Add `--background` to keep
+it running after the window closes; `hogman-join share stop blog` takes it down and frees
+the name. A computer that isn't in the pen can share too: press *Add a server* on your home
+page and add the link it gives you to the end of the command.
 
 ## What you get
 
@@ -224,6 +252,7 @@ Try it, break it, tell us what you find. Don't trust it with anything that matte
 | Alerts on your phone when the server or its backups stop | |
 | Pens on our server: sign up by invitation while we test, or join the waiting list | |
 | Run your pen from its home page: invites, the herd, the boot | |
+| Put a folder or a website in your pen with one command (`hogman-join share`) | |
 | End-to-end tests: 122 checks for a pen, 74 for a shared host | |
 
 **Found a security problem?** Please don't open a public issue. Report it privately

@@ -2,7 +2,10 @@ module hogman/join
 
 go 1.27.4
 
-require tailscale.com v1.104.7
+require (
+	golang.org/x/crypto v0.58.0
+	tailscale.com v1.104.7
+)
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
@@ -36,7 +39,6 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb // indirect
-	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect

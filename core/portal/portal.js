@@ -111,7 +111,7 @@
       $('qr').hidden = !r.join_qr_svg || kind === 'server';
       $('phone-line').hidden = kind === 'server';
       $('computer-line').textContent = kind === 'server'
-        ? 'Server: open this link on the server (or copy the command its page shows into the server\'s terminal):'
+        ? 'Server: to put one thing in the pen, run ./hogman-join share NAME PORT \'<this link>\' on that computer (see Host something, below). To join the whole computer, open this link on it and follow the steps:'
         : 'Computer: open this link on it and follow the steps:';
       $('linktext').textContent = r.join_link;
       $('newlink').hidden = false;
