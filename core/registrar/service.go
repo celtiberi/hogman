@@ -263,6 +263,8 @@ func (s *Service) SetRole(a Actor, handle, role string) error {
 	if !validRoles[role] {
 		return bad("role must be owner, admin or member")
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	m, err := s.member(handle)
 	if err != nil {
 		return err
@@ -271,15 +273,39 @@ func (s *Service) SetRole(a Actor, handle, role string) error {
 		return conflict("%s has been removed", handle)
 	}
 	if m.Role == "owner" && role != "owner" {
-		if n, _ := s.st.CountOwners(); n <= 1 {
+		ok, err := s.st.DemoteOwner(m.ID, role)
+		if err != nil {
+			return err
+		}
+		if !ok {
 			return conflict("%s is the only owner", handle)
 		}
-	}
-	if err := s.st.SetMemberRole(m.ID, role); err != nil {
+	} else if err := s.st.SetMemberRole(m.ID, role); err != nil {
 		return err
 	}
 	s.st.Audit(a.String(), "member.role", handle, m.Role+" -> "+role)
+	// Invites carry their maker's authority. When that shrinks, the invites
+	// they left open go too (Redeem also re-checks the maker's role).
+	if roleRank[role] < roleRank[m.Role] {
+		if n, err := s.st.RevokeOpenInvitesBy(m.ID); err == nil && n > 0 {
+			s.st.Audit(a.String(), "invite.revoke", handle, fmt.Sprintf("%d open, after role change", n))
+		}
+	}
 	return nil
+}
+
+var roleRank = map[string]int{"member": 0, "admin": 1, "owner": 2}
+
+// mayMint reports whether a member, as they are now, may hand out an invite
+// for this role. MintInvite applies the same rules when the invite is made.
+func (s *Service) mayMint(m *Member, role string) bool {
+	switch role {
+	case "admin":
+		return m.Role == "owner"
+	case "member":
+		return m.Role == "owner" || m.Role == "admin" || s.cfg.MembersCanInvite
+	}
+	return false
 }
 
 // canRemove applies DESIGN.md section 9, "Protecting the owner".
@@ -553,7 +579,8 @@ func (s *Service) Redeem(ctx context.Context, token, handle string) (*Enrolment,
 		return nil, forbidden("invite %s", st)
 	}
 	if inv.MintedBy != nil {
-		if minter, err := s.st.MemberByID(*inv.MintedBy); err != nil || minter.Status != "active" {
+		minter, err := s.st.MemberByID(*inv.MintedBy)
+		if err != nil || minter.Status != "active" || !s.mayMint(minter, inv.Role) {
 			return nil, forbidden("invite not valid")
 		}
 	}
