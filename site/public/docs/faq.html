@@ -94,7 +94,9 @@
   <dt>"This computer cannot find the network's names yet"</dt>
   <dd>With Tailscale, check its DNS setting is on (<code>tailscale set --accept-dns=true</code>)
     and that the pen's profile is the active one (<code>tailscale switch --list</code>). Then run
-    the join again; it picks up where it left off without using your invite.</dd>
+    the same join command again. Your invite was already used to add this device, so the rerun
+    sees the device is in, skips the invite, and goes on to check your home page. (The link
+    won't work on another computer: ask for a device link instead.)</dd>
 
   <dt>Firefox on Linux shows a certificate warning</dt>
   <dd>Firefox on Linux keeps its own list of trusted certificates instead of the system's.
@@ -104,9 +106,13 @@
   <dt id="own-certs">An app says the certificate isn't trusted (Node, Python, Java)</dt>
   <dd>Some runtimes keep their own certificate list. Download the pen's root from your home page
     and point them at it:
-<pre class="term">NODE_EXTRA_CA_CERTS=~/pen-root.crt node app.js
-SSL_CERT_FILE=~/pen-root.crt python app.py        <span class="c"># also REQUESTS_CA_BUNDLE for requests</span>
-keytool -importcert -alias mypen -file ~/pen-root.crt -cacerts   <span class="c"># Java</span></pre></dd>
+<pre class="term">NODE_EXTRA_CA_CERTS="$HOME/pen-root.crt" node app.js      <span class="c"># adds to Node's own list</span>
+keytool -importcert -alias mypen -file "$HOME/pen-root.crt" -cacerts   <span class="c"># Java</span></pre>
+    Python is different: <code>SSL_CERT_FILE</code> and <code>REQUESTS_CA_BUNDLE</code>
+    <em>replace</em> the whole list, so pointing them at the pen's root alone breaks public HTTPS
+    in that program. If it also talks to public sites, make one file with both:
+<pre class="term">cat "$(python3 -c 'import certifi; print(certifi.where())')" "$HOME/pen-root.crt" &gt; "$HOME/ca-plus-pen.crt"
+SSL_CERT_FILE="$HOME/ca-plus-pen.crt" REQUESTS_CA_BUNDLE="$HOME/ca-plus-pen.crt" python app.py</pre></dd>
 
   <dt>The join tool tried to open a browser on a server</dt>
   <dd>Add <code>--no-open</code>. On a machine with no desktop there's nothing to open; the home

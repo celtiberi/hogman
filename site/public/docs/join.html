@@ -78,8 +78,9 @@
     Keep the <code>hogman-join</code> file: you'll use it to share things and to leave.</li>
 </ol>
 <p><strong>If it stops part way</strong> (a password prompt cancelled, DNS not ready), fix what it
-  says and run the same command again. Once your device is in, it won't use the invite a second
-  time, so a rerun picks up where it left off.</p>
+  says and run the same command again. If the stop came before your device joined, the invite
+  is still unused; if after, the rerun sees the device is already in and skips the invite.
+  Either way the link only ever adds this one computer.</p>
 <p>Before trusting anything, the tool checks the pen's certificate against the fingerprint in
   your link, and that the certificate can only vouch for the pen's own names. A link that
   doesn't match is refused before the invite is used.</p>
