@@ -1,6 +1,7 @@
-<h1 class="docs-h1">Sharing a folder or a website</h1>
-<p class="lede">One command puts something in your pen under its own name, with HTTPS. Everyone
-  in the pen can open it; nobody outside can find it.</p>
+<h1 class="docs-h1">Putting things in your pen</h1>
+<p class="lede">One command puts something in your pen with its own name and the padlock.
+  Everyone in the pen can open it; nobody outside can find it. This is how almost everything
+  gets into a pen: a folder of photos, an app, a website you're building.</p>
 
 <pre class="term"><span class="p">$</span> ./hogman-join share photos ~/holiday
 
@@ -11,91 +12,86 @@
   Everyone in the pen can open it.
   It shows the folder ~/holiday.
   Take it down and give the name back: hogman-join share stop photos</pre>
+<p>Use the same <code>hogman-join</code> you joined with, on a computer that's in the pen.</p>
 
 <nav class="toc" aria-label="On this page">
-  <a href="#what">What you can share</a> · <a href="#running">Keeping it running</a> ·
-  <a href="#manage">Listing and stopping</a> · <a href="#link">From a computer not in the pen</a> ·
-  <a href="#names">Names</a> · <a href="#how">How it works</a> · <a href="#limits">Limits</a>
+  <a href="#what">What you can put in</a> · <a href="#running">Keeping it running</a> ·
+  <a href="#manage">Listing and taking down</a> · <a href="#always-on">On an always-on computer</a> ·
+  <a href="#names">Names</a> · <a href="#limits">Limits</a> · <a href="#how">How it works</a>
 </nav>
 
-<h2 class="docs-h2" id="what">What you can share</h2>
+<h2 class="docs-h2" id="what">What you can put in</h2>
 <table class="docs-table">
-  <thead><tr><th>Command</th><th>Shares</th></tr></thead>
+  <thead><tr><th>You have</th><th>Command</th></tr></thead>
   <tbody>
-    <tr><td><code>share notes ./site</code></td><td>A folder, served as a website. An
-      <code>index.html</code> is the front page; otherwise visitors get a file list. Links pointing
-      outside the folder are refused.</td></tr>
-    <tr><td><code>share blog 3000</code></td><td>Whatever is listening on port 3000 of this
-      computer: a dev server, a self-hosted app, anything that speaks HTTP.</td></tr>
-    <tr><td><code>share nas http://192.168.1.20:8080</code></td><td>A web address this computer
-      can reach, such as a device on your home network. Only do this for something you mean
-      the whole pen to reach.</td></tr>
+    <tr><td>A folder of files or a finished website. An <code>index.html</code> becomes the front
+      page; otherwise visitors see a list of the files.</td>
+      <td><code>share photos ~/holiday</code></td></tr>
+    <tr><td>An app running on this computer: a photo gallery, a forum, a wiki, a website you're
+      building. Use the port it runs on.</td>
+      <td><code>share blog 3000</code></td></tr>
+    <tr><td>Something on your home network, such as a NAS or a media server. Only for things
+      you mean the whole pen to reach.</td>
+      <td><code>share media http://192.168.1.20:8096</code></td></tr>
   </tbody>
 </table>
-<p>For a port or address, visitors' requests are passed on with the usual
-  <code>X-Forwarded-For</code>, <code>X-Forwarded-Host</code> and <code>X-Forwarded-Proto</code>
-  headers, and with the Host header your app expects (its own), so dev servers that check the
-  Host header still work. WebSockets work.</p>
 
 <h2 class="docs-h2" id="running">Keeping it running</h2>
-<p>By default a share runs in your terminal until you press Ctrl-C. The name stays yours: run
-  the same command later to bring it back at the same address.</p>
+<p>A share runs until you press Ctrl-C. The name stays yours: run the same command later and
+  it's back at the same address.</p>
 <p>To keep it running after you close the window, add <code>--background</code>:</p>
 <pre class="term"><span class="p">$</span> ./hogman-join share blog 3000 --background</pre>
-<p>On a Mac or Linux, a background share keeps running after you close the terminal, until
-  the computer restarts (or, on some Linux systems, until you log out). (Starting by itself after a restart isn't
-  built yet; run the command again.)</p>
+<p>On a Mac or Linux it keeps running after you close the terminal, until the computer restarts
+  (on some Linux systems, until you log out). It doesn't start by itself after a restart yet;
+  run the command again.</p>
 
-<h2 class="docs-h2" id="manage">Listing and stopping</h2>
+<h2 class="docs-h2" id="manage">Listing and taking down</h2>
 <pre class="term"><span class="p">$</span> ./hogman-join share list
 https://blog.smith.hogman                http://127.0.0.1:3000  (running in the background)
 
 <span class="p">$</span> ./hogman-join share stop blog
 <span class="ok">✓ https://blog.smith.hogman is down, and the name is free again.</span></pre>
-<p><code>share stop</code> stops it, gives the name back and removes its server from your
-  devices. Leaving the pen (<code>hogman-join leave</code>) stops all of this computer's shares
-  first. If you're in more than one pen, pick one with <code>--pen smith.hogman</code>.</p>
+<p><code>share stop</code> takes it down and gives the name back. Leaving the pen takes all of
+  this computer's shares down first. In more than one pen? Add <code>--pen smith.hogman</code>.</p>
 
-<h2 class="docs-h2" id="link">From a computer that isn't in the pen</h2>
-<p>A spare box in the closet doesn't need to join first. On your home page, press
-  <strong>Add a server</strong>, copy the link, and add it to the end of the command on that
-  box (download <code>hogman-join</code> there the same way you did when you joined):</p>
-<pre class="term"><span class="p">$</span> ./hogman-join share web 8080 'https://smith.pens.hogman.network/join#k=…&amp;fp=…'</pre>
-<p>The link works once and expires in an hour. Use a server link, not an invite: an invite
-  makes a new member.</p>
+<h2 class="docs-h2" id="always-on">On an always-on computer</h2>
+<p>For something that should stay up, like a family forum, run it on a computer that's always on
+  (an old laptop, a mini PC, a small cloud server) and share it from there. That computer doesn't
+  need to join the pen first:</p>
+<ol class="docs-steps">
+  <li>On your pen's home page, press <strong>Add a server</strong> and copy the link. It works
+    once, for an hour.</li>
+  <li>On the always-on computer, download <code>hogman-join</code> the same way you did when you
+    joined, and add the link to the end of the share command:
+<pre class="term"><span class="p">$</span> ./hogman-join share forum 8080 'https://smith.pens.hogman.network/join#k=…&amp;fp=…' --background</pre></li>
+</ol>
+<p>Use a server link, not an invite: an invite makes a new member.</p>
 
 <h2 class="docs-h2" id="names">Names</h2>
 <ul>
   <li>The name becomes <code>https://NAME.yourpen.hogman</code>: lowercase letters, digits and
-    dashes. A dotted name like <code>photos.blog</code> works if <code>blog</code> is already
-    yours and points at the same share.</li>
-  <li>Names are first come, first served. If it's taken, you're told and nothing is left
-    behind; pick another.</li>
-  <li>Each member can hold up to 50 names.</li>
+    dashes.</li>
+  <li>First come, first served. If it's taken you're told, nothing is left behind, and you pick
+    another. Each member can hold up to 50.</li>
+  <li>A name under one of yours works too: <code>share pics.blog …</code>, if <code>blog</code>
+    is yours and shared from the same place.</li>
 </ul>
-
-<h2 class="docs-h2" id="how">How it works</h2>
-<p>Each share is a small device of its own: a server, joined to the pen from inside the join
-  tool with Tailscale's <code>tsnet</code>. Without a link, the tool asks the pen (as you,
-  through your computer's existing connection) for a one-time server key. The share then:</p>
-<ol class="docs-steps">
-  <li>joins the mesh as a server, so members may connect to it;</li>
-  <li>claims its name (a server may only name itself, with a free name or one already pointing
-    at it);</li>
-  <li>gets a 7-day certificate from the pen's CA over ACME and renews it on its own;</li>
-  <li>listens on the mesh at ports 443 and 80 (80 redirects to HTTPS) and serves the folder or
-    passes visitors to your port.</li>
-</ol>
-<p>Your laptop itself stays a personal device that accepts no connections. Nothing opens a
-  port on your computer, and nothing needs administrator rights. Its state lives in your
-  user config folder under <code>hogman-shares/yourpen/&lt;name&gt;</code>.</p>
 
 <h2 class="docs-h2" id="limits">Limits</h2>
 <ul>
   <li>Shares don't come back by themselves after a restart yet.</li>
-  <li>A computer that joined as a server can't share without a server link (servers can't add
-    devices).</li>
+  <li>A computer that joined as a server needs a server link to share.</li>
   <li>Windows is untested.</li>
-  <li>For a permanent site with its own web server configuration, see
-    <a href="/docs/servers.html">Running a server</a>.</li>
 </ul>
+
+<h2 class="docs-h2" id="how">How it works</h2>
+<p>Each share is a small device of its own, a server, run inside <code>hogman-join</code> with
+  Tailscale's <code>tsnet</code>. It joins the pen (with a one-time key the tool asks for in your
+  name, or the server link), claims its name, gets a 7-day certificate from the pen's own CA and
+  renews it, and listens on ports 443 and 80 inside the mesh. Your laptop itself still accepts no
+  connections; nothing opens a port on your computer, and nothing needs administrator rights.</p>
+<p>For developers: requests are passed to your app with <code>X-Forwarded-For</code>,
+  <code>-Host</code> and <code>-Proto</code>, and with the app's own Host header, so dev servers
+  that check it still work. WebSockets work.</p>
+<p>Want to run your own web server (Caddy, nginx) with the pen's certificates instead? That's
+  <a href="/docs/servers.html">the advanced page</a>.</p>

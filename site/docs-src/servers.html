@@ -1,8 +1,12 @@
-<h1 class="docs-h1">Running a server in your pen</h1>
-<p class="lede">For a site that stays up, with your own web server configuration: a machine
-  joined as a server, a name pointing at it, and Caddy (or any ACME client) getting its
-  certificates from the pen's own authority. For something quick, <a href="/docs/share.html">
-  sharing</a> is simpler.</p>
+<h1 class="docs-h1">Your own web server <span class="docs-tag">advanced</span></h1>
+<p class="lede">You probably don't need this page. <a href="/docs/share.html">Sharing</a> puts
+  any folder or app in the pen with one command, certificates included. This page is for the
+  technically minded who want to run their own web server (Caddy, nginx, anything that speaks
+  ACME) on a machine in the pen, with their own configuration, other ports, or several sites
+  behind one server.</p>
+
+<p>The steps: join the machine as a server, point a name at it, and have your web server get
+  its certificates from the pen's own certificate authority.</p>
 
 <h2 class="docs-h2">1. Join the machine as a server</h2>
 <p>On your pen's home page, press <strong>Add a server</strong> and open the link on the
@@ -49,7 +53,8 @@ blog.smith.hogman {
 
 <h2 class="docs-h2">Good to know</h2>
 <ul>
-  <li>Servers accept connections from any active member's device. Personal devices never do.</li>
+  <li>Servers accept connections from any active member's device, on any port. Personal
+    devices never do.</li>
   <li>A server can't add devices, invite people or run the pen; use a personal device for that.</li>
   <li>If the member who owns the server is suspended, the server is cut off until they're
     resumed. If they're removed, the server is deleted and its names are held for 90 days.</li>

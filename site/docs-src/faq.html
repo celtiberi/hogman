@@ -81,7 +81,8 @@ SSL_CERT_FILE="$HOME/ca-plus-pen.crt" REQUESTS_CA_BUNDLE="$HOME/ca-plus-pen.crt"
   <dt>Caddy can't listen on port 80 or 443</dt>
   <dd>On Linux, low ports need permission. Run Caddy as root or through systemd, or once:
     <code>sudo setcap cap_net_bind_service=+ep "$(command -v caddy)"</code>.
-    <a href="/docs/servers.html">Running a server</a>.</dd>
+    Only relevant if you run your own web server
+    (<a href="/docs/servers.html">the advanced page</a>); shares don't need it.</dd>
 
   <dt>"is already being shared from this computer"</dt>
   <dd>That share is already running, perhaps in the background or another window. See it with

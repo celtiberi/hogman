@@ -66,8 +66,8 @@ good free ones), put them in your pen with one command, and Hogman makes them pr
 
 - *Do I need to be technical?* To get a pen and invite people, no: you sign up on a web page,
   and your guests click a link and paste one command. Putting a folder or a website in the
-  pen is one command too (`hogman-join share photos ~/holiday`). Running bigger apps on a
-  spare computer helps to know a little about servers.
+  pen is one command too (`hogman-join share photos ~/holiday`). Bigger apps (a forum, a
+  photo gallery) you install on an always-on computer, then share the same way.
 - *Do my people install anything?* A small program, once; the invite link walks them through
   it on a Mac or Linux (Windows and a phone app are coming).
 - *Can strangers find my pen?* No. Nothing in it has a public address.
