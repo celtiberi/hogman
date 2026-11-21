@@ -5,6 +5,7 @@ Status: **signed off** by @hogman (revision 3, with the sign-off fixes). Build i
 Decisions:
 - **D-18:** publicly trusted certificates only, with no private root.
 - **D-19:** the Public Suffix List is a goal, not a launch gate.
+- **D-24:** hosted pens only. The self-hosted columns and notes below (libdns, bring-your-own-domain) are not being built; they stay here in case that changes.
 
 This design also covers the audit items it settles: H1, and the PKI items rated Medium. See `docs/security/audit-2026-11.md`.
 
