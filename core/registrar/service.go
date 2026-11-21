@@ -169,9 +169,10 @@ func (s *Service) DeviceLink(key, kind string) string {
 // ------------------------------------------------------------- validation --
 
 var (
-	handleRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`)
-	labelRE  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	reserved = map[string]bool{"home": true, "ca": true, "ns": true, "registrar": true,
+	handleRE          = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`)
+	labelRE           = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	reservedNSLabelRE = regexp.MustCompile(`^ns[0-9]*$`)
+	reserved          = map[string]bool{"home": true, "ca": true, "ns": true, "registrar": true,
 		"search": true, "nodes": true, "www": true, "join": true, "admin": true}
 	validRoles = map[string]bool{"owner": true, "admin": true, "member": true}
 )
@@ -999,7 +1000,7 @@ func (s *Service) serverOwnsACMEName(d *Device, rawName string) (string, error) 
 		return "", err
 	}
 	for _, l := range strings.Split(name, ".") {
-		if l == "home" || l == "nodes" || strings.HasPrefix(l, "ns") || l == "_acme-challenge" {
+		if l == "home" || l == "nodes" || reservedNSLabelRE.MatchString(l) || l == "_acme-challenge" {
 			return "", forbidden("%q is reserved by the network", l)
 		}
 	}

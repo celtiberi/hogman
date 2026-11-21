@@ -249,6 +249,19 @@ func TestMeshACMEEndpoints(t *testing.T) {
 		t.Fatalf("sub-name POST txt: got %d want 201 body=%s", rec.Code, rec.Body.String())
 	}
 
+	// Ordinary names starting with "ns" (e.g., nspire) must work while ^ns[0-9]*$ remain refused.
+	if _, err := e.svc.ServerClaim(Actor{CLI: false, Member: aliceSrvMember(t, e, "alice")}, aliceSrv, "nspire", nil); err != nil {
+		t.Fatal(err)
+	}
+	rec = doMeshReq(h, "POST", "/api/acme/txt", "100.64.0.11", `{"name":"nspire","value":"`+validVal+`"}`, jsonHdr)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("nspire POST txt: got %d want 201 body=%s", rec.Code, rec.Body.String())
+	}
+	rec = doMeshReq(h, "DELETE", "/api/acme/txt", "100.64.0.11", `{"name":"nspire","value":"`+validVal+`"}`, jsonHdr)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("nspire DELETE txt: got %d want 204 body=%s", rec.Code, rec.Body.String())
+	}
+
 	// Another server of same member, another member's server, personal device, unclaimed name -> refused.
 	for _, tc := range []struct {
 		desc, method, path, ip, body string
