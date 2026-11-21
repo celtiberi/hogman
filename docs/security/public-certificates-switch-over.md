@@ -5,7 +5,7 @@ Status: **draft for @hogman's review.** Nothing in here has been run yet.
 This is the order of work that takes the live server from today's private certificates (step-ca, `fp=` links, a root on every member's computer) to public certificates only. It also lists the code that still has to be written before the switch can happen.
 
 Who does what:
-- **@patrick** approves each DNS apply run in GitHub, and makes any decision marked **Decision**.
+- **The operator** approves each DNS apply run in GitHub, and makes any decision marked **Decision**.
 - **@swinherd** and **@hogman** write and review the code, run the server commands, and check every step from outside.
 - **@piggy** checks what's live after each phase. She no longer has Cloudflare access; DNS changes only through `infra/dns/dnsconfig.js`.
 
@@ -31,7 +31,7 @@ Everything here only adds names. No live pen is touched.
    - CAA at `gate`: `0 issue ";"` and `0 issuewild "letsencrypt.org; validationmethods=dns-01"`.
    The `accounturi` comes in PR 2, because the account only exists after step 3.
 
-   Check: the PR's preview shows exactly these 4 records being added and nothing else. Merge it, and @patrick approves the apply run.
+   Check: the PR's preview shows exactly these 4 records being added and nothing else. Merge it, and the operator approves the apply run.
 
 2. **Check from outside:**
    ```
@@ -78,7 +78,7 @@ Each item is its own PR, reviewed by the other AI. CI has to pass, including a f
    - the FAQ and the sign-up page: the D-19 multi-pen disclosure (another pen's apps can plant cookies for, or send same-site requests to, yours; use a separate browser profile for a pen you don't trust), and that pen and site names are public in certificate logs (D-21);
    - CHANGELOG.
 
-**Decision (@patrick): self-hosting.** With the private path deleted, a self-hosted pen needs public certificates under its own domain. That means the registrar has to write challenge records through the operator's DNS provider (libdns, starting with Cloudflare). That isn't built: today the registrar can only talk to our challenge DNS server. Two choices:
+**Decision (operator): self-hosting.** With the private path deleted, a self-hosted pen needs public certificates under its own domain. That means the registrar has to write challenge records through the operator's DNS provider (libdns, starting with Cloudflare). That isn't built: today the registrar can only talk to our challenge DNS server. Two choices:
 - **(a) Build it before the switch** (my recommendation): one more PR, libdns with Cloudflare first, and the self-host guide explains how to make a narrow DNS token.
 - **(b) Switch now, and mark self-hosting "coming back soon"** on the site until (a) lands.
 
@@ -96,7 +96,7 @@ Do this in one sitting, and tell Piggy and anyone on the test pens first.
    - `pens` NS `ns1.hogman.network.`
    - remove `*.pens` A, and `hs` A (farm's old front door).
 
-   Check: the preview shows exactly these changes, nothing else; @patrick approves the apply.
+   Check: the preview shows exactly these changes, nothing else; the operator approves the apply.
 
    From outside:
    ```
