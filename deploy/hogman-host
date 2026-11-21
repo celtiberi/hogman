@@ -482,11 +482,13 @@ cmd_backup_allow() {
 backup_pen() {  # backup_pen <name>
   local n="$1" pen="$PENS/$1" stage ts out
   stage="$(mktemp -d)"
-  # Everything needed to bring the pen back, minus what returns by itself:
+  # Everything needed to bring the pen back, minus what returns by itself, and
+  # never an offline root key a self-hosted owner hasn't moved off yet (audit H9):
   # the compiled join tool (every release ships it), web certificates
   # (re-issued), and step-ca's ACME records (members' servers re-register).
   rsync -a "$pen/data/" "$stage/data/" \
     --exclude join-dl/ --exclude edge/ --exclude portal/ --exclude step/db/ --exclude tmp/ \
+    --exclude pki/offline/ \
     --exclude 'headscale/lib/db.sqlite*' --exclude 'registrar/registrar.db*'
   # Databases are copied with SQLite's own backup, safe while the pen runs.
   sqlite3 "$pen/data/headscale/lib/db.sqlite" ".backup '$stage/data/headscale/lib/db.sqlite'"
@@ -636,6 +638,11 @@ cmd_signup_setup() {
   fi
   # The broker runs this very script; Docker needs its absolute path.
   local hostbin; hostbin="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  # The broker is as powerful as root, so it gets no internet unless the
+  # operator turned on push notifications (the only thing it sends out).
+  # Docker itself pulls images and builds; the broker only asks it to.
+  local broker_nets="[signup]" out_net=""
+  if [ -n "${SIGNUP_NTFY:-}" ]; then broker_nets="[signup, out]"; out_net="  out: {}"; fi
   cat > "$SIGNUP/compose.yaml" <<EOF
 # Written by hogman-host signup-setup.
 name: hogman-signup
@@ -678,13 +685,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - $HOGMAN_HOME:$HOGMAN_HOME
       - $hostbin:/usr/local/bin/hogman-host:ro
-    # signup: the page reaches it here. out: it reaches the internet (image and
-    # build pulls); nothing else is on that network, so nothing reaches it there.
-    networks: [signup, out]
+    # signup: the page reaches it here (internal: no internet). out, only with
+    # push notifications on: nothing else is on it, so nothing reaches it there.
+    networks: $broker_nets
 networks:
   hogman-front: { external: true }
   signup: { internal: true }
-  out: {}
+$out_net
 EOF
   (cd "$SIGNUP" && docker compose up -d --build --remove-orphans >&2) || die "the sign-up page did not start: cd $SIGNUP && docker compose logs"
   write_front
