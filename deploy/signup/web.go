@@ -28,6 +28,7 @@ type web struct {
 	brokerURL   string
 	token       string
 	domain      string
+	sitesDomain string // what pens' names end in: "hogman", or the pens zone (D-18)
 	client      *http.Client
 	checks      *limiter // name checks while typing
 	creates     *limiter // sign-up attempts, which also bounds guessing codes
@@ -40,6 +41,7 @@ type web struct {
 
 func runWeb() {
 	wb := newWeb(env("BROKER_URL", "http://broker:9090"), readToken(), env("PENS_DOMAIN", ""))
+	wb.sitesDomain = env("SITES_DOMAIN", "hogman")
 	addr := env("LISTEN", ":8080")
 	log.Printf("sign-up page on %s", addr)
 	srv := &http.Server{Addr: addr, Handler: wb.handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
@@ -51,6 +53,7 @@ func newWeb(brokerURL, token, domain string) *web {
 		brokerURL:   strings.TrimRight(brokerURL, "/"),
 		token:       token,
 		domain:      domain,
+		sitesDomain: "hogman",
 		client:      &http.Client{Timeout: 16 * time.Minute},
 		checks:      newLimiter(60, time.Minute),
 		creates:     newLimiter(5, time.Hour),
@@ -111,7 +114,7 @@ func (wb *web) status(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, code, out)
 		return
 	}
-	jsonOut(w, 200, map[string]any{"open": out["open"], "pens_domain": wb.domain})
+	jsonOut(w, 200, map[string]any{"open": out["open"], "pens_domain": wb.domain, "sites_domain": wb.sitesDomain})
 }
 
 func (wb *web) check(w http.ResponseWriter, r *http.Request) {

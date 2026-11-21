@@ -28,6 +28,7 @@ case "$1" in
     mkdir "$HOGMAN_HOME/pens/$2"
     echo "==> lots of progress" >&2
     echo "{\"pen\":\"$2\",\"zone\":\"$2.hogman\",\"host\":\"$2.pens.test\",\"owner\":\"$3\",\"join_link\":\"https://$2.pens.test/join#k=abc&fp=AA\",\"valid_until\":\"x\"}" ;;
+  name-free) [ -e "$HOGMAN_HOME/pens/$2" ] && exit 2; [ "$2" = burned ] && exit 2; exit 0 ;;
   *) exit 9 ;;
 esac
 `

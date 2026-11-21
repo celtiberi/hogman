@@ -1,0 +1,11 @@
+# Test only (deploy/test-host.sh): a public-certificate pen whose CA is Pebble,
+# Let's Encrypt's test CA. The registrar trusts the test CA's own TLS
+# certificate (HOGMAN_TEST_ACME_ROOT). Never used without that variable.
+services:
+  registrar:
+    environment:
+      ACME_CA_ROOT: /acme-ca-root.crt
+      ACME_PROPAGATION_DELAY: 100ms
+      ACME_PROPAGATION_TIMEOUT: 30s
+    volumes:
+      - ${HOGMAN_TEST_ACME_ROOT:?}:/acme-ca-root.crt:ro
