@@ -425,9 +425,6 @@ func NewHomeCertManager(cfg HomeConfig) (*HomeCertManager, error) {
 	if cfg.PrimaryCA == "" {
 		cfg.PrimaryCA = certmagic.LetsEncryptProductionCA
 	}
-	if cfg.Email == "" {
-		cfg.Email = "admin@" + strings.TrimPrefix(host, "*.")
-	}
 	if len(cfg.Resolvers) == 0 {
 		cfg.Resolvers = []string{"1.1.1.1:53", "8.8.8.8:53"}
 	}
@@ -557,6 +554,27 @@ func (m *HomeCertManager) newManagedConfig(caURL string, withEAB bool) (*certmag
 	return cfg, iss
 }
 
+// nonInteractiveACMEIssuer forces non-interactive PreCheck on synchronous
+// CertMagic calls so an empty ACME contact email never prompts stdin. The
+// long-lived cache configs keep the unwrapped *certmagic.ACMEIssuer so
+// background renewals preserve ARI "replaces" support.
+type nonInteractiveACMEIssuer struct {
+	*certmagic.ACMEIssuer
+}
+
+func (n nonInteractiveACMEIssuer) PreCheck(ctx context.Context, names []string, _ bool) error {
+	return n.ACMEIssuer.PreCheck(ctx, names, false)
+}
+
+func (m *HomeCertManager) newSyncConfig(cfg *certmagic.Config, iss *certmagic.ACMEIssuer) *certmagic.Config {
+	return certmagic.New(m.cache, certmagic.Config{
+		Storage: m.storage,
+		OnEvent: cfg.OnEvent,
+		Logger:  m.logger,
+		Issuers: []certmagic.Issuer{nonInteractiveACMEIssuer{iss}},
+	})
+}
+
 func (m *HomeCertManager) getConfigForCert(cert certmagic.Certificate) (*certmagic.Config, error) {
 	ctx := context.Background()
 	if m.fallbackCfg != nil && m.fallbackIss != nil {
@@ -635,7 +653,7 @@ func (m *HomeCertManager) EnsureOnce(ctx context.Context) error {
 		}
 	}
 
-	err = m.primaryCfg.ManageSync(ctx, []string{m.host})
+	err = m.newSyncConfig(m.primaryCfg, m.primaryIss).ManageSync(ctx, []string{m.host})
 	if err == nil {
 		_, syncErr := m.syncStoredCert(ctx, m.primaryCfg, m.primaryIss)
 		return syncErr
@@ -645,7 +663,7 @@ func (m *HomeCertManager) EnsureOnce(ctx context.Context) error {
 	}
 
 	log.Printf("acme: primary CA failed for %s (%v); failing over to fallback CA", m.host, err)
-	fbErr := m.fallbackCfg.ManageSync(ctx, []string{m.host})
+	fbErr := m.newSyncConfig(m.fallbackCfg, m.fallbackIss).ManageSync(ctx, []string{m.host})
 	if fbErr != nil {
 		return fmt.Errorf("primary failed (%w); fallback failed: %v", err, fbErr)
 	}
@@ -661,7 +679,7 @@ func (m *HomeCertManager) ForceRenew(ctx context.Context) error {
 
 	if m.fallbackCfg != nil && m.fallbackIss != nil {
 		if m.storageHasPair(ctx, m.fallbackIss.IssuerKey()) && !m.storageHasPair(ctx, m.primaryIss.IssuerKey()) {
-			if err := m.fallbackCfg.RenewCertSync(ctx, m.host, true); err != nil {
+			if err := m.newSyncConfig(m.fallbackCfg, m.fallbackIss).RenewCertSync(ctx, m.host, true); err != nil {
 				return err
 			}
 			_, syncErr := m.syncStoredCert(ctx, m.fallbackCfg, m.fallbackIss)
@@ -669,7 +687,7 @@ func (m *HomeCertManager) ForceRenew(ctx context.Context) error {
 		}
 	}
 
-	err := m.primaryCfg.RenewCertSync(ctx, m.host, true)
+	err := m.newSyncConfig(m.primaryCfg, m.primaryIss).RenewCertSync(ctx, m.host, true)
 	if err == nil {
 		_, syncErr := m.syncStoredCert(ctx, m.primaryCfg, m.primaryIss)
 		return syncErr
@@ -681,9 +699,9 @@ func (m *HomeCertManager) ForceRenew(ctx context.Context) error {
 	log.Printf("acme: primary forced renewal failed for %s (%v); failing over to fallback CA", m.host, err)
 	var fbErr error
 	if m.storageHasPair(ctx, m.fallbackIss.IssuerKey()) {
-		fbErr = m.fallbackCfg.RenewCertSync(ctx, m.host, true)
+		fbErr = m.newSyncConfig(m.fallbackCfg, m.fallbackIss).RenewCertSync(ctx, m.host, true)
 	} else {
-		fbErr = m.fallbackCfg.ManageSync(ctx, []string{m.host})
+		fbErr = m.newSyncConfig(m.fallbackCfg, m.fallbackIss).ManageSync(ctx, []string{m.host})
 	}
 	if fbErr != nil {
 		return fmt.Errorf("primary failed (%w); fallback failed: %v", err, fbErr)
@@ -727,7 +745,7 @@ func (m *HomeCertManager) Run(ctx context.Context) {
 				continue
 			}
 			log.Printf("acme: primary renewal failed for %s; failing over to fallback CA", m.host)
-			if err := m.fallbackCfg.ManageSync(ctx, []string{m.host}); err != nil {
+			if err := m.newSyncConfig(m.fallbackCfg, m.fallbackIss).ManageSync(ctx, []string{m.host}); err != nil {
 				log.Printf("acme: fallback renewal failed for %s: %v", m.host, err)
 			}
 			_, _ = m.syncStoredCert(ctx, m.fallbackCfg, m.fallbackIss)

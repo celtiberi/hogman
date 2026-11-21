@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -503,6 +504,29 @@ func newMockACMECA(t *testing.T, onOrder func(http.ResponseWriter, *http.Request
 	mux.HandleFunc("/acct", func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		nextNonce(w)
+		var jws struct {
+			Payload string `json:"payload"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&jws); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(jws.Payload)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var acctPayload struct {
+			Contact []string `json:"contact"`
+		}
+		if err := json.Unmarshal(raw, &acctPayload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if len(acctPayload.Contact) != 0 {
+			http.Error(w, fmt.Sprintf("expected empty contact, got %v", acctPayload.Contact), http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("Location", "https://"+r.Host+"/acct/1")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
@@ -575,6 +599,29 @@ func TestHomeCertManagerEnsureOnceFastFailover429(t *testing.T) {
 	fbMux.HandleFunc("/acct", func(w http.ResponseWriter, r *http.Request) {
 		fbAcctHits.Add(1)
 		nextNonce(w)
+		var jws struct {
+			Payload string `json:"payload"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&jws); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(jws.Payload)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var acctPayload struct {
+			Contact []string `json:"contact"`
+		}
+		if err := json.Unmarshal(raw, &acctPayload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if len(acctPayload.Contact) != 0 {
+			http.Error(w, fmt.Sprintf("expected empty contact, got %v", acctPayload.Contact), http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("Location", "https://"+r.Host+"/acct/1")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
@@ -736,8 +783,8 @@ func TestCertManagerHostAndFileBase(t *testing.T) {
 	if m.host != "*.gate.example.test" {
 		t.Fatalf("host = %q", m.host)
 	}
-	if m.cfg.Email != "admin@gate.example.test" {
-		t.Fatalf("email = %q", m.cfg.Email)
+	if m.cfg.Email != "" {
+		t.Fatalf("email = %q, want empty", m.cfg.Email)
 	}
 
 	certPEM, keyPEM := selfSignedPair(t, "*.gate.example.test")
@@ -867,5 +914,220 @@ func TestCertMode(t *testing.T) {
 		CertMode: "hybrid",
 	}, st, NewHeadscale(hs.srv.URL, "test-key")); err == nil {
 		t.Fatal("expected error for invalid cert_mode")
+	}
+}
+
+func TestRegistrarACMEEmptyEmailNoPrompt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// Keep a live open pipe on stdin to catch any unexpected interactive prompt.
+	rPipe, wPipe, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = wPipe.Close()
+		_ = rPipe.Close()
+	}()
+
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRegistrarACMENoPromptSubprocess$")
+	cmd.Stdin = rPipe
+	cmd.Env = append(os.Environ(), "HOGMAN_REGISTRAR_NO_PROMPT_HELPER=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("empty-email ACME subprocess failed: %v\n%s", err, out)
+	}
+	text := string(out)
+	if strings.Contains(text, "Email address") || strings.Contains(text, "Your sites will be served") {
+		t.Fatalf("CertMagic prompted interactively on empty email:\n%s", text)
+	}
+}
+
+func TestRegistrarACMENoPromptSubprocess(t *testing.T) {
+	if os.Getenv("HOGMAN_REGISTRAR_NO_PROMPT_HELPER") != "1" {
+		t.Skip("helper subprocess for TestRegistrarACMEEmptyEmailNoPrompt")
+	}
+
+	const host = "*.gate.example.test"
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: "registrar-no-email-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+	}
+	var issuedMu sync.Mutex
+	var issuedPEM []byte
+	var acctHits atomic.Int32
+	var nonceSeq atomic.Int64
+	nextNonce := func(w http.ResponseWriter) {
+		w.Header().Set("Replay-Nonce", fmt.Sprintf("np-nonce-%d", nonceSeq.Add(1)))
+		w.Header().Set("Cache-Control", "no-store")
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/dir", func(w http.ResponseWriter, r *http.Request) {
+		base := "https://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"newNonce":   base + "/nonce",
+			"newAccount": base + "/acct",
+			"newOrder":   base + "/order",
+		})
+	})
+	mux.HandleFunc("/nonce", func(w http.ResponseWriter, r *http.Request) {
+		nextNonce(w)
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/acct", func(w http.ResponseWriter, r *http.Request) {
+		acctHits.Add(1)
+		nextNonce(w)
+		var jws struct {
+			Payload string `json:"payload"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&jws); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(jws.Payload)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var acctPayload struct {
+			Contact []string `json:"contact"`
+		}
+		if err := json.Unmarshal(raw, &acctPayload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if len(acctPayload.Contact) != 0 {
+			t.Errorf("expected empty contact list, got %v", acctPayload.Contact)
+			http.Error(w, "unexpected ACME contact", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Location", "https://"+r.Host+"/acct/1")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "valid"})
+	})
+	mux.HandleFunc("/order", func(w http.ResponseWriter, r *http.Request) {
+		nextNonce(w)
+		w.Header().Set("Location", "https://"+r.Host+"/order/1")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":      "ready",
+			"identifiers": []map[string]string{{"type": "dns", "value": host}},
+			"finalize":    "https://" + r.Host + "/finalize",
+		})
+	})
+	mux.HandleFunc("/finalize", func(w http.ResponseWriter, r *http.Request) {
+		var jws struct {
+			Payload string `json:"payload"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&jws)
+		raw, _ := base64.RawURLEncoding.DecodeString(jws.Payload)
+		var fin struct {
+			CSR string `json:"csr"`
+		}
+		_ = json.Unmarshal(raw, &fin)
+		csrDER, _ := base64.RawURLEncoding.DecodeString(fin.CSR)
+		csr, err := x509.ParseCertificateRequest(csrDER)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		leafTmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(101),
+			Subject:      csr.Subject,
+			DNSNames:     csr.DNSNames,
+			NotBefore:    time.Now().Add(-time.Minute),
+			NotAfter:     time.Now().Add(48 * time.Hour),
+			KeyUsage:     x509.KeyUsageDigitalSignature,
+			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		}
+		leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caTmpl, csr.PublicKey, caKey)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		issuedMu.Lock()
+		issuedPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
+		issuedMu.Unlock()
+		nextNonce(w)
+		w.Header().Set("Location", "https://"+r.Host+"/order/1")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":      "valid",
+			"identifiers": []map[string]string{{"type": "dns", "value": host}},
+			"certificate": "https://" + r.Host + "/cert/1",
+		})
+	})
+	mux.HandleFunc("/cert/1", func(w http.ResponseWriter, r *http.Request) {
+		nextNonce(w)
+		w.Header().Set("Content-Type", "application/pem-certificate-chain")
+		issuedMu.Lock()
+		defer issuedMu.Unlock()
+		_, _ = w.Write(issuedPEM)
+	})
+	srv := httptest.NewTLSServer(mux)
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	caFile := filepath.Join(tmp, "ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tlsDir := filepath.Join(tmp, "tls")
+	storeDir := filepath.Join(tmp, "acme")
+
+	cfg := HomeConfig{
+		Host:       host,
+		FileBase:   "gate",
+		HomeTLSDir: tlsDir,
+		StorageDir: storeDir,
+		PrimaryCA:  srv.URL + "/dir",
+		CARootFile: caFile,
+		Backend:    noopACMEBackend{},
+	}
+	mgr1, err := NewHomeCertManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mgr1.cfg.Email != "" {
+		mgr1.Close()
+		t.Fatalf("expected empty email default, got %q", mgr1.cfg.Email)
+	}
+	if err := mgr1.EnsureOnce(context.Background()); err != nil {
+		mgr1.Close()
+		t.Fatalf("EnsureOnce with empty email failed: %v", err)
+	}
+	mgr1.Close()
+
+	if err := VerifyTLSFiles(tlsDir, "gate"); err != nil {
+		t.Fatalf("VerifyTLSFiles: %v", err)
+	}
+	if acctHits.Load() != 1 {
+		t.Fatalf("expected 1 ACME /acct registration, got %d", acctHits.Load())
+	}
+
+	mgr2, err := NewHomeCertManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr2.Close()
+	if err := mgr2.EnsureOnce(context.Background()); err != nil {
+		t.Fatalf("restarted EnsureOnce failed: %v", err)
+	}
+	if acctHits.Load() != 1 {
+		t.Fatalf("restart hit /acct unexpectedly: %d", acctHits.Load())
 	}
 }
