@@ -156,8 +156,11 @@ own_runtime_files() {
   [ "$(id -u)" = 0 ] || return 0
   [ -n "${HOGMAN_UID:-}" ] && [ "$HOGMAN_UID" != 0 ] || return 0
   local d
-  # Certificates are public; make sure a non-root reader can open them.
-  chmod 644 "$DATA"/pki/public/*.crt 2>/dev/null || true
+  # What it only reads holds nothing secret (public certificates, the CA's
+  # settings): make it readable whatever root's umask was when it was written.
+  # The secrets below are handed over instead, and stay private.
+  chmod 755 "$DATA/pki/public" "$DATA/step/config" 2>/dev/null || true
+  chmod 644 "$DATA"/pki/public/*.crt "$DATA/step/config/ca.json" 2>/dev/null || true
   for d in "$DATA/registrar" "$DATA/secrets/registrar" "$DATA/step/secrets" "$DATA/step/db"; do
     [ -e "$d" ] && chown -R "$HOGMAN_UID:$HOGMAN_GID" "$d"
   done
