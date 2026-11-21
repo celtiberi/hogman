@@ -3,7 +3,7 @@
 version: 2
 updates:
   - package-ecosystem: gomod
-    directories: ["/core/join", "/core/registrar", "/deploy/signup"]
+    directories: ["/core/join", "/core/registrar", "/deploy/signup", "/deploy/challenge-dns"]
     schedule: { interval: weekly }
     groups:
       go: { patterns: ["*"] }
