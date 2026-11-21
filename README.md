@@ -202,7 +202,8 @@ A stranger typing the same address: NODATA from ns1. Zero A/AAAA records exist p
 1. **You get a link.** It carries your single-use invitation to your pen's gate (`smith.gate.hogman.network`).
 2. **You run one command.** The link's page gives it to you. It checks the network over
    normal HTTPS, asks what you'd like to be called, and starts a small local connection as you —
-   no admin password, no custom root certificate.
+   no custom root certificate. On a Mac it may ask for your password once, only to point your
+   browsers at the pen.
 3. **You're in.** Open your ordinary browser and go.
 
 ```text

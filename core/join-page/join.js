@@ -41,6 +41,8 @@
   const verb = forShare ? 'share blog 8080 ' : '';
   const unixCmd = `curl -fsSLo hogman-join "https://${host}/join/dl/hogman-join-$(uname -s)-$(uname -m)" && chmod +x hogman-join && ./hogman-join ${verb}${quoted}`;
   document.getElementById('cmd').textContent = unixCmd;
+  // Sharing doesn't touch the browser proxy, so no password note there.
+  document.getElementById('pw-note').hidden = forShare;
   if (forShare) {
     document.getElementById('lead').textContent =
       'Copy this into a terminal on the computer hosting your app or folder. It downloads hogman-join (no other software needed):';
