@@ -260,7 +260,7 @@
       <h3>No crawler gets in</h3>
       <p>AI companies train their models on whatever their crawlers can reach on the public web. A
         pen's sites have no public address, so there's nothing for a crawler to find: your photos,
-        posts and files never end up in someone's training data.</p>
+        posts and files aren't scraped into someone's training data.</p>
     </article>
     <article class="feature plain">
       <h3>Nothing to sell</h3>
@@ -271,19 +271,20 @@
     <article class="feature plain">
       <h3>Your stuff stays on your computers</h3>
       <p>When you share something, it's served straight from your own computer, encrypted all the
-        way to the person opening it. If we host your pen, our server only lets devices find each
-        other: it never stores your files, and it can't read what passes between you.</p>
+        way to the person opening it. If we host your pen, our server only coordinates connections,
+        and relays encrypted traffic when two devices can't reach each other directly. It never
+        stores your files, and it can't read what passes between your devices.</p>
     </article>
   </div>
   <h3 style="margin-top:2.2rem">What a pen does and doesn't keep out</h3>
   <ul class="status">
     <li class="yes"><strong>Crawlers, scrapers and search engines</strong>: they can't reach anything in the pen.</li>
     <li class="yes"><strong>Ad networks and trackers</strong>: Hogman adds none, anywhere.</li>
-    <li class="yes"><strong>Whoever runs the server</strong>, us included: can't read what's said or shared.</li>
+    <li class="yes"><strong>Whoever runs the server</strong>, us included: can't read what's said or shared. (Whoever runs the gate could still let a device in; <a href="#hosted">more on that</a>.)</li>
     <li class="notyet"><strong>The people you invite.</strong> Anyone in your pen can screenshot something, or paste it into a chatbot. A pen keeps out strangers, not your own members.</li>
     <li class="notyet"><strong>The apps you run.</strong> A photo gallery or chat app in your pen is its own software. Some phone home; pick ones that don't.</li>
     <li class="notyet"><strong>The names.</strong> Once pens move to standard web certificates (coming soon), pen and site names, such as <em>photos.smithfamily</em>, appear in public certificate logs. What's on the sites doesn't.</li>
-    <li class="notyet"><strong>Who's in it.</strong> The keeper, and we if we host your pen, can see who's in the pen and their devices. <a href="#hosted">More on that</a>.</li>
+    <li class="notyet"><strong>Who's in it.</strong> The keeper, and we if we host your pen, can see who's in the pen, their devices, and which pen names get looked up. <a href="#hosted">More on that</a>.</li>
   </ul>
 </section>
 
