@@ -704,7 +704,7 @@ provision_rollback() {
 cmd_signup_setup() {
   load_host
   # With no arguments: refresh it with the saved settings (install.sh does this).
-  local domain="${1:-${PENS_DOMAIN:-}}" host="${2:-${SIGNUP_HOST:-}}" max="${3:-${MAX_PENS:-8}}"
+  local domain="${1:-${GATE_DOMAIN:-${PENS_DOMAIN:-}}}" host="${2:-${SIGNUP_HOST:-}}" max="${3:-${MAX_PENS:-8}}"
   valid_host "$domain" && valid_host "$host" || die "usage: hogman-host signup-setup <front-door-domain> <signup-host> [max-pens]"
   [ -n "${PENS_ZONE:-}" ] && [ -n "${GATE_DOMAIN:-}" ] \
     || die "public pens aren't set up here yet: hogman-host gate-cert-setup, then hogman-host pens-zone"

@@ -299,6 +299,14 @@ grep -o 'age1[0-9a-z]*' <<<"$agekey" | head -1 > "$HOGMAN_HOME/backup-recipient.
 rsync -a --exclude hogman-signup.bin "$REPO/deploy/signup/" "$HOGMAN_HOME/signup-src/"
 check "signup-setup refuses a front-door domain other than the gate" fails "$HOST" signup-setup pens.example get.example 3
 check "signup-setup starts the page and its broker" "$HOST" signup-setup gate.hogman.test get.example 3
+no_arg_signup_refresh() {
+  local tmp; tmp="$(mktemp)"
+  grep -v '^PENS_DOMAIN=' "$HOGMAN_HOME/host.env" > "$tmp"
+  printf "PENS_DOMAIN='old.pens.example'\n" >> "$tmp"
+  install -m 0600 "$tmp" "$HOGMAN_HOME/host.env"; rm -f "$tmp"
+  "$HOST" signup-setup && grep -qx "PENS_DOMAIN='gate.hogman.test'" "$HOGMAN_HOME/host.env"
+}
+check "no-arg signup-setup refreshes to GATE_DOMAIN despite stale PENS_DOMAIN" no_arg_signup_refresh
 code="$("$HOST" signup-code for the test | awk '/^code:/ {print $2}')"
 check "signup-code makes a code" grep -q "^$code " "$HOGMAN_HOME/signup/codes"
 
