@@ -28,7 +28,10 @@ env:
 
 jobs:
   preview:
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    # Fork PRs get no secrets, so they'd only fail: skip them.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
     name: dns preview
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -46,7 +49,10 @@ jobs:
         working-directory: infra/dns
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DNS_READ_TOKEN }}
+        # The repo and its logs are public. Fine for DNS-only records, which are
+        # public anyway; if any record is proxied, its origin address shows here.
         run: |
+          set -euo pipefail
           dnscontrol get-zones --format=js cloudflare - hogman.network | tee zone.js
           { echo '### Live hogman.network zone'; echo '```js'; cat zone.js; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Preview
@@ -55,6 +61,7 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DNS_READ_TOKEN }}
         run: |
+          set -euo pipefail
           dnscontrol check
           dnscontrol preview 2>&1 | tee preview.txt
           { echo '### DNS changes this PR would make'; echo '```'; cat preview.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
@@ -81,6 +88,7 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DNS_EDIT_TOKEN }}
         run: |
+          set -euo pipefail
           dnscontrol check
           dnscontrol push 2>&1 | tee push.txt
           { echo '### DNS changes applied'; echo '```'; cat push.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

@@ -10,7 +10,7 @@ token.
 - **A pull request** that touches it runs **dns preview**, which shows exactly what would
   change. It uses a read-only token from the `infra-preview` environment.
 - **Merging to main** runs **dns apply** from the locked `infra` environment. It waits for
-  @patrick's approval, runs only from `main`, and uses the edit token. Apply stays off until
+  an environment reviewer's approval, runs only from `main`, and uses the edit token. Apply stays off until
   the repository variable `DNS_APPLY_ENABLED` is `true`.
 
 ### Keys
