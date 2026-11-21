@@ -51,12 +51,21 @@ type Cred struct {
 	Created time.Time `json:"created"`
 }
 
-// state is what survives a restart: credentials, and when each pen first
-// wrote each name (for the cap). Challenge values are never written to disk.
+// state is what survives a restart, and deliberately little of it:
+//   - credentials, as token hashes only;
+//   - for the weekly cap, which names each pen wrote in the last 7 days
+//     (pruned as the window moves);
+//   - recent fallback-key mints (pruned after a day);
+//   - the names of pens that ever had a credential, so a deleted pen's name
+//     is never given out again (D-21). Just the name: it's public in the
+//     certificate logs anyway.
+//
+// Challenge values are never written to disk.
 type state struct {
 	Creds []Cred                          `json:"creds"`
 	Seen  map[string]map[string]time.Time `json:"seen"` // cred ID -> fqdn -> first write in window
 	EAB   map[string][]time.Time          `json:"eab"`  // cred ID -> recent EAB mints
+	Used  []string                        `json:"used"` // pen names ever credentialed, kept after removal
 }
 
 type txtValue struct {
@@ -157,17 +166,42 @@ func (s *Store) AddCred(kind, penID string) (Cred, string, error) {
 	defer s.mu.Unlock()
 	for _, c := range s.st.Creds {
 		if kind == "pen" && c.Kind == "pen" && c.PenID == penID {
-			return Cred{}, "", fmt.Errorf("pen %s already has a credential (%s); remove it first", penID, c.ID)
+			return Cred{}, "", fmt.Errorf("pen %s already has a credential (%s)", penID, c.ID)
 		}
+	}
+	if kind == "pen" && s.usedLocked(penID) {
+		return Cred{}, "", fmt.Errorf("the pen name %s was used before and is never given out again", penID)
 	}
 	tok := "hcd_" + newSecret(32)
 	c := Cred{ID: newSecret(6), Kind: kind, PenID: penID, Hash: hashToken(tok), Created: s.now().UTC()}
 	s.st.Creds = append(s.st.Creds, c)
+	if kind == "pen" {
+		s.st.Used = append(s.st.Used, penID) // marked the moment it's taken, not only on removal
+	}
 	if err := s.saveLocked(); err != nil {
 		s.st.Creds = s.st.Creds[:len(s.st.Creds)-1]
+		if kind == "pen" {
+			s.st.Used = s.st.Used[:len(s.st.Used)-1]
+		}
 		return Cred{}, "", err
 	}
 	return c, tok, nil
+}
+
+func (s *Store) usedLocked(name string) bool {
+	for _, n := range s.st.Used {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// NameUsed reports whether a pen name was ever given out (sign-up checks this).
+func (s *Store) NameUsed(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.usedLocked(normalize(name))
 }
 
 func (s *Store) RemoveCred(id string) error {

@@ -365,3 +365,32 @@ func TestWindowLimiter(t *testing.T) {
 		t.Fatal("per-hour limit")
 	}
 }
+
+// D-21: a pen name is used once, ever. Removing a pen's credential forgets
+// everything about it except that its name was used.
+func TestPenNamesAreNeverReused(t *testing.T) {
+	s, _ := newTestStore(t)
+	c, _ := mustCred(t, s, "pen", penA)
+	_ = s.PutTXT(c, ch("photos", penA), val1)
+	if !s.NameUsed(penA) || s.NameUsed(penB) {
+		t.Fatal("NameUsed wrong before removal")
+	}
+	if err := s.RemoveCred(c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !s.NameUsed(strings.ToUpper(penA)) {
+		t.Fatal("removing the pen freed its name")
+	}
+	if _, _, err := s.AddCred("pen", penA); err == nil {
+		t.Fatal("a removed pen's name was given out again")
+	}
+	// Nothing else about the removed pen is kept: no credential, no cap
+	// history, no fallback-key history.
+	s2, err := OpenStore(s.path, testZones)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s2.st.Creds) != 0 || len(s2.st.Seen) != 0 || len(s2.st.EAB) != 0 || !s2.NameUsed(penA) {
+		t.Fatalf("after removal and restart, kept: %+v", s2.st)
+	}
+}

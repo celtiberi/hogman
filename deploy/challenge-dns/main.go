@@ -40,6 +40,7 @@ const usage = `challenge-dns: DNS-01 challenge server for Hogman pens
   challenge-dns cred add host            the front door's credential (gate wildcard)
   challenge-dns cred rm <id>
   challenge-dns cred list
+  challenge-dns name used <penname>      prints "used" (exit 0) if the name was ever given out
 
 Settings (environment):
   CDNS_LISTEN        public address for DNS, e.g. 159.65.78.95:53 (required to serve)
@@ -67,6 +68,8 @@ func main() {
 		err = serve()
 	case "cred":
 		err = credCmd(args[1:])
+	case "name":
+		err = nameCmd(args[1:])
 	default:
 		fmt.Print(usage)
 		os.Exit(2)
@@ -241,5 +244,28 @@ func credCmd(args []string) error {
 	default:
 		return errors.New("usage: cred add pen <penname> | cred add host | cred rm <id> | cred list")
 	}
+	return nil
+}
+
+// nameCmd: "name used <penname>" prints used or free; exit 0 if used, 1 if free.
+func nameCmd(args []string) error {
+	if len(args) != 2 || args[0] != "used" {
+		return errors.New("usage: name used <penname>")
+	}
+	b, code, err := adminDo(env("CDNS_ADMIN_SOCK", "/run/challenge-dns/admin.sock"), "GET", "/admin/names/"+args[1], nil)
+	if err != nil {
+		return err
+	}
+	if code != http.StatusOK {
+		return fmt.Errorf("HTTP %d", code)
+	}
+	var out struct{ Used bool }
+	_ = json.Unmarshal(b, &out)
+	if out.Used {
+		fmt.Println("used")
+		return nil
+	}
+	fmt.Println("free")
+	os.Exit(1)
 	return nil
 }

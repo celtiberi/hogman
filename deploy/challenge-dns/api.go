@@ -172,6 +172,10 @@ func AdminHandler(s *Store) http.Handler {
 		}
 		writeJSON(w, http.StatusCreated, map[string]string{"id": c.ID, "token": tok})
 	})
+	// Sign-up asks before raising a pen: a name used once is never used again.
+	mux.HandleFunc("GET /admin/names/{name}", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]bool{"used": s.NameUsed(r.PathValue("name"))})
+	})
 	mux.HandleFunc("DELETE /admin/creds/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.RemoveCred(r.PathValue("id")); err != nil {
 			fail(w, http.StatusNotFound, err.Error())

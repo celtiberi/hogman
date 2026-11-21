@@ -16,6 +16,11 @@ It never serves an address. Names under its zones that have nothing are answered
 10 new names a week. The host's front door has one credential, for its `*.gate` wildcard
 only. Tokens are stored as SHA-256 hashes.
 
+**What it keeps, and nothing more:** token hashes; for the weekly cap, which names each pen wrote
+in the last 7 days; recent fallback-key mints (a day); and the names of pens ever given a
+credential, so a deleted pen's name is never handed out again (`challenge-dns name used <name>`).
+That last list holds only names, which are public in the certificate logs anyway.
+
 **The fallback CA.** With `CDNS_GCP_KEY` set to a Google service-account key that holds
 only `roles/publicca.externalAccountKeyCreator`, `POST /v1/eab` mints one single-use
 Google account key on request, at most 5 a day per credential, within Google's quota.
@@ -29,6 +34,7 @@ challenge-dns cred add pen <penname>     # prints the token once
 challenge-dns cred add host
 challenge-dns cred list
 challenge-dns cred rm <id>
+challenge-dns name used <penname>        # sign-up asks before raising a pen
 ```
 
 | API (Unix socket `/run/hogman-acme/api.sock`, bearer token) | |
