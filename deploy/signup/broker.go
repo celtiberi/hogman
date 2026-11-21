@@ -140,9 +140,18 @@ func (b *broker) capacity(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, c)
 }
 
-func (b *broker) taken(pen string) bool {
-	_, err := os.Stat(filepath.Join(b.home, "pens", pen))
-	return err == nil
+// taken: a pen here has the name, or (public pens) it was ever used (D-21).
+// hogman-host name-free answers 0 free, 2 taken; anything else counts as
+// taken, so a name is never offered when we can't tell.
+func (b *broker) taken(ctx context.Context, pen string) bool {
+	if _, err := os.Stat(filepath.Join(b.home, "pens", pen)); err == nil {
+		return true
+	}
+	_, code, stderr := b.run(ctx, "name-free", pen)
+	if code != 0 && code != 2 {
+		log.Printf("name-free %s: exit %d: %s", pen, code, lastLine(stderr))
+	}
+	return code != 0
 }
 
 func (b *broker) check(w http.ResponseWriter, r *http.Request) {
@@ -151,7 +160,7 @@ func (b *broker) check(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 200, map[string]any{"free": false, "reason": why})
 		return
 	}
-	if b.taken(pen) {
+	if b.taken(r.Context(), pen) {
 		jsonOut(w, 200, map[string]any{"free": false, "reason": "that name is taken"})
 		return
 	}
@@ -208,7 +217,7 @@ func (b *broker) validate(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 403, map[string]string{"error": "that sign-up code isn't right, or it was already used"})
 		return
 	}
-	if b.taken(in.Pen) {
+	if b.taken(r.Context(), in.Pen) {
 		jsonOut(w, 409, map[string]string{"error": "that name is taken"})
 		return
 	}
@@ -243,7 +252,7 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 403, map[string]string{"error": "that sign-up code isn't right, or it was already used"})
 		return
 	}
-	if b.taken(in.Pen) {
+	if b.taken(r.Context(), in.Pen) {
 		jsonOut(w, 409, map[string]string{"error": "that name is taken"})
 		return
 	}
@@ -279,7 +288,7 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 	}
 	b.ledger(fmt.Sprintf("%s raised %s for %s with %s (%s) in %s",
 		time.Now().UTC().Format(time.RFC3339), in.Pen, in.Owner, in.Code, note, time.Since(start).Round(time.Second)))
-	b.notifyKind("raised", fmt.Sprintf("New pen raised: %s.hogman", in.Pen))
+	b.notifyKind("raised", fmt.Sprintf("New pen raised: %s", res["zone"]))
 	jsonOut(w, 201, res)
 }
 

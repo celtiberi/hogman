@@ -336,6 +336,8 @@ check "the sign-up page sets Origin-Agent-Cluster" grep -iq '^origin-agent-clust
 check "it says sign-ups are open" sh -c "docker exec client-signup curl -sf https://get.example/api/status | jq -e '.open'"
 check "it shows names under the pens zone" sh -c "docker exec client-signup curl -sf https://get.example/api/status | jq -e '.sites_domain == \"pens.hogman.test\"'"
 check "a reserved name is refused" sh -c "docker exec client-signup curl -sf 'https://get.example/api/check?pen=www' | jq -e '.free == false'"
+check "a name used before (alpha) shows as taken (D-21)" sh -c "docker exec client-signup curl -sf 'https://get.example/api/check?pen=alpha' | jq -e '.free == false'"
+check "a never-used name shows as free" sh -c "docker exec client-signup curl -sf 'https://get.example/api/check?pen=freshname' | jq -e '.free == true'"
 wrong_code() { [ "$(create_pen '{"code":"PIG-AAAA-AAAA","pen":"smithy","handle":"keeper"}' | jq -r .status)" = 403 ]; }
 check "a wrong code is refused" wrong_code
 front_started="$(docker inspect -f '{{.State.StartedAt}}' hogman-front-front-1)"
