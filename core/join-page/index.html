@@ -21,6 +21,14 @@
     <pre id="cmd"></pre>
     <p><button id="copy" type="button">Copy</button> <span class="muted" id="copied"></span></p>
     <p class="warn">This command embeds a one-time key — treat it like a password and don't share it.</p>
+    <p class="note"><b>On a Mac, two things may pop up. Both are expected.</b></p>
+    <ul class="note">
+      <li><b>“Allow hogman-join to find devices on local networks?”</b> Either answer works.
+        <b>Allow</b> lets your devices in the same home or office talk to each other directly, which is faster.
+        <b>Don't Allow</b> sends that traffic the long way, over the internet. Nothing on your network is shared with the pen either way.</li>
+      <li id="pw-note"><b>Your Mac's password</b>, once, so your browsers can find the pen's sites. It changes only that proxy
+        setting. If you skip it, the tool prints the one setting to change by hand.</li>
+    </ul>
   </div>
   <div id="win-panel" hidden>
     <p class="warn">Windows support is coming soon (not available yet). For now, open this link on a macOS or Linux computer.</p>
@@ -28,7 +36,7 @@
 
   <p class="muted" id="join-details">The <code>hogman-join</code> tool verifies <span id="redeem"></span>
   the pen over your computer's built-in trusted certificates and connects you.
-  No certificate authority is added and no password is asked.</p>
+  No certificate authority is added to your computer.</p>
   <p class="muted" id="share-details" hidden>The <code>hogman-join</code> tool verifies the network
   over your computer's built-in trusted certificates and publishes only that port or folder on
   <b class="zone"></b> over HTTPS. No system certificate is installed, no password is asked,
