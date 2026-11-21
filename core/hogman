@@ -344,6 +344,9 @@ cmd_up() {
   # Pens raised as root before audit H3 ran their registrar and step-ca as
   # root too. Move them to the unprivileged user on the next start.
   if [ "${HOGMAN_UID:-}" = 0 ] && [ "$(id -u)" = 0 ]; then
+    # Stop them first: the old step-ca, still running as root, would otherwise
+    # write a new database file after the handover that the new one can't open.
+    dc stop step-ca registrar >/dev/null 2>&1 || true
     local ids; ids="$(run_ids)"
     HOGMAN_UID="${ids% *}"; HOGMAN_GID="${ids#* }"
     set_state HOGMAN_UID "$HOGMAN_UID"
