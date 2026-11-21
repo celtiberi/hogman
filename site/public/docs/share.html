@@ -83,9 +83,11 @@
   it's back at the same address.</p>
 <p>To keep it running after you close the window, add <code>--background</code>:</p>
 <pre class="term"><span class="p">$</span> ./hogman-join share blog 3000 --background</pre>
-<p>On a Mac or Linux it keeps running after you close the terminal, until the computer restarts
-  (on some Linux systems, until you log out). It doesn't start by itself after a restart yet;
-  run the command again.</p>
+<p>On a Mac or Linux (with systemd user services) it registers a login service for you so it
+  keeps running in the background and starts by itself after a restart. On a Linux server where
+  no user is logged in at boot, run <code>sudo loginctl enable-linger $USER</code> once so
+  systemd keeps user services running after you log out. Add <code>--no-service</code> if you
+  only want a temporary background process until restart.</p>
 
 <h2 class="docs-h2" id="manage">Listing and taking down</h2>
 <pre class="term"><span class="p">$</span> ./hogman-join share list
@@ -120,7 +122,7 @@ https://blog.smith.hogman                http://127.0.0.1:3000  (running in the 
 
 <h2 class="docs-h2" id="limits">Limits</h2>
 <ul>
-  <li>Shares don't come back by themselves after a restart yet.</li>
+  <li>On Windows, shares still need to be started again after a restart (no login service yet).</li>
   <li>A computer that joined as a server needs a server link to share.</li>
   <li>Windows is untested.</li>
 </ul>
