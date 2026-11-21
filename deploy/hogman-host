@@ -1118,6 +1118,14 @@ cmd_gate_cert_setup() {
   fi
   set_host_var GATE_DOMAIN "$domain"
   GATE_DOMAIN="$domain"
+  # systemd needs a real account for User=: a bare uid with no passwd entry
+  # fails with 217/USER. Same uid and group as the pens' registrars and the
+  # front door's Caddy (H3), so they can read the files it writes.
+  getent group "$PEN_GID" >/dev/null || groupadd --system --gid "$PEN_GID" hogman-pen
+  getent passwd "$PEN_GID" >/dev/null || useradd --system --uid "$PEN_GID" --gid "$PEN_GID" \
+    --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hogman-pen
+  local penuser; penuser="$(getent passwd "$PEN_GID" | cut -d: -f1)"
+  local pengroup; pengroup="$(getent group "$PEN_GID" | cut -d: -f1)"
   install -d -m 0700 -o "$PEN_GID" -g "$PEN_GID" /var/lib/hogman-gate "$GATE_TLS" /var/lib/hogman-gate/acme
   # Mount the wildcard's folder into the front door now (this recreates it
   # once), so the first certificate only needs a reload, not a restart.
@@ -1140,8 +1148,8 @@ Environment=CHALLENGE_DNS_TOKEN_FILE=%d/gate-token
 Environment=ACME_CA_URL=${GATE_ACME_CA_URL:-https://acme-v02.api.letsencrypt.org/directory}
 LoadCredential=gate-token:$GATE_TOKEN
 # The front door's Caddy runs as $PEN_GID too, so it can read the key.
-User=$PEN_GID
-Group=$PEN_GID
+User=$penuser
+Group=$pengroup
 StateDirectory=hogman-gate hogman-gate/tls hogman-gate/acme
 StateDirectoryMode=0700
 ReadWritePaths=/run/hogman-acme
