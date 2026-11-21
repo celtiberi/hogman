@@ -368,10 +368,13 @@ cmd_add() {
   load_host
   local n="${1:-}" host="${2:-}" zone=""
   [ -n "$n" ] && [ -n "$host" ] || die "usage: hogman-host add <network> <public-host> [--public <zone>]"
-  if [ "${3:-}" = --public ]; then
-    zone="${4:-}"
-    valid_host "$zone" && [[ "$zone" == "$n".* ]] || die "--public needs the pen's zone, $n.<domain> (e.g. $n.pens.hogman.network)"
-  fi
+  case "${3:-}" in
+    "") [ $# -le 2 ] || die "usage: hogman-host add <network> <public-host> [--public <zone>]" ;;
+    --public)
+      zone="${4:-}"; [ $# -eq 4 ] || die "usage: hogman-host add <network> <public-host> --public <zone>"
+      valid_host "$zone" && [[ "$zone" == "$n".* ]] || die "--public needs the pen's zone, $n.<domain> (e.g. $n.pens.hogman.network)" ;;
+    *) die "unknown option ${3}: usage: hogman-host add <network> <public-host> [--public <zone>]" ;;
+  esac
   valid_name "$n" || die "network names are lowercase letters, digits and dashes (max 63 chars)"
   valid_host "$host" || die "invalid public hostname: $host"
   [ -e "$PENS/$n" ] && die "pen $n already exists"

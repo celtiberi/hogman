@@ -95,6 +95,7 @@ services:
     environment:
       ZONE: "${ACME_ZONE:?}"
       PUBLIC_HOST: "${ACME_PUBLIC_HOST:-gate.hogman.test}"
+      CERT_MODE: "public"
       CORE_MESH_IP: "100.64.0.1"
       HEADSCALE_URL: "http://fake-challengedns:8085"
       HEADSCALE_API_KEY_FILE: "/secrets/headscale_api_key"

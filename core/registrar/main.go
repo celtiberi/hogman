@@ -74,9 +74,10 @@ func parseCSV(raw string) []string {
 
 func setup() *Service {
 	coreIP := mustEnv("CORE_MESH_IP")
+	certMode := strings.ToLower(strings.TrimSpace(env("CERT_MODE", "private")))
 	homeTLSDir := strings.TrimSpace(os.Getenv("HOME_TLS_DIR"))
 	rootCA := strings.TrimSpace(os.Getenv("ROOT_CA"))
-	if rootCA == "" {
+	if rootCA == "" && certMode != "public" {
 		if homeTLSDir == "" {
 			rootCA = "/pki/root_ca.crt"
 		} else if _, err := os.Stat("/pki/root_ca.crt"); err == nil {
@@ -101,6 +102,7 @@ func setup() *Service {
 		PublicHost:       mustEnv("PUBLIC_HOST"),
 		CoreIP:           coreIP,
 		CAIP:             env("CA_MESH_IP", coreIP),
+		CertMode:         certMode,
 		RootCAFile:       rootCA,
 		NameHold:         durEnv("NAME_HOLD", 90*24*time.Hour),
 		InviteTTL:        durEnv("INVITE_TTL", 7*24*time.Hour),

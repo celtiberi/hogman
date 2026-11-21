@@ -9,7 +9,8 @@ cfg="$(docker compose -p check -f compose.yaml -f compose.public.yaml config --f
 fail() { echo "FAIL: $*" >&2; exit 1; }
 svcs="$(jq -r '.services | keys[]' <<<"$cfg")"
 grep -qx step-ca <<<"$svcs" && fail "step-ca would start"
-jq -e '.services.portal.depends_on | keys == ["registrar"]' <<<"$cfg" >/dev/null || fail "portal should depend only on the registrar"
+# Compose adds core-mesh itself (the portal shares its network); step-ca must be gone.
+jq -e '.services.portal.depends_on | keys - ["core-mesh"] == ["registrar"]' <<<"$cfg" >/dev/null || fail "portal should depend only on the registrar (and core-mesh)"
 jq -e '.services.portal.depends_on.registrar.condition == "service_healthy"' <<<"$cfg" >/dev/null || fail "portal must wait for a healthy registrar"
 jq -e '.services.registrar.environment.CERT_MODE == "public"' <<<"$cfg" >/dev/null || fail "registrar not in public mode"
 jq -e '.services.registrar.healthcheck.test | index("health")' <<<"$cfg" >/dev/null || fail "registrar has no health check"
