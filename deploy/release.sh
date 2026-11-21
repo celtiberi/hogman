@@ -19,38 +19,45 @@ out="$REPO/site/public/dl"
 mkdir -p "$out"
 
 tarball="hogman-$ver.tar.gz"
-git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md deploy/signup LICENSE README.md \
-  | gzip -9n > "$out/$tarball"
 
-# Compiled parts, so servers don't spend half an hour building them: built
-# here when Docker is running, otherwise taken from GitHub's build of this
-# exact commit (.github/workflows/build.yml), so no Docker is needed locally.
+# Compiled parts, so servers don't spend half an hour building them. They come
+# only from GitHub's build of this exact commit (.github/workflows/build.yml),
+# never from this machine (audit H5), and every file must carry GitHub's signed
+# provenance from that workflow before anything is published.
 bins="hogman-bin-$ver.tar.gz"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 full="$(git rev-parse "$REF^{commit}")"   # a tag resolves to its commit
-if [ "${USE_CI_BUILD:-}" != 1 ] && docker info >/dev/null 2>&1; then
-  git archive --format=tar "$REF" core/join core/registrar deploy/signup | tar -x -C "$work"
-  deploy/build-bins.sh "$work" "$work/prebuilt"
-else
-  echo "Docker isn't running here: using GitHub's build of $sha..."
-  # Only push or manual runs: a pull-request run builds a merge commit, and
-  # its artifact is named after that, not $full.
-  run="$(gh run list --workflow build.yml --commit "$full" --status success --limit 20 \
-          --json databaseId,event --jq '[.[] | select(.event != "pull_request")][0].databaseId // empty')"
-  if [ -z "$run" ]; then
-    echo "no successful GitHub build for $sha yet. Watch it: gh run list --workflow build.yml" >&2
-    echo "(it runs on every push to main; or start one: gh workflow run build.yml --ref main)" >&2
-    exit 1
-  fi
-  if ! gh run download "$run" --name "hogman-bin-$full" --dir "$work/prebuilt"; then
-    echo "GitHub's build of $sha can't be downloaded (builds are kept 30 days)." >&2
-    echo "Start Docker and run this again, or release a newer commit." >&2
-    exit 1
-  fi
-  # Artifacts lose the executable bit.
-  find "$work/prebuilt" -type f ! -name SHA256SUMS -exec chmod 0755 {} +
+echo "using GitHub's build of $sha..."
+# Only push or manual runs: a pull-request run builds a merge commit, and its
+# artifact is named after that, not $full (and isn't attested).
+run="$(gh run list --workflow build.yml --commit "$full" --status success --limit 20 \
+        --json databaseId,event --jq '[.[] | select(.event != "pull_request")][0].databaseId // empty')"
+if [ -z "$run" ]; then
+  echo "no successful GitHub build for $sha yet. Watch it: gh run list --workflow build.yml" >&2
+  echo "(it runs on every push to main; or start one: gh workflow run build.yml --ref main)" >&2
+  exit 1
 fi
+if ! gh run download "$run" --name "hogman-bin-$full" --dir "$work/prebuilt"; then
+  echo "GitHub's build of $sha can't be downloaded (builds are kept 30 days); release a newer commit." >&2
+  exit 1
+fi
+# Artifacts lose the executable bit.
+find "$work/prebuilt" -type f ! -name SHA256SUMS -exec chmod 0755 {} +
+repo="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+checked=0
+while IFS= read -r -d '' f; do
+  gh attestation verify "$f" --repo "$repo" --deny-self-hosted-runners \
+    --signer-workflow "$repo/.github/workflows/build.yml" --source-digest "$full" >/dev/null \
+    || { echo "no valid provenance for ${f#"$work/"}: not releasing" >&2; exit 1; }
+  checked=$((checked + 1))
+done < <(find "$work/prebuilt" -type f -print0)
+[ "$checked" -gt 0 ] || { echo "GitHub's build of $sha has no files: not releasing" >&2; exit 1; }
+echo "provenance checked: $checked files, each built by build.yml from $sha on GitHub's runners"
+
+# Only now that the compiled parts check out, write anything to the website.
+git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md deploy/signup LICENSE README.md \
+  | gzip -9n > "$out/$tarball"
 # No macOS file metadata in the bundle (Linux tar warns about it).
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$work" -czf "$out/$bins" prebuilt
 
