@@ -345,15 +345,31 @@ page_ok() {
 }
 net_ok()   { match '"zone":"bobo.hogman"' from_internet "https://$PUBLIC_HOST/hogman/v1/network"; }
 check "https://<host>/join serves the join page" page_ok
+check "edge runs non-root ($HOGMAN_UID:$HOGMAN_GID)" bash -c 'test "$1" != 0 && test "$2" = "$1:$3"' _ "$HOGMAN_UID" "$(docker inspect -f '{{.Config.User}}' "$(dc ps -q edge)")" "$HOGMAN_GID"
+check "portal runs non-root ($HOGMAN_UID:$HOGMAN_GID)" bash -c 'test "$1" != 0 && test "$2" = "$1:$3"' _ "$HOGMAN_UID" "$(docker inspect -f '{{.Config.User}}' "$(dc ps -q portal)")" "$HOGMAN_GID"
 join_hdrs="$(from_internet -sI "https://$PUBLIC_HOST/join" | tr -d '\r')"
-check "the join page sets anti-framing headers" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\"" _ "$join_hdrs"
+check "the join page sets anti-framing headers and Origin-Agent-Cluster" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\" && grep -iq '^origin-agent-cluster: ?1' <<<\"\$1\"" _ "$join_hdrs"
+portal_hdrs="$(run bob-tools curl -sfI --cacert $ROOT "https://home.$ZONE/" | tr -d '\r')"
+check "the portal page sets Origin-Agent-Cluster" grep -iq '^origin-agent-cluster: ?1' <<<"$portal_hdrs"
 join_assets_ok() {
   from_internet "https://$PUBLIC_HOST/join/assets/join.js" >/dev/null &&
     from_internet "https://$PUBLIC_HOST/join/assets/join.css" >/dev/null
 }
 check "join page external JS/CSS load" join_assets_ok
+dl_hdrs="$(from_internet -sI "https://$PUBLIC_HOST/join/dl/SHA256SUMS" | tr -d '\r')"
+check "/join/dl/ sets nosniff" grep -iq '^x-content-type-options: nosniff' <<<"$dl_hdrs"
+check "edge allows Headscale /health" match '"pass"' from_internet "https://$PUBLIC_HOST/health"
+check "edge allows Tailscale /key" from_internet "https://$PUBLIC_HOST/key?v=100"
+check "edge allows /generate_204" test "$(from_internet_status "https://$PUBLIC_HOST/generate_204")" = 204
 check "edge blocks Headscale admin API (/api/v1/user -> 404)" test "$(from_internet_status "https://$PUBLIC_HOST/api/v1/user")" = 404
 check "edge blocks Headscale Swagger UI (/swagger -> 404)" test "$(from_internet_status "https://$PUBLIC_HOST/swagger")" = 404
+edge_blocked_routes_ok() {
+  local p
+  for p in / /version /apple /windows /register/test /auth/test /robots.txt; do
+    [ "$(from_internet_status "https://$PUBLIC_HOST$p")" = 404 ] || return 1
+  done
+}
+check "edge blocks Headscale root, register, auth, apple, windows, version (-> 404)" edge_blocked_routes_ok
 sums="$(from_internet "https://$PUBLIC_HOST/join/dl/SHA256SUMS")"
 check "the join tool is downloadable for 5 platforms" test "$(grep -c hogman-join <<<"$sums")" = 5
 check "the network info endpoint is public" net_ok

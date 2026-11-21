@@ -86,6 +86,11 @@ valid_ipv4() {
 
 # ---------------------------------------------------------------- front ----
 
+front_ids() {  # prints "UID GID" for the shared front door Caddy container
+  if [ "$(id -u)" != 0 ]; then echo "$(id -u) $(id -g)"; return; fi
+  echo "${HOGMAN_FRONT_UID:-65532} ${HOGMAN_FRONT_GID:-65532}"
+}
+
 # Keep the shared front door's public static files (join page and join tool
 # binaries) synced from $SRC without mounting any pen directory into the front door.
 sync_front_assets() {
@@ -99,10 +104,23 @@ sync_front_assets() {
     info "Building the join tool for the front door"
     docker build -q --output "type=local,dest=$FRONT/join-dl" "$SRC/join" >/dev/null
   fi
+  chmod 755 "$FRONT/join-page" "$FRONT/join-dl" 2>/dev/null || true
+  chmod -R a+rX "$FRONT/join-page" "$FRONT/join-dl" 2>/dev/null || true
 }
 
 write_front() {
   sync_front_assets
+  local fids fuid fgid
+  fuid="${FRONT_UID:-}"; fgid="${FRONT_GID:-}"
+  if [ -z "$fuid" ] || [ -z "$fgid" ]; then
+    fids="$(front_ids)"
+    fuid="${fids% *}"; fgid="${fids#* }"
+  fi
+  mkdir -p "$FRONT/data" "$FRONT/config"
+  chmod 700 "$FRONT/data"
+  if [ "$(id -u)" = 0 ]; then
+    chown -R "$fuid:$fgid" "$FRONT/data" "$FRONT/config"
+  fi
   local caddy="$FRONT/Caddyfile.new" compose="$FRONT/compose.yaml.new" aliases="" n host
   {
     echo "# Written by hogman-host. Edit pens, not this file."
@@ -126,6 +144,7 @@ write_front() {
 			X-Content-Type-Options nosniff
 			Referrer-Policy no-referrer
 			Cache-Control no-store
+			Origin-Agent-Cluster ?1
 			Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 			-Server
 		}
@@ -138,25 +157,27 @@ write_front() {
 	}
 	handle_path /join/dl/* {
 		root * /srv/join-dl
+		header X-Content-Type-Options nosniff
 		file_server
 	}
 	handle /hogman/* {
+		header X-Content-Type-Options nosniff
 		request_body {
 			max_size 16KB
 		}
 		reverse_proxy pen-{args[0]}-core-mesh-1:8081
 	}
-	# Keep Headscale's admin REST API and Swagger UI off the public front door.
-	handle /api/* {
-		respond 404
-	}
-	handle /swagger* {
-		respond 404
-	}
-	handle {
+	# Expose only the Tailscale control/relay routes clients need and the
+	# health endpoint used by monitoring; keep Headscale's admin REST API,
+	# Swagger UI, auth/register pages, and everything else returning 404 (D-19).
+	@control path /ts2021 /key /derp /derp/probe /derp/latency-check /bootstrap-dns /machine/ping-response /health
+	handle @control {
 		reverse_proxy pen-{args[0]}-headscale-1:8080 {
 			header_up X-Real-IP {remote_host}
 		}
+	}
+	handle {
+		respond 404
 	}
 }
 
@@ -213,6 +234,13 @@ services:
   front:
     image: $CADDY_IMAGE
     restart: unless-stopped
+    user: "$fuid:$fgid"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    sysctls:
+      - net.ipv4.ip_unprivileged_port_start=80
     mem_limit: 128m
     pids_limit: 128
     environment:
@@ -233,6 +261,7 @@ EOF
   # Rewritten in place, not renamed over: the front door mounts this one file,
   # and a mounted file that is replaced stays the old one inside the container.
   cat "$caddy" > "$FRONT/Caddyfile"; rm -f "$caddy"
+  chmod 644 "$FRONT/Caddyfile"
   mv "$compose" "$FRONT/compose.yaml"
 }
 
@@ -296,11 +325,14 @@ cmd_init() {
       ip4=""
     fi
   fi
+  local fids; fids="$(front_ids)"
   (
     umask 077
     cat > "$HOSTENV" <<EOF
 FRONT_TLS_MODE=$tls
 HOST_IPV4=$ip4
+FRONT_UID=${fids% *}
+FRONT_GID=${fids#* }
 EOF
   )
   docker network inspect hogman-front >/dev/null 2>&1 || docker network create hogman-front >/dev/null

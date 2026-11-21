@@ -159,9 +159,10 @@ own_runtime_files() {
   # What it only reads holds nothing secret (public certificates, the CA's
   # settings): make it readable whatever root's umask was when it was written.
   # The secrets below are handed over instead, and stay private.
-  chmod 755 "$DATA/pki/public" "$DATA/step/config" 2>/dev/null || true
+  chmod 755 "$DATA/pki/public" "$DATA/step/config" "$DATA/join-dl" 2>/dev/null || true
+  chmod -R a+rX "$DATA/join-dl" 2>/dev/null || true
   chmod 644 "$DATA"/pki/public/*.crt "$DATA/step/config/ca.json" 2>/dev/null || true
-  for d in "$DATA/registrar" "$DATA/api" "$DATA/secrets/registrar" "$DATA/step/secrets" "$DATA/step/db"; do
+  for d in "$DATA/registrar" "$DATA/api" "$DATA/edge" "$DATA/portal" "$DATA/secrets/registrar" "$DATA/step/secrets" "$DATA/step/db"; do
     [ -e "$d" ] && chown -R "$HOGMAN_UID:$HOGMAN_GID" "$d"
   done
   return 0
@@ -293,6 +294,8 @@ use_prebuilt_or_build() {
     info "Building the join tool for download"
     docker build -q --output "type=local,dest=$DATA/join-dl" join >/dev/null
   fi
+  chmod 755 "$DATA/join-dl" 2>/dev/null || true
+  chmod -R a+rX "$DATA/join-dl" 2>/dev/null || true
   local arch
   case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) arch="" ;; esac
   if [ -n "$arch" ] && [ -f "prebuilt/registrar/registrar-linux-$arch" ]; then
@@ -340,7 +343,7 @@ cmd_up() {
   # Folders a backup leaves out. Made here, as us: if Docker made them, they
   # would belong to root and step-ca could not write its database.
   mkdir -p "$DATA"/{step/db,edge,portal,join-dl,tmp,api}
-  chmod 700 "$DATA/api"
+  chmod 700 "$DATA/api" "$DATA/edge" "$DATA/portal"
   # Pens raised as root before audit H3 ran their registrar and step-ca as
   # root too. Move them to the unprivileged user on the next start.
   if [ "${HOGMAN_UID:-}" = 0 ] && [ "$(id -u)" = 0 ]; then

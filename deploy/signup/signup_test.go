@@ -226,6 +226,9 @@ func TestWebPageAndHeaders(t *testing.T) {
 	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") {
 		t.Fatalf("CSP: %q", csp)
 	}
+	if oac := rec.Header().Get("Origin-Agent-Cluster"); oac != "?1" {
+		t.Fatalf("Origin-Agent-Cluster: %q, want ?1", oac)
+	}
 	if code, _ := call(h, "GET", "/api/status", "", nil); code != 502 {
 		t.Fatalf("broker down should be 502, got %d", code)
 	}
