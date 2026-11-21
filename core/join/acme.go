@@ -717,6 +717,11 @@ func (m *shareCertManager) Ensure(ctx context.Context) error {
 	return nil
 }
 
+func isRegistrarCapErr(err error) bool {
+	var me *meshAPIError
+	return errors.As(err, &me) && me.Status == http.StatusTooManyRequests
+}
+
 func isNonRetryableShareCertErr(err error) bool {
 	if err == nil {
 		return false
@@ -728,7 +733,7 @@ func isNonRetryableShareCertErr(err error) bool {
 	if errors.As(err, &me) {
 		switch me.Status {
 		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,
-			http.StatusConflict, http.StatusTooManyRequests:
+			http.StatusConflict:
 			return true
 		}
 	}
@@ -772,6 +777,14 @@ func (m *shareCertManager) EnsureWithBackoff(ctx context.Context) error {
 			last = err
 		}
 		if ctx.Err() != nil {
+			return last
+		}
+		if isRegistrarCapErr(last) {
+			delay := m.maxBackoff()
+			state.Failures++
+			state.NextAttempt = m.currentTime().UTC().Add(delay)
+			m.saveRetryState(state)
+			log.Printf("acme: registrar weekly certificate limit reached for %s (%v); next retry after %s", m.host, last, delay)
 			return last
 		}
 		if isNonRetryableShareCertErr(last) {
