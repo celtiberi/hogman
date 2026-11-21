@@ -717,3 +717,77 @@ func TestHomeCertManagerEnsureOnceFastFailover429(t *testing.T) {
 		t.Fatalf("VerifyHomeTLS after failover: %v", err)
 	}
 }
+
+// 4b: the same manager keeps the front door's wildcard, under its own name
+// and file names, with no pen zone at all.
+func TestCertManagerHostAndFileBase(t *testing.T) {
+	dir := t.TempDir()
+	m, err := NewHomeCertManager(HomeConfig{
+		Host:       "*.gate.example.test.",
+		FileBase:   "gate",
+		HomeTLSDir: filepath.Join(dir, "tls"),
+		StorageDir: filepath.Join(dir, "acme"),
+		Backend:    noopACMEBackend{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if m.host != "*.gate.example.test" {
+		t.Fatalf("host = %q", m.host)
+	}
+	if m.cfg.Email != "admin@gate.example.test" {
+		t.Fatalf("email = %q", m.cfg.Email)
+	}
+
+	certPEM, keyPEM := selfSignedPair(t, "*.gate.example.test")
+	if err := writeTLSFilesAtomic(m.cfg.HomeTLSDir, m.cfg.FileBase, certPEM, keyPEM); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyTLSFiles(m.cfg.HomeTLSDir, "gate"); err != nil {
+		t.Fatalf("gate files: %v", err)
+	}
+	if VerifyHomeTLS(m.cfg.HomeTLSDir) == nil {
+		t.Fatal("home files reported valid, but only gate files were written")
+	}
+	if fi, err := os.Stat(filepath.Join(m.cfg.HomeTLSDir, "gate.key")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("gate.key mode: %v %v", fi, err)
+	}
+
+	// Without Host it's still home.<zone>, as before.
+	h, err := NewHomeCertManager(HomeConfig{Zone: "bobo.pens.example.test", HomeTLSDir: filepath.Join(dir, "h"),
+		StorageDir: filepath.Join(dir, "ha"), Backend: noopACMEBackend{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if h.host != "home.bobo.pens.example.test" || h.cfg.FileBase != "home" {
+		t.Fatalf("default host/base = %q/%q", h.host, h.cfg.FileBase)
+	}
+}
+
+type noopACMEBackend struct{}
+
+func (noopACMEBackend) SetTXT(context.Context, string, string) error    { return nil }
+func (noopACMEBackend) DeleteTXT(context.Context, string, string) error { return nil }
+func (noopACMEBackend) MintEAB(context.Context) (*EABPair, error)       { return nil, nil }
+
+func selfSignedPair(t *testing.T, name string) ([]byte, []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: []string{name},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kb, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kb})
+}

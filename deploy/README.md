@@ -250,6 +250,19 @@ hogman-host challenge-dns cred list
 - **Port 53** is opened in the server's firewall. If DigitalOcean's cloud firewall is on,
   open TCP and UDP 53 there too.
 
+**The front door's certificate.** Hosted pens' public addresses are `<pen>.gate.hogman.network`,
+all covered by one wildcard certificate:
+
+```bash
+hogman-host gate-cert-setup gate.hogman.network
+```
+
+It installs a locked-down service (`hogman-gate-cert`) that gets and renews
+`*.gate.hogman.network` through the challenge DNS server, with a credential that can write only
+the front door's challenge name. When the certificate changes, the front door reloads by
+itself. It starts asking only once `_acme-challenge.gate.hogman.network` is delegated, because
+failed attempts count against Let's Encrypt's limits.
+
 Pens keep their own certificate authority until the switch-over. At the switch-over every
 pen moves to public certificates at once and the old way is removed: there's no setting to
 choose between them (D-22).

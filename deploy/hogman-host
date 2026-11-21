@@ -52,6 +52,8 @@ usage: hogman-host <command>
                                  run the DNS-01 challenge server (public certificates, D-18)
                                  on <public-ip>:53; the Google key enables the fallback CA
   challenge-dns <args...>        talk to it, e.g.  challenge-dns cred list
+  gate-cert-setup <gate-domain>  keep the front door's *.<gate-domain> certificate
+                                 (e.g. gate-cert-setup gate.hogman.network)
 
 The control hostname's DNS must point at this server before `add`, so the
 front door can get its certificate.
@@ -208,6 +210,7 @@ http://$host {
 	}
 }
 $host {
+$(gate_tls_line "$host")
 	import pen $n
 }
 
@@ -263,6 +266,7 @@ services:
       - ./config:/config
       - ./join-page:/srv/join-page:ro
       - ./join-dl:/srv/join-dl:ro
+$( [ -n "${GATE_DOMAIN:-}" ] && echo "      - $GATE_TLS:/gate-tls:ro   # the *.$GATE_DOMAIN wildcard (hogman-gate-cert)")
     networks: [hogman-front]
 networks:
   hogman-front:
@@ -1076,8 +1080,140 @@ UNIT
   info "If DigitalOcean's cloud firewall is on, allow TCP and UDP 53 there too."
 }
 
+# The front door's wildcard for every hosted pen's public address (D-18):
+# *.<GATE_DOMAIN>, kept by `registrar gate-cert` with the host's challenge DNS
+# credential. A pen whose PUBLIC_HOST is under the gate domain uses it, but
+# only once it exists: a missing file must never stop the front door loading.
+GATE_TLS=/var/lib/hogman-gate/tls
+gate_tls_line() {
+  local host="$1" label
+  [ -n "${GATE_DOMAIN:-}" ] && [[ "$host" == *".$GATE_DOMAIN" ]] || return 0
+  label="${host%".$GATE_DOMAIN"}"
+  [[ "$label" != *.* ]] || return 0   # the wildcard covers exactly one label
+  [ -s "$GATE_TLS/gate.crt" ] && [ -s "$GATE_TLS/gate.key" ] \
+    && printf '\ttls /gate-tls/gate.crt /gate-tls/gate.key'
+  return 0
+}
+
+# gate-cert-setup <gate-domain>: keep the *.<gate-domain> wildcard for the
+# front door, e.g.  gate-cert-setup gate.hogman.network
+GATE_TOKEN=/etc/hogman/gate-challenge-token
+cmd_gate_cert_setup() {
+  load_host
+  local domain="${1:-}" arch
+  valid_host "$domain" || die "usage: hogman-host gate-cert-setup <gate-domain>   (e.g. gate.hogman.network)"
+  [ -x "$CDNS_BIN" ] || die "set up the challenge DNS server first: hogman-host challenge-dns-setup <public-ip>"
+  case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) die "unsupported CPU $(uname -m)" ;; esac
+  local bin="$SRC/prebuilt/registrar/registrar-linux-$arch"
+  [ -f "$bin" ] || die "no compiled registrar in this release ($bin)"
+  install -m 0755 "$bin" /usr/local/bin/hogman-registrar
+
+  # The host credential: it may write only _acme-challenge.<gate-domain>.
+  if [ ! -s "$GATE_TOKEN" ]; then
+    local out tok
+    out="$(CDNS_ADMIN_SOCK=/run/challenge-dns/admin.sock "$CDNS_BIN" cred add host)" || die "could not make the host's challenge DNS credential: $out"
+    tok="$(awk '/^token:/ {print $2}' <<<"$out")"; [ -n "$tok" ] || die "no token from challenge-dns"
+    install -d -m 0700 /etc/hogman
+    ( umask 077; printf '%s' "$tok" > "$GATE_TOKEN" )
+  fi
+  set_host_var GATE_DOMAIN "$domain"
+  GATE_DOMAIN="$domain"
+  install -d -m 0700 -o "$PEN_GID" -g "$PEN_GID" /var/lib/hogman-gate "$GATE_TLS" /var/lib/hogman-gate/acme
+  # Mount the wildcard's folder into the front door now (this recreates it
+  # once), so the first certificate only needs a reload, not a restart.
+  write_front
+  reload_front
+
+  cat > /etc/systemd/system/hogman-gate-cert.service <<UNIT
+[Unit]
+Description=Hogman: the front door's *.$domain certificate
+After=network-online.target hogman-challenge-dns.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/hogman-registrar gate-cert
+Environment=GATE_HOST=*.$domain
+Environment=GATE_TLS_DIR=$GATE_TLS
+Environment=ACME_STORAGE_DIR=/var/lib/hogman-gate/acme
+Environment=CHALLENGE_DNS_URL=unix:///run/hogman-acme/api.sock
+Environment=CHALLENGE_DNS_TOKEN_FILE=%d/gate-token
+Environment=ACME_CA_URL=${GATE_ACME_CA_URL:-https://acme-v02.api.letsencrypt.org/directory}
+LoadCredential=gate-token:$GATE_TOKEN
+# The front door's Caddy runs as $PEN_GID too, so it can read the key.
+User=$PEN_GID
+Group=$PEN_GID
+StateDirectory=hogman-gate hogman-gate/tls hogman-gate/acme
+StateDirectoryMode=0700
+ReadWritePaths=/run/hogman-acme
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  # When the certificate changes, rewrite the front door's routes (which turn
+  # on the wildcard once it exists) and reload it.
+  cat > /etc/systemd/system/hogman-gate-reload.path <<UNIT
+[Unit]
+Description=Hogman: reload the front door when its wildcard changes
+[Path]
+PathChanged=$GATE_TLS/gate.crt
+[Install]
+WantedBy=multi-user.target
+UNIT
+  cat > /etc/systemd/system/hogman-gate-reload.service <<UNIT
+[Unit]
+Description=Hogman: reload the front door with its new wildcard
+[Service]
+Type=oneshot
+Environment=HOGMAN_HOME=$HOGMAN_HOME
+ExecStart=/usr/local/bin/hogman-host routes
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now hogman-gate-reload.path >/dev/null
+  systemctl enable hogman-gate-cert.service >/dev/null
+
+  # Only start asking for the certificate once the challenge name is really
+  # delegated to us: failed attempts count against Let's Encrypt's limits.
+  local ns
+  ns="$(curl -fsS -m 10 -H 'accept: application/dns-json' \
+        "https://cloudflare-dns.com/dns-query?name=_acme-challenge.$domain&type=NS" 2>/dev/null \
+        | grep -o '"data":"[^"]*"' | head -1 | cut -d'"' -f4)"
+  if [ -n "$ns" ]; then
+    systemctl restart hogman-gate-cert.service
+    info "Getting *.$domain (delegated to $ns). Watch: journalctl -u hogman-gate-cert -f"
+  else
+    info "Installed, not started: _acme-challenge.$domain isn't delegated yet."
+    info "Add an NS record for _acme-challenge.$domain -> ns1.<your domain> in DNS, then: systemctl start hogman-gate-cert"
+  fi
+}
+
 case "${1:-}" in
   init)    shift; cmd_init "$@" ;;
+  gate-cert-setup) shift; cmd_gate_cert_setup "$@" ;;
   challenge-dns-setup) shift; cmd_challenge_dns_setup "$@" ;;
   challenge-dns) shift; load_host; [ -x "$CDNS_BIN" ] || die "not set up: hogman-host challenge-dns-setup"; CDNS_ADMIN_SOCK=/run/challenge-dns/admin.sock exec "$CDNS_BIN" "$@" ;;
   waitlist) shift; cmd_waitlist "$@" ;;

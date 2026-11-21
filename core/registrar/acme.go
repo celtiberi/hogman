@@ -363,6 +363,8 @@ func (f *FailoverIssuer) getFallback(ctx context.Context) (certmagic.Issuer, err
 // HomeConfig configures certificate issuance and renewal for home.<zone>.
 type HomeConfig struct {
 	Zone               string
+	Host               string // the name to certify; default home.<Zone>. The host's front door uses *.gate.<domain>
+	FileBase           string // files written are <FileBase>.crt and <FileBase>.key; default "home"
 	HomeTLSDir         string
 	CaddyAdminSocket   string
 	StorageDir         string
@@ -403,8 +405,16 @@ type HomeCertManager struct {
 // NewHomeCertManager builds a certificate manager for home.<cfg.Zone>.
 func NewHomeCertManager(cfg HomeConfig) (*HomeCertManager, error) {
 	cfg.Zone = normalizeFQDN(cfg.Zone)
-	if cfg.Zone == "" {
+	cfg.Host = normalizeFQDN(cfg.Host)
+	if cfg.Zone == "" && cfg.Host == "" {
 		return nil, errors.New("acme: zone is empty")
+	}
+	host := cfg.Host
+	if host == "" {
+		host = "home." + cfg.Zone
+	}
+	if cfg.FileBase == "" {
+		cfg.FileBase = "home"
 	}
 	if cfg.HomeTLSDir == "" {
 		return nil, errors.New("acme: HOME_TLS_DIR is empty")
@@ -416,7 +426,7 @@ func NewHomeCertManager(cfg HomeConfig) (*HomeCertManager, error) {
 		cfg.PrimaryCA = certmagic.LetsEncryptProductionCA
 	}
 	if cfg.Email == "" {
-		cfg.Email = "admin@" + cfg.Zone
+		cfg.Email = "admin@" + strings.TrimPrefix(host, "*.")
 	}
 	if len(cfg.Resolvers) == 0 {
 		cfg.Resolvers = []string{"1.1.1.1:53", "8.8.8.8:53"}
@@ -450,7 +460,7 @@ func NewHomeCertManager(cfg HomeConfig) (*HomeCertManager, error) {
 	logger := zap.NewNop()
 	m := &HomeCertManager{
 		cfg:     cfg,
-		host:    "home." + cfg.Zone,
+		host:    host,
 		storage: &certmagic.FileStorage{Path: cfg.StorageDir},
 		solver: dns01GateSolver{
 			inner: &certmagic.DNS01Solver{
@@ -513,9 +523,9 @@ func (m *HomeCertManager) newManagedConfig(caURL string, withEAB bool) (*certmag
 	}
 
 	cfg = certmagic.New(m.cache, certmagic.Config{
-		Storage:  m.storage,
-		OnEvent:  onEvent,
-		Logger:   m.logger,
+		Storage: m.storage,
+		OnEvent: onEvent,
+		Logger:  m.logger,
 	})
 
 	tmpl := certmagic.ACMEIssuer{
@@ -573,10 +583,10 @@ func (m *HomeCertManager) exportFromStorageKeys(ctx context.Context, certKey, pr
 	}
 	m.syncMu.Lock()
 	defer m.syncMu.Unlock()
-	if bytes.Equal(certPEM, m.lastCertPEM) && bytes.Equal(keyPEM, m.lastKeyPEM) && VerifyHomeTLS(m.cfg.HomeTLSDir) == nil {
+	if bytes.Equal(certPEM, m.lastCertPEM) && bytes.Equal(keyPEM, m.lastKeyPEM) && VerifyTLSFiles(m.cfg.HomeTLSDir, m.cfg.FileBase) == nil {
 		return nil
 	}
-	if err := writeHomeTLSAtomic(m.cfg.HomeTLSDir, certPEM, keyPEM); err != nil {
+	if err := writeTLSFilesAtomic(m.cfg.HomeTLSDir, m.cfg.FileBase, certPEM, keyPEM); err != nil {
 		return err
 	}
 	if err := reloadCaddy(ctx, m.cfg.CaddyAdminSocket); err != nil {
@@ -726,13 +736,17 @@ func (m *HomeCertManager) Run(ctx context.Context) {
 }
 
 func writeHomeTLSAtomic(dir string, certPEM, keyPEM []byte) error {
+	return writeTLSFilesAtomic(dir, "home", certPEM, keyPEM)
+}
+
+func writeTLSFilesAtomic(dir, base string, certPEM, keyPEM []byte) error {
 	if _, err := tls.X509KeyPair(certPEM, keyPEM); err != nil {
 		return fmt.Errorf("invalid certificate/key pair: %w", err)
 	}
-	if err := writeFileAtomic(filepath.Join(dir, "home.key"), keyPEM, 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, base+".key"), keyPEM, 0o600); err != nil {
 		return err
 	}
-	if err := writeFileAtomic(filepath.Join(dir, "home.crt"), certPEM, 0o644); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, base+".crt"), certPEM, 0o644); err != nil {
 		return err
 	}
 	return nil
@@ -774,9 +788,12 @@ func writeFileAtomic(dst string, data []byte, mode os.FileMode) error {
 }
 
 // VerifyHomeTLS checks that home.crt and home.key in dir form a valid, unexpired keypair.
-func VerifyHomeTLS(dir string) error {
-	certPath := filepath.Join(dir, "home.crt")
-	keyPath := filepath.Join(dir, "home.key")
+func VerifyHomeTLS(dir string) error { return VerifyTLSFiles(dir, "home") }
+
+// VerifyTLSFiles checks that <base>.crt and <base>.key in dir form a valid, unexpired keypair.
+func VerifyTLSFiles(dir, base string) error {
+	certPath := filepath.Join(dir, base+".crt")
+	keyPath := filepath.Join(dir, base+".key")
 	pair, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
 		return err
