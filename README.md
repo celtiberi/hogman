@@ -156,7 +156,7 @@ certificates from older releases.
   shared wildcard `*.gate.hogman.network` certificate). `hogman-join` runs unprivileged as you
   (never as administrator), with a local PAC-scoped proxy that carries only HTTPS to the pen's names.
 - **The boot:** deletes all of a member's devices, revokes their keys and invites, rewrites the
-  policy, and holds their names for 90 days. About two seconds.
+  policy, and retires their site names permanently. About two seconds.
 - **Hosted pens:** four containers per pen (Headscale, registrar, Caddy for `home.<zone>`, and
   the pen's own `core-mesh` Tailscale node), running non-root (`uid 65532`) on an isolated Docker
   bridge with its own folder and about 75 MB of memory. Only each pen's front-door route and relay

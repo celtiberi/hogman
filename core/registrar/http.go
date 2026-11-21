@@ -202,7 +202,7 @@ func MeshHandler(s *Service) http.Handler {
 		names, _ := s.st.Names()
 		mine := []*Name{}
 		for _, n := range names {
-			if n.MemberID == c.member.ID && n.HeldUntil == nil {
+			if n.MemberID == c.member.ID && n.RetiredAt == nil {
 				mine = append(mine, n)
 			}
 		}

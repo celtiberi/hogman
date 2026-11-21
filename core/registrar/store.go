@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS names (
 	member_id   INTEGER NOT NULL REFERENCES members(id),
 	device_id   INTEGER REFERENCES devices(id),
 	note        TEXT NOT NULL DEFAULT '',
-	held_until  INTEGER,                 -- set when the owner is removed; nobody may claim it until then
+	held_until  INTEGER,                 -- non-NULL once the owner is removed; permanently retired (never reused)
 	created_at  INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS audit (
@@ -621,7 +621,9 @@ type Name struct {
 	Note      string `json:"note,omitempty"`
 	IPv4      string `json:"ipv4,omitempty"`
 	IPv6      string `json:"ipv6,omitempty"`
-	HeldUntil *int64 `json:"held_until,omitempty"`
+	// RetiredAt is stored in names.held_until for backward compatibility with existing DBs;
+	// any non-NULL value means the name is permanently retired and may never be reused.
+	RetiredAt *int64 `json:"retired_at,omitempty"`
 }
 
 func (s *Store) queryNames(where string, args ...any) ([]*Name, error) {
@@ -635,7 +637,7 @@ func (s *Store) queryNames(where string, args ...any) ([]*Name, error) {
 	var out []*Name
 	for rows.Next() {
 		var n Name
-		if err := rows.Scan(&n.Name, &n.MemberID, &n.Member, &n.DeviceID, &n.Note, &n.IPv4, &n.IPv6, &n.HeldUntil); err != nil {
+		if err := rows.Scan(&n.Name, &n.MemberID, &n.Member, &n.DeviceID, &n.Note, &n.IPv4, &n.IPv6, &n.RetiredAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &n)
@@ -657,20 +659,27 @@ func (s *Store) NameByName(name string) (*Name, error) {
 }
 
 func (s *Store) UpsertName(name string, memberID int64, deviceID *int64, note string) error {
-	_, err := s.db.Exec(`INSERT INTO names (name, member_id, device_id, note, created_at) VALUES (?,?,?,?,?)
-		ON CONFLICT(name) DO UPDATE SET member_id = excluded.member_id, device_id = excluded.device_id, note = excluded.note, held_until = NULL`,
+	res, err := s.db.Exec(`INSERT INTO names (name, member_id, device_id, note, created_at) VALUES (?,?,?,?,?)
+		ON CONFLICT(name) DO UPDATE SET member_id = excluded.member_id, device_id = excluded.device_id, note = excluded.note
+		WHERE names.held_until IS NULL`,
 		name, memberID, deviceID, note, now())
-	return err
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("name %s is retired", name)
+	}
+	return nil
 }
 
 func (s *Store) DeleteName(name string) error {
-	_, err := s.db.Exec(`DELETE FROM names WHERE name = ?`, name)
+	_, err := s.db.Exec(`DELETE FROM names WHERE name = ? AND held_until IS NULL`, name)
 	return err
 }
 
-// HoldNames unpoints all of a member's names and blocks anyone claiming them until `until`.
-func (s *Store) HoldNames(memberID, until int64) (int64, error) {
-	res, err := s.db.Exec(`UPDATE names SET device_id = NULL, held_until = ?, note = '' WHERE member_id = ?`, until, memberID)
+// RetireNames unpoints all of a member's names and retires them permanently.
+func (s *Store) RetireNames(memberID int64) (int64, error) {
+	res, err := s.db.Exec(`UPDATE names SET device_id = NULL, held_until = ?, note = '' WHERE member_id = ?`, now(), memberID)
 	if err != nil {
 		return 0, err
 	}

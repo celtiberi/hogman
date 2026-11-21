@@ -141,7 +141,6 @@ services:
       PUBLIC_HOST: ${PUBLIC_HOST}
       CORE_MESH_IP: ${CORE_MESH_IP:-}
       MEMBERS_CAN_INVITE: ${MEMBERS_CAN_INVITE:-false}
-      NAME_HOLD: ${NAME_HOLD:-2160h}
       MESH_ADDR: unix:/run/hogman-api/mesh.sock
       CHALLENGE_DNS_URL: unix:///run/hogman-acme/api.sock
       CHALLENGE_DNS_TOKEN_FILE: /secrets/challenge_dns_token
