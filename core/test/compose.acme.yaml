@@ -1,0 +1,157 @@
+# Offline Docker Compose stack for testing registrar ACME home-certificate
+# issuance, hot-reload of portal Caddy over its admin Unix socket,
+# mesh /api/acme/* authorization + caps, and primary->fallback EAB failover
+# using Pebble, pebble-challtestsrv, and fake-challengedns.
+
+services:
+  challtestsrv:
+    image: ghcr.io/letsencrypt/pebble-challtestsrv:2.10.3
+    command:
+      - "-dnsserver=:8053"
+      - "-management=:8055"
+      - "-http01="
+      - "-https01="
+      - "-doh="
+      - "-tlsalpn01="
+      - "-defaultIPv6="
+      - "-defaultIPv4=127.0.0.1"
+    networks: [acme]
+
+  pebble1:
+    image: ghcr.io/letsencrypt/pebble:2.10.3
+    command:
+      - "-config=/config/pebble1.json"
+      - "-dnsserver=fake-challengedns:8054"
+      - "-strict"
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_WFE_NONCEREJECT: "0"
+    volumes:
+      - "${ACME_WORKDIR:?}/config/pebble1.json:/config/pebble1.json:ro"
+      - "${ACME_WORKDIR:?}/certs:/certs:ro"
+    ports:
+      - "127.0.0.1:${ACME_PEBBLE1_DIR_PORT:-14001}:14000"
+      - "127.0.0.1:${ACME_PEBBLE1_MGMT_PORT:-15001}:15000"
+    depends_on: [challtestsrv, fake-challengedns]
+    networks: [acme]
+
+  pebble2:
+    image: ghcr.io/letsencrypt/pebble:2.10.3
+    command:
+      - "-config=/config/pebble2.json"
+      - "-dnsserver=fake-challengedns:8054"
+      - "-strict"
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_WFE_NONCEREJECT: "0"
+    volumes:
+      - "${ACME_WORKDIR:?}/config/pebble2.json:/config/pebble2.json:ro"
+      - "${ACME_WORKDIR:?}/certs:/certs:ro"
+    ports:
+      - "127.0.0.1:${ACME_PEBBLE2_DIR_PORT:-14002}:14000"
+      - "127.0.0.1:${ACME_PEBBLE2_MGMT_PORT:-15002}:15000"
+    depends_on: [challtestsrv, fake-challengedns]
+    networks: [acme]
+
+  fake-challengedns:
+    build:
+      context: ./fake-challengedns
+    image: hogman/fake-challengedns:test
+    command:
+      - "-pen-name=${ACME_PEN_NAME:-bobo}"
+      - "-pens-zone=${ACME_PENS_ZONE:-pens.hogman.network}"
+      - "-token=${ACME_CHALLENGE_TOKEN:-test-challenge-token}"
+      - "-challtestsrv-mgmt=http://challtestsrv:8055"
+      - "-challtestsrv-dns=challtestsrv:8053"
+      - "-eab-kid=${ACME_EAB_KID:-test-eab-kid}"
+      - "-eab-hmac=${ACME_EAB_HMAC:?}"
+      - "-api-addr=:8080"
+      - "-dns-addr=:8054"
+      - "-hs-addr=:8085"
+      - "-mock429-addr=:14000"
+      - "-tls-cert=/certs/server.crt"
+      - "-tls-key=/certs/server.key"
+    volumes:
+      - "${ACME_WORKDIR:?}/certs:/certs:ro"
+    ports:
+      - "127.0.0.1:${ACME_CHALLENGE_API_PORT:-18080}:8080"
+      - "127.0.0.1:${ACME_DNS_PORT:-18054}:8054/udp"
+      - "127.0.0.1:${ACME_DNS_PORT:-18054}:8054/tcp"
+      - "127.0.0.1:${ACME_HS_PORT:-18085}:8085"
+    depends_on: [challtestsrv]
+    networks:
+      acme:
+        aliases: [mock429]
+
+  registrar:
+    build:
+      context: ../registrar
+      dockerfile: ${REGISTRAR_DOCKERFILE:-Dockerfile}
+    image: hogman/registrar:dev
+    user: "65532:65532"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    environment:
+      ZONE: "${ACME_ZONE:?}"
+      PUBLIC_HOST: "${ACME_PUBLIC_HOST:-gate.hogman.test}"
+      CORE_MESH_IP: "100.64.0.1"
+      HEADSCALE_URL: "http://fake-challengedns:8085"
+      HEADSCALE_API_KEY_FILE: "/secrets/headscale_api_key"
+      CHALLENGE_DNS_URL: "http://fake-challengedns:8080"
+      CHALLENGE_DNS_TOKEN_FILE: "/secrets/challenge_dns_token"
+      DNS_ADDR: "off"
+      MESH_ADDR: "unix:/run/hogman-api/mesh.sock"
+      SYNC_INTERVAL: "1s"
+      HOME_TLS_DIR: "/home-tls"
+      CADDY_ADMIN_SOCKET: "/run/caddy-admin/admin.sock"
+      ACME_STORAGE_DIR: "/var/lib/registrar/acme"
+      ACME_CA_URL: "${ACME_CA_URL:-https://pebble1:14000/dir}"
+      ACME_FALLBACK_CA_URL: "${ACME_FALLBACK_CA_URL:-}"
+      ACME_CA_ROOT: "/certs/ca.crt"
+      ACME_RESOLVERS: "fake-challengedns:8054"
+      ACME_PROPAGATION_DELAY: "${ACME_PROPAGATION_DELAY:-100ms}"
+      ACME_PROPAGATION_TIMEOUT: "${ACME_PROPAGATION_TIMEOUT:-10s}"
+    volumes:
+      - "${ACME_WORKDIR:?}/data/registrar:/var/lib/registrar"
+      - "${ACME_WORKDIR:?}/data/home-tls:/home-tls"
+      - "${ACME_WORKDIR:?}/data/caddy-admin:/run/caddy-admin:ro"
+      - "${ACME_WORKDIR:?}/data/api:/run/hogman-api"
+      - "${ACME_WORKDIR:?}/secrets:/secrets:ro"
+      - "${ACME_WORKDIR:?}/certs:/certs:ro"
+    healthcheck:
+      test: ["CMD", "registrar", "health"]
+      interval: 1s
+      timeout: 5s
+      retries: 60
+    depends_on: [fake-challengedns, pebble1, pebble2]
+    networks: [acme]
+
+  portal:
+    image: caddy:2.11.9
+    user: "65532:65532"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    sysctls:
+      - net.ipv4.ip_unprivileged_port_start=80
+    environment:
+      ZONE: "${ACME_ZONE:?}"
+      XDG_CONFIG_HOME: "/tmp/caddy-config"
+      XDG_DATA_HOME: "/tmp/caddy-data"
+    volumes:
+      - "${ACME_WORKDIR:?}/config/portal.Caddyfile:/etc/caddy/Caddyfile:ro"
+      - "${ACME_WORKDIR:?}/data/home-tls:/home-tls:ro"
+      - "${ACME_WORKDIR:?}/data/caddy-admin:/run/caddy-admin"
+      - "${ACME_WORKDIR:?}/data/api:/run/hogman-api:ro"
+      - "${ACME_WORKDIR:?}/data/portal:/data"
+    ports:
+      - "127.0.0.1:${ACME_PORTAL_PORT:-18443}:443"
+    depends_on:
+      registrar:
+        condition: service_healthy
+    networks: [acme]
+
+networks:
+  acme:

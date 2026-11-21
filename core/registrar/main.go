@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -47,18 +48,65 @@ func durEnv(k string, def time.Duration) time.Duration {
 	return def
 }
 
+func propTimeoutEnv(k string) time.Duration {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return 0
+	}
+	if v == "-1" {
+		return -1
+	}
+	return durEnv(k, 0)
+}
+
+func parseCSV(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(raw, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func setup() *Service {
 	coreIP := mustEnv("CORE_MESH_IP")
+	homeTLSDir := strings.TrimSpace(os.Getenv("HOME_TLS_DIR"))
+	rootCA := strings.TrimSpace(os.Getenv("ROOT_CA"))
+	if rootCA == "" {
+		if homeTLSDir == "" {
+			rootCA = "/pki/root_ca.crt"
+		} else if _, err := os.Stat("/pki/root_ca.crt"); err == nil {
+			rootCA = "/pki/root_ca.crt"
+		}
+	}
+	var acmeBackend ACMEBackend
+	if chURL := strings.TrimSpace(os.Getenv("CHALLENGE_DNS_URL")); chURL != "" {
+		tokPath := env("CHALLENGE_DNS_TOKEN_FILE", "/secrets/challenge_dns_token")
+		tokBytes, err := os.ReadFile(tokPath)
+		if err != nil {
+			log.Fatalf("challenge DNS token %s: %v", tokPath, err)
+		}
+		cli, err := NewChallengeDNSClient(chURL, string(tokBytes))
+		if err != nil {
+			log.Fatalf("challenge DNS client: %v", err)
+		}
+		acmeBackend = cli
+	}
 	cfg := Config{
 		Zone:             mustEnv("ZONE"),
 		PublicHost:       mustEnv("PUBLIC_HOST"),
 		CoreIP:           coreIP,
 		CAIP:             env("CA_MESH_IP", coreIP),
-		RootCAFile:       env("ROOT_CA", "/pki/root_ca.crt"),
+		RootCAFile:       rootCA,
 		NameHold:         durEnv("NAME_HOLD", 90*24*time.Hour),
 		InviteTTL:        durEnv("INVITE_TTL", 7*24*time.Hour),
 		DeviceKeyTTL:     durEnv("DEVICE_KEY_TTL", time.Hour),
 		MembersCanInvite: env("MEMBERS_CAN_INVITE", "false") == "true",
+		ACMEBackend:      acmeBackend,
 	}
 	key, err := os.ReadFile(env("HEADSCALE_API_KEY_FILE", "/secrets/headscale_api_key"))
 	if err != nil {
@@ -76,11 +124,37 @@ func setup() *Service {
 	return svc
 }
 
+func healthCmd() error {
+	if homeTLSDir := strings.TrimSpace(os.Getenv("HOME_TLS_DIR")); homeTLSDir != "" {
+		if err := VerifyHomeTLS(homeTLSDir); err != nil {
+			return err
+		}
+	}
+	meshAddr := env("MESH_ADDR", "127.0.0.1:8082")
+	netw, addr := "tcp", meshAddr
+	if sock, ok := strings.CutPrefix(meshAddr, "unix:"); ok {
+		netw, addr = "unix", sock
+	}
+	conn, err := net.DialTimeout(netw, addr, 2*time.Second)
+	if err != nil {
+		return fmt.Errorf("mesh API %s: %w", meshAddr, err)
+	}
+	_ = conn.Close()
+	return nil
+}
+
 func main() {
 	log.SetFlags(0)
 	args := os.Args[1:]
 	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
 		fmt.Print(usage)
+		return
+	}
+	if args[0] == "health" {
+		if err := healthCmd(); err != nil {
+			fmt.Fprintln(os.Stderr, "unhealthy:", err)
+			os.Exit(1)
+		}
 		return
 	}
 	if args[0] == "serve" {
@@ -151,6 +225,29 @@ func serve(s *Service) {
 		}
 	}()
 
+	var homeMgr *HomeCertManager
+	if homeTLSDir := strings.TrimSpace(os.Getenv("HOME_TLS_DIR")); homeTLSDir != "" {
+		mgr, err := NewHomeCertManager(HomeConfig{
+			Zone:               s.cfg.Zone,
+			HomeTLSDir:         homeTLSDir,
+			CaddyAdminSocket:   strings.TrimSpace(os.Getenv("CADDY_ADMIN_SOCKET")),
+			StorageDir:         env("ACME_STORAGE_DIR", "/var/lib/registrar/acme"),
+			PrimaryCA:          strings.TrimSpace(os.Getenv("ACME_CA_URL")),
+			FallbackCA:         strings.TrimSpace(os.Getenv("ACME_FALLBACK_CA_URL")),
+			Email:              strings.TrimSpace(os.Getenv("ACME_EMAIL")),
+			CARootFile:         strings.TrimSpace(os.Getenv("ACME_CA_ROOT")),
+			Resolvers:          parseCSV(os.Getenv("ACME_RESOLVERS")),
+			PropagationDelay:   durEnv("ACME_PROPAGATION_DELAY", 0),
+			PropagationTimeout: propTimeoutEnv("ACME_PROPAGATION_TIMEOUT"),
+			Backend:            s.acme,
+		})
+		if err != nil {
+			log.Fatalf("acme home manager: %v", err)
+		}
+		homeMgr = mgr
+		defer homeMgr.Close()
+	}
+
 	pub := &http.Server{Addr: env("PUBLIC_ADDR", ":8081"), Handler: PublicHandler(s),
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
@@ -164,16 +261,37 @@ func serve(s *Service) {
 			log.Fatal(err)
 		}
 	}()
+	ln, err := listenMesh(mesh.Addr)
+	if err != nil {
+		log.Fatal(err)
+	}
 	go func() {
-		ln, err := listenMesh(mesh.Addr)
-		if err != nil {
-			log.Fatal(err)
-		}
 		log.Printf("mesh API listening on %s", mesh.Addr)
 		if err := mesh.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatal(err)
 		}
 	}()
+	if homeMgr != nil {
+		hupCh := make(chan os.Signal, 1)
+		signal.Notify(hupCh, syscall.SIGHUP)
+		defer signal.Stop(hupCh)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-hupCh:
+					log.Printf("acme: SIGHUP received, forcing certificate renewal for %s", homeMgr.host)
+					if err := homeMgr.ForceRenew(ctx); err != nil {
+						log.Printf("acme: forced renewal for %s failed: %v", homeMgr.host, err)
+					} else {
+						log.Printf("acme: forced renewal for %s succeeded", homeMgr.host)
+					}
+				}
+			}
+		}()
+		go homeMgr.Run(ctx)
+	}
 	<-ctx.Done()
 	shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -186,6 +304,7 @@ func serve(s *Service) {
 const usage = `registrar: members, invites, devices and names for one Hogman network
 
   serve                                  run the server
+  health                                 check mesh socket and home TLS readiness
 
   member add <handle> [--role owner|admin|member]
   member list

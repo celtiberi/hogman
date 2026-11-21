@@ -36,6 +36,7 @@ type Config struct {
 	MaxNamesPerMember int
 	MaxOpenInvites    int
 	MaxInviteNoteLen  int
+	ACMEBackend       ACMEBackend
 }
 
 // Actor is whoever is performing an action: a member over the mesh API,
@@ -82,6 +83,7 @@ type Service struct {
 	cfg     Config
 	st      *Store
 	hs      *Headscale
+	acme    ACMEBackend
 	rootPEM string
 	rootFP  string
 
@@ -106,21 +108,23 @@ func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
 	if cfg.MaxInviteNoteLen <= 0 {
 		cfg.MaxInviteNoteLen = 256
 	}
-	s := &Service{cfg: cfg, st: st, hs: hs, orphans: map[string]bool{}}
-	raw, err := os.ReadFile(cfg.RootCAFile)
-	if err != nil {
-		return nil, fmt.Errorf("root CA: %w", err)
+	s := &Service{cfg: cfg, st: st, hs: hs, acme: cfg.ACMEBackend, orphans: map[string]bool{}}
+	if cfg.RootCAFile != "" {
+		raw, err := os.ReadFile(cfg.RootCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("root CA: %w", err)
+		}
+		blk, _ := pem.Decode(raw)
+		if blk == nil {
+			return nil, errors.New("root CA: not PEM")
+		}
+		if _, err := x509.ParseCertificate(blk.Bytes); err != nil {
+			return nil, fmt.Errorf("root CA: %w", err)
+		}
+		sum := sha256.Sum256(blk.Bytes)
+		s.rootPEM = string(raw)
+		s.rootFP = strings.ToUpper(hex.EncodeToString(sum[:]))
 	}
-	blk, _ := pem.Decode(raw)
-	if blk == nil {
-		return nil, errors.New("root CA: not PEM")
-	}
-	if _, err := x509.ParseCertificate(blk.Bytes); err != nil {
-		return nil, fmt.Errorf("root CA: %w", err)
-	}
-	sum := sha256.Sum256(blk.Bytes)
-	s.rootPEM = string(raw)
-	s.rootFP = strings.ToUpper(hex.EncodeToString(sum[:]))
 	return s, nil
 }
 
@@ -165,9 +169,10 @@ func (s *Service) DeviceLink(key, kind string) string {
 // ------------------------------------------------------------- validation --
 
 var (
-	handleRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`)
-	labelRE  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	reserved = map[string]bool{"home": true, "ca": true, "ns": true, "registrar": true,
+	handleRE          = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`)
+	labelRE           = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	reservedNSLabelRE = regexp.MustCompile(`^ns[0-9]*$`)
+	reserved          = map[string]bool{"home": true, "ca": true, "ns": true, "registrar": true,
 		"search": true, "nodes": true, "www": true, "join": true, "admin": true}
 	validRoles = map[string]bool{"owner": true, "admin": true, "member": true}
 )
@@ -184,6 +189,9 @@ func (s *Service) normaliseName(raw string) (string, error) {
 		return "", bad("name %q has too many levels", raw)
 	}
 	for _, l := range labels {
+		if l == "_acme-challenge" {
+			return "", forbidden("%q is reserved by the network", l)
+		}
 		if !labelRE.MatchString(l) {
 			return "", bad("name %q: labels are letters, digits and dashes", raw)
 		}
@@ -978,6 +986,117 @@ func (s *Service) serverOwnsName(d *Device, rawName string) error {
 		return missing("%s is not claimed", name)
 	}
 	return nil
+}
+
+// serverOwnsACMEName (s.mu held) enforces strict active ownership for ACME
+// DNS-01 challenges: the device must be a server and must currently own the
+// normalized name (never unclaimed, held, or reserved labels).
+func (s *Service) serverOwnsACMEName(d *Device, rawName string) (string, error) {
+	if d == nil || d.Kind != "server" {
+		return "", forbidden("server devices only")
+	}
+	name, err := s.normaliseName(rawName)
+	if err != nil {
+		return "", err
+	}
+	for _, l := range strings.Split(name, ".") {
+		if l == "home" || l == "nodes" || reservedNSLabelRE.MatchString(l) || l == "_acme-challenge" {
+			return "", forbidden("%q is reserved by the network", l)
+		}
+	}
+	n, err := s.st.NameByName(name)
+	if errors.Is(err, ErrNotFound) {
+		return "", forbidden("%s must be claimed by this server first", name)
+	}
+	if err != nil {
+		return "", err
+	}
+	if n.HeldUntil != nil || n.MemberID != d.MemberID || n.DeviceID == nil || *n.DeviceID != d.ID {
+		return "", forbidden("%s does not point at this server", name)
+	}
+	return name, nil
+}
+
+// serverHasClaimedName (s.mu held) reports whether d owns at least one active claimed name.
+func (s *Service) serverHasClaimedName(d *Device) (bool, error) {
+	if d == nil || d.Kind != "server" {
+		return false, nil
+	}
+	all, err := s.st.Names()
+	if err != nil {
+		return false, err
+	}
+	for _, n := range all {
+		if n.HeldUntil == nil && n.MemberID == d.MemberID && n.DeviceID != nil && *n.DeviceID == d.ID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ServerSetACMETXT writes an ACME DNS-01 challenge TXT record for a name owned by d.
+func (s *Service) ServerSetACMETXT(ctx context.Context, d *Device, rawName, value string) (string, error) {
+	if s.acme == nil {
+		return "", &Problem{Status: 503, Msg: "ACME challenge DNS is not configured"}
+	}
+	if !acmeTXTValueRE.MatchString(value) {
+		return "", bad("invalid ACME TXT value")
+	}
+	s.mu.Lock()
+	name, err := s.serverOwnsACMEName(d, rawName)
+	s.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	fqdn := "_acme-challenge." + name + "." + s.cfg.Zone
+	if err := s.acme.SetTXT(ctx, fqdn, value); err != nil {
+		return "", err
+	}
+	return fqdn, nil
+}
+
+// ServerDeleteACMETXT removes an ACME DNS-01 challenge TXT record for a name owned by d.
+func (s *Service) ServerDeleteACMETXT(ctx context.Context, d *Device, rawName, value string) error {
+	if s.acme == nil {
+		return &Problem{Status: 503, Msg: "ACME challenge DNS is not configured"}
+	}
+	if !acmeTXTValueRE.MatchString(value) {
+		return bad("invalid ACME TXT value")
+	}
+	s.mu.Lock()
+	name, err := s.serverOwnsACMEName(d, rawName)
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	fqdn := "_acme-challenge." + name + "." + s.cfg.Zone
+	return s.acme.DeleteTXT(ctx, fqdn, value)
+}
+
+// ServerMintACMEEAB obtains one single-use fallback CA EAB pair for an enrolled
+// server that currently owns at least one claimed name.
+func (s *Service) ServerMintACMEEAB(ctx context.Context, d *Device) (*EABPair, error) {
+	if d == nil || d.Kind != "server" {
+		return nil, forbidden("server devices only")
+	}
+	if s.acme == nil {
+		return nil, &Problem{Status: 503, Msg: "ACME challenge DNS is not configured"}
+	}
+	s.mu.Lock()
+	hasName, err := s.serverHasClaimedName(d)
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if !hasName {
+		return nil, forbidden("claim a name for this server first")
+	}
+	pair, err := s.acme.MintEAB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.st.Audit(d.Name, "acme.eab", fmt.Sprintf("device#%d", d.ID), "")
+	return pair, nil
 }
 
 // Release frees a name and everything under it.
