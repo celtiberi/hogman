@@ -6,7 +6,7 @@ import (
 )
 
 func TestQRSVG(t *testing.T) {
-	link := "https://hs.example.com/join#k=hskey-auth-abcdefghijklmnop-qrstuvwxyz0123456789&fp=" + strings.Repeat("AB", 32)
+	link := "https://bobo.gate.example.com/join#k=hskey-auth-abcdefghijklmnop-qrstuvwxyz0123456789"
 	svg, err := qrSVG(link)
 	if err != nil {
 		t.Fatal(err)
@@ -14,7 +14,7 @@ func TestQRSVG(t *testing.T) {
 	if !strings.HasPrefix(svg, "<svg ") || !strings.HasSuffix(svg, "</svg>") {
 		t.Fatalf("not an SVG: %.60s", svg)
 	}
-	if strings.Count(svg, "h1v1h-1z") < 200 {
+	if strings.Count(svg, "h1v1h-1z") < 100 {
 		t.Fatalf("too few modules for a %d-character link", len(link))
 	}
 	if strings.Contains(svg, "hskey") {

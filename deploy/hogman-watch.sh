@@ -38,7 +38,7 @@ BACKUPS="${2:-}"
 curl -fsS -m 10 -o /dev/null https://1.1.1.1/cdn-cgi/trace || { log "this machine is offline; skipping"; exit 0; }
 
 c_headscale() { local out; out="$(curl -fsS -m 15 "https://$HOST/health")" || return 1; grep -q '"pass"' <<<"$out"; }
-c_pen()       { local out; out="$(curl -fsS -m 15 "https://$HOST/hogman/v1/network")" || return 1; grep -q '"zone":"[a-z0-9-]*\.hogman"' <<<"$out"; }
+c_pen()       { local out; out="$(curl -fsS -m 15 "https://$HOST/hogman/v1/network")" || return 1; grep -Eq '"zone":"[a-z0-9-]+(\.[a-z0-9-]+)+"' <<<"$out"; }
 c_cert() {
   echo | openssl s_client -connect "$HOST:443" -servername "$HOST" 2>/dev/null \
     | openssl x509 -noout -checkend $((14 * 86400)) >/dev/null 2>&1

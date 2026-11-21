@@ -582,18 +582,25 @@ func TestShareCertManagerMockACME(t *testing.T) {
 		t.Fatalf("403 triggered fallback: eabHits=%d fbHits=%d", eabHits.Load(), fallbackHits.Load())
 	}
 
-	// 2. Registrar /api/acme/txt 429 cap (dnsStepError) must NOT fail over or mint EAB.
+	// 2. Registrar /api/acme/txt 429 cap (dnsStepError) must NOT fail over or mint EAB,
+	//    and must persist backoff state without in-process retry bursts.
 	orderStatus.Store(http.StatusOK)
 	txtCap429.Store(true)
+	txtBeforeCap := txtHits.Load()
 	cmCap := newMgr(t.TempDir())
 	if err := cmCap.EnsureWithBackoff(context.Background()); err == nil {
 		cmCap.Close()
 		t.Fatal("expected TXT 429 error")
 	}
-	cmCap.Close()
-	if txtHits.Load() == 0 {
-		t.Fatal("expected TXT call before cap error")
+	if txtHits.Load()-txtBeforeCap != 1 {
+		cmCap.Close()
+		t.Fatalf("registrar TXT 429 cap made %d attempts, want 1", txtHits.Load()-txtBeforeCap)
 	}
+	if st := cmCap.loadRetryState(); st.Failures != 1 || st.NextAttempt.IsZero() {
+		cmCap.Close()
+		t.Fatalf("registrar TXT 429 cap did not record backoff state: %+v", st)
+	}
+	cmCap.Close()
 	if eabHits.Load() != 0 || fallbackHits.Load() != 0 {
 		t.Fatalf("registrar TXT 429 cap triggered fallback unexpectedly: eabHits=%d fbHits=%d", eabHits.Load(), fallbackHits.Load())
 	}
@@ -1301,5 +1308,161 @@ func TestShareACMEPersistentBackoffAcrossRestarts(t *testing.T) {
 	}
 	if _, err := os.Stat(retryPath); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("expected stale %s to be removed on cached hit, got %v", retryPath, err)
+	}
+}
+
+func TestShareACMERegistrarCapLongBackoff(t *testing.T) {
+	const (
+		penZone   = "bobo.pens.example.com"
+		shareHost = "photos.bobo.pens.example.com"
+	)
+
+	var nonces atomic.Int64
+	nextNonce := func(w http.ResponseWriter) {
+		w.Header().Set("Replay-Nonce", "cap-nonce-"+big.NewInt(nonces.Add(1)).String())
+	}
+	var txtHits atomic.Int32
+
+	priMux := http.NewServeMux()
+	priMux.HandleFunc("/dir", func(w http.ResponseWriter, r *http.Request) {
+		base := "https://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"newNonce":   base + "/nonce",
+			"newAccount": base + "/acct",
+			"newOrder":   base + "/order",
+		})
+	})
+	priMux.HandleFunc("/nonce", func(w http.ResponseWriter, r *http.Request) {
+		nextNonce(w)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	priMux.HandleFunc("/acct", func(w http.ResponseWriter, r *http.Request) {
+		nextNonce(w)
+		w.Header().Set("Location", "https://"+r.Host+"/acct/1")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "valid"})
+	})
+	priMux.HandleFunc("/order", func(w http.ResponseWriter, r *http.Request) {
+		nextNonce(w)
+		w.Header().Set("Location", "https://"+r.Host+"/order/1")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":         "pending",
+			"identifiers":    []map[string]string{{"type": "dns", "value": shareHost}},
+			"authorizations": []string{"https://" + r.Host + "/authz/1"},
+			"finalize":       "https://" + r.Host + "/finalize/1",
+		})
+	})
+	priMux.HandleFunc("/authz/1", func(w http.ResponseWriter, r *http.Request) {
+		nextNonce(w)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":     "pending",
+			"identifier": map[string]string{"type": "dns", "value": shareHost},
+			"challenges": []map[string]any{{
+				"type":   "dns-01",
+				"url":    "https://" + r.Host + "/chall/1",
+				"status": "pending",
+				"token":  "chall_token_0123456789abcdef",
+			}},
+		})
+	})
+	primary := httptest.NewTLSServer(priMux)
+	defer primary.Close()
+
+	meshSrv := newTLSServerForHost(t, "home."+penZone, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/acme/txt" {
+			txtHits.Add(1)
+			http.Error(w, `{"error":"weekly certificate name limit reached"}`, http.StatusTooManyRequests)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: primary.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	storageDir := filepath.Join(t.TempDir(), "acme")
+	fakeNow := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	var waits []time.Duration
+
+	newMgr := func() *shareCertManager {
+		cm, err := newShareCertManager(shareACMEConfig{
+			Zone:       penZone,
+			Host:       shareHost,
+			StorageDir: storageDir,
+			PrimaryCA:  primary.URL + "/dir",
+			CARootFile: caFile,
+			HTTPClient: homeMeshTestClient(meshSrv, penZone),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cm.now = func() time.Time { return fakeNow }
+		cm.waitFn = func(_ context.Context, d time.Duration) error {
+			waits = append(waits, d)
+			fakeNow = fakeNow.Add(d)
+			return nil
+		}
+		return cm
+	}
+
+	// 1. First registrar 429 returns after 1 attempt and schedules 1h maxBackoff immediately.
+	cm1 := newMgr()
+	if err := cm1.EnsureWithBackoff(context.Background()); err == nil {
+		cm1.Close()
+		t.Fatal("expected TXT 429 error on first attempt")
+	}
+	st1 := cm1.loadRetryState()
+	cm1.Close()
+	if txtHits.Load() != 1 {
+		t.Fatalf("expected 1 TXT attempt on registrar 429, got %d", txtHits.Load())
+	}
+	if len(waits) != 0 {
+		t.Fatalf("unexpected in-process wait after registrar 429: %v", waits)
+	}
+	wantNext1 := fakeNow.Add(time.Hour)
+	if st1.Failures != 1 || !st1.NextAttempt.Equal(wantNext1) {
+		t.Fatalf("retry state = %+v, want Failures=1 NextAttempt=%s", st1, wantNext1)
+	}
+
+	// 2. Restart 15m later waits remaining 45m, tries once, and sets another 1h backoff.
+	fakeNow = fakeNow.Add(15 * time.Minute)
+	cm2 := newMgr()
+	if err := cm2.EnsureWithBackoff(context.Background()); err == nil {
+		cm2.Close()
+		t.Fatal("expected TXT 429 error on second attempt")
+	}
+	st2 := cm2.loadRetryState()
+	cm2.Close()
+	if len(waits) != 1 || waits[0] != 45*time.Minute {
+		t.Fatalf("restart waits = %v, want [45m]", waits)
+	}
+	if txtHits.Load() != 2 {
+		t.Fatalf("expected 2 total TXT hits after restart, got %d", txtHits.Load())
+	}
+	wantNext2 := fakeNow.Add(time.Hour)
+	if st2.Failures != 2 || !st2.NextAttempt.Equal(wantNext2) {
+		t.Fatalf("retry state after second 429 = %+v, want Failures=2 NextAttempt=%s", st2, wantNext2)
+	}
+
+	// 3. Immediate restart waits full 1h cap before hitting /api/acme/txt again.
+	waits = nil
+	cm3 := newMgr()
+	if err := cm3.EnsureWithBackoff(context.Background()); err == nil {
+		cm3.Close()
+		t.Fatal("expected TXT 429 error on third attempt")
+	}
+	cm3.Close()
+	if len(waits) != 1 || waits[0] != time.Hour {
+		t.Fatalf("third restart waits = %v, want [1h]", waits)
+	}
+	if txtHits.Load() != 3 {
+		t.Fatalf("expected 3 total TXT hits, got %d", txtHits.Load())
 	}
 }

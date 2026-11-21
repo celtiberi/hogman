@@ -10,7 +10,6 @@ cd "$HERE"
 
 DATA="$HERE/data"
 STATE="$DATA/state.env"
-STEP_IMAGE="smallstep/step-ca:0.30.2"
 
 die()  { echo "hogman: $*" >&2; exit 1; }
 info() { echo "==> $*" >&2; }
@@ -20,7 +19,7 @@ usage() {
 usage: hogman <command> [args]
 
 Setup
-  init                         Generate the network's CA and configs (once)
+  init                         Initialise the network's folders and configs (once)
   up                           Bootstrap on first run, then start everything
   down                         Stop everything
   status                       Containers, members and devices
@@ -66,27 +65,17 @@ load_env() {
   set +a
   : "${NETWORK:?set NETWORK in .env}"
   : "${PUBLIC_HOST:?set PUBLIC_HOST in .env}"
+  : "${ZONE:?set ZONE in .env, e.g. ${NETWORK}.pens.hogman.network}"
   case "$NETWORK" in
     *[!a-z0-9-]*|-*|*-) die "NETWORK must be lowercase letters, digits and dashes" ;;
   esac
   valid_host "$PUBLIC_HOST" || die "PUBLIC_HOST must be a valid DNS hostname"
+  valid_host "$ZONE" || die "ZONE must be a valid DNS name"
+  case "$ZONE" in "$NETWORK".*) ;; *) die "ZONE must start with the pen's name: $NETWORK.<domain>" ;; esac
+  export ZONE
   if [ -n "${PUBLIC_IPV4:-}" ]; then
     valid_ipv4 "$PUBLIC_IPV4" || die "PUBLIC_IPV4 must be a valid IPv4 address"
   fi
-  # CERT_MODE: private (default) runs the pen's own certificate authority and
-  # members install its root; public (D-18) gets publicly trusted certificates
-  # by DNS-01 instead, and the pen's zone is a real name (ZONE in .env, e.g.
-  # bobo.pens.hogman.network for a hosted pen).
-  export CERT_MODE="${CERT_MODE:-private}"
-  case "$CERT_MODE" in
-    private) export ZONE="${NETWORK}.hogman" ;;
-    public)
-      : "${ZONE:?CERT_MODE=public needs ZONE in .env, e.g. ${NETWORK}.pens.hogman.network}"
-      valid_host "$ZONE" || die "ZONE must be a valid DNS name"
-      case "$ZONE" in "$NETWORK".*) ;; *) die "ZONE must start with the pen's name: $NETWORK.<domain>" ;; esac
-      export ZONE ;;
-    *) die "CERT_MODE must be private or public" ;;
-  esac
   export STUN_PORT="${STUN_PORT:-3478}"
   # FRONT_DOOR=true: this pen sits behind a shared front door (deploy/hogman-host)
   # that holds ports 80/443 and the public certificate for every pen on the host.
@@ -104,8 +93,8 @@ dc() {
   [ -f "$STATE" ] && args+=(--env-file "$STATE")
   local files=(-f compose.yaml)
   [ "$FRONT_DOOR" = true ] && files+=(-f compose.front.yaml)
-  [ "$CERT_MODE" = public ] && files+=(-f compose.public.yaml)
   [ "$TEST_MODE" = true ] && [ "$FRONT_DOOR" != true ] && [ -f test/compose.test.yaml ] && files+=(-f test/compose.test.yaml)
+  [ "$TEST_MODE" = true ] && [ -n "${HOGMAN_TEST_ACME_ROOT:-}" ] && files+=(-f test/compose.acme-root.yaml)
   ZONE="$ZONE" EDGE_TLS_MODE="$EDGE_TLS_MODE" docker compose -p "${COMPOSE_PROJECT_NAME:-hogman}" \
     "${args[@]}" "${files[@]}" "$@"
 }
@@ -155,7 +144,7 @@ json_field() {  # json_field <field>  (reads one JSON object on stdin)
 
 randpw() { head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | head -c 40; }
 
-# The user the registrar and step-ca run as. Never root (audit H3): run by a
+# The user the registrar runs as. Never root (audit H3): run by a
 # person, that's them. Run as root (a hosted server, or the sign-up broker's
 # container), it's a fixed numeric user with no account, 65532 ("nonroot" by
 # the usual convention), so it's the same everywhere and survives rebuilds.
@@ -170,13 +159,9 @@ own_runtime_files() {
   [ "$(id -u)" = 0 ] || return 0
   [ -n "${HOGMAN_UID:-}" ] && [ "$HOGMAN_UID" != 0 ] || return 0
   local d
-  # What it only reads holds nothing secret (public certificates, the CA's
-  # settings): make it readable whatever root's umask was when it was written.
-  # The secrets below are handed over instead, and stay private.
-  chmod 755 "$DATA/pki/public" "$DATA/step/config" "$DATA/join-dl" 2>/dev/null || true
+  chmod 755 "$DATA/join-dl" 2>/dev/null || true
   chmod -R a+rX "$DATA/join-dl" 2>/dev/null || true
-  chmod 644 "$DATA"/pki/public/*.crt "$DATA/step/config/ca.json" 2>/dev/null || true
-  for d in "$DATA/registrar" "$DATA/api" "$DATA/edge" "$DATA/portal" "$DATA/secrets/registrar" "$DATA/step/secrets" "$DATA/step/db" "$DATA/home-tls" "$DATA/caddy-admin"; do
+  for d in "$DATA/registrar" "$DATA/api" "$DATA/edge" "$DATA/portal" "$DATA/secrets/registrar" "$DATA/home-tls" "$DATA/caddy-admin"; do
     [ -e "$d" ] && chown -R "$HOGMAN_UID:$HOGMAN_GID" "$d"
   done
   return 0
@@ -184,75 +169,11 @@ own_runtime_files() {
 
 # ------------------------------------------------------------------ init ----
 
+# A pen with public certificates (D-18 / D-22): no certificate authority,
+# nothing for members to install, and no root key to look after.
 cmd_init() {
   load_env
-  [ -f "$DATA/pki/public/root_ca.crt" ] && die "already initialised (data/pki exists)."
   [ -n "${INITIALISED:-}" ] && die "already initialised ($INITIALISED)."
-  if [ "$CERT_MODE" = public ]; then init_public; return; fi
-
-  info "Network $NETWORK, zone $ZONE, control host $PUBLIC_HOST"
-  mkdir -p "$DATA"/{pki/public,pki/offline,step/config,step/secrets,step/db} \
-           "$DATA"/{headscale/config,headscale/lib,mesh/core} \
-           "$DATA"/{edge,edge-trust,portal,registrar,secrets/registrar,join-dl,tmp}
-  chmod 700 "$DATA/pki/offline" "$DATA/step/secrets" "$DATA/secrets/registrar" \
-            "$DATA/mesh" "$DATA/registrar" "$DATA/headscale/lib"
-
-  local ids; ids="$(run_ids)"
-  HOGMAN_UID="${ids% *}"; HOGMAN_GID="${ids#* }"
-  set_state HOGMAN_UID "$HOGMAN_UID"
-  set_state HOGMAN_GID "$HOGMAN_GID"
-
-  info "Generating the network's certificate authority (restricted to .$ZONE)"
-  (
-    umask 077
-    randpw > "$DATA/pki/offline/root_password"
-    randpw > "$DATA/step/secrets/intermediate_password"
-  )
-  render templates/root_ca.tpl "$DATA/tmp/root_ca.tpl"
-  render templates/intermediate_ca.tpl "$DATA/tmp/intermediate_ca.tpl"
-  docker run --rm --user "$(id -u):$(id -g)" \
-    -v "$DATA/pki:/pki" -v "$DATA/step/secrets:/secrets" -v "$DATA/tmp:/tpl:ro" \
-    --entrypoint sh "$STEP_IMAGE" -c "
-      set -e
-      step certificate create '$ZONE Root CA' \
-        /pki/public/root_ca.crt /pki/offline/root_ca_key \
-        --template /tpl/root_ca.tpl --kty EC --curve P-256 --not-after 87600h \
-        --password-file /pki/offline/root_password
-      step certificate create '$ZONE Intermediate CA' \
-        /pki/public/intermediate_ca.crt /secrets/intermediate_ca_key \
-        --ca /pki/public/root_ca.crt --ca-key /pki/offline/root_ca_key \
-        --ca-password-file /pki/offline/root_password \
-        --template /tpl/intermediate_ca.tpl --kty EC --curve P-256 --not-after 43800h \
-        --password-file /secrets/intermediate_password
-    "
-  rm -rf "$DATA/tmp"
-  chmod 600 "$DATA"/pki/offline/* "$DATA"/step/secrets/*
-  own_runtime_files
-
-  render templates/ca.json "$DATA/step/config/ca.json"
-  render templates/policy.hujson "$DATA/headscale/config/policy.hujson"
-
-  local fp
-  fp="$(openssl x509 -in "$DATA/pki/public/root_ca.crt" -noout -fingerprint -sha256 | cut -d= -f2)"
-  set_state ROOT_FINGERPRINT "$fp"
-
-  cat >&2 <<EOF
-
-Initialised. Root certificate fingerprint (SHA-256):
-  $fp
-
-IMPORTANT: data/pki/offline/ holds the root key and its password. The network
-runs without them. Move that folder somewhere offline (encrypted USB, password
-manager) once you have checked the network works, and delete it from this server.
-You will need it only to replace the intermediate CA.
-
-Next: ./hogman up
-EOF
-}
-
-# A pen with public certificates (D-18): no certificate authority, nothing for
-# members to install, and no root key to look after.
-init_public() {
   info "Network $NETWORK, zone $ZONE, control host $PUBLIC_HOST (public certificates)"
   mkdir -p "$DATA"/{headscale/config,headscale/lib,mesh/core} \
            "$DATA"/{edge,edge-trust,portal,registrar,secrets/registrar,join-dl,tmp,api,home-tls,caddy-admin}
@@ -349,62 +270,25 @@ use_prebuilt_or_build() {
   fi
 }
 
-# Pens upgraded from before step-ca moved onto core-mesh still have the retired
-# ca-mesh node registered in Headscale, its state under data/mesh/ca, and
-# CA_MESH_IP in state.env. Clean them up once on upgrade.
-cleanup_old_ca() {
-  if [ ! -d "$DATA/mesh/ca" ] && [ ! -f "$DATA/mesh/ca.env" ] && [ -z "${CA_MESH_IP:-}" ]; then
-    return 0
-  fi
-  info "Cleaning up retired ca-mesh node"
-  local nodes_json ids id
-  if ! nodes_json="$(hs nodes list -o json 2>/dev/null)"; then
-    return 0
-  fi
-  ids="$(printf '%s\n' "$nodes_json" | awk '
-    /^\t\{$/ { id=""; name=""; infra=0; in_tags=0 }
-    /^\t\t"id": / { sub(/^\t\t"id": */, ""); sub(/,$/, ""); id=$0 }
-    /^\t\t"name": "ca",?$/ { name="ca" }
-    /^\t\t"tags": \[/ { in_tags=1 }
-    in_tags && /"tag:infra"/ { infra=1 }
-    in_tags && /\]/ { in_tags=0 }
-    /^\t\},?$/ { if (id != "" && name == "ca" && infra) print id }
-  ')"
-  for id in $ids; do
-    if ! hs nodes delete -i "$id" --force >/dev/null 2>&1; then
-      return 0
-    fi
-  done
-  rm -rf "$DATA/mesh/ca" "$DATA/mesh/ca.env"
-  unset_state CA_MESH_IP
-}
-
 cmd_up() {
   load_env
-  if [ "$CERT_MODE" = public ]; then
-    [ "${INITIALISED:-}" = public ] || die "run ./hogman init first."
-    [ -s "$DATA/secrets/registrar/challenge_dns_token" ] \
-      || die "no challenge DNS token in data/secrets/registrar/challenge_dns_token (hogman-host adds it)"
-    mkdir -p "$DATA"/{api,home-tls,caddy-admin}
-  else
-    [ -f "$DATA/pki/public/root_ca.crt" ] || die "run ./hogman init first."
-  fi
-  # Folders a backup leaves out. Made here, as us: if Docker made them, they
-  # would belong to root and step-ca could not write its database.
-  mkdir -p "$DATA"/{step/db,edge,portal,join-dl,tmp,api}
-  chmod 700 "$DATA/api" "$DATA/edge" "$DATA/portal"
-  # Pens raised as root before audit H3 ran their registrar and step-ca as
-  # root too. Move them to the unprivileged user on the next start.
+  [ -n "${INITIALISED:-}" ] || die "run ./hogman init first."
+  [ -s "$DATA/secrets/registrar/challenge_dns_token" ] \
+    || die "no challenge DNS token in data/secrets/registrar/challenge_dns_token (hogman-host adds it)"
+  mkdir -p "$DATA"/{edge,portal,join-dl,tmp,api,home-tls,caddy-admin}
+  chmod 700 "$DATA/api" "$DATA/edge" "$DATA/portal" "$DATA/home-tls" "$DATA/caddy-admin"
+  # Pens raised as root before audit H3 ran the registrar as root too. Move it
+  # to the unprivileged user on the next start.
   if [ "${HOGMAN_UID:-}" = 0 ] && [ "$(id -u)" = 0 ]; then
     local ids; ids="$(run_ids)"
     HOGMAN_UID="${ids% *}"; HOGMAN_GID="${ids#* }"
     set_state HOGMAN_UID "$HOGMAN_UID"
     set_state HOGMAN_GID "$HOGMAN_GID"
-    info "registrar and step-ca now run as user $HOGMAN_UID, not root"
+    info "registrar now runs as user $HOGMAN_UID, not root"
   fi
   if [ "$(id -u)" = 0 ] && [ -n "${HOGMAN_UID:-}" ] && [ "$HOGMAN_UID" != 0 ]; then
     local svc cid cur
-    for svc in step-ca registrar portal edge; do
+    for svc in registrar portal edge; do
       cid="$(dc ps -q "$svc" 2>/dev/null || true)"
       [ -n "$cid" ] || continue
       cur="$(docker inspect -f '{{.Config.User}}' "$cid" 2>/dev/null || true)"
@@ -465,7 +349,6 @@ cmd_up() {
     render_headscale
   fi
 
-  [ "$CERT_MODE" = public ] || render templates/ca.json "$DATA/step/config/ca.json"
   use_prebuilt_or_build
 
   if [ "$FRONT_DOOR" = true ]; then
@@ -475,7 +358,6 @@ cmd_up() {
   fi
   dc up -d --build --remove-orphans
   wait_for "registrar" 60 reg sync
-  cleanup_old_ca
   if [ -d "$DATA/coredns" ]; then
     rm -rf "$DATA/coredns"
   fi

@@ -1,15 +1,14 @@
 # In-mesh portal at home.<zone>. Only reachable over the mesh.
-# Gets its certificate from the network's own CA, the same way members' servers do.
+# The registrar gets home.<zone>'s certificate from Let's Encrypt (DNS-01) and
+# writes it to /home-tls; Caddy just serves it, and the registrar reloads
+# Caddy over the admin socket when it renews.
 {
-	acme_ca https://ca.{$ZONE}:9000/acme/acme/directory
-	acme_ca_root /pki/root_ca.crt
-	# The pen's CA offers TLS-ALPN on 443 only (HTTPS-only, D-11).
-	cert_issuer acme {
-		disable_http_challenge
-	}
+	auto_https off
+	admin unix//run/caddy-admin/admin.sock
 }
 
-home.{$ZONE} {
+https://home.{$ZONE}:443 {
+	tls /home-tls/home.crt /home-tls/home.key
 	header {
 		Strict-Transport-Security "max-age=31536000"
 		X-Frame-Options DENY
@@ -20,33 +19,14 @@ home.{$ZONE} {
 		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 		-Server
 	}
-	# Member and admin API. Caddy sets X-Forwarded-For to the caller's mesh
-	# address (ignoring any the caller sent), which is how the registrar
-	# knows who is asking. It's a Unix socket that only the portal and the
-	# registrar can see, so nothing else in the pen can claim to be a member.
+	# Member and admin API, over the Unix socket only the portal and the
+	# registrar can see (audit H2). Caddy sets X-Forwarded-For to the caller's
+	# mesh address, which is how the registrar knows who is asking.
 	handle /api/* {
 		reverse_proxy unix//run/hogman-api/mesh.sock
-	}
-	# Members can fetch the network's root certificate again from here.
-	handle /root_ca.crt {
-		root * /pki
-		file_server
 	}
 	handle {
 		root * /srv/portal
 		file_server
-	}
-}
-
-# Backwards compatibility for member servers still pointed at https://ca.<zone>
-# (port 443) from before step-ca moved onto core-mesh:9000. step-ca builds ACME
-# directory links from the incoming Host header, so clients stay on port 443.
-ca.{$ZONE} {
-	reverse_proxy https://127.0.0.1:9000 {
-		header_up Host ca.{$ZONE}
-		transport http {
-			tls_server_name ca.{$ZONE}
-			tls_trust_pool file /pki/root_ca.crt
-		}
 	}
 }

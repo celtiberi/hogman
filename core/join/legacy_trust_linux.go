@@ -49,60 +49,38 @@ func sbinTool(name string) string {
 	return ""
 }
 
-func anchorPath(s *anchorStore, r *RootInfo) string {
-	return filepath.Join(s.dir, "hogman-"+r.Zone+".crt")
-}
-
-func trustInstalled(r *RootInfo) bool {
+func removeLegacyHogmanRoot(zone, rootFP string) (bool, error) {
 	s, err := linuxStore()
 	if err != nil {
-		return false
+		return false, nil
 	}
-	b, err := os.ReadFile(anchorPath(s, r))
-	return err == nil && string(b) == r.PEM
-}
-
-// installTrust adds the root to the system store used by curl, git, Go,
-// Python's requests (via certifi only if configured) and most tools.
-// Chrome and Firefox on Linux keep their own stores (NSS); see the hint printed.
-func installTrust(r *RootInfo, file string) error {
-	s, err := linuxStore()
+	entries, err := os.ReadDir(s.dir)
 	if err != nil {
-		return err
+		return false, nil
 	}
-	if trustInstalled(r) {
-		note("already trusted")
-		return nil
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			names = append(names, e.Name())
+		}
 	}
-	if out, err := run(true, "install", "-m", "0644", file, anchorPath(s, r)); err != nil {
-		return errorf("could not copy the certificate: %v\n%s", err, out)
+	paths := filterLinuxLegacyAnchorFiles(s.dir, names, zone, rootFP, os.ReadFile)
+	if len(paths) == 0 {
+		return false, nil
 	}
-	if out, err := run(true, s.update[0], s.update[1:]...); err != nil {
-		return errorf("could not refresh the certificate store: %v\n%s", err, out)
+	for _, p := range paths {
+		if out, err := run(true, "rm", "-f", p); err != nil {
+			return false, errorf("could not remove old certificate (%s): %v\n%s", p, err, out)
+		}
 	}
-	note("browsers on Linux keep their own list; if Chrome or Firefox warn, import %s there", anchorPath(s, r))
-	note("(it's also at https://home.%s/root_ca.crt once you're in)", r.Zone)
-	return nil
-}
-
-func removeTrust(r *RootInfo, _ string) error {
-	s, err := linuxStore()
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(anchorPath(s, r)); err != nil {
-		return nil
-	}
-	if out, err := run(true, "rm", "-f", anchorPath(s, r)); err != nil {
-		return errorf("could not remove the certificate: %v\n%s", err, out)
-	}
-	// --fresh rebuilds /etc/ssl/certs, so no dangling link to the removed file is left.
 	args := s.update[1:]
 	if filepath.Base(s.update[0]) == "update-ca-certificates" {
 		args = append([]string{"--fresh"}, args...)
 	}
-	_, err = run(true, s.update[0], args...)
-	return err
+	if out, err := run(true, s.update[0], args...); err != nil {
+		return false, errorf("could not refresh the certificate store: %v\n%s", err, out)
+	}
+	return true, nil
 }
 
 func tailscaleCandidates() []string {

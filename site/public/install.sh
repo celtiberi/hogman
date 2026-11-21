@@ -78,13 +78,15 @@ Next:
   1. Manage this server over your own Tailscale network, and close SSH to the internet:
        tailscale up --hostname=\$(hostname)        (open the link it prints)
        bash $home/bootstrap.sh --lock-ssh
-  2. Point a hostname at this server (for example hs.example.com), then raise a pen:
-       hogman-host add mypen hs.example.com
+  2. Set up the challenge DNS server and wildcard gate certificate, then raise a pen:
+       hogman-host challenge-dns-setup <public-ip>
+       hogman-host gate-cert-setup <gate-domain>
+       hogman-host pens-zone <pens-zone>
+       hogman-host add mypen
        hogman-host pen mypen member add you --role owner
   3. Get your own laptop in: open the link this prints, on the laptop:
        hogman-host pen mypen device key you personal
-  4. Move the pen's root key off the server (hogman-host add says where it is).
-  5. Invite others:  hogman-host pen mypen invite create
+  4. Invite others:  hogman-host pen mypen invite create
 
 The whole guide, with backups and alerts:
   https://github.com/celtiberi/hogman/blob/main/deploy/README.md
@@ -96,9 +98,13 @@ EOF
 EOF
     hogman-host list | sed 's/^/    /'
     echo
-    if grep -q '^SIGNUP_HOST=.' "$home/host.env" 2>/dev/null; then
-      say "Updating the sign-up page"
-      hogman-host signup-setup
+    if ( . "$home/host.env" 2>/dev/null && [ -n "${SIGNUP_HOST:-}" ] ); then
+      if ( . "$home/host.env" 2>/dev/null && [ -n "${PENS_ZONE:-}" ] && [ -n "${GATE_DOMAIN:-}" ] ); then
+        say "Updating the sign-up page"
+        hogman-host signup-setup
+      else
+        echo "  (sign-up page not refreshed yet: run hogman-host gate-cert-setup, pens-zone, then signup-setup)"
+      fi
     fi
     echo "  hogman-host upgrade <pen>     (restarts that pen on the new version)"
   fi

@@ -367,27 +367,41 @@ func TestFetchNetworkValidation(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(payload)
 	}))
 	defer srv.Close()
-	host := strings.TrimPrefix(srv.URL, "https://")
-	c := srv.Client()
+	host := "bobo.gate.example.com"
+	baseTransport := srv.Client().Transport
+	srvAddr := strings.TrimPrefix(srv.URL, "https://")
+	c := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			r2 := req.Clone(req.Context())
+			r2.URL.Host = srvAddr
+			return baseTransport.RoundTrip(r2)
+		}),
+	}
 
 	baseValid := networkInfo{
-		Zone:        "bobo.hogman",
+		Zone:        "bobo.pens.example.com",
 		LoginServer: "https://" + host,
-		CertMode:    "private",
-		Portal:      "https://home.bobo.hogman",
+		CertMode:    "public",
+		Portal:      "https://home.bobo.pens.example.com",
 		DNSServer:   "100.64.0.2",
 	}
 	payload = baseValid
 	if _, err := fetchNetwork(c, host); err != nil {
-		t.Fatalf("valid networkInfo rejected: %v", err)
+		t.Fatalf("valid public networkInfo rejected: %v", err)
+	}
+	payload.CertMode = ""
+	if _, err := fetchNetwork(c, host); err != nil {
+		t.Fatalf("public networkInfo with omitted cert_mode rejected: %v", err)
 	}
 
 	cases := []struct {
 		name   string
 		mutate func(*networkInfo)
 	}{
-		{"missing cert_mode", func(n *networkInfo) { n.CertMode = "" }},
+		{"private cert_mode", func(n *networkInfo) { n.CertMode = "private" }},
 		{"unknown cert_mode", func(n *networkInfo) { n.CertMode = "bogus" }},
+		{"cross-pen zone", func(n *networkInfo) { n.Zone = "alice.pens.example.com"; n.Portal = "https://home.alice.pens.example.com" }},
+		{"non-public zone", func(n *networkInfo) { n.Zone = "bobo.hogman"; n.Portal = "https://home.bobo.hogman" }},
 		{"mismatched login_server", func(n *networkInfo) { n.LoginServer = "https://evil.example" }},
 		{"foreign portal", func(n *networkInfo) { n.Portal = "https://evil.example/phish" }},
 		{"non-mesh dns_server", func(n *networkInfo) { n.DNSServer = "8.8.8.8" }},
@@ -442,35 +456,6 @@ func TestValidatePublicZoneAndNetworkInfo(t *testing.T) {
 		if err := validatePublicZone(tc.host, tc.zone); err == nil {
 			t.Errorf("validatePublicZone(%q, %q) expected error, got nil", tc.host, tc.zone)
 		}
-	}
-
-	badPub := networkInfo{
-		Zone:            "bobo.pens.example.com",
-		LoginServer:     "https://bobo.gate.example.com",
-		CertMode:        "public",
-		RootCA:          "PEM",
-		RootFingerprint: fp64,
-		Portal:          "https://home.bobo.pens.example.com",
-		DNSServer:       "100.64.0.1",
-	}
-	if err := validateNetworkInfo("bobo.gate.example.com", &badPub); err == nil {
-		t.Fatal("expected public networkInfo with RootCA/RootFingerprint to fail")
-	}
-
-	goodPEM, goodFP := makeRoot(t, []string{"bobo.hogman"}, true)
-	privInfo := &networkInfo{Zone: "bobo.hogman", CertMode: "private", RootCA: goodPEM, RootFingerprint: goodFP}
-	if _, err := checkLinkCertMode(&Link{Host: "hs.example.com", Fingerprint: ""}, privInfo); err == nil {
-		t.Fatal("private link without fp= must fail")
-	}
-	if root, err := checkLinkCertMode(&Link{Host: "hs.example.com", Fingerprint: goodFP}, privInfo); err != nil || root == nil {
-		t.Fatalf("valid private link failed: root=%v err=%v", root, err)
-	}
-	pubInfo := &networkInfo{Zone: "bobo.pens.example.com", CertMode: "public"}
-	if _, err := checkLinkCertMode(&Link{Host: "bobo.gate.example.com", Fingerprint: fp64}, pubInfo); err == nil {
-		t.Fatal("public link carrying fp= must fail")
-	}
-	if root, err := checkLinkCertMode(&Link{Host: "bobo.gate.example.com"}, pubInfo); err != nil || root != nil {
-		t.Fatalf("valid public link failed: root=%v err=%v", root, err)
 	}
 }
 

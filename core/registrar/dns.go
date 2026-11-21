@@ -31,7 +31,6 @@ type DNSServer struct {
 	nsName    dnsmessage.Name
 	ownerName dnsmessage.Name
 	coreV4    netip.Addr
-	caV4      netip.Addr
 	serial    uint32
 }
 
@@ -58,14 +57,6 @@ func NewDNSServer(s *Service) (*DNSServer, error) {
 	if err != nil || !coreV4.Is4() {
 		return nil, fmt.Errorf("dns: invalid CORE_MESH_IP %q", s.cfg.CoreIP)
 	}
-	caRaw := strings.TrimSpace(s.cfg.CAIP)
-	if caRaw == "" {
-		caRaw = s.cfg.CoreIP
-	}
-	caV4, err := netip.ParseAddr(caRaw)
-	if err != nil || !caV4.Is4() {
-		return nil, fmt.Errorf("dns: invalid CA_MESH_IP %q", caRaw)
-	}
 	return &DNSServer{
 		svc:       s,
 		zoneFQDN:  fqdn,
@@ -73,7 +64,6 @@ func NewDNSServer(s *Service) (*DNSServer, error) {
 		nsName:    nsName,
 		ownerName: ownerName,
 		coreV4:    coreV4,
-		caV4:      caV4,
 		serial:    uint32(time.Now().Unix()),
 	}, nil
 }
@@ -382,8 +372,6 @@ func (d *DNSServer) coreAddr(rel string) (netip.Addr, bool) {
 	switch rel {
 	case "ns", "home":
 		return d.coreV4, true
-	case "ca":
-		return d.caV4, true
 	default:
 		return netip.Addr{}, false
 	}

@@ -15,6 +15,11 @@
   const m = location.hash.match(/code=([A-Za-z0-9-]+)/);
   if (m) $('code').value = m[1].toUpperCase();
 
+  // What pens' names end in (<pen>.pens.hogman.network), from the server.
+  let sites = 'pens.hogman.network';
+  const setSites = () => document.querySelectorAll('.sites').forEach(e => { e.textContent = sites; });
+  api('GET', '/status').then(r => { if (/^[a-z0-9.-]+$/.test(r.sites_domain || '')) { sites = r.sites_domain; setSites(); } }).catch(() => {});
+
   const setNames = () => {
     const p = $('pen').value.trim().toLowerCase() || '<network>';
     document.querySelectorAll('.penname').forEach(e => { e.textContent = p; });
@@ -34,13 +39,13 @@
         const r = await api('GET', '/check?pen=' + encodeURIComponent(pen));
         if (seq !== checkSeq) return;
         hint.className = r.free ? 'hint ok' : 'hint bad';
-        hint.textContent = r.free ? `✓ ${pen}.hogman is free` : `✗ ${r.reason}`;
+        hint.textContent = r.free ? `✓ ${pen}.${sites} is free` : `✗ ${r.reason}`;
       } catch (e) { if (seq === checkSeq) { hint.className = 'hint bad'; hint.textContent = e.message; } }
     }, 350);
   });
   const defaultHint = () => {
     const s = document.createElement('span'); s.className = 'penname'; s.textContent = '<network>';
-    return [document.createTextNode('For your private network itself. Sites and addresses will end in .'), s, document.createTextNode('.hogman')];
+    return [document.createTextNode('For your private network itself. Sites and addresses will end in .'), s, document.createTextNode('.' + sites)];
   };
   $('handle').addEventListener('input', setNames);
   for (const f of ['pen', 'handle']) $(f).addEventListener('change', setNames);   // autofill, paste, scripts

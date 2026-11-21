@@ -3,7 +3,7 @@
 #
 # The front door (Caddy) holds ports 80/443 and gets a public certificate for
 # each pen's control hostname, then hands each pen's traffic to that pen's own
-# stack. Pens share nothing else: each has its own Headscale, DNS, CA,
+# stack. Pens share nothing else: each has its own Headscale, DNS,
 # registrar, database and keys, in its own folder.
 #
 #   $HOGMAN_HOME/src/        the core/ code new pens are made from
@@ -27,7 +27,8 @@ usage() {
 usage: hogman-host <command>
 
   init [--test]                  set up the front door (--test: self-signed certificates, for local trials)
-  add <network> <public-host>    create a pen, e.g.  add bobo hs.example.com
+  add <pen>                      create a pen with public certificates: its front door is
+                                 <pen>.<gate-domain>, its sites <site>.<pen>.<pens-zone>
   list                           pens on this host
   pen <network> <args...>        run ./hogman in a pen, e.g.  pen bobo member list
   upgrade <network>              update a pen's code from src/ and restart it
@@ -38,7 +39,7 @@ usage: hogman-host <command>
   backup-allow '<ssh-public-key>'  let another machine download the encrypted backups, and nothing else
   backup                         back up every pen now
 
-  signup-setup <pens-domain> <signup-host> [max-pens]
+  signup-setup <front-door-domain> <signup-host> [max-pens]
                                  a sign-up page that raises pens for other people
                                  (no arguments: rebuild it with the saved settings)
   signup-code [note]             a single-use sign-up code (sign-ups are invite-only)
@@ -54,6 +55,8 @@ usage: hogman-host <command>
   challenge-dns <args...>        talk to it, e.g.  challenge-dns cred list
   gate-cert-setup <gate-domain>  keep the front door's *.<gate-domain> certificate
                                  (e.g. gate-cert-setup gate.hogman.network)
+  pens-zone <zone>               where public pens live (e.g. pens.hogman.network); set it
+                                 once that zone is delegated to this server's challenge DNS
 
 The control hostname's DNS must point at this server before `add`, so the
 front door can get its certificate.
@@ -353,7 +356,7 @@ EOF
   load_host
   write_front
   reload_front
-  info "front door up${tls:+ (test certificates)}. Next: hogman-host add <network> <public-host>"
+  info "front door up${tls:+ (test certificates)}. Next: hogman-host challenge-dns-setup <public-ip>, gate-cert-setup <gate-domain>, pens-zone <zone>, then hogman-host add <pen>"
 }
 
 next_stun_port() {
@@ -365,33 +368,26 @@ next_stun_port() {
   die "no free relay port in $STUN_BASE-$((STUN_BASE + 99))"
 }
 
-# --public <zone> is build scaffolding for the public-certificate switch-over
-# (D-22): deliberately undocumented, never offered as a choice, and removed
-# along with the private certificate authority at the switch-over.
 cmd_add() {
   load_host
-  local n="${1:-}" host="${2:-}" zone=""
-  [ -n "$n" ] && [ -n "$host" ] || die "usage: hogman-host add <network> <public-host> [--public <zone>]"
-  case "${3:-}" in
-    "") [ $# -le 2 ] || die "usage: hogman-host add <network> <public-host> [--public <zone>]" ;;
-    --public)
-      zone="${4:-}"; [ $# -eq 4 ] || die "usage: hogman-host add <network> <public-host> --public <zone>"
-      valid_host "$zone" && [[ "$zone" == "$n".* ]] || die "--public needs the pen's zone, $n.<domain> (e.g. $n.pens.hogman.network)" ;;
-    *) die "unknown option ${3}: usage: hogman-host add <network> <public-host> [--public <zone>]" ;;
-  esac
+  # add <pen>: a pen with public certificates (D-18 / D-22). Its front door is
+  #   <pen>.<GATE_DOMAIN> and its sites live under <pen>.<PENS_ZONE>.
+  local n="${1:-}"
+  [ -n "$n" ] && [ $# -eq 1 ] || die "usage: hogman-host add <pen>"
+  [ -n "${PENS_ZONE:-}" ] && [ -n "${GATE_DOMAIN:-}" ] || die "public pens aren't set up here yet: hogman-host gate-cert-setup, then hogman-host pens-zone"
+  [[ "$n" =~ $HOSTED_RE ]] || die "pen names are 3-30 lowercase letters, digits and dashes, starting with a letter"
+  local host="$n.$GATE_DOMAIN" zone="$n.$PENS_ZONE"
   valid_name "$n" || die "network names are lowercase letters, digits and dashes (max 63 chars)"
   valid_host "$host" || die "invalid public hostname: $host"
   [ -e "$PENS/$n" ] && die "pen $n already exists"
-  if [ -n "$zone" ]; then
-    [ -x "$CDNS_BIN" ] || die "public certificates need the challenge DNS server: hogman-host challenge-dns-setup <public-ip>"
-    # D-21: a pen name is used once, ever.
-    local used; used="$(CDNS_ADMIN_SOCK=/run/challenge-dns/admin.sock "$CDNS_BIN" name used "$n" 2>&1 || true)"
-    case "$used" in
-      free) ;;
-      used) die "the pen name $n was used before and is never given out again" ;;
-      *) die "couldn't ask the challenge DNS server whether $n was used before: $used" ;;   # fail closed
-    esac
-  fi
+  [ -x "$CDNS_BIN" ] || die "public certificates need the challenge DNS server: hogman-host challenge-dns-setup <public-ip>"
+  # D-21: a pen name is used once, ever.
+  local used; used="$(cdns name used "$n" 2>&1 || true)"
+  case "$used" in
+    free) ;;
+    used) die "the pen name $n was used before and is never given out again" ;;
+    *) die "couldn't ask the challenge DNS server whether $n was used before: $used" ;;   # fail closed
+  esac
   for o in $(pen_names); do
     [ "$(pen_env "$o" PUBLIC_HOST)" = "$host" ] && die "$host is already used by pen $o"
   done
@@ -401,6 +397,7 @@ cmd_add() {
   rsync -a --exclude data --exclude .env "$SRC/" "$PENS/$n/"
   cat > "$PENS/$n/.env" <<EOF
 NETWORK=$n
+ZONE=$zone
 PUBLIC_HOST=$host
 PUBLIC_IPV4=${HOST_IPV4:-}
 TEST_MODE=$([ -n "${FRONT_TLS_MODE:-}" ] && echo true || echo false)
@@ -408,18 +405,15 @@ FRONT_DOOR=true
 STUN_PORT=$stun
 COMPOSE_PROJECT_NAME=pen-$n
 EOF
-  if [ -n "$zone" ]; then
-    printf 'CERT_MODE=public\nZONE=%s\n' "$zone" >> "$PENS/$n/.env"
-    # This pen's challenge DNS credential: it can write only this pen's
-    # challenge records. The token goes straight into the registrar's secrets.
-    install -d -m 0700 "$PENS/$n/data/secrets/registrar"
-    local out tok
-    out="$(CDNS_ADMIN_SOCK=/run/challenge-dns/admin.sock "$CDNS_BIN" cred add pen "$n")" || die "could not make the pen's challenge DNS credential: $out"
-    tok="$(awk '/^token:/ {print $2}' <<<"$out")"
-    [ -n "$tok" ] || die "no token from challenge-dns"
-    ( umask 077; printf '%s' "$tok" > "$PENS/$n/data/secrets/registrar/challenge_dns_token" )
-    awk '/^id:/ {print $2}' <<<"$out" > "$PENS/$n/.challenge-dns-id"
-  fi
+  # This pen's challenge DNS credential: it can write only this pen's
+  # challenge records. The token goes straight into the registrar's secrets.
+  install -d -m 0700 "$PENS/$n/data/secrets/registrar"
+  local out tok
+  out="$(cdns cred add pen "$n")" || die "could not make the pen's challenge DNS credential: $out"
+  tok="$(awk '/^token:/ {print $2}' <<<"$out")"
+  [ -n "$tok" ] || die "no token from challenge-dns"
+  ( umask 077; printf '%s' "$tok" > "$PENS/$n/data/secrets/registrar/challenge_dns_token" )
+  awk '/^id:/ {print $2}' <<<"$out" > "$PENS/$n/.challenge-dns-id"
   # The pen's private network, and the route, come first: the pen's own core
   # joins its mesh through the front door.
   docker network inspect "pen-$n-core" >/dev/null 2>&1 || docker network create "pen-$n-core" >/dev/null
@@ -430,9 +424,6 @@ EOF
   (cd "$PENS/$n" && ./hogman init && FRONT_CA="$front_ca" FRONT_JOIN_DL="$FRONT/join-dl" ./hogman up)
   info "Pen $n is up. Create its owner:  hogman-host pen $n member add <handle> --role owner"
   info "Then join your own laptop:      hogman-host pen $n device key <handle> personal  (open the link on it)"
-  if [ -z "$zone" ]; then
-    info "Its root key is in $PENS/$n/data/pki/offline/: move it somewhere safe and delete it here."
-  fi
 }
 
 cmd_list() {
@@ -481,7 +472,7 @@ cmd_remove() {
   # Its challenge DNS credential goes; the server keeps only the fact that the
   # name was used (D-21), so it's never handed out again.
   if [ -s "$PENS/$n/.challenge-dns-id" ] && [ -x "$CDNS_BIN" ]; then
-    CDNS_ADMIN_SOCK=/run/challenge-dns/admin.sock "$CDNS_BIN" cred rm "$(cat "$PENS/$n/.challenge-dns-id")" >/dev/null 2>&1 \
+    cdns cred rm "$(cat "$PENS/$n/.challenge-dns-id")" >/dev/null 2>&1 \
       && rm -f "$PENS/$n/.challenge-dns-id" || info "could not remove $n's challenge DNS credential; do it by hand: hogman-host challenge-dns cred list"
   fi
   write_front
@@ -568,13 +559,10 @@ cmd_backup_allow() {
 backup_pen() {  # backup_pen <name>
   local n="$1" pen="$PENS/$1" stage ts out
   stage="$(mktemp -d)"
-  # Everything needed to bring the pen back, minus what returns by itself, and
-  # never an offline root key a self-hosted owner hasn't moved off yet (audit H9):
-  # the compiled join tool (every release ships it), web certificates
-  # (re-issued), and step-ca's ACME records (members' servers re-register).
+  # Everything needed to bring the pen back, minus what returns by itself:
+  # the compiled join tool (every release ships it) and edge/portal runtime state.
   rsync -a "$pen/data/" "$stage/data/" \
-    --exclude join-dl/ --exclude edge/ --exclude portal/ --exclude step/db/ --exclude tmp/ --exclude api/ \
-    --exclude pki/offline/ \
+    --exclude join-dl/ --exclude edge/ --exclude portal/ --exclude tmp/ --exclude api/ \
     --exclude 'headscale/lib/db.sqlite*' --exclude 'registrar/registrar.db*'
   # Databases are copied with SQLite's own backup, safe while the pen runs.
   sqlite3 "$pen/data/headscale/lib/db.sqlite" ".backup '$stage/data/headscale/lib/db.sqlite'"
@@ -617,6 +605,18 @@ SIGNUP="$HOGMAN_HOME/signup"
 HOSTED_RE='^[a-z][a-z0-9-]{1,28}[a-z0-9]$'   # 3-30 characters
 HANDLE_RE='^[a-z][a-z0-9-]{0,30}[a-z0-9]$'   # the registrar's rule
 
+# name_free <pen>: 0 free, 2 taken (a pen here has it, or it was ever used:
+# D-21), 1 can't tell. Fails closed.
+name_free() {
+  [ -e "$PENS/$1" ] && return 2
+  [ -n "${PENS_ZONE:-}" ] && [ -x "$CDNS_BIN" ] || return 1
+  case "$(cdns name used "$1" 2>/dev/null)" in
+    free) return 0 ;;
+    used) return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
 live_pens() { local n c=0; for n in $(pen_names); do [ -f "$PENS/$n/.removed" ] || c=$((c + 1)); done; echo "$c"; }
 
 set_host_var() {  # set_host_var KEY value: in host.env, replacing any old value
@@ -629,36 +629,25 @@ set_host_var() {  # set_host_var KEY value: in host.env, replacing any old value
   install -m 0600 "$tmp" "$HOSTENV"; rm -f "$tmp"
 }
 
-# The root key of a hosted pen never stays on the server in the clear: it is
-# encrypted to the operator's backup key and the plain copy is deleted. The
-# pen runs on its intermediate (5 years); the root is needed only to renew it.
-escrow_root() {
-  local n="$1" off="$PENS/$1/data/pki/offline" out="$PENS/$1/data/pki/root-escrow.tar.gz.age"
-  [ -s "$RECIPIENT" ] || die "no backup key: run hogman-host backup-setup first"
-  [ -n "$(ls -A "$off" 2>/dev/null)" ] || return 0
-  tar -C "$off" -czf - . | age -r "$(cat "$RECIPIENT")" > "$out.part"
-  [ -s "$out.part" ] || die "escrowing $n's root key failed"
-  chmod 0600 "$out.part"; mv "$out.part" "$out"
-  rm -f "$off"/*
-}
-
 cmd_capacity() {
   load_host
   local n max="${MAX_PENS:-8}"; n="$(live_pens)"
   printf '{"pens":%d,"max":%d,"open":%s}\n' "$n" "$max" "$([ "$n" -lt "$max" ] && echo true || echo false)"
 }
 
-# provision <pen> <owner>: raise <pen>.<PENS_DOMAIN> with <owner> as its keeper
+# provision <pen> <owner>: raise <pen>.<GATE_DOMAIN> with <owner> as its keeper
 # and print, as JSON, the one-time link that joins the keeper's first device.
 # Exit 2: the name is taken. Exit 3: the server is full.
 cmd_provision() {
   load_host
   local n="${1:-}" owner="${2:-}"
   [ -n "${PENS_DOMAIN:-}" ] || die "sign-ups are not set up: hogman-host signup-setup"
+  [ -n "${PENS_ZONE:-}" ] && [ -n "${GATE_DOMAIN:-}" ] || die "public pens aren't set up here yet: hogman-host gate-cert-setup, then hogman-host pens-zone"
   [[ "$n" =~ $HOSTED_RE ]] || die "pen names are 3-30 lowercase letters, digits and dashes, starting with a letter"
   [[ "$owner" =~ $HANDLE_RE ]] || die "invalid handle: $owner"
   [ -s "$RECIPIENT" ] || die "no backup key: run hogman-host backup-setup first"
   [ -e "$PENS/$n" ] && { echo "hogman-host: pen $n already exists" >&2; exit 2; }
+  name_free "$n" || { [ $? = 2 ] && { echo "hogman-host: the pen name $n was used before" >&2; exit 2; }; die "couldn't check whether $n was used before"; }
   [ "$(live_pens)" -lt "${MAX_PENS:-8}" ] || { echo "hogman-host: this server is full" >&2; exit 3; }
   # All or nothing: a pen that fails half-way is taken down again, so its name
   # and memory aren't stuck, and kept in failed/ to see what went wrong.
@@ -673,24 +662,23 @@ cmd_provision() {
     provision_rollback "$n"
     die "raising $n failed; rolled back (its folder is in $HOGMAN_HOME/failed/)"
   fi
-  local link exp
+  local link exp zone="$n.$PENS_ZONE" host="$n.$GATE_DOMAIN"
   link="$(sed -n 1p "$res")"; exp="$(sed -n 2p "$res")"; rm -f "$res"
   info "pen $n raised for $owner"
-  printf '{"pen":"%s","zone":"%s.hogman","host":"%s","owner":"%s","join_link":"%s","valid_until":"%s"}\n' \
-    "$n" "$n" "$n.$PENS_DOMAIN" "$owner" "$link" "$exp"
+  printf '{"pen":"%s","zone":"%s","host":"%s","owner":"%s","join_link":"%s","valid_until":"%s"}\n' \
+    "$n" "$zone" "$host" "$owner" "$link" "$exp"
 }
 
 # signup-setup <pens-domain> <signup-host> [max-pens]: turn on the sign-up page.
 # Pens get <name>.<pens-domain>; point *.<pens-domain> and <signup-host> here.
 provision_steps() {  # in a subshell: prints the join link, then its expiry
   local n="$1" owner="$2" out link
-  cmd_add "$n" "$n.$PENS_DOMAIN" >&2
+  cmd_add "$n" >&2
   echo "HOSTED=true" >> "$PENS/$n/.env"
   (cd "$PENS/$n" && ./hogman member add "$owner" --role owner) >&2
   out="$(cd "$PENS/$n" && ./hogman device key "$owner" personal)"
   link="$(awk '/^link:/ {print $2}' <<<"$out")"
-  [[ "$link" =~ ^https://[a-z0-9.-]+/join#k=[A-Za-z0-9_-]+\&fp=[A-Fa-f0-9:]+$ ]] || die "no join link for $owner: $out"
-  escrow_root "$n"
+  [[ "$link" =~ ^https://[a-z0-9.-]+/join#k=[A-Za-z0-9_-]+$ ]] || die "no join link for $owner: $out"
   echo "$link"
   awk '/^valid until/ {print $3, $4}' <<<"$out" | tr -d ','  # "valid until <date> <time>, single use"
 }
@@ -699,6 +687,14 @@ provision_rollback() {
   local n="$1"
   [ -d "$PENS/$n" ] || return 0
   (cd "$PENS/$n" && ./hogman down -v --remove-orphans >/dev/null 2>&1) || true
+  # A half-made public pen holds a live challenge DNS credential: revoke it and
+  # drop the token before the folder goes to failed/ (its name stays used, D-21).
+  if [ -s "$PENS/$n/.challenge-dns-id" ]; then
+    cdns cred rm "$(cat "$PENS/$n/.challenge-dns-id")" >/dev/null 2>&1 \
+      && rm -f "$PENS/$n/.challenge-dns-id" \
+      || info "could not revoke $n's challenge DNS credential; do it by hand: hogman-host challenge-dns cred list"
+  fi
+  rm -f "$PENS/$n/data/secrets/registrar/challenge_dns_token"
   mkdir -p "$HOGMAN_HOME/failed"
   mv "$PENS/$n" "$HOGMAN_HOME/failed/$n-$(date -u +%Y%m%dT%H%M%SZ)"
   write_front; reload_front
@@ -708,10 +704,14 @@ provision_rollback() {
 cmd_signup_setup() {
   load_host
   # With no arguments: refresh it with the saved settings (install.sh does this).
-  local domain="${1:-${PENS_DOMAIN:-}}" host="${2:-${SIGNUP_HOST:-}}" max="${3:-${MAX_PENS:-8}}"
-  valid_host "$domain" && valid_host "$host" || die "usage: hogman-host signup-setup <pens-domain> <signup-host> [max-pens]"
+  local domain="${1:-${GATE_DOMAIN:-${PENS_DOMAIN:-}}}" host="${2:-${SIGNUP_HOST:-}}" max="${3:-${MAX_PENS:-8}}"
+  valid_host "$domain" && valid_host "$host" || die "usage: hogman-host signup-setup <front-door-domain> <signup-host> [max-pens]"
+  [ -n "${PENS_ZONE:-}" ] && [ -n "${GATE_DOMAIN:-}" ] \
+    || die "public pens aren't set up here yet: hogman-host gate-cert-setup, then hogman-host pens-zone"
+  [ "$domain" = "$GATE_DOMAIN" ] \
+    || die "the front-door domain must be the gate domain: hogman-host signup-setup $GATE_DOMAIN $host"
   [[ "$max" =~ ^[0-9]+$ ]] && [ "$max" -ge 1 ] && [ "$max" -le 100 ] || die "max-pens is 1-100"
-  [ -s "$RECIPIENT" ] || die "set up backups first (hosted pens' root keys are escrowed to the backup key): hogman-host backup-setup"
+  [ -s "$RECIPIENT" ] || die "set up backups first: hogman-host backup-setup"
   [ -d "$HOGMAN_HOME/signup-src" ] || die "no sign-up code in $HOGMAN_HOME/signup-src (install.sh puts it there)"
   set_host_var PENS_DOMAIN "$domain"
   set_host_var SIGNUP_HOST "$host"
@@ -756,6 +756,7 @@ services:
       BROKER_URL: http://broker:9090
       BROKER_TOKEN_FILE: /run/secrets/token
       PENS_DOMAIN: $PENS_DOMAIN
+      SITES_DOMAIN: $PENS_ZONE
     volumes: ["./token:/run/secrets/token:ro"]
     networks:
       hogman-front: { aliases: [signup] }
@@ -779,6 +780,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - $HOGMAN_HOME:$HOGMAN_HOME
       - $hostbin:/usr/local/bin/hogman-host:ro
+      - $CDNS_BIN:$CDNS_BIN:ro
+      - $(dirname "$CDNS_ADMIN"):$(dirname "$CDNS_ADMIN")
     # signup: the page reaches it here (internal: no internet). out, only with
     # push notifications on: nothing else is on it, so nothing reaches it there.
     networks: $broker_nets
@@ -790,7 +793,7 @@ EOF
   (cd "$SIGNUP" && docker compose up -d --build --remove-orphans >&2) || die "the sign-up page did not start: cd $SIGNUP && docker compose logs"
   write_front
   reload_front
-  info "Sign-ups on: https://$SIGNUP_HOST, pens at <name>.$PENS_DOMAIN, at most $MAX_PENS here."
+  info "Sign-ups on: https://$SIGNUP_HOST, front doors at <name>.$PENS_DOMAIN, at most $MAX_PENS here."
   info "DNS: point $SIGNUP_HOST and *.$PENS_DOMAIN at this server. Then: hogman-host signup-code"
 }
 
@@ -973,6 +976,24 @@ CDNS_UNIT=/etc/systemd/system/hogman-challenge-dns.service
 CDNS_USER=hogman-cdns
 CDNS_KEY=/etc/hogman/gcp-eab.json
 CDNS_STATE=/var/lib/challenge-dns/state.json
+# The admin socket's path. host.env may move it and CDNS_BIN (the shared-host
+# test runs its own challenge DNS server); the systemd unit uses the default.
+CDNS_ADMIN=/run/challenge-dns/admin.sock
+cdns() { CDNS_ADMIN_SOCK="$CDNS_ADMIN" "$CDNS_BIN" "$@"; }
+
+# pens-zone <zone>: the zone hosted pens live under (D-18), e.g.
+# pens.hogman.network. Set it at the switch-over, once that zone is delegated
+# to this server's challenge DNS server: from then on `add <pen>` and sign-ups
+# make public-certificate pens.
+cmd_pens_zone() {
+  load_host
+  local z="${1:-}"
+  valid_host "$z" || die "usage: hogman-host pens-zone <zone>   (e.g. pens.hogman.network)"
+  [ -n "${GATE_DOMAIN:-}" ] || die "set up the front door's wildcard first: hogman-host gate-cert-setup <gate-domain>"
+  [ -x "$CDNS_BIN" ] && cdns cred list >/dev/null 2>&1 || die "the challenge DNS server isn't answering: hogman-host challenge-dns-setup <public-ip>"
+  set_host_var PENS_ZONE "$z"
+  info "New pens: front door <pen>.$GATE_DOMAIN, sites under <pen>.$z"
+}
 PEN_GID=65532   # the group the pens' registrars run as (H3); it may use the API socket
 cmd_challenge_dns_setup() {
   load_host
@@ -1111,7 +1132,7 @@ cmd_gate_cert_setup() {
   # The host credential: it may write only _acme-challenge.<gate-domain>.
   if [ ! -s "$GATE_TOKEN" ]; then
     local out tok
-    out="$(CDNS_ADMIN_SOCK=/run/challenge-dns/admin.sock "$CDNS_BIN" cred add host)" || die "could not make the host's challenge DNS credential: $out"
+    out="$(cdns cred add host)" || die "could not make the host's challenge DNS credential: $out"
     tok="$(awk '/^token:/ {print $2}' <<<"$out")"; [ -n "$tok" ] || die "no token from challenge-dns"
     install -d -m 0700 /etc/hogman
     ( umask 077; printf '%s' "$tok" > "$GATE_TOKEN" )
@@ -1223,7 +1244,9 @@ case "${1:-}" in
   init)    shift; cmd_init "$@" ;;
   gate-cert-setup) shift; cmd_gate_cert_setup "$@" ;;
   challenge-dns-setup) shift; cmd_challenge_dns_setup "$@" ;;
-  challenge-dns) shift; load_host; [ -x "$CDNS_BIN" ] || die "not set up: hogman-host challenge-dns-setup"; CDNS_ADMIN_SOCK=/run/challenge-dns/admin.sock exec "$CDNS_BIN" "$@" ;;
+  challenge-dns) shift; load_host; [ -x "$CDNS_BIN" ] || die "not set up: hogman-host challenge-dns-setup"; CDNS_ADMIN_SOCK="$CDNS_ADMIN" exec "$CDNS_BIN" "$@" ;;
+  pens-zone) shift; cmd_pens_zone "$@" ;;
+  name-free) shift; load_host; [[ "${1:-}" =~ $HOSTED_RE ]] || die "usage: hogman-host name-free <pen>"; name_free "$1"; exit $? ;;
   waitlist) shift; cmd_waitlist "$@" ;;
   signup-mail) shift; cmd_signup_mail "$@" ;;
   signup-notify) shift; cmd_signup_notify "$@" ;;
