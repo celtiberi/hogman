@@ -19,8 +19,6 @@ out="$REPO/site/public/dl"
 mkdir -p "$out"
 
 tarball="hogman-$ver.tar.gz"
-git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md deploy/signup LICENSE README.md \
-  | gzip -9n > "$out/$tarball"
 
 # Compiled parts, so servers don't spend half an hour building them. They come
 # only from GitHub's build of this exact commit (.github/workflows/build.yml),
@@ -47,12 +45,19 @@ fi
 # Artifacts lose the executable bit.
 find "$work/prebuilt" -type f ! -name SHA256SUMS -exec chmod 0755 {} +
 repo="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+checked=0
 while IFS= read -r -d '' f; do
-  gh attestation verify "$f" --repo "$repo" \
+  gh attestation verify "$f" --repo "$repo" --deny-self-hosted-runners \
     --signer-workflow "$repo/.github/workflows/build.yml" --source-digest "$full" >/dev/null \
     || { echo "no valid provenance for ${f#"$work/"}: not releasing" >&2; exit 1; }
+  checked=$((checked + 1))
 done < <(find "$work/prebuilt" -type f -print0)
-echo "provenance checked: every file was built by build.yml from $sha"
+[ "$checked" -gt 0 ] || { echo "GitHub's build of $sha has no files: not releasing" >&2; exit 1; }
+echo "provenance checked: $checked files, each built by build.yml from $sha on GitHub's runners"
+
+# Only now that the compiled parts check out, write anything to the website.
+git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md deploy/signup LICENSE README.md \
+  | gzip -9n > "$out/$tarball"
 # No macOS file metadata in the bundle (Linux tar warns about it).
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$work" -czf "$out/$bins" prebuilt
 
