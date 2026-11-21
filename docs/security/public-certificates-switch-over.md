@@ -1,6 +1,6 @@
 # Switching hogman-1 to public certificates (D-18, step 4c)
 
-Status: **draft for @hogman's review.** Nothing in here has been run yet.
+Status: **reviewed by @hogman** (PR #75). Nothing in here has been run yet; the self-hosting decision in Phase B is still open.
 
 This is the order of work that takes the live server from today's private certificates (step-ca, `fp=` links, a root on every member's computer) to public certificates only. It also lists the code that still has to be written before the switch can happen.
 
