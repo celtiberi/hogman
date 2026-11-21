@@ -105,6 +105,40 @@ func removeTrust(r *RootInfo, _ string) error {
 	return err
 }
 
+func removeLegacyHogmanRoot(zone, rootFP string) (bool, error) {
+	s, err := linuxStore()
+	if err != nil {
+		return false, nil
+	}
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return false, nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	paths := filterLinuxLegacyAnchorFiles(s.dir, names, zone, rootFP, os.ReadFile)
+	if len(paths) == 0 {
+		return false, nil
+	}
+	for _, p := range paths {
+		if out, err := run(true, "rm", "-f", p); err != nil {
+			return false, errorf("could not remove old certificate (%s): %v\n%s", p, err, out)
+		}
+	}
+	args := s.update[1:]
+	if filepath.Base(s.update[0]) == "update-ca-certificates" {
+		args = append([]string{"--fresh"}, args...)
+	}
+	if out, err := run(true, s.update[0], args...); err != nil {
+		return false, errorf("could not refresh the certificate store: %v\n%s", err, out)
+	}
+	return true, nil
+}
+
 func tailscaleCandidates() []string {
 	return []string{"tailscale", "/usr/bin/tailscale", "/usr/local/bin/tailscale"}
 }

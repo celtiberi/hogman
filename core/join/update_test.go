@@ -414,3 +414,163 @@ func TestUpdateShareBinaryRestartAndRollback(t *testing.T) {
 	}
 }
 
+func TestCleanupLegacyRootsForUpdate(t *testing.T) {
+	// 1. Private target with private network info leaves root intact (Item 2a guard for run.sh).
+	var calls []string
+	privPlan := &updatePlan{
+		baseURL: "https://hs.example.com",
+		host:    "hs.example.com",
+		pens: []penTarget{{
+			zone: "bobo.hogman",
+			dir:  t.TempDir(),
+			cfg:  &agentConfig{Zone: "bobo.hogman", LoginServer: "https://hs.example.com", CertMode: "private", RootFP: "AA11"},
+		}},
+	}
+	got := cleanupLegacyRootsForUpdate(privPlan, false, legacyCleanupOps{
+		fetchCertMode: func() string { return "private" },
+		loadAllPens:   func() []penTarget { return privPlan.pens },
+		removeRoot: func(zone, fp string) (bool, error) {
+			calls = append(calls, zone+"|"+fp)
+			return true, nil
+		},
+	})
+	if len(got) != 0 || len(calls) != 0 {
+		t.Fatalf("private update unexpectedly cleaned roots: got=%v calls=%v", got, calls)
+	}
+
+	// 2. Public target removes pen's recorded RootFP, sweeps leftovers, and clears RootFP on disk.
+	pubDir := t.TempDir()
+	pubCfg := &agentConfig{Zone: "bobo.pens.example.com", LoginServer: "https://bobo.gate.example.com", CertMode: "public", RootFP: "BB22"}
+	if err := pubCfg.save(pubDir); err != nil {
+		t.Fatal(err)
+	}
+	calls = nil
+	pubPlan := &updatePlan{
+		baseURL: "https://bobo.gate.example.com",
+		host:    "bobo.gate.example.com",
+		pens:    []penTarget{{zone: pubCfg.Zone, dir: pubDir, cfg: pubCfg}},
+	}
+	got = cleanupLegacyRootsForUpdate(pubPlan, false, legacyCleanupOps{
+		loadAllPens: func() []penTarget { return pubPlan.pens },
+		removeRoot: func(zone, fp string) (bool, error) {
+			calls = append(calls, zone+"|"+fp)
+			return true, nil
+		},
+		saveConfig: func(dir string, c *agentConfig) error { return c.save(dir) },
+	})
+	if !slices.Equal(calls, []string{"bobo.pens.example.com|BB22", "|"}) {
+		t.Fatalf("public cleanup calls = %v, want pen + wildcard sweep", calls)
+	}
+	if len(got) != 2 {
+		t.Fatalf("public cleanup results = %v, want 2 entries", got)
+	}
+	reloaded, err := loadAgentConfig(pubDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.RootFP != "" {
+		t.Fatalf("expected saved config RootFP cleared, got %q", reloaded.RootFP)
+	}
+
+	// 3. Public target alongside an unrelated private pen cleans only the target pen (skips wildcard sweep).
+	calls = nil
+	otherPriv := penTarget{
+		zone: "other.hogman",
+		dir:  t.TempDir(),
+		cfg:  &agentConfig{Zone: "other.hogman", LoginServer: "https://other.example.com", CertMode: "private", RootFP: "CC33"},
+	}
+	cleanupLegacyRootsForUpdate(pubPlan, false, legacyCleanupOps{
+		loadAllPens: func() []penTarget { return append(append([]penTarget(nil), pubPlan.pens...), otherPriv) },
+		removeRoot: func(zone, fp string) (bool, error) {
+			calls = append(calls, zone+"|"+fp)
+			return false, nil
+		},
+	})
+	if !slices.Equal(calls, []string{"bobo.pens.example.com|"}) {
+		t.Fatalf("mixed private+public calls = %v, want only public target zone", calls)
+	}
+
+	// 4. Dry-run never invokes removeRoot.
+	calls = nil
+	pubPlan.pens[0].cfg.RootFP = "DD44"
+	cleanupLegacyRootsForUpdate(pubPlan, true, legacyCleanupOps{
+		loadAllPens: func() []penTarget { return pubPlan.pens },
+		removeRoot: func(zone, fp string) (bool, error) {
+			calls = append(calls, zone+"|"+fp)
+			return true, nil
+		},
+	})
+	if len(calls) != 0 {
+		t.Fatalf("dry-run called removeRoot: %v", calls)
+	}
+
+	// 5. Steady-state public pen without RootFP or other private pens scans only once via wildcard.
+	calls = nil
+	pubPlan.pens[0].cfg.RootFP = ""
+	cleanupLegacyRootsForUpdate(pubPlan, false, legacyCleanupOps{
+		loadAllPens: func() []penTarget { return pubPlan.pens },
+		removeRoot: func(zone, fp string) (bool, error) {
+			calls = append(calls, zone+"|"+fp)
+			return false, nil
+		},
+	})
+	if !slices.Equal(calls, []string{"|"}) {
+		t.Fatalf("steady-state public cleanup calls = %v, want single wildcard [\"|\"]", calls)
+	}
+}
+
+func TestFindAndRetireLegacySameServerPens(t *testing.T) {
+	base := t.TempDir()
+	oldDir := filepath.Join(base, "bobo.hogman")
+	newDir := filepath.Join(base, "bobo.pens.example.com")
+	otherDir := filepath.Join(base, "other.hogman")
+	for _, d := range []string{oldDir, newDir, otherDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := (&agentConfig{Zone: "bobo.hogman", LoginServer: "https://hs.example.com", CertMode: "private", RootFP: "FP-OLD"}).save(oldDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&agentConfig{Zone: "bobo.pens.example.com", LoginServer: "https://hs.example.com", CertMode: "public"}).save(newDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&agentConfig{Zone: "other.hogman", LoginServer: "https://other.example.com", CertMode: "private", RootFP: "FP-OTHER"}).save(otherDir); err != nil {
+		t.Fatal(err)
+	}
+
+	found := findLegacySameServerPens(base, "bobo.pens.example.com", "https://hs.example.com")
+	if len(found) != 1 || found[0].zone != "bobo.hogman" || found[0].dir != oldDir {
+		t.Fatalf("findLegacySameServerPens = %+v, want only bobo.hogman", found)
+	}
+
+	var steps []string
+	retireLegacySameServerPens(found, false, legacyRetireOps{
+		stop: func(_ string, c *agentConfig) {
+			steps = append(steps, "stop:"+c.Zone)
+		},
+		logout: func(dir string) {
+			if dir != oldDir {
+				t.Fatalf("logout dir = %q, want %q", dir, oldDir)
+			}
+			steps = append(steps, "logout")
+		},
+		removeRoot: func(zone, rootFP string) (bool, error) {
+			steps = append(steps, "removeRoot:"+zone+"|"+rootFP)
+			return true, nil
+		},
+	})
+	if !slices.Equal(steps, []string{"stop:bobo.hogman", "logout", "removeRoot:bobo.hogman|FP-OLD"}) {
+		t.Fatalf("retire call sequence = %v, want [stop:bobo.hogman logout removeRoot:bobo.hogman|FP-OLD]", steps)
+	}
+	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+		t.Fatalf("expected old pen dir %s removed, stat err = %v", oldDir, err)
+	}
+	if _, err := os.Stat(newDir); err != nil {
+		t.Fatalf("expected new pen dir %s kept, err = %v", newDir, err)
+	}
+	if _, err := os.Stat(otherDir); err != nil {
+		t.Fatalf("expected unrelated pen dir %s kept, err = %v", otherDir, err)
+	}
+}
+

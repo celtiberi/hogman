@@ -326,7 +326,7 @@ type updatePlan struct {
 	shares    []shareTargetDir
 }
 
-func loadLocalTargets(configBase, sharesDir string) ([]penTarget, []shareTargetDir) {
+func loadPenTargets(configBase string) []penTarget {
 	var pens []penTarget
 	if pattern, err := filepath.Glob(filepath.Join(configBase, "*", "config.json")); err == nil {
 		sort.Strings(pattern)
@@ -337,6 +337,11 @@ func loadLocalTargets(configBase, sharesDir string) ([]penTarget, []shareTargetD
 			}
 		}
 	}
+	return pens
+}
+
+func loadLocalTargets(configBase, sharesDir string) ([]penTarget, []shareTargetDir) {
+	pens := loadPenTargets(configBase)
 	var shares []shareTargetDir
 	if pattern, err := filepath.Glob(filepath.Join(sharesDir, "*", "*", "share.json")); err == nil {
 		sort.Strings(pattern)
@@ -721,7 +726,11 @@ func updateCmd(args []string, o options) error {
 			break
 		}
 	}
+	cleanupOps := defaultLegacyCleanupOps(metaClient, plan.host, configBase)
 	if !anyUpdate {
+		if !o.dryRun {
+			cleanupLegacyRootsForUpdate(plan, false, cleanupOps)
+		}
 		say("\n✓ hogman-join is already up to date (%s).", wantHex[:12])
 		return nil
 	}
@@ -736,6 +745,7 @@ func updateCmd(args []string, o options) error {
 				note("%s", u.path)
 			}
 		}
+		cleanupLegacyRootsForUpdate(plan, true, cleanupOps)
 		return nil
 	}
 
@@ -827,6 +837,8 @@ func updateCmd(args []string, o options) error {
 		}
 	}
 
+	cleanupLegacyRootsForUpdate(plan, false, cleanupOps)
+
 	verLine := ""
 	if out, err := exec.Command(selfPath, "--version").Output(); err == nil {
 		verLine = strings.TrimSpace(string(bytes.TrimSpace(out)))
@@ -837,6 +849,124 @@ func updateCmd(args []string, o options) error {
 		say("\n✓ Updated hogman-join (SHA-256 %s).", wantHex[:12])
 	}
 	return nil
+}
+
+type legacyCleanupOps struct {
+	fetchCertMode func() string
+	loadAllPens   func() []penTarget
+	removeRoot    func(zone, rootFP string) (bool, error)
+	saveConfig    func(dir string, c *agentConfig) error
+}
+
+func defaultLegacyCleanupOps(metaClient *http.Client, host, configBase string) legacyCleanupOps {
+	return legacyCleanupOps{
+		fetchCertMode: func() string {
+			n, err := fetchNetwork(metaClient, host)
+			if err != nil || n == nil {
+				return ""
+			}
+			return n.CertMode
+		},
+		loadAllPens: func() []penTarget {
+			return loadPenTargets(configBase)
+		},
+		removeRoot: removeLegacyHogmanRoot,
+		saveConfig: func(dir string, c *agentConfig) error {
+			return c.save(dir)
+		},
+	}
+}
+
+func cleanupLegacyRootsForUpdate(plan *updatePlan, dryRun bool, ops legacyCleanupOps) []string {
+	if plan == nil {
+		return nil
+	}
+	targetPublic := false
+	for _, p := range plan.pens {
+		if p.cfg != nil && p.cfg.CertMode == "public" {
+			targetPublic = true
+			break
+		}
+	}
+	if !targetPublic {
+		for _, s := range plan.shares {
+			if s.cfg != nil && s.cfg.CertMode == "public" {
+				targetPublic = true
+				break
+			}
+		}
+	}
+	if !targetPublic && ops.fetchCertMode != nil {
+		targetPublic = ops.fetchCertMode() == "public"
+	}
+	if !targetPublic {
+		// Until Item 2b retires private mode, keep active private pen roots intact.
+		return nil
+	}
+
+	// TODO(item-2b): once private mode is retired, unconditionally sweep all legacy
+	// Hogman roots without preserving unrelated private pens.
+	hasOtherPrivatePen := false
+	if ops.loadAllPens != nil {
+		for _, p := range ops.loadAllPens() {
+			if p.cfg != nil && p.cfg.CertMode != "public" && p.cfg.LoginServer != plan.baseURL {
+				hasOtherPrivatePen = true
+				break
+			}
+		}
+	}
+
+	var cleaned []string
+	for _, p := range plan.pens {
+		if p.cfg == nil {
+			continue
+		}
+		if dryRun {
+			if p.cfg.RootFP != "" || p.cfg.CertMode != "public" {
+				note("would remove old %s certificate from trust store", p.zone)
+				cleaned = append(cleaned, p.zone)
+			}
+			continue
+		}
+		if !hasOtherPrivatePen && p.cfg.RootFP == "" {
+			continue
+		}
+		if ops.removeRoot == nil {
+			continue
+		}
+		removed, err := ops.removeRoot(p.zone, p.cfg.RootFP)
+		if err != nil {
+			note("could not remove old %s certificate: %v", p.zone, err)
+			continue
+		}
+		if removed {
+			note("removed old %s network certificate from this computer's trust store", p.zone)
+			cleaned = append(cleaned, p.zone)
+		}
+		if p.cfg.RootFP != "" {
+			p.cfg.RootFP = ""
+			if ops.saveConfig != nil {
+				if ser := ops.saveConfig(p.dir, p.cfg); ser != nil {
+					note("could not update %s settings after certificate cleanup: %v", p.zone, ser)
+				}
+			}
+		}
+	}
+
+	if !hasOtherPrivatePen {
+		if dryRun {
+			note("would check for and remove any leftover old network root certificates")
+		} else if ops.removeRoot != nil {
+			removed, err := ops.removeRoot("", "")
+			if err != nil {
+				note("could not remove leftover old network certificate(s): %v", err)
+			} else if removed {
+				note("removed leftover old network certificate(s) from this computer's trust store")
+				cleaned = append(cleaned, "*")
+			}
+		}
+	}
+	return cleaned
 }
 
 func shortDigest(h string) string {

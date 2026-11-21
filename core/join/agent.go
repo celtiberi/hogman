@@ -35,6 +35,7 @@ type agentConfig struct {
 	Zone        string `json:"zone"`
 	LoginServer string `json:"login_server"`
 	CertMode    string `json:"cert_mode,omitempty"`
+	RootFP      string `json:"root_fp,omitempty"`
 	DNSServer   string `json:"dns_server"` // mesh address of the pen's DNS
 	Hostname    string `json:"hostname"`
 	ProxyAddr   string `json:"proxy_addr"` // 127.0.0.1:<port>

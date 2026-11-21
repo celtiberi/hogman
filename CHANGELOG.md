@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- `core/join` public-certificate cleanup and ACME cap handling (D-22 prep):
+  - Persist `root_fp` in side-by-side `agentConfig` on private joins, remove legacy Hogman root certificates (matching either stored `root_fp` or the exact `<zone> Root CA` + critical NameConstraints shape for pre-`root_fp` installs) during `hogman-join update` on public pens, and retire old same-server zone folders and roots when re-joining a renamed public zone.
+  - Treat registrar `429` weekly limit responses on `/api/acme/txt` as a capped retry rather than permanent exit, jumping directly to the `1h` max backoff in `retry.json` without triggering EAB or fallback CA failover.
 - `core/join` and `core/registrar` public-certificate ACME follow-ups:
   - Persist `hogman-join share` ACME retry state in `<share>/acme/retry.json` (`0600`) with exponential backoff up to 1 hour so `systemd`/`launchd` service restarts no longer reset retry timers and hammer CAs on repeated transient failures; stale retry state is cleared once a valid certificate is issued or loaded from cache.
   - Drop the fabricated `admin@<zone>` / `admin@<host>` default ACME contact emails when `HOGMAN_ACME_EMAIL` / `ACME_EMAIL` is unset, and force non-interactive `PreCheck` on synchronous CertMagic calls so empty contact emails never prompt stdin in foreground terminals.

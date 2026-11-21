@@ -122,6 +122,10 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 	note("joining side by side: only names ending in .%s use the pen; nothing else on this computer changes", n.Zone)
 
 	existing, _ := loadAgentConfig(dir)
+	var oldSameServer []penTarget
+	if existing == nil {
+		oldSameServer = findLegacySameServerPens(hogmanConfigBase(), n.Zone, n.LoginServer)
+	}
 	if o.dryRun {
 		step("Dry run: nothing changed. Would:")
 		if existing == nil && link.InviteToken != "" {
@@ -133,6 +137,9 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 			note("add the %s certificate to this computer's trust store (trusted now: %v)", n.Zone, trustInstalled(root))
 		}
 		note("run a small background agent as %q, with a local proxy for .%s (already set up: %v)", hostname, n.Zone, existing != nil)
+		for _, old := range oldSameServer {
+			note("retire old %s pen setup (%s)", old.zone, old.dir)
+		}
 		return nil
 	}
 
@@ -176,6 +183,12 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		if link.InviteToken != "" {
 			note("not using the invite; it stays valid for another device or person")
 		}
+		if root != nil && cfg.RootFP != root.Fingerprint {
+			cfg.RootFP = root.Fingerprint
+			if err := cfg.save(dir); err != nil {
+				return err
+			}
+		}
 	} else {
 		key := link.DeviceKey
 		if link.InviteToken != "" {
@@ -194,7 +207,11 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		cfg = &agentConfig{Zone: n.Zone, LoginServer: n.LoginServer, CertMode: n.CertMode, DNSServer: n.DNSServer, Hostname: hostname, ProxyAddr: addr}
+		rootFP := ""
+		if root != nil {
+			rootFP = root.Fingerprint
+		}
+		cfg = &agentConfig{Zone: n.Zone, LoginServer: n.LoginServer, CertMode: n.CertMode, RootFP: rootFP, DNSServer: n.DNSServer, Hostname: hostname, ProxyAddr: addr}
 		if o.controlCA != "" {
 			pemBytes, err := os.ReadFile(o.controlCA)
 			if err != nil {
@@ -243,6 +260,7 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 	if handle == "" {
 		handle = who
 	}
+	retireLegacySameServerPens(oldSameServer, o.noTrust, defaultLegacyRetireOps())
 
 	pens := normalizePenConfigs(loadInstalledPenConfigs(hogmanConfigBase()), cfg)
 	browsers := "set your browser's automatic proxy configuration to " + cfg.pacURL()
@@ -381,6 +399,62 @@ func leaveAlongside(zone string) bool {
 	}
 	note("stopped the pen connection and removed its settings")
 	return true
+}
+
+func findLegacySameServerPens(configBase, newZone, loginServer string) []penTarget {
+	if loginServer == "" {
+		return nil
+	}
+	var out []penTarget
+	for _, p := range loadPenTargets(configBase) {
+		if p.zone != newZone && p.cfg.LoginServer == loginServer {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+type legacyRetireOps struct {
+	stop       func(dir string, c *agentConfig)
+	logout     func(dir string)
+	removeRoot func(zone, rootFP string) (bool, error)
+}
+
+func defaultLegacyRetireOps() legacyRetireOps {
+	return legacyRetireOps{
+		stop: stopAgent,
+		logout: func(dir string) {
+			if self, err := os.Executable(); err == nil && self != "" {
+				_, _ = run(false, self, "__agent-logout", dir)
+			}
+		},
+		removeRoot: removeLegacyHogmanRoot,
+	}
+}
+
+func retireLegacySameServerPens(oldPens []penTarget, noTrust bool, ops legacyRetireOps) {
+	if len(oldPens) == 0 {
+		return
+	}
+	for _, old := range oldPens {
+		step("Retiring old %s pen setup", old.zone)
+		if ops.stop != nil {
+			ops.stop(old.dir, old.cfg)
+		}
+		if ops.logout != nil {
+			ops.logout(old.dir)
+		}
+		if !noTrust && old.cfg.CertMode != "public" && ops.removeRoot != nil {
+			if removed, err := ops.removeRoot(old.zone, old.cfg.RootFP); err != nil {
+				note("could not remove old %s certificate: %v", old.zone, err)
+			} else if removed {
+				note("removed old %s certificate from trust store", old.zone)
+			}
+		}
+		if err := os.RemoveAll(old.dir); err != nil {
+			note("could not remove old settings folder %s: %v", old.dir, err)
+		}
+	}
 }
 
 // stopDetached stops an agent that was started as a plain background process.
