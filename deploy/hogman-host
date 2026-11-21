@@ -48,6 +48,11 @@ usage: hogman-host <command>
   capacity                       how many pens this server holds, and its limit
   provision <pen> <owner>        raise a hosted pen (what the sign-up page runs)
 
+  challenge-dns-setup <public-ip> [gcp-key.json]
+                                 run the DNS-01 challenge server (public certificates, D-18)
+                                 on <public-ip>:53; the Google key enables the fallback CA
+  challenge-dns <args...>        talk to it, e.g.  challenge-dns cred list
+
 The control hostname's DNS must point at this server before `add`, so the
 front door can get its certificate.
 EOF
@@ -907,8 +912,103 @@ cmd_signup_notify() {
   info "Sign-up pushes ${u:+go to $u}${u:-are off}"
 }
 
+# challenge-dns-setup <public-ip> [gcp-key.json]: install and run the DNS-01
+# challenge server (deploy/challenge-dns) as a locked-down systemd service.
+# It answers only for pens.hogman.network and the front door's challenge name,
+# and only once Cloudflare delegates those to ns1 (docs: public-certificates).
+CDNS_BIN=/usr/local/bin/challenge-dns
+CDNS_UNIT=/etc/systemd/system/hogman-challenge-dns.service
+PEN_GID=65532   # the group the pens' registrars run as (H3); it may use the API socket
+cmd_challenge_dns_setup() {
+  load_host
+  local ip="${1:-}" key="${2:-}" arch
+  valid_ipv4 "$ip" || die "usage: hogman-host challenge-dns-setup <public IPv4 of this server> [gcp-key.json]"
+  ip -4 addr show 2>/dev/null | grep -qw "inet $ip" || die "$ip isn't an address of this server (answering on 127.0.0.53 would clash with systemd-resolved)"
+  case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) die "unsupported CPU $(uname -m)" ;; esac
+  local bin="$SRC/prebuilt/challenge-dns/challenge-dns-linux-$arch"
+  [ -f "$bin" ] || die "no compiled challenge-dns in this release ($bin); update first: curl -fsSL https://hogman.network/install.sh | sudo bash"
+  install -m 0755 "$bin" "$CDNS_BIN"
+
+  # The registrars' group, so the service can hand them the API socket.
+  getent group "$PEN_GID" >/dev/null || groupadd --system --gid "$PEN_GID" hogman-pen
+  local pengroup; pengroup="$(getent group "$PEN_GID" | cut -d: -f1)"
+
+  # The Google key (optional) is handed over as a systemd credential: read
+  # only by this service, never in its environment or on its command line.
+  local cred=""
+  if [ -n "$key" ]; then
+    [ -f "$key" ] || die "no such file: $key"
+    install -d -m 0700 /etc/hogman
+    install -m 0600 "$key" /etc/hogman/gcp-eab.json
+    cred=$'LoadCredential=gcp-eab.json:/etc/hogman/gcp-eab.json\nEnvironment=CDNS_GCP_KEY=%d/gcp-eab.json'
+  fi
+
+  cat > "$CDNS_UNIT" <<UNIT
+[Unit]
+Description=Hogman: DNS-01 challenge server (public certificates)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=$CDNS_BIN serve
+Environment=CDNS_LISTEN=$ip:53
+Environment=CDNS_STATE=/var/lib/challenge-dns/state.json
+Environment=CDNS_API_SOCK=/run/hogman-acme/api.sock
+Environment=CDNS_API_GID=$PEN_GID
+Environment=CDNS_ADMIN_SOCK=/run/challenge-dns/admin.sock
+$(printf '%b' "$cred")
+DynamicUser=yes
+SupplementaryGroups=$pengroup
+StateDirectory=challenge-dns
+StateDirectoryMode=0700
+RuntimeDirectory=challenge-dns hogman-acme
+RuntimeDirectoryMode=0755
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable hogman-challenge-dns.service >/dev/null
+  systemctl restart hogman-challenge-dns.service
+  if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow proto udp to "$ip" port 53 comment "hogman challenge-dns" >/dev/null
+    ufw allow proto tcp to "$ip" port 53 comment "hogman challenge-dns" >/dev/null
+  fi
+  sleep 1
+  systemctl is-active --quiet hogman-challenge-dns.service || die "it didn't start: journalctl -u hogman-challenge-dns"
+  info "challenge-dns answers on $ip:53 (UDP and TCP)${key:+, with the Google fallback CA}"
+  info "Check from outside:  dig @$ip pens.hogman.network SOA   (and +tcp)"
+  info "If DigitalOcean's cloud firewall is on, allow TCP and UDP 53 there too."
+}
+
 case "${1:-}" in
   init)    shift; cmd_init "$@" ;;
+  challenge-dns-setup) shift; cmd_challenge_dns_setup "$@" ;;
+  challenge-dns) shift; load_host; [ -x "$CDNS_BIN" ] || die "not set up: hogman-host challenge-dns-setup"; CDNS_ADMIN_SOCK=/run/challenge-dns/admin.sock exec "$CDNS_BIN" "$@" ;;
   waitlist) shift; cmd_waitlist "$@" ;;
   signup-mail) shift; cmd_signup_mail "$@" ;;
   signup-notify) shift; cmd_signup_notify "$@" ;;
