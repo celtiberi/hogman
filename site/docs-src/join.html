@@ -31,11 +31,21 @@
     </table></li>
   <li><strong>Pick your name</strong> when asked: lowercase letters, digits and dashes, 2 to 32
     characters. It's how the pen knows you.</li>
-  <li><strong>You're in.</strong> No root certificate is installed and no administrator password
-    is needed: <code>hogman-join</code> verifies the gate over your OS's normal HTTPS trust store,
-    checks that your pen's home page loads over HTTPS, sets up your browser proxy, and opens it.
+  <li><strong>You're in.</strong> No root certificate is installed: <code>hogman-join</code>
+    verifies the gate over your OS's normal HTTPS trust store, checks that your pen's home page
+    loads over HTTPS, sets up your browser proxy, and opens it.
     Keep the <code>hogman-join</code> file: you'll use it to update, share things, and leave.</li>
 </ol>
+<p><strong>On a Mac, two things may pop up. Both are expected.</strong></p>
+<ul>
+  <li><strong>"Allow hogman-join to find devices on local networks?"</strong> Either answer works.
+    <em>Allow</em> lets your devices in the same home or office reach each other directly, which is
+    faster. <em>Don't Allow</em> sends that traffic over the internet instead. Nothing on your
+    network is shared with the pen either way.</li>
+  <li><strong>Your Mac's password</strong>, once, so your browsers can find the pen's sites. It
+    changes only the automatic proxy setting. If you skip it, <code>hogman-join</code> prints the
+    one setting to change by hand.</li>
+</ul>
 <p><strong>If it stops part way</strong> (DNS not ready, offline), fix what it says and run the
   same command again. If the stop came before your device joined, the invite is still unused; if
   after, the rerun sees the device is already in and skips the invite. Either way the link only
