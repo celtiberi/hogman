@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -756,4 +758,62 @@ func TestIPRateLimiterIPv6AndBoundedEviction(t *testing.T) {
 	if l.allow("abuser", t0.Add(7*time.Second)) {
 		t.Fatal("active abuser must stay throttled after eviction")
 	}
+}
+
+// H2 (audit 2026-11): in a pen the mesh API listens only on a Unix socket that
+// just the portal can reach, and a request arriving there is trusted to carry
+// the caller's mesh address. Over the socket, an enrolled device is known.
+func TestMeshAPIOverUnixSocket(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	if _, err := e.svc.AddMember(ctx, Actor{CLI: true}, "root", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
+
+	// Short path: Unix socket paths are limited to about 100 bytes.
+	dir, err := os.MkdirTemp("", "hm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	path := filepath.Join(dir, "mesh.sock")
+	ln, err := listenMesh("unix:" + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("socket mode: %v %v", fi, err)
+	}
+	srv := &http.Server{Handler: MeshHandler(e.svc), ConnContext: markSocketConn}
+	go srv.Serve(ln)
+	defer srv.Close()
+
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", path)
+	}}}
+	get := func(xff string) int {
+		req, _ := http.NewRequest("GET", "http://portal/api/me", nil)
+		req.Header.Set("X-Forwarded-For", xff)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := get("100.64.0.10"); code != http.StatusOK {
+		t.Fatalf("enrolled device over the socket: %d, want 200", code)
+	}
+	if code := get("100.64.0.99"); code != http.StatusForbidden {
+		t.Fatalf("unknown device over the socket: %d, want 403", code)
+	}
+
+	// A stale socket from a previous run is replaced, not an error.
+	srv.Close()
+	ln2, err := listenMesh("unix:" + path)
+	if err != nil {
+		t.Fatalf("relisten over a stale socket: %v", err)
+	}
+	ln2.Close()
 }

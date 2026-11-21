@@ -21,9 +21,10 @@ home.{$ZONE} {
 	}
 	# Member and admin API. Caddy sets X-Forwarded-For to the caller's mesh
 	# address (ignoring any the caller sent), which is how the registrar
-	# knows who is asking.
+	# knows who is asking. It's a Unix socket that only the portal and the
+	# registrar can see, so nothing else in the pen can claim to be a member.
 	handle /api/* {
-		reverse_proxy 127.0.0.1:8082
+		reverse_proxy unix//run/hogman-api/mesh.sock
 	}
 	# Members can fetch the network's root certificate again from here.
 	handle /root_ca.crt {

@@ -487,7 +487,7 @@ backup_pen() {  # backup_pen <name>
   # the compiled join tool (every release ships it), web certificates
   # (re-issued), and step-ca's ACME records (members' servers re-register).
   rsync -a "$pen/data/" "$stage/data/" \
-    --exclude join-dl/ --exclude edge/ --exclude portal/ --exclude step/db/ --exclude tmp/ \
+    --exclude join-dl/ --exclude edge/ --exclude portal/ --exclude step/db/ --exclude tmp/ --exclude api/ \
     --exclude pki/offline/ \
     --exclude 'headscale/lib/db.sqlite*' --exclude 'registrar/registrar.db*'
   # Databases are copied with SQLite's own backup, safe while the pen runs.
