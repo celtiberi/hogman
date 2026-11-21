@@ -1046,8 +1046,11 @@ UNIT
 # only once it exists: a missing file must never stop the front door loading.
 GATE_TLS=/var/lib/hogman-gate/tls
 gate_tls_line() {
-  local host="$1"
-  [ -n "${GATE_DOMAIN:-}" ] && [[ "$host" == *".$GATE_DOMAIN" ]] && [ -s "$GATE_TLS/gate.crt" ] && [ -s "$GATE_TLS/gate.key" ] \
+  local host="$1" label
+  [ -n "${GATE_DOMAIN:-}" ] && [[ "$host" == *".$GATE_DOMAIN" ]] || return 0
+  label="${host%".$GATE_DOMAIN"}"
+  [[ "$label" != *.* ]] || return 0   # the wildcard covers exactly one label
+  [ -s "$GATE_TLS/gate.crt" ] && [ -s "$GATE_TLS/gate.key" ] \
     && printf '\ttls /gate-tls/gate.crt /gate-tls/gate.key'
   return 0
 }
@@ -1074,6 +1077,12 @@ cmd_gate_cert_setup() {
     ( umask 077; printf '%s' "$tok" > "$GATE_TOKEN" )
   fi
   set_host_var GATE_DOMAIN "$domain"
+  GATE_DOMAIN="$domain"
+  install -d -m 0700 -o "$PEN_GID" -g "$PEN_GID" /var/lib/hogman-gate "$GATE_TLS" /var/lib/hogman-gate/acme
+  # Mount the wildcard's folder into the front door now (this recreates it
+  # once), so the first certificate only needs a reload, not a restart.
+  write_front
+  reload_front
 
   cat > /etc/systemd/system/hogman-gate-cert.service <<UNIT
 [Unit]
