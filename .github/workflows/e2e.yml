@@ -1,6 +1,6 @@
 # End-to-end tests on GitHub's runners, so they don't need Docker on our own
 # machines. Each suite raises real pens in Docker (Headscale, the registrar,
-# step-ca, Caddy, Tailscale clients) and plays out a pen's life against them.
+# Caddy, Tailscale clients) and plays out a pen's life against them.
 name: e2e
 
 # These checks are required on main, so they must always report. A change that

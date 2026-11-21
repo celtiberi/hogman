@@ -18,27 +18,41 @@ x-device-env: &device-env
   TS_EXTRA_ARGS: --login-server=https://${PUBLIC_HOST}
   SSL_CERT_FILE: /edge-trust/root.crt
 
+x-acme-env: &acme-env
+  HOGMAN_ACME_CA_ROOT: /acme/bundle.crt
+  HOGMAN_ACME_CA_URL: https://pebble:14000/dir
+  HOGMAN_ACME_RESOLVERS: hogman-run-cdns:53
+  HOGMAN_ACME_PROPAGATION_DELAY: 100ms
+  HOGMAN_ACME_PROPAGATION_TIMEOUT: 30s
+
 x-fresh-computer: &fresh-computer
   image: tailscale/tailscale:v1.104.7
   cap_add: [NET_ADMIN, NET_RAW]
   devices: [/dev/net/tun:/dev/net/tun]
   networks: [outside]
   profiles: [clients]
+  environment:
+    <<: *acme-env
   entrypoint: ["/bin/sh", "-c"]
   command:
     - >-
       cp /edge-trust/root.crt /usr/local/share/ca-certificates/control-host.crt &&
+      cp /acme/issued-root.crt /usr/local/share/ca-certificates/acme-issued.crt &&
       update-ca-certificates >/dev/null 2>&1;
       exec tailscaled --state=/var/lib/tailscale/tailscaled.state --tun=tailscale0
   volumes:
     - ./data/edge-trust:/edge-trust:ro
     - ./data/join-dl:/dl:ro
+    - ${ACME_DIR:?}:/acme:ro
 
 services:
   edge:
     networks:
       outside:
         aliases: ["${PUBLIC_HOST}"]
+
+  core-mesh:
+    networks: [core, acme]
 
   alice-laptop:
     <<: *device
@@ -80,7 +94,7 @@ services:
     network_mode: service:stray-device
     command: ["sleep", "infinity"]
     volumes:
-      - ./data/pki/public:/pki:ro
+      - ${ACME_DIR:?}:/acme:ro
 
   # Tools on Alice's laptop: she uses the portal API from here.
   alice-laptop-tools:
@@ -89,7 +103,7 @@ services:
     network_mode: service:alice-laptop
     command: ["sleep", "infinity"]
     volumes:
-      - ./data/pki/public:/pki:ro
+      - ${ACME_DIR:?}:/acme:ro
 
   # Fresh computers with nothing but Tailscale installed. Carol joins them
   # with the join tool alone. At start they trust the control host's test
@@ -107,45 +121,62 @@ services:
   dave-laptop:
     image: nicolaka/netshoot:v0.14
     hostname: dave-laptop
-    networks: [outside]
+    networks: [outside, acme]
     profiles: [clients]
+    environment:
+      <<: *acme-env
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
         cp /edge-trust/root.crt /usr/local/share/ca-certificates/control-host.crt &&
+        cp /acme/issued-root.crt /usr/local/share/ca-certificates/acme-issued.crt &&
         update-ca-certificates >/dev/null 2>&1;
         exec sleep infinity
     volumes:
       - ./data/edge-trust:/edge-trust:ro
       - ./data/join-dl:/dl:ro
+      - ${ACME_DIR:?}:/acme:ro
 
   # A computer that isn't in the pen: it shares an app with a server (share)
   # link, and must not be able to join as a whole computer with one.
   dave-server:
     image: caddy:2.11.9
     hostname: dave-server
-    networks: [outside]
+    networks: [outside, acme]
     profiles: [clients]
+    environment:
+      <<: *acme-env
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
         cp /edge-trust/root.crt /usr/local/share/ca-certificates/control-host.crt &&
+        cp /acme/issued-root.crt /usr/local/share/ca-certificates/acme-issued.crt &&
         update-ca-certificates >/dev/null 2>&1;
         exec sleep infinity
     volumes:
       - ./data/edge-trust:/edge-trust:ro
       - ./data/join-dl:/dl:ro
+      - ${ACME_DIR:?}:/acme:ro
 
-  # Alice's website, running on her server exactly as a member would run it.
-  alice-web:
-    image: caddy:2.11.9
+  # Alice's website, running via `hogman-join share` outside her laptop/server.
+  alice-share:
+    image: nicolaka/netshoot:v0.14
+    hostname: alice-share
+    networks: [outside, acme]
     profiles: [clients]
-    network_mode: service:alice-server
     environment:
-      ZONE: ${ZONE}
+      <<: *acme-env
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        cp /edge-trust/root.crt /usr/local/share/ca-certificates/control-host.crt &&
+        cp /acme/issued-root.crt /usr/local/share/ca-certificates/acme-issued.crt &&
+        update-ca-certificates >/dev/null 2>&1;
+        exec sleep infinity
     volumes:
-      - ./test/alice.Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./data/pki/public:/pki:ro
+      - ./data/edge-trust:/edge-trust:ro
+      - ./data/join-dl:/dl:ro
+      - ${ACME_DIR:?}:/acme:ro
 
   # Tools on Bob's laptop: curl, dig, openssl.
   bob-tools:
@@ -154,7 +185,7 @@ services:
     network_mode: service:bob-laptop
     command: ["sleep", "infinity"]
     volumes:
-      - ./data/pki/public:/pki:ro
+      - ${ACME_DIR:?}:/acme:ro
 
   # Tools on Alice's server, for checking what a server can reach.
   alice-tools:
@@ -163,7 +194,10 @@ services:
     network_mode: service:alice-server
     command: ["sleep", "infinity"]
     volumes:
-      - ./data/pki/public:/pki:ro
+      - ${ACME_DIR:?}:/acme:ro
 
 networks:
   outside: {}
+  acme:
+    name: hogman-test-acme
+    external: true

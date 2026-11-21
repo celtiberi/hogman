@@ -7,7 +7,6 @@ require (
 	github.com/libdns/libdns v1.1.1
 	github.com/mholt/acmez/v3 v3.1.7
 	go.uber.org/zap v1.28.0
-	golang.org/x/crypto v0.58.0
 	golang.org/x/net v0.60.0
 	tailscale.com v1.104.7
 )
@@ -50,6 +49,7 @@ require (
 	go.uber.org/zap/exp v0.3.0 // indirect
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb // indirect
+	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect

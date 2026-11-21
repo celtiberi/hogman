@@ -95,16 +95,12 @@
 Run it with the same <code>hogman-join</code> you joined with, on a computer that's in the pen:</p>
 <pre><code>./hogman-join share photos ~/holiday --note "Summer trip photos"
 ./hogman-join share blog 3000            # a site you're building, by its port</code></pre>
-<p class="muted">Everyone in the pen can then open <code>https://blog.<span class="zone">&lt;network&gt;.hogman</span></code>.
+<p class="muted">Everyone in the pen can then open <code>https://blog.<span class="zone">&lt;network&gt;.pens.hogman.network</span></code>.
 Add <code>--background</code> to keep it running after the window closes;
 <code>./hogman-join share stop blog</code> takes it down and frees the name.</p>
 <p>A computer that isn't in the pen, like a spare box in the closet? Press <em>Get a share link</em>
 above, and put the link at the end: <code>./hogman-join share blog 3000 '&lt;share link&gt;'</code>.
 Already run a web server such as Caddy or nginx? Share its port.</p>
-
-<h2>Root certificate</h2>
-<p>Download it again: <a href="/root_ca.crt">root_ca.crt</a>. It can only vouch
-for names inside this network.</p>
 
 <script src="/portal.js" defer></script>
 </body>

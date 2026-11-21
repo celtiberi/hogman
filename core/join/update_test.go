@@ -74,14 +74,13 @@ func TestParseSHA256SUMS(t *testing.T) {
 }
 
 func TestParseUpdateSourceURL(t *testing.T) {
-	fp := strings.Repeat("AA", 32)
 	good := []struct {
 		raw      string
 		wantBase string
 		wantHost string
 	}{
-		{"https://pen.example/join#t=abc&fp=" + fp, "https://pen.example", "pen.example"},
-		{"https://pen.example/join#k=dev&fp=" + fp + "&for=share", "https://pen.example", "pen.example"},
+		{"https://pen.example/join#t=abc", "https://pen.example", "pen.example"},
+		{"https://pen.example/join#k=dev&for=share", "https://pen.example", "pen.example"},
 		{"pen.example", "https://pen.example", "pen.example"},
 		{"https://pen.example:8443/", "https://pen.example:8443", "pen.example:8443"},
 	}
@@ -415,54 +414,30 @@ func TestUpdateShareBinaryRestartAndRollback(t *testing.T) {
 }
 
 func TestCleanupLegacyRootsForUpdate(t *testing.T) {
-	// 1. Private target with private network info leaves root intact (Item 2a guard for run.sh).
-	var calls []string
-	privPlan := &updatePlan{
-		baseURL: "https://hs.example.com",
-		host:    "hs.example.com",
-		pens: []penTarget{{
-			zone: "bobo.hogman",
-			dir:  t.TempDir(),
-			cfg:  &agentConfig{Zone: "bobo.hogman", LoginServer: "https://hs.example.com", CertMode: "private", RootFP: "AA11"},
-		}},
-	}
-	got := cleanupLegacyRootsForUpdate(privPlan, false, legacyCleanupOps{
-		fetchCertMode: func() string { return "private" },
-		loadAllPens:   func() []penTarget { return privPlan.pens },
-		removeRoot: func(zone, fp string) (bool, error) {
-			calls = append(calls, zone+"|"+fp)
-			return true, nil
-		},
-	})
-	if len(got) != 0 || len(calls) != 0 {
-		t.Fatalf("private update unexpectedly cleaned roots: got=%v calls=%v", got, calls)
-	}
-
-	// 2. Public target removes pen's recorded RootFP, sweeps leftovers, and clears RootFP on disk.
+	// 1. Saved RootFP cleans specific pen root, runs trailing wildcard sweep, and clears RootFP on disk.
 	pubDir := t.TempDir()
-	pubCfg := &agentConfig{Zone: "bobo.pens.example.com", LoginServer: "https://bobo.gate.example.com", CertMode: "public", RootFP: "BB22"}
+	pubCfg := &agentConfig{Zone: "bobo.hogman", LoginServer: "https://hs.example.com", RootFP: "BB22"}
 	if err := pubCfg.save(pubDir); err != nil {
 		t.Fatal(err)
 	}
-	calls = nil
-	pubPlan := &updatePlan{
+	var calls []string
+	plan := &updatePlan{
 		baseURL: "https://bobo.gate.example.com",
 		host:    "bobo.gate.example.com",
 		pens:    []penTarget{{zone: pubCfg.Zone, dir: pubDir, cfg: pubCfg}},
 	}
-	got = cleanupLegacyRootsForUpdate(pubPlan, false, legacyCleanupOps{
-		loadAllPens: func() []penTarget { return pubPlan.pens },
+	got := cleanupLegacyRootsForUpdate(plan, false, legacyCleanupOps{
 		removeRoot: func(zone, fp string) (bool, error) {
 			calls = append(calls, zone+"|"+fp)
 			return true, nil
 		},
 		saveConfig: func(dir string, c *agentConfig) error { return c.save(dir) },
 	})
-	if !slices.Equal(calls, []string{"bobo.pens.example.com|BB22", "|"}) {
-		t.Fatalf("public cleanup calls = %v, want pen + wildcard sweep", calls)
+	if !slices.Equal(calls, []string{"bobo.hogman|BB22", "|"}) {
+		t.Fatalf("cleanup calls = %v, want pen + wildcard sweep", calls)
 	}
 	if len(got) != 2 {
-		t.Fatalf("public cleanup results = %v, want 2 entries", got)
+		t.Fatalf("cleanup results = %v, want 2 entries", got)
 	}
 	reloaded, err := loadAgentConfig(pubDir)
 	if err != nil {
@@ -472,29 +447,10 @@ func TestCleanupLegacyRootsForUpdate(t *testing.T) {
 		t.Fatalf("expected saved config RootFP cleared, got %q", reloaded.RootFP)
 	}
 
-	// 3. Public target alongside an unrelated private pen cleans only the target pen (skips wildcard sweep).
+	// 2. Dry-run never invokes removeRoot and preserves RootFP.
 	calls = nil
-	otherPriv := penTarget{
-		zone: "other.hogman",
-		dir:  t.TempDir(),
-		cfg:  &agentConfig{Zone: "other.hogman", LoginServer: "https://other.example.com", CertMode: "private", RootFP: "CC33"},
-	}
-	cleanupLegacyRootsForUpdate(pubPlan, false, legacyCleanupOps{
-		loadAllPens: func() []penTarget { return append(append([]penTarget(nil), pubPlan.pens...), otherPriv) },
-		removeRoot: func(zone, fp string) (bool, error) {
-			calls = append(calls, zone+"|"+fp)
-			return false, nil
-		},
-	})
-	if !slices.Equal(calls, []string{"bobo.pens.example.com|"}) {
-		t.Fatalf("mixed private+public calls = %v, want only public target zone", calls)
-	}
-
-	// 4. Dry-run never invokes removeRoot.
-	calls = nil
-	pubPlan.pens[0].cfg.RootFP = "DD44"
-	cleanupLegacyRootsForUpdate(pubPlan, true, legacyCleanupOps{
-		loadAllPens: func() []penTarget { return pubPlan.pens },
+	plan.pens[0].cfg.RootFP = "DD44"
+	cleanupLegacyRootsForUpdate(plan, true, legacyCleanupOps{
 		removeRoot: func(zone, fp string) (bool, error) {
 			calls = append(calls, zone+"|"+fp)
 			return true, nil
@@ -504,18 +460,17 @@ func TestCleanupLegacyRootsForUpdate(t *testing.T) {
 		t.Fatalf("dry-run called removeRoot: %v", calls)
 	}
 
-	// 5. Steady-state public pen without RootFP or other private pens scans only once via wildcard.
+	// 3. Steady-state pen without RootFP scans only once via wildcard sweep.
 	calls = nil
-	pubPlan.pens[0].cfg.RootFP = ""
-	cleanupLegacyRootsForUpdate(pubPlan, false, legacyCleanupOps{
-		loadAllPens: func() []penTarget { return pubPlan.pens },
+	plan.pens[0].cfg.RootFP = ""
+	cleanupLegacyRootsForUpdate(plan, false, legacyCleanupOps{
 		removeRoot: func(zone, fp string) (bool, error) {
 			calls = append(calls, zone+"|"+fp)
 			return false, nil
 		},
 	})
 	if !slices.Equal(calls, []string{"|"}) {
-		t.Fatalf("steady-state public cleanup calls = %v, want single wildcard [\"|\"]", calls)
+		t.Fatalf("steady-state cleanup calls = %v, want single wildcard [\"|\"]", calls)
 	}
 }
 
@@ -529,13 +484,13 @@ func TestFindAndRetireLegacySameServerPens(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := (&agentConfig{Zone: "bobo.hogman", LoginServer: "https://hs.example.com", CertMode: "private", RootFP: "FP-OLD"}).save(oldDir); err != nil {
+	if err := (&agentConfig{Zone: "bobo.hogman", LoginServer: "https://hs.example.com", RootFP: "FP-OLD"}).save(oldDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&agentConfig{Zone: "bobo.pens.example.com", LoginServer: "https://hs.example.com", CertMode: "public"}).save(newDir); err != nil {
+	if err := (&agentConfig{Zone: "bobo.pens.example.com", LoginServer: "https://hs.example.com"}).save(newDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&agentConfig{Zone: "other.hogman", LoginServer: "https://other.example.com", CertMode: "private", RootFP: "FP-OTHER"}).save(otherDir); err != nil {
+	if err := (&agentConfig{Zone: "other.hogman", LoginServer: "https://other.example.com", RootFP: "FP-OTHER"}).save(otherDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -545,7 +500,7 @@ func TestFindAndRetireLegacySameServerPens(t *testing.T) {
 	}
 
 	var steps []string
-	retireLegacySameServerPens(found, false, legacyRetireOps{
+	retireLegacySameServerPens(found, legacyRetireOps{
 		stop: func(_ string, c *agentConfig) {
 			steps = append(steps, "stop:"+c.Zone)
 		},

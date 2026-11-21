@@ -15,8 +15,8 @@
   const m = location.hash.match(/code=([A-Za-z0-9-]+)/);
   if (m) $('code').value = m[1].toUpperCase();
 
-  // What pens' names end in (D-18: <pen>.pens.hogman.network), from the server.
-  let sites = 'hogman';
+  // What pens' names end in (<pen>.pens.hogman.network), from the server.
+  let sites = 'pens.hogman.network';
   const setSites = () => document.querySelectorAll('.sites').forEach(e => { e.textContent = sites; });
   api('GET', '/status').then(r => { if (/^[a-z0-9.-]+$/.test(r.sites_domain || '')) { sites = r.sites_domain; setSites(); } }).catch(() => {});
 

@@ -17,7 +17,7 @@ import (
 	"strings"
 )
 
-// Pen names become <name>.hogman and <name>.<pens domain>: 3-30 characters.
+// Pen names become <name>.<pens zone> and <name>.<gate domain>: 3-30 characters.
 // Handles follow the registrar's rule.
 var (
 	penRE    = regexp.MustCompile(`^[a-z][a-z0-9-]{1,28}[a-z0-9]$`)

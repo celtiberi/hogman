@@ -2,16 +2,9 @@ package main
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -144,34 +137,9 @@ type testEnv struct {
 	dir string
 }
 
-func writeTestRootCA(t *testing.T, path string) {
-	t.Helper()
-	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "bobo.hogman Root CA"},
-		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     time.Now().Add(time.Hour),
-		IsCA:         true,
-		KeyUsage:     x509.KeyUsageCertSign,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &k.PublicKey, k)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	dir := t.TempDir()
-	rootPath := filepath.Join(dir, "root_ca.crt")
-	writeTestRootCA(t, rootPath)
 	st, err := OpenStore(filepath.Join(dir, "registrar.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -182,8 +150,6 @@ func newTestEnv(t *testing.T) *testEnv {
 		Zone:         "bobo.hogman",
 		PublicHost:   "hs.example.com",
 		CoreIP:       "100.64.0.1",
-		CAIP:         "100.64.0.2",
-		RootCAFile:   rootPath,
 		NameHold:     90 * 24 * time.Hour,
 		InviteTTL:    7 * 24 * time.Hour,
 		DeviceKeyTTL: time.Hour,
@@ -650,10 +616,8 @@ func TestQuotasAndSuspendExpiresKeys(t *testing.T) {
 	}
 }
 
-func TestCASharesCoreMeshIPAndPort9000(t *testing.T) {
+func TestNoCARecordOrPort9000(t *testing.T) {
 	dir := t.TempDir()
-	rootPath := filepath.Join(dir, "root_ca.crt")
-	writeTestRootCA(t, rootPath)
 	st, err := OpenStore(filepath.Join(dir, "registrar.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -661,31 +625,38 @@ func TestCASharesCoreMeshIPAndPort9000(t *testing.T) {
 	t.Cleanup(func() { _ = st.db.Close() })
 	hs := newFakeHeadscale(t)
 	cfg := Config{
-		Zone:       "bobo.hogman",
-		PublicHost: "hs.example.com",
+		Zone:       "bobo.pens.example.com",
+		PublicHost: "bobo.gate.example.com",
 		CoreIP:     "100.64.0.10",
-		RootCAFile: rootPath,
 	}
 	svc, err := NewService(cfg, st, NewHeadscale(hs.srv.URL, "test-key"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if svc.cfg.CAIP != "100.64.0.10" {
-		t.Fatalf("CAIP=%q want 100.64.0.10", svc.cfg.CAIP)
-	}
 	dnsSrv, err := NewDNSServer(svc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := mustResolveA(t, dnsSrv, "ca.bobo.hogman."); got != "100.64.0.10" {
-		t.Fatalf("ca.bobo.hogman. = %q want 100.64.0.10", got)
+	resp, ok := dnsSrv.HandlePacket(buildDNSQuery(t, 1, "ca.bobo.pens.example.com.", dnsmessage.TypeA, true, 0), false)
+	if !ok {
+		t.Fatal("expected DNS response for ca.<zone>")
+	}
+	hdr, ans, _, _ := parseDNSResp(t, resp)
+	if hdr.RCode != dnsmessage.RCodeNameError || len(ans) != 0 {
+		t.Fatalf("ca.<zone> got rcode=%v ans=%d, want NXDOMAIN", hdr.RCode, len(ans))
+	}
+	if _, err := svc.normaliseName("ca"); err != nil {
+		t.Fatalf("expected label ca to be unreserved: %v", err)
 	}
 	pol, err := svc.buildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(pol, `"9000"`) {
-		t.Fatalf("policy missing CA port 9000:\n%s", pol)
+	if strings.Contains(pol, `"9000"`) {
+		t.Fatalf("policy still allows retired CA port 9000:\n%s", pol)
+	}
+	if !strings.Contains(pol, `"53"`) || !strings.Contains(pol, `"443"`) {
+		t.Fatalf("policy missing DNS/HTTPS ports:\n%s", pol)
 	}
 }
 

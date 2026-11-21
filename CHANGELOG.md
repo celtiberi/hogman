@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- Retired the per-pen private certificate authority (`step-ca`, D-22):
+  - Removed `step-ca`, CA templates (`ca.json`, `root_ca.tpl`, `intermediate_ca.tpl`), `ca.<zone>` DNS records, Headscale ACL port `9000`, `CERT_MODE`, `ROOT_CA`, `compose.public.yaml`, `portal.public.Caddyfile`, and `step-resolv.conf`. All pens now run public ACME certificates via DNS-01 (`home.<zone>` managed by `registrar`, member sites/shares managed by `hogman-join share`).
+  - Removed `fp=` link parameters, `CheckRoot`, `--no-trust`, and OS trust-store install/remove helpers from `core/join`, `core/registrar`, and `core/join-page`. Invite and server links carrying `fp=` are rejected with an upgrade message. Retained legacy private-CA root cleanup and old zone retirement in `hogman-join update` and `leave`.
+  - Retired private-CA `hogman-host add <pen> <public-host>`, `escrow_root`, `pki/offline/`, and `step/db/` handling in `deploy/hogman-host`; `hogman-host add <pen>` now always creates a public-certificate pen using `challenge-dns`. Updated `core/test/run.sh`, `core/test/compose.test.yaml`, and `deploy/test-host.sh` to run public-certificate e2e suites against `challenge-dns` + Pebble.
+
 ### Fixed
 - `core/join` public-certificate cleanup and ACME cap handling (D-22 prep):
   - Persist `root_fp` in side-by-side `agentConfig` on private joins, remove legacy Hogman root certificates (matching either stored `root_fp` or the exact `<zone> Root CA` + critical NameConstraints shape for pre-`root_fp` installs) during `hogman-join update` on public pens, and retire old same-server zone folders and roots when re-joining a renamed public zone.

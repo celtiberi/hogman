@@ -11,6 +11,9 @@
   const t = q.get('t');
   const k = q.get('k');
   const fp = q.get('fp');
+  if (fp) {
+    return err('This link is from an older release and is no longer valid. Ask whoever sent it for a fresh one.');
+  }
   if (!(t || k)) {
     return err('This link is incomplete. Ask whoever sent it for a fresh one, and copy it whole.');
   }
@@ -20,7 +23,6 @@
   const host = location.host;
   if ((t && !/^[a-zA-Z0-9._-]+$/.test(t)) ||
       (k && !/^[a-zA-Z0-9._-]+$/.test(k)) ||
-      (fp && !/^[0-9a-fA-F:]+$/.test(fp)) ||
       !/^[a-zA-Z0-9._:-]+$/.test(host)) {
     return err('This link contains unexpected characters. Ask whoever sent it for a fresh one.');
   }
@@ -34,7 +36,7 @@
     return err('Phones can\'t join yet: the Hogman phone app is coming soon. ' +
                'For now, open this link on a macOS or Linux computer.');
   }
-  const cleanLink = `https://${host}/join#${t ? 't=' + t : 'k=' + k}${fp ? '&fp=' + fp : ''}${forShare ? '&for=share' : ''}`;
+  const cleanLink = `https://${host}/join#${t ? 't=' + t : 'k=' + k}${forShare ? '&for=share' : ''}`;
   const quoted = `'${cleanLink}'`;
   const verb = forShare ? 'share blog 8080 ' : '';
   const unixCmd = `curl -fsSLo hogman-join "https://${host}/join/dl/hogman-join-$(uname -s)-$(uname -m)" && chmod +x hogman-join && ./hogman-join ${verb}${quoted}`;
@@ -59,7 +61,7 @@
     await navigator.clipboard.writeText(unixCmd);
     document.getElementById('copied').textContent = 'Copied.';
   };
-  document.getElementById('redeem').textContent = kind === 'invite' ? 'asks you to pick your name,' : '';
+  document.getElementById('redeem').textContent = kind === 'invite' ? 'asks you to pick your name, validates' : 'connects to';
   fetch('/hogman/v1/network').then(r => r.json()).then(n => {
     document.querySelectorAll('.zone').forEach(el => { el.textContent = '.' + n.zone; });
     document.getElementById('title').textContent = (forShare ? 'Share into ' : 'Join ') + n.zone;
@@ -68,18 +70,7 @@
       : kind === 'share'
         ? 'Put something in the pen from this computer: change blog to the name you want, and 8080 to your app\'s port (or a folder). This link works once, for an hour.'
         : 'Add another device. This link works once, for an hour.';
-    if (n.cert_mode === 'public') {
-      if (fp) {
-        return err('This link is invalid for a network using public certificates. Ask whoever sent it for a fresh one.');
-      }
-    } else if (n.cert_mode === 'private') {
-      if (!fp) {
-        return err('This link is incomplete (missing certificate fingerprint). Ask whoever sent it for a fresh one.');
-      }
-      if (n.root_fingerprint !== fp.replace(/:/g, '').toUpperCase()) {
-        return err('Warning: this network’s certificate does not match your link. Do not continue; tell whoever sent it.');
-      }
-    } else {
+    if (n.cert_mode && n.cert_mode !== 'public') {
       return err('This network returned an unrecognized certificate mode.');
     }
     document.getElementById('main').hidden = false;

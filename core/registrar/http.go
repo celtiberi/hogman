@@ -648,7 +648,7 @@ func ownerCount(s *Service, a Actor) int {
 // The mesh API trusts X-Forwarded-For to say who is asking, so who can reach
 // it matters (audit H2). In a pen it listens only on a Unix socket in a folder
 // mounted into the registrar and the portal and nothing else: other services
-// sharing the network namespace (step-ca, core-mesh) have no way to it, and
+// sharing the network namespace (core-mesh) have no way to it, and
 // the kernel enforces that. MESH_ADDR "unix:/path" selects it; a host:port
 // (the default, for development and tests) listens on loopback TCP instead.
 type viaSocketKey struct{}
