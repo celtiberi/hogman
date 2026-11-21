@@ -199,9 +199,15 @@ docker run -d --name client-signup --network hogman-front \
 retry 20 docker exec client-signup test -s /etc/ssl/certs/ca-certificates.crt
 signup() { docker exec client-signup curl -s -m 30 -H 'content-type: application/json' "https://get.example$@"; }
 create_pen() {  # create_pen <json>: start a sign-up and follow its job, like the page does; prints the result
-  local job j i
-  job="$(signup /api/create -d "$1" | jq -r '.job // empty')"
-  [ -n "$job" ] || { echo '{"error":"no job"}'; return; }
+  local raw status body job j i
+  raw="$(docker exec client-signup curl -s -m 30 -w '\n%{http_code}' -H 'content-type: application/json' -d "$1" https://get.example/api/create)"
+  status="${raw##*$'\n'}"
+  body="${raw%$'\n'*}"
+  job="$(jq -r '.job // empty' <<<"$body" 2>/dev/null)"
+  if [ -z "$job" ]; then
+    jq -c --argjson st "${status:-0}" '. + {status: $st}' <<<"$body" 2>/dev/null || echo "{\"error\":\"no job\",\"status\":${status:-0}}"
+    return
+  fi
   for i in $(seq 1 300); do
     j="$(signup "/api/job?id=$job")"
     case "$(jq -r .state <<<"$j" 2>/dev/null)" in

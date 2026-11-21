@@ -22,11 +22,16 @@ import (
 // broker raises pens. One at a time: a small server should not build two
 // pens at once, and it makes a sign-up code impossible to use twice.
 type broker struct {
-	home  string // HOGMAN_HOME
-	tool  string // hogman-host
-	token string
-	ntfy  string // optional: ntfy topic URL for the operator's pushes
-	mu    sync.Mutex
+	home        string // HOGMAN_HOME
+	tool        string // hogman-host
+	token       string
+	ntfy        string // optional: ntfy topic URL for the operator's pushes
+	mu          sync.Mutex
+	limitMu     sync.Mutex
+	waitJoins   *limiter
+	waitNotify  *limiter
+	raiseNotify *limiter
+	ntfySem     chan struct{}
 }
 
 func runBroker() {
@@ -38,14 +43,45 @@ func runBroker() {
 	}
 	addr := env("BROKER_ADDR", ":9090")
 	log.Printf("broker on %s", addr)
-	srv := &http.Server{Addr: addr, Handler: b.handler(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: b.handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	log.Fatal(srv.ListenAndServe())
+}
+
+func (b *broker) ensureLimits() {
+	b.limitMu.Lock()
+	defer b.limitMu.Unlock()
+	if b.waitJoins == nil {
+		b.waitJoins = newLimiterWithCap(30, time.Hour, 4)
+	}
+	if b.waitNotify == nil {
+		b.waitNotify = newLimiterWithCap(10, time.Hour, 4)
+	}
+	if b.raiseNotify == nil {
+		b.raiseNotify = newLimiterWithCap(20, time.Hour, 4)
+	}
+	if b.ntfySem == nil {
+		b.ntfySem = make(chan struct{}, 4)
+	}
+}
+
+func (b *broker) allowWaitlistJoin(now time.Time) bool {
+	b.ensureLimits()
+	return b.waitJoins.allow("*", now)
+}
+
+func (b *broker) notifyLimiter(kind string) *limiter {
+	b.ensureLimits()
+	if kind == "waitlist" {
+		return b.waitNotify
+	}
+	return b.raiseNotify
 }
 
 func (b *broker) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /capacity", b.capacity)
 	mux.HandleFunc("GET /check", b.check)
+	mux.HandleFunc("POST /validate", b.validate)
 	mux.HandleFunc("POST /provision", b.provision)
 	mux.HandleFunc("POST /waitlist", b.waitlist)
 	mux.HandleFunc("POST /waitlist/leave", b.leaveWaitlist)
@@ -122,30 +158,76 @@ func (b *broker) check(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, map[string]any{"free": true})
 }
 
-func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Code  string `json:"code"`
-		Pen   string `json:"pen"`
-		Owner string `json:"owner"`
-	}
+type signupInput struct {
+	Code  string `json:"code"`
+	Pen   string `json:"pen"`
+	Owner string `json:"owner"`
+}
+
+func decodeSignupInput(w http.ResponseWriter, r *http.Request) (signupInput, bool) {
+	var in signupInput
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&in); err != nil {
 		jsonOut(w, 400, map[string]string{"error": "bad request"})
-		return
+		return signupInput{}, false
 	}
 	in.Code = normCode(in.Code)
+	in.Pen = strings.ToLower(strings.TrimSpace(in.Pen))
+	in.Owner = strings.ToLower(strings.TrimSpace(in.Owner))
 	if why, ok := validPen(in.Pen); !ok {
 		jsonOut(w, 400, map[string]string{"error": "pen name: " + why})
-		return
+		return signupInput{}, false
 	}
 	if why, ok := validHandle(in.Owner); !ok {
 		jsonOut(w, 400, map[string]string{"error": "your name: " + why})
-		return
+		return signupInput{}, false
 	}
 	if !codeRE.MatchString(in.Code) {
 		jsonOut(w, 403, map[string]string{"error": "that sign-up code isn't right"})
+		return signupInput{}, false
+	}
+	return in, true
+}
+
+// validate checks code, pen availability, and capacity synchronously before
+// queueing a background provision job.
+func (b *broker) validate(w http.ResponseWriter, r *http.Request) {
+	in, valid := decodeSignupInput(w, r)
+	if !valid {
+		return
+	}
+	_, ok, err := b.findCode(in.Code)
+	if err != nil {
+		log.Print(err)
+		jsonOut(w, 500, map[string]string{"error": "internal error"})
+		return
+	}
+	if !ok {
+		jsonOut(w, 403, map[string]string{"error": "that sign-up code isn't right, or it was already used"})
+		return
+	}
+	if b.taken(in.Pen) {
+		jsonOut(w, 409, map[string]string{"error": "that name is taken"})
+		return
+	}
+	cap, err := b.readCapacity(r.Context())
+	if err != nil {
+		log.Print(err)
+		jsonOut(w, 500, map[string]string{"error": "internal error"})
+		return
+	}
+	if !cap.Open {
+		jsonOut(w, 503, map[string]string{"error": "this server is full right now"})
+		return
+	}
+	jsonOut(w, 200, map[string]bool{"ok": true})
+}
+
+func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
+	in, valid := decodeSignupInput(w, r)
+	if !valid {
 		return
 	}
 
@@ -197,7 +279,7 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 	}
 	b.ledger(fmt.Sprintf("%s raised %s for %s with %s (%s) in %s",
 		time.Now().UTC().Format(time.RFC3339), in.Pen, in.Owner, in.Code, note, time.Since(start).Round(time.Second)))
-	b.notify(fmt.Sprintf("New pen raised: %s.hogman", in.Pen))
+	b.notifyKind("raised", fmt.Sprintf("New pen raised: %s.hogman", in.Pen))
 	jsonOut(w, 201, res)
 }
 
