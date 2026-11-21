@@ -27,7 +27,10 @@ usage() {
 usage: hogman-host <command>
 
   init [--test]                  set up the front door (--test: self-signed certificates, for local trials)
-  add <network> <public-host>    create a pen, e.g.  add bobo hs.example.com
+  add <network> <public-host> [--public <zone>]
+                                 create a pen, e.g.  add bobo hs.example.com
+                                 --public: public certificates (D-18), e.g.
+                                   add bobo bobo.gate.hogman.network --public bobo.pens.hogman.network
   list                           pens on this host
   pen <network> <args...>        run ./hogman in a pen, e.g.  pen bobo member list
   upgrade <network>              update a pen's code from src/ and restart it
@@ -363,11 +366,25 @@ next_stun_port() {
 
 cmd_add() {
   load_host
-  local n="${1:-}" host="${2:-}"
-  [ -n "$n" ] && [ -n "$host" ] || die "usage: hogman-host add <network> <public-host>"
+  local n="${1:-}" host="${2:-}" zone=""
+  [ -n "$n" ] && [ -n "$host" ] || die "usage: hogman-host add <network> <public-host> [--public <zone>]"
+  if [ "${3:-}" = --public ]; then
+    zone="${4:-}"
+    valid_host "$zone" && [[ "$zone" == "$n".* ]] || die "--public needs the pen's zone, $n.<domain> (e.g. $n.pens.hogman.network)"
+  fi
   valid_name "$n" || die "network names are lowercase letters, digits and dashes (max 63 chars)"
   valid_host "$host" || die "invalid public hostname: $host"
   [ -e "$PENS/$n" ] && die "pen $n already exists"
+  if [ -n "$zone" ]; then
+    [ -x "$CDNS_BIN" ] || die "public certificates need the challenge DNS server: hogman-host challenge-dns-setup <public-ip>"
+    # D-21: a pen name is used once, ever.
+    local used; used="$(CDNS_ADMIN_SOCK=/run/challenge-dns/admin.sock "$CDNS_BIN" name used "$n" 2>&1 || true)"
+    case "$used" in
+      free) ;;
+      used) die "the pen name $n was used before and is never given out again" ;;
+      *) die "couldn't ask the challenge DNS server whether $n was used before: $used" ;;   # fail closed
+    esac
+  fi
   for o in $(pen_names); do
     [ "$(pen_env "$o" PUBLIC_HOST)" = "$host" ] && die "$host is already used by pen $o"
   done
@@ -384,6 +401,18 @@ FRONT_DOOR=true
 STUN_PORT=$stun
 COMPOSE_PROJECT_NAME=pen-$n
 EOF
+  if [ -n "$zone" ]; then
+    printf 'CERT_MODE=public\nZONE=%s\n' "$zone" >> "$PENS/$n/.env"
+    # This pen's challenge DNS credential: it can write only this pen's
+    # challenge records. The token goes straight into the registrar's secrets.
+    install -d -m 0700 "$PENS/$n/data/secrets/registrar"
+    local out tok
+    out="$(CDNS_ADMIN_SOCK=/run/challenge-dns/admin.sock "$CDNS_BIN" cred add pen "$n")" || die "could not make the pen's challenge DNS credential: $out"
+    tok="$(awk '/^token:/ {print $2}' <<<"$out")"
+    [ -n "$tok" ] || die "no token from challenge-dns"
+    ( umask 077; printf '%s' "$tok" > "$PENS/$n/data/secrets/registrar/challenge_dns_token" )
+    awk '/^id:/ {print $2}' <<<"$out" > "$PENS/$n/.challenge-dns-id"
+  fi
   # The pen's private network, and the route, come first: the pen's own core
   # joins its mesh through the front door.
   docker network inspect "pen-$n-core" >/dev/null 2>&1 || docker network create "pen-$n-core" >/dev/null
@@ -394,7 +423,9 @@ EOF
   (cd "$PENS/$n" && ./hogman init && FRONT_CA="$front_ca" FRONT_JOIN_DL="$FRONT/join-dl" ./hogman up)
   info "Pen $n is up. Create its owner:  hogman-host pen $n member add <handle> --role owner"
   info "Then join your own laptop:      hogman-host pen $n device key <handle> personal  (open the link on it)"
-  info "Its root key is in $PENS/$n/data/pki/offline/: move it somewhere safe and delete it here."
+  if [ -z "$zone" ]; then
+    info "Its root key is in $PENS/$n/data/pki/offline/: move it somewhere safe and delete it here."
+  fi
 }
 
 cmd_list() {
@@ -440,6 +471,12 @@ cmd_remove() {
   [ -d "$PENS/$n" ] || die "no pen $n"
   (cd "$PENS/$n" && ./hogman down) || true
   touch "$PENS/$n/.removed"
+  # Its challenge DNS credential goes; the server keeps only the fact that the
+  # name was used (D-21), so it's never handed out again.
+  if [ -s "$PENS/$n/.challenge-dns-id" ] && [ -x "$CDNS_BIN" ]; then
+    CDNS_ADMIN_SOCK=/run/challenge-dns/admin.sock "$CDNS_BIN" cred rm "$(cat "$PENS/$n/.challenge-dns-id")" >/dev/null 2>&1 \
+      && rm -f "$PENS/$n/.challenge-dns-id" || info "could not remove $n's challenge DNS credential; do it by hand: hogman-host challenge-dns cred list"
+  fi
   write_front
   reload_front
   docker network rm "pen-$n-core" >/dev/null 2>&1 || true

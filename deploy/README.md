@@ -250,7 +250,18 @@ hogman-host challenge-dns cred list
 - **Port 53** is opened in the server's firewall. If DigitalOcean's cloud firewall is on,
   open TCP and UDP 53 there too.
 
-Pens keep using their own certificate authority until the switch-over, which comes later.
+A pen can then be raised with public certificates instead of its own certificate authority:
+
+```bash
+hogman-host add bobo bobo.gate.hogman.network --public bobo.pens.hogman.network
+```
+
+It gets its own challenge DNS credential, which can only write `bobo`'s challenge records. Its
+registrar fetches `home.bobo.pens.hogman.network`'s certificate from Let's Encrypt, so there's
+no root key to look after and nothing for members to install. A name used once is never given
+out again, even after `hogman-host remove`. This works only once Cloudflare delegates
+`pens.hogman.network` to the challenge DNS server and members' `hogman-join` understands public
+pens. Until that switch-over, existing pens keep their own certificate authority.
 
 ## Everyday
 
