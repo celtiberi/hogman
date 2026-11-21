@@ -782,6 +782,10 @@ services:
       - $hostbin:/usr/local/bin/hogman-host:ro
       - $CDNS_BIN:$CDNS_BIN:ro
       - $(dirname "$CDNS_ADMIN"):$(dirname "$CDNS_ADMIN")
+      # Read-only: the broker rewrites the front door's routes when it raises a
+      # pen, and a route uses the *.<gate> wildcard only if these files exist.
+      # Without them every gate route lost its certificate line.
+      - $GATE_TLS:$GATE_TLS:ro
     # signup: the page reaches it here (internal: no internet). out, only with
     # push notifications on: nothing else is on it, so nothing reaches it there.
     networks: $broker_nets

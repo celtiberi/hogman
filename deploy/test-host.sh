@@ -105,9 +105,23 @@ pebble_get() { docker run --rm --network hogman-front -v "$ACME/certs:/c:ro" nic
 check "Pebble is up" retry 30 pebble_get 14000/dir
 pebble_get 15000/roots/0 > "$ACME/issued-root.crt"
 check "Pebble's issuing root is fetched" grep -q 'BEGIN CERTIFICATE' "$ACME/issued-root.crt"
+# The front door's *.gate wildcard (on a real host: gate-cert-setup's Let's
+# Encrypt certificate), here signed by the front door's own test CA, which
+# the test clients already trust.
+FRONT_PKI="$HOGMAN_HOME/front/data/caddy/pki/authorities/local"
+mkdir -p "$ACME/gate-tls"
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$ACME/gate-tls/gate.key" \
+  -out "$ACME/gate.csr" -subj "/CN=*.gate.hogman.test" >/dev/null 2>&1
+printf 'basicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:*.gate.hogman.test\n' > "$ACME/gate.ext"
+openssl x509 -req -in "$ACME/gate.csr" -CA "$FRONT_PKI/root.crt" -CAkey "$FRONT_PKI/root.key" -CAcreateserial \
+  -out "$ACME/gate-tls/gate.crt" -days 2 -extfile "$ACME/gate.ext" >/dev/null 2>&1
+fuid="$(grep -h '^FRONT_UID=' "$HOGMAN_HOME/host.env" | cut -d= -f2 | tr -d "'")"
+chown -R "${fuid:-0}" "$ACME/gate-tls"; chmod 644 "$ACME/gate-tls/gate.crt"; chmod 600 "$ACME/gate-tls/gate.key"
+check "the test *.gate wildcard is made" test -s "$ACME/gate-tls/gate.crt"
 # What a real host gets from challenge-dns-setup and gate-cert-setup; here the
 # test's own server, CA and names. The broker reads these too (host.env).
 cat >> "$HOGMAN_HOME/host.env" <<EOF
+GATE_TLS='$ACME/gate-tls'
 CDNS_BIN='$ACME/cdns/challenge-dns'
 CDNS_ADMIN='$ACME/cdns/admin.sock'
 HOGMAN_ACME_SOCK_DIR='$ACME/sock'
@@ -356,6 +370,12 @@ check "raising a pen doesn't restart the front door (other pens stay up)" \
 link="$(jq -r .join_link <<<"$res" 2>/dev/null)"
 check "a pen is raised from the page" test "$(jq -r .zone <<<"$res" 2>/dev/null)" = smithy.pens.hogman.test
 check "its front door is smithy.gate.hogman.test" test "$(jq -r .host <<<"$res" 2>/dev/null)" = smithy.gate.hogman.test
+# The broker rewrote the front door's routes: every gate route must still use
+# the wildcard (a test front door would mint its own certificate anyway, so
+# check the routes themselves; a real one can't: CAA allows only the wildcard).
+gate_route_tls() { grep -A1 "^$1.gate.hogman.test {" "$HOGMAN_HOME/front/Caddyfile" | grep -q 'tls /gate-tls/gate.crt /gate-tls/gate.key'; }
+check "the sign-up's pen uses the *.gate wildcard" gate_route_tls smithy
+check "and the other pens' routes kept it after the sign-up" gate_route_tls bobo
 if [ -z "$link" ] || [ "$link" = null ]; then
   echo "        | $res"
   docker logs hogman-signup-broker-1 2>&1 | tail -25 | sed 's/^/        broker| /'

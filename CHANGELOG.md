@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Documentation & Website
+- Fixed: public sign-ups failed with "timed out waiting for core mesh IP", and each one stripped the `*.gate` wildcard from every pen's front-door route. The sign-up broker rewrites the front door's routes but couldn't see the wildcard's files, so it wrote routes without them; Caddy then had no certificate it was allowed to use (CAA permits only the wildcard). The broker now mounts the wildcard folder read-only, and `deploy/test-host.sh` gives its front door a real test wildcard and checks every gate route keeps it after a sign-up.
 - Updated documentation, website, and sign-up disclosures for public certificates (`D-18`, `D-22`) and hosted pens only (`D-24`, Phase B item 6):
   - Added `/docs/security.html` (packet flow, client isolation, DNS-01 architecture, threat model, host hardening, and known limits) and overhauled the homepage `#tech` section (`site/public/index.html`, `site/docs-src/`).
   - Removed obsolete `step-ca`, private root CA, offline root key, `fp=`, `--no-trust`, and self-hosted pen server steps across `README.md`, `deploy/README.md` (reframed as the operator guide), `core/README.md`, `DESIGN.md` (marked initial spec with superseded decision links), and `site/`.
