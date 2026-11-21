@@ -31,18 +31,18 @@ We follow two existing models rather than invent our own:
 
 | What | Hosted pens | Self-hosted pens |
 |---|---|---|
-| Pen zone, mesh only | `<penid>.pens.hogman.network` | A name under the operator's own domain, such as `pen.example.com` |
-| Sites and shares | `<site>.<penid>.pens.hogman.network` (up to 4 labels, as today) | `<site>.pen.example.com` |
-| Home page | `home.<penid>.pens.hogman.network` | `home.pen.example.com` |
+| Pen zone, mesh only | `<penname>.pens.hogman.network` | A name under the operator's own domain, such as `pen.example.com` |
+| Sites and shares | `<site>.<penname>.pens.hogman.network` (up to 4 labels, as today) | `<site>.pen.example.com` |
+| Home page | `home.<penname>.pens.hogman.network` | `home.pen.example.com` |
 | Public front door (Headscale control, join page, invite redemption) | `<pen>.gate.hogman.network` | The operator's `PUBLIC_HOST` |
 
-- A **pen ID** is 12 random characters from `[a-z2-7]`, about 60 bits. It hides *whose* pen a name belongs to. The names themselves still appear in public CT logs, and we say so.
+- **The pen's own name** is the label (D-21), using the existing hosted-pen rule: 3–30 lowercase letters, digits and dashes, starting with a letter, minus the reserved list. **A pen name is used once, ever.** When a pen is deleted its name stays taken, so old links, cookies and HSTS can never reach a stranger's pen. Pen names and site names appear in public CT logs, and the FAQ says so. (Revision 3 used a random 12-character ID to hide which pen a site belongs to; it was dropped because site names are public either way, and nothing is reachable from the internet.)
 - **Zones are checked before anything trusts them,** so a hostile pen can't make your browser send other sites through it:
-  - hosted zones must match exactly `^[a-z2-7]{12}\.pens\.hogman\.network$`;
+  - hosted zones must match exactly `^[a-z][a-z0-9-]{1,28}[a-z0-9]\.pens\.hogman\.network$`, and the name must be the pen's own (from the invite's network info, which is checked against the home page's public certificate);
   - an invite from a `*.gate.hogman.network` host is always treated as hosted: its zone must match the pattern above, and it never falls back to the self-hosted rule;
   - a self-hosted zone must sit under the invite host's registrable domain (checked against the PSL), and must not be a public suffix itself;
   - `hogman-join` connects to `https://home.<zone>` and checks it with the system's trusted roots **before** it writes the zone into its config or the PAC.
-- **Front doors move off `pens.` to `gate.`** A pen's human name and a random pen ID must never share a namespace: someone could otherwise choose a pen name that equals another pen's ID. It also keeps the front door's wildcard certificate (below) out of every pen zone. The PSL entry will be `pens.hogman.network`, which covers only the mesh sites, the ones that run third-party apps.
+- **Front doors move off `pens.` to `gate.`** That keeps the front door's wildcard certificate (below) out of every pen zone, and keeps the public front doors, which run only our own code, out of the PSL entry. The PSL entry will be `pens.hogman.network`, which covers only the mesh sites, the ones that run third-party apps.
 - **No public A or AAAA records exist for anything under a pen zone.** Browsers never resolve pen names: the PAC sends those hosts to the local agent, which resolves them through the pen's own DNS over the mesh, as today. Public DNS only ever answers the challenge records, CAA, NS and SOA.
 
 ## DNS
@@ -61,7 +61,7 @@ We follow two existing models rather than invent our own:
     - `0 issue ";"`: `issuewild` alone doesn't restrict non-wildcard names (RFC 8659);
     - `issuewild` for `letsencrypt.org` and `pki.goog`, each with `validationmethods=dns-01` and the host's `accounturi`.
     - The two CAs give the host two different account URIs, and they exist only after the host registers, so these CAA records are added after that.
-- **Each pen gets its own API credential, scoped to that pen.** It can write TXT records under `_acme-challenge.*.<its penid>.pens.hogman.network`, and nothing else: no other pen, no other record type, nothing under `gate.`.
+- **Each pen gets its own API credential, scoped to that pen.** It can write TXT records under `_acme-challenge.*.<its pen name>.pens.hogman.network`, and nothing else: no other pen, no other record type, nothing under `gate.`.
   - It allows at most 2 live TXT records per name.
   - Its **weekly cap** (10) counts distinct names whose challenge was written this week, not raw TXT writes. A renewal touches its name about once every 60 days, so renewals barely count.
   - The host has one separate credential, which only the front door uses, for the `*.gate.hogman.network` wildcard.
@@ -139,7 +139,8 @@ We follow two existing models rather than invent our own:
   - a client for the challenge DNS service, or libdns for self-hosters;
   - reserved names: `ca` is removed, `_acme-challenge` is added as invalid.
 - **Sign-up and `hogman-host`:**
-  - provisioning makes a pen ID and a per-pen credential at the challenge DNS service;
+  - provisioning makes a per-pen credential at the challenge DNS service, for the pen's name;
+  - deleting a pen never frees its name (the sign-up broker and `hogman-host` keep a list of names ever used);
   - the front door moves to `gate.`;
   - the provision regex no longer expects `fp=`.
 - **CSRF:** unchanged. `requireSameOriginAndJSON` already rejects same-site requests, which remains correct when every pen sits under `pens.hogman.network`.
@@ -188,7 +189,7 @@ The docs say, in one sentence, that pens created before this change need to be r
 | Someone issues through another CA or method | CAA restricted to our two CAs, with `validationmethods=dns-01` and `accounturi` |
 | A leaked GTS credential | The GCP service-account key never leaves the challenge DNS service. A share holds only a single-use EAB pair, which is useless once its account is bound. |
 | One pen exhausts the shared quota | The per-pen weekly cap, the LE override, the GTS fallback |
-| Site names exposed in CT | Pen IDs hide ownership; site labels are disclosed; bring-your-own-domain for those who mind |
+| Pen and site names exposed in CT | Disclosed up front (D-21); bring-your-own-domain for those who mind |
 | Cross-pen cookie risk before the PSL | D-19 disclosure; PSL application; bring-your-own-domain |
 | The challenge DNS service is down | Existing certificates keep working for up to about 60 days, and ARI starts renewing early. Monitor it with `hogman-watch`. |
 | The pen's server reads members' traffic | Not possible: TLS ends at each share, never at the server (wildcard termination at the server was rejected) |
@@ -202,7 +203,7 @@ The docs say, in one sentence, that pens created before this change need to be r
 | certmagic | Yes, with public resolvers for propagation checks and its cache kept across updates. |
 | `get_certificate` | Dropped. Atomic files in a mount-isolated folder, and a reload over Caddy's admin Unix socket. |
 | Weekly cap | 10, counting distinct new names, not TXT writes. |
-| Pen ID length | 12 characters (60 bits). |
+| Pen ID length | 12 characters at rev 2; replaced by readable pen names in D-21. |
 
 Also fixed:
 - `accounturi` is dropped on `pens.`;
