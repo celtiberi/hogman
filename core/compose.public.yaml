@@ -1,0 +1,46 @@
+# Added on top of compose.yaml for a pen with public certificates (D-18,
+# CERT_MODE=public): no certificate authority of its own. The registrar gets
+# home.<zone>'s certificate from Let's Encrypt by DNS-01, writing the challenge
+# record through the host's challenge DNS server (deploy/challenge-dns), and
+# the portal serves it. Pens with their own CA don't use this file at all.
+services:
+  step-ca:
+    profiles: [private-ca-only]   # never started in this mode
+
+  registrar:
+    environment:
+      CERT_MODE: public
+      ROOT_CA: ""
+      CHALLENGE_DNS_URL: unix:///run/hogman-acme/api.sock
+      CHALLENGE_DNS_TOKEN_FILE: /secrets/challenge_dns_token
+      HOME_TLS_DIR: /home-tls
+      CADDY_ADMIN_SOCKET: /run/caddy-admin/admin.sock
+      ACME_STORAGE_DIR: /var/lib/registrar/acme
+      ACME_CA_URL: ${ACME_CA_URL:-https://acme-v02.api.letsencrypt.org/directory}
+      ACME_FALLBACK_CA_URL: ${ACME_FALLBACK_CA_URL:-}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+      ACME_RESOLVERS: ${ACME_RESOLVERS:-1.1.1.1:53,8.8.8.8:53}
+    volumes: !override
+      - ./data/registrar:/var/lib/registrar
+      - ./data/api:/run/hogman-api                 # its API socket: shared with the portal only (H2)
+      - ./data/home-tls:/home-tls                  # home.<zone>'s certificate, for the portal
+      - ./data/caddy-admin:/run/caddy-admin:ro     # the portal's admin socket, to reload on renewal
+      - ./data/secrets/registrar:/secrets:ro
+      - ${HOGMAN_ACME_SOCK_DIR:-/run/hogman-acme}:/run/hogman-acme   # the host's challenge DNS API
+    healthcheck:
+      test: ["CMD", "registrar", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+
+  portal:
+    volumes: !override
+      - ./config/portal.public.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./portal:/srv/portal:ro
+      - ./data/portal:/data
+      - ./data/home-tls:/home-tls:ro
+      - ./data/caddy-admin:/run/caddy-admin
+      - ./data/api:/run/hogman-api:ro
+    depends_on: !override
+      registrar: { condition: service_healthy }   # home.<zone>'s certificate exists

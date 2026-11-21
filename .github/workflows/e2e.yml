@@ -40,6 +40,16 @@ jobs:
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "code changed: $code"
 
+  compose:
+    name: public-certificate pen compose
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: core/test/compose-public-check.sh
+
   pen:
     name: pen (core/test/run.sh)
     needs: changes

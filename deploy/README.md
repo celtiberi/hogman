@@ -250,7 +250,9 @@ hogman-host challenge-dns cred list
 - **Port 53** is opened in the server's firewall. If DigitalOcean's cloud firewall is on,
   open TCP and UDP 53 there too.
 
-Pens keep using their own certificate authority until the switch-over, which comes later.
+Pens keep their own certificate authority until the switch-over. At the switch-over every
+pen moves to public certificates at once and the old way is removed: there's no setting to
+choose between them (D-22).
 
 ## Everyday
 
