@@ -36,9 +36,11 @@ D("hogman.network", REG_NONE, DnsProvider(DSP_CLOUDFLARE),
   NS("_acme-challenge.gate", "ns1.hogman.network."),    // DNS-01 for the *.gate wildcard
   // Only a wildcard may be issued for gate. (issue ";" alone forbids plain
   // names: RFC 8659), only by Let's Encrypt, only by DNS-01 (RFC 8657).
-  // Phase A step 4 pins the host's account (accounturi); Phase E adds pki.goog.
+  // Pinned to hogman-1's own Let's Encrypt account (RFC 8657 accounturi), so
+  // even a leaked challenge credential can't get a *.gate certificate through
+  // any other account. Phase E adds pki.goog with the host's GTS account.
   CAA("gate", "issue", ";"),
-  CAA("gate", "issuewild", "letsencrypt.org; validationmethods=dns-01"),
+  CAA("gate", "issuewild", "letsencrypt.org; validationmethods=dns-01; accounturi=https://acme-v02.api.letsencrypt.org/acme/acct/4026504272"),
 
   // Email from the sign-up page (Resend).
   CNAME("send", "send.forge.rmta.net."),
