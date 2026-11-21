@@ -106,6 +106,7 @@ dc() {
   [ "$FRONT_DOOR" = true ] && files+=(-f compose.front.yaml)
   [ "$CERT_MODE" = public ] && files+=(-f compose.public.yaml)
   [ "$TEST_MODE" = true ] && [ "$FRONT_DOOR" != true ] && [ -f test/compose.test.yaml ] && files+=(-f test/compose.test.yaml)
+  [ "$TEST_MODE" = true ] && [ "$CERT_MODE" = public ] && [ -n "${HOGMAN_TEST_ACME_ROOT:-}" ] && files+=(-f test/compose.acme-root.yaml)
   ZONE="$ZONE" EDGE_TLS_MODE="$EDGE_TLS_MODE" docker compose -p "${COMPOSE_PROJECT_NAME:-hogman}" \
     "${args[@]}" "${files[@]}" "$@"
 }

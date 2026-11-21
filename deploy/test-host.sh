@@ -49,11 +49,11 @@ retry() { local n="$1"; shift; for _ in $(seq "$n"); do "$@" >/dev/null 2>&1 && 
 
 cleanup() {
   if [ "$KEEP" = true ]; then echo; echo "Left running. HOGMAN_HOME=$HOGMAN_HOME"; return; fi
-  for c in client-bobo client-zebra client-signup; do docker rm -f "$c" >/dev/null 2>&1; done
+  for c in client-bobo client-zebra client-signup client-alpha hogman-test-cdns hogman-test-pebble; do docker rm -f "$c" >/dev/null 2>&1; done
   (cd "$HOGMAN_HOME/signup" 2>/dev/null && docker compose down -v >/dev/null 2>&1)
-  for n in bobo zebra smithy jones; do (cd "$HOGMAN_HOME/pens/$n" 2>/dev/null && ./hogman down -v --remove-orphans >/dev/null 2>&1); done
+  for n in bobo zebra alpha smithy jones; do (cd "$HOGMAN_HOME/pens/$n" 2>/dev/null && ./hogman down -v --remove-orphans >/dev/null 2>&1); done
   (cd "$HOGMAN_HOME/front" 2>/dev/null && docker compose down -v >/dev/null 2>&1)
-  for n in bobo zebra smithy jones; do docker network rm "pen-$n-core" >/dev/null 2>&1; done
+  for n in bobo zebra alpha smithy jones; do docker network rm "pen-$n-core" >/dev/null 2>&1; done
   docker network rm hogman-front >/dev/null 2>&1
   rm -rf "$HOGMAN_HOME"
 }
@@ -193,19 +193,119 @@ check "the restored pen kept its members" match zebra-owner "$HOST" pen zebra me
 check "the restored pen kept its devices" match 'member1.*laptop' "$HOST" pen zebra device list
 check "the restored pen is listed as running" match 'zebra.*running' "$HOST" list
 
-step "Get a pen: the sign-up page raises one for a stranger"
-# The operator's backup key: hosted pens' root keys are escrowed to it.
+step "Public certificates (D-18): the challenge DNS server and a test CA"
+# The registrars reach the challenge DNS server over a Unix socket in a bind
+# mount, as on a real host, which needs Linux (Docker Desktop can't share one).
+if [ "$(uname -s)" != Linux ]; then
+  echo "  SKIP  public pens and sign-ups need Linux; CI runs them"
+  echo; echo "Result: $pass passed, $fail failed (public sections skipped)"; [ "$fail" -eq 0 ]; exit
+fi
+ACME="$HOGMAN_HOME/acme"
+mkdir -p "$ACME/cdns" "$ACME/sock" "$ACME/certs"
+chgrp 65532 "$ACME/sock" && chmod 0750 "$ACME/sock"   # like /run/hogman-acme: the registrars' group may enter
+build_cdns() {
+  docker run --rm -v "$REPO/deploy/challenge-dns:/src:ro" -v "$ACME/cdns:/out" -w /src \
+    -e CGO_ENABLED=0 -e GOFLAGS=-buildvcs=false golang:1.27-alpine go build -o /out/challenge-dns .
+}
+check "challenge-dns builds" build_cdns
+docker run -d --name hogman-test-cdns --network hogman-front \
+  -v "$ACME/cdns:/cdns" -v "$ACME/sock:/run/hogman-acme" \
+  -e CDNS_LISTEN=0.0.0.0:53 -e CDNS_PENS_ZONE=pens.hogman.test -e CDNS_GATE_NAME=_acme-challenge.gate.hogman.test \
+  -e CDNS_STATE=/cdns/state.json -e CDNS_API_SOCK=/run/hogman-acme/api.sock -e CDNS_ADMIN_SOCK=/cdns/admin.sock \
+  alpine:3.22 /cdns/challenge-dns serve >/dev/null
+check "challenge-dns answers on its admin socket" retry 20 env CDNS_ADMIN_SOCK="$ACME/cdns/admin.sock" "$ACME/cdns/challenge-dns" cred list
+# Pebble, Let's Encrypt's test CA, asks the challenge DNS server for DNS-01.
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$ACME/certs/ca.key" -out "$ACME/certs/ca.crt" \
+  -days 2 -subj "/CN=hogman-test-host-ca" -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign" >/dev/null 2>&1
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$ACME/certs/server.key" -out "$ACME/certs/server.csr" -subj "/CN=pebble" >/dev/null 2>&1
+printf 'basicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:pebble\n' > "$ACME/certs/ext.cnf"
+openssl x509 -req -in "$ACME/certs/server.csr" -CA "$ACME/certs/ca.crt" -CAkey "$ACME/certs/ca.key" -CAcreateserial \
+  -out "$ACME/certs/server.crt" -days 2 -extfile "$ACME/certs/ext.cnf" >/dev/null 2>&1
+chmod 644 "$ACME/certs/"*
+cat > "$ACME/pebble.json" <<'JSON'
+{"pebble": {"listenAddress": "0.0.0.0:14000", "managementListenAddress": "0.0.0.0:15000",
+  "certificate": "/certs/server.crt", "privateKey": "/certs/server.key", "httpPort": 5002, "tlsPort": 5001,
+  "externalAccountBindingRequired": false, "retryAfter": {"authz": 1, "order": 1}, "keyAlgorithm": "ecdsa"}}
+JSON
+docker run -d --name hogman-test-pebble --network hogman-front --network-alias pebble -e PEBBLE_VA_NOSLEEP=1 \
+  -v "$ACME/certs:/certs:ro" -v "$ACME/pebble.json:/pebble.json:ro" \
+  ghcr.io/letsencrypt/pebble:2.10.3 -config /pebble.json -dnsserver hogman-test-cdns:53 >/dev/null
+pebble_get() { docker run --rm --network hogman-front -v "$ACME/certs:/c:ro" nicolaka/netshoot:v0.14 curl -sf --cacert /c/ca.crt "https://pebble:$1"; }
+check "Pebble is up" retry 30 pebble_get 14000/dir
+pebble_get 15000/roots/0 > "$ACME/issued-root.crt"
+check "Pebble's issuing root is fetched" grep -q 'BEGIN CERTIFICATE' "$ACME/issued-root.crt"
+# What a real host gets from challenge-dns-setup and gate-cert-setup; here the
+# test's own server, CA and names. The broker reads these too (host.env).
+cat >> "$HOGMAN_HOME/host.env" <<EOF
+CDNS_BIN='$ACME/cdns/challenge-dns'
+CDNS_ADMIN='$ACME/cdns/admin.sock'
+HOGMAN_ACME_SOCK_DIR='$ACME/sock'
+ACME_CA_URL='https://pebble:14000/dir'
+ACME_RESOLVERS='hogman-test-cdns:53'
+HOGMAN_TEST_ACME_ROOT='$ACME/certs/ca.crt'
+GATE_DOMAIN='gate.hogman.test'
+EOF
+check "add <pen> refuses before a pens zone is set" fails "$HOST" add alpha
+check "pens-zone sets where public pens live" "$HOST" pens-zone pens.hogman.test
+# A pen's registrar reaches the challenge DNS server and the CA on the pen's
+# own network (on a real host: the socket, and the internet).
+pen_net() {
+  docker network inspect "pen-$1-core" >/dev/null 2>&1 || docker network create "pen-$1-core" >/dev/null
+  docker network connect "pen-$1-core" hogman-test-cdns
+  docker network connect --alias pebble "pen-$1-core" hogman-test-pebble
+}
+
+step "A public pen: add <pen>"
+pen_net alpha
+out="$("$HOST" add alpha 2>&1)"; rc=$?
+[ $rc = 0 ] || echo "$out" | tail -15 | sed 's/^/        | /'
+check "hogman-host add alpha raises a public pen (exit $rc)" test $rc = 0
+check "its front door is alpha.gate.hogman.test" grep -qx 'PUBLIC_HOST=alpha.gate.hogman.test' "$HOGMAN_HOME/pens/alpha/.env"
+check "its zone is alpha.pens.hogman.test" grep -qx 'ZONE=alpha.pens.hogman.test' "$HOGMAN_HOME/pens/alpha/.env"
+check "it runs no certificate authority" fails docker inspect pen-alpha-step-ca-1
+check "it has no root key" test ! -e "$HOGMAN_HOME/pens/alpha/data/pki"
+check "its challenge DNS credential is kept for the registrar only" test "$(perm "$HOGMAN_HOME/pens/alpha/data/secrets/registrar")" = 700
+"$HOST" pen alpha member add alpha-owner --role owner >/dev/null
+link="$("$HOST" pen alpha invite create --note test | awk '/^link:/ {print $2}')"
+check "its invite link carries no fingerprint" bash -c '[[ "$1" =~ ^https://alpha\.gate\.hogman\.test/join#t=[A-Za-z0-9._-]+$ ]]' _ "$link"
+front_ip="$(docker inspect -f '{{(index .NetworkSettings.Networks "hogman-front").IPAddress}}' hogman-front-front-1)"
+docker run -d --name client-alpha --network hogman-front --add-host "alpha.gate.hogman.test:$front_ip" \
+  -e HOGMAN_ACME_CA_ROOT=/issued-root.crt -v "$ACME/issued-root.crt:/issued-root.crt:ro" \
+  -v "$FRONT_CA:/front-ca.crt:ro" -v "$HOGMAN_HOME/pens/alpha/data/join-dl:/dl:ro" \
+  --entrypoint sh nicolaka/netshoot:v0.14 -c \
+  'cp /front-ca.crt /usr/local/share/ca-certificates/front.crt && update-ca-certificates >/dev/null 2>&1; exec sleep infinity' >/dev/null
+retry 20 docker exec client-alpha test -s /etc/ssl/certs/ca-certificates.crt
+pub_info() { docker exec client-alpha curl -sf https://alpha.gate.hogman.test/hogman/v1/network | jq -e '.zone == "alpha.pens.hogman.test" and .cert_mode == "public" and .root_ca == ""'; }
+check "the front door answers as a public pen" pub_info
+out="$(docker exec client-alpha sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open --handle member1 --hostname laptop "$1"' _ "$link" 2>&1)"; rc=$?
+[ $rc = 0 ] || echo "$out" | tail -10 | sed 's/^/        | /'
+check "a member joins alpha (exit $rc)" grep -q "You're in. You are member1 on alpha.pens.hogman.test" <<<"$out"
+check "nothing was added to the computer's trust store" no_match hogman docker exec client-alpha ls /usr/local/share/ca-certificates
+alpha_proxy="$(docker exec client-alpha sh -c 'jq -r .proxy_addr "${XDG_CONFIG_HOME:-$HOME/.config}/hogman/alpha.pens.hogman.test/config.json"' 2>/dev/null)"
+home_public() { docker exec client-alpha sh -c 'curl -sf --cacert /issued-root.crt -x "http://$1" https://home.alpha.pens.hogman.test/api/me | jq -e ".member.handle == \"member1\""' _ "$alpha_proxy"; }
+check "home.alpha.pens.hogman.test has a certificate from the CA" home_public
+check "the name alpha is now used" match '^used$' env CDNS_ADMIN_SOCK="$ACME/cdns/admin.sock" "$ACME/cdns/challenge-dns" name used alpha
+"$HOST" remove alpha >/dev/null 2>&1
+mv "$HOGMAN_HOME/pens/alpha" "$HOGMAN_HOME/alpha-old"
+reuse="$("$HOST" add alpha 2>&1)"
+check "a removed pen's name is never given out again (D-21)" grep -q 'never given out again' <<<"$reuse"
+check "removing it dropped its challenge DNS credential" no_match 'alpha' env CDNS_ADMIN_SOCK="$ACME/cdns/admin.sock" "$ACME/cdns/challenge-dns" cred list
+
+step "Get a pen: the sign-up page raises a public pen for a stranger"
+# The operator's backup key (sign-ups need backups set up).
 agekey="$(docker run --rm alpine:3.22 sh -c 'apk add -q age >/dev/null && age-keygen 2>/dev/null')"
 grep '^AGE-SECRET-KEY' <<<"$agekey" > "$HOGMAN_HOME/age-secret.txt"
 grep -o 'age1[0-9a-z]*' <<<"$agekey" | head -1 > "$HOGMAN_HOME/backup-recipient.txt"
 rsync -a --exclude hogman-signup.bin "$REPO/deploy/signup/" "$HOGMAN_HOME/signup-src/"
-check "signup-setup starts the page and its broker" "$HOST" signup-setup pens.example get.example 3
+check "signup-setup refuses a front-door domain other than the gate" fails "$HOST" signup-setup pens.example get.example 3
+check "signup-setup starts the page and its broker" "$HOST" signup-setup gate.hogman.test get.example 3
 code="$("$HOST" signup-code for the test | awk '/^code:/ {print $2}')"
 check "signup-code makes a code" grep -q "^$code " "$HOGMAN_HOME/signup/codes"
 
 front_ip="$(docker inspect -f '{{(index .NetworkSettings.Networks "hogman-front").IPAddress}}' hogman-front-front-1)"
 docker run -d --name client-signup --network hogman-front \
-  --add-host "get.example:$front_ip" --add-host "smithy.pens.example:$front_ip" \
+  --add-host "get.example:$front_ip" --add-host "smithy.gate.hogman.test:$front_ip" \
+  -e HOGMAN_ACME_CA_ROOT=/issued-root.crt -v "$ACME/issued-root.crt:/issued-root.crt:ro" \
   -v "$FRONT_CA:/front-ca.crt:ro" --entrypoint sh nicolaka/netshoot:v0.14 -c \
   'cp /front-ca.crt /usr/local/share/ca-certificates/front.crt && update-ca-certificates >/dev/null 2>&1; exec sleep infinity' >/dev/null
 retry 20 docker exec client-signup test -s /etc/ssl/certs/ca-certificates.crt
@@ -234,15 +334,18 @@ check "the page is served at https://get.example" match 'Get a pen' docker exec 
 signup_hdrs="$(docker exec client-signup curl -sI https://get.example/ | tr -d '\r')"
 check "the sign-up page sets Origin-Agent-Cluster" grep -iq '^origin-agent-cluster: ?1' <<<"$signup_hdrs"
 check "it says sign-ups are open" sh -c "docker exec client-signup curl -sf https://get.example/api/status | jq -e '.open'"
+check "it shows names under the pens zone" sh -c "docker exec client-signup curl -sf https://get.example/api/status | jq -e '.sites_domain == \"pens.hogman.test\"'"
 check "a reserved name is refused" sh -c "docker exec client-signup curl -sf 'https://get.example/api/check?pen=www' | jq -e '.free == false'"
 wrong_code() { [ "$(create_pen '{"code":"PIG-AAAA-AAAA","pen":"smithy","handle":"keeper"}' | jq -r .status)" = 403 ]; }
 check "a wrong code is refused" wrong_code
 front_started="$(docker inspect -f '{{.State.StartedAt}}' hogman-front-front-1)"
+pen_net smithy
 res="$(create_pen "{\"code\":\"$code\",\"pen\":\"smithy\",\"handle\":\"keeper\"}")"
 check "raising a pen doesn't restart the front door (other pens stay up)" \
   test "$(docker inspect -f '{{.State.StartedAt}}' hogman-front-front-1)" = "$front_started"
 link="$(jq -r .join_link <<<"$res" 2>/dev/null)"
-check "a pen is raised from the page" test "$(jq -r .zone <<<"$res" 2>/dev/null)" = smithy.hogman
+check "a pen is raised from the page" test "$(jq -r .zone <<<"$res" 2>/dev/null)" = smithy.pens.hogman.test
+check "its front door is smithy.gate.hogman.test" test "$(jq -r .host <<<"$res" 2>/dev/null)" = smithy.gate.hogman.test
 if [ -z "$link" ] || [ "$link" = null ]; then
   echo "        | $res"
   docker logs hogman-signup-broker-1 2>&1 | tail -25 | sed 's/^/        broker| /'
@@ -252,19 +355,12 @@ check "with a QR code of the keeper's link" qr_ok
 code_used() { [ -n "$code" ] && ! grep -q "^$code " "$HOGMAN_HOME/signup/codes"; }
 check "the code is used up" code_used
 check "the pen is marked hosted" grep -q '^HOSTED=true' "$HOGMAN_HOME/pens/smithy/.env"
-no_plain_root() { local d="$HOGMAN_HOME/pens/smithy/data/pki/offline"; [ -d "$d" ] && [ -z "$(ls -A "$d")" ]; }
-check "its root key is not on the server in the clear" no_plain_root
-escrow_opens() {
-  local out
-  out="$(docker run --rm -v "$HOGMAN_HOME:/h:ro" alpine:3.22 sh -c \
-    'apk add -q age >/dev/null && age -d -i /h/age-secret.txt /h/pens/smithy/data/pki/root-escrow.tar.gz.age | tar -tz')" || return 1
-  grep -q root_ca_key <<<"$out"
-}
-check "it is escrowed to the operator's backup key" escrow_opens
+check "it has public certificates: no root key at all" test ! -e "$HOGMAN_HOME/pens/smithy/data/pki"
+check "the keeper's link carries no fingerprint" bash -c '[[ "$1" =~ ^https://smithy\.gate\.hogman\.test/join#k=[A-Za-z0-9_-]+$ ]]' _ "$link"
 docker cp "$HOGMAN_HOME/pens/smithy/data/join-dl" client-signup:/dl >/dev/null
 out="$(docker exec client-signup sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open --hostname laptop "$1"' _ "$link" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | tail -8 | sed 's/^/        | /'
-check "the keeper joins with the link (exit $rc)" grep -q "You're in. You are keeper on smithy.hogman" <<<"$out"
+check "the keeper joins with the link (exit $rc)" grep -q "You're in. You are keeper on smithy.pens.hogman.test" <<<"$out"
 check "and is the pen's owner" match 'keeper.*owner' "$HOST" pen smithy member list
 code2="$("$HOST" signup-code | awk '/^code:/ {print $2}')"
 check "the server is full at 3 pens" sh -c "docker exec client-signup curl -sf https://get.example/api/status | jq -e '.open == false'"
