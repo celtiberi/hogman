@@ -77,6 +77,7 @@ func (wb *web) handler() http.Handler {
 		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Origin-Agent-Cluster", "?1")
 		mux.ServeHTTP(w, r)
 	})
 }

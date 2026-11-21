@@ -479,9 +479,9 @@ func requireSameOriginAndJSON(zone string, next http.Handler) http.Handler {
 	})
 }
 
-// identify resolves the calling device from its mesh address. The portal's
-// Caddy is the only client (it runs in the same network namespace and the
-// API listens on loopback), and it reports the caller in X-Forwarded-For.
+// identify resolves the calling device from its mesh address. In a pen, the
+// portal's Caddy reaches it only over the mounted Unix socket (or loopback TCP
+// in dev/tests) and reports the caller in X-Forwarded-For.
 func identify(s *Service, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)

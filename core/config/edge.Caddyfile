@@ -20,6 +20,9 @@ http://{$PUBLIC_HOST} {
 {$PUBLIC_HOST} {
 	# HTTPS only, and browsers remember it for a year.
 	header Strict-Transport-Security "max-age=31536000"
+	handle /generate_204 {
+		respond 204
+	}
 	# The page an invite link opens, and the join tool downloads.
 	handle /join {
 		root * /srv/join-page
@@ -29,6 +32,7 @@ http://{$PUBLIC_HOST} {
 			X-Content-Type-Options nosniff
 			Referrer-Policy no-referrer
 			Cache-Control no-store
+			Origin-Agent-Cluster ?1
 			Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 			-Server
 		}
@@ -41,24 +45,26 @@ http://{$PUBLIC_HOST} {
 	}
 	handle_path /join/dl/* {
 		root * /srv/join-dl
+		header X-Content-Type-Options nosniff
 		file_server
 	}
 	handle /hogman/* {
+		header X-Content-Type-Options nosniff
 		request_body {
 			max_size 16KB
 		}
 		reverse_proxy core-mesh:8081
 	}
-	# Keep Headscale's admin REST API and Swagger UI off the public edge.
-	handle /api/* {
-		respond 404
-	}
-	handle /swagger* {
-		respond 404
-	}
-	handle {
+	# Expose only the Tailscale control/relay routes clients need and the
+	# health endpoint used by monitoring; keep Headscale's admin REST API,
+	# Swagger UI, auth/register pages, and everything else returning 404 (D-19).
+	@control path /ts2021 /key /derp /derp/probe /derp/latency-check /bootstrap-dns /machine/ping-response /health
+	handle @control {
 		reverse_proxy headscale:8080 {
 			header_up X-Real-IP {remote_host}
 		}
+	}
+	handle {
+		respond 404
 	}
 }

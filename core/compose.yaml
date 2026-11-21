@@ -44,11 +44,20 @@ services:
   edge:
     image: caddy:2.11.9
     restart: unless-stopped
+    user: "${HOGMAN_UID:-1000}:${HOGMAN_GID:-1000}"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # Allow unprivileged Caddy (cap_drop: ALL) to bind HTTP/HTTPS ports 80/443.
+    sysctls:
+      - net.ipv4.ip_unprivileged_port_start=80
     mem_limit: 128m
     pids_limit: 128
     environment:
       PUBLIC_HOST: ${PUBLIC_HOST}
       EDGE_TLS_MODE: ${EDGE_TLS_MODE:-}
+      XDG_CONFIG_HOME: /tmp/caddy-config
       GOGC: "25"
       GOMEMLIMIT: 96MiB
     volumes:
@@ -88,11 +97,17 @@ services:
   portal:
     image: caddy:2.11.9
     restart: unless-stopped
+    user: "${HOGMAN_UID:-1000}:${HOGMAN_GID:-1000}"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     mem_limit: 128m
     pids_limit: 128
     network_mode: service:core-mesh
     environment:
       ZONE: ${ZONE}
+      XDG_CONFIG_HOME: /tmp/caddy-config
       GOGC: "25"
       GOMEMLIMIT: 96MiB
     volumes:

@@ -134,10 +134,22 @@ check "front door reaches only bobo's core and headscale"  front_dns_ok bobo
 check "front door reaches only zebra's core and headscale" front_dns_ok zebra
 check "front door hides Headscale admin API (404)" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/api/v1/node)" = 404
 check "front door hides Headscale Swagger (404)"   test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/swagger)" = 404
+front_blocked_routes_ok() {
+  local p
+  for p in / /version /apple /windows /register/test /auth/test; do
+    [ "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' "https://control.bobo.example$p")" = 404 ] || return 1
+  done
+}
+check "front door blocks Headscale root, register, auth, apple, windows, version (404)" front_blocked_routes_ok
+check "front door allows Headscale /health" match '"pass"' in_client bobo curl -sf https://control.bobo.example/health
+check "front door allows Tailscale /key" match '"publicKey"' in_client bobo curl -sf 'https://control.bobo.example/key?v=138'
+check "front door allows /generate_204" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/generate_204)" = 204
 join_hdrs="$(in_client bobo curl -sI https://control.bobo.example/join | tr -d '\r')"
-check "front door sets anti-framing headers on /join" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\"" _ "$join_hdrs"
+check "front door sets anti-framing headers and Origin-Agent-Cluster on /join" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\" && grep -iq '^origin-agent-cluster: ?1' <<<\"\$1\"" _ "$join_hdrs"
 check "front door serves /join/assets/join.js" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/join/assets/join.js)" = 200
 check "front door serves /join/dl/SHA256SUMS"  test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/join/dl/SHA256SUMS)" = 200
+dl_hdrs="$(in_client bobo curl -sI https://control.bobo.example/join/dl/SHA256SUMS | tr -d '\r')"
+check "front door sets nosniff on /join/dl/" grep -iq '^x-content-type-options: nosniff' <<<"$dl_hdrs"
 cross() { in_client bobo curl -sf "https://control.zebra.example/hogman/v1/network" | jq -e '.zone == "zebra.hogman"'; }
 check "both control hosts answer through the same front door" cross
 fp_b="$(in_client bobo curl -sf https://control.bobo.example/hogman/v1/network | jq -r .root_fingerprint)"
@@ -219,6 +231,8 @@ create_pen() {  # create_pen <json>: start a sign-up and follow its job, like th
   echo '{"error":"timed out"}'
 }
 check "the page is served at https://get.example" match 'Get a pen' docker exec client-signup curl -sf https://get.example/
+signup_hdrs="$(docker exec client-signup curl -sI https://get.example/ | tr -d '\r')"
+check "the sign-up page sets Origin-Agent-Cluster" grep -iq '^origin-agent-cluster: ?1' <<<"$signup_hdrs"
 check "it says sign-ups are open" sh -c "docker exec client-signup curl -sf https://get.example/api/status | jq -e '.open'"
 check "a reserved name is refused" sh -c "docker exec client-signup curl -sf 'https://get.example/api/check?pen=www' | jq -e '.free == false'"
 wrong_code() { [ "$(create_pen '{"code":"PIG-AAAA-AAAA","pen":"smithy","handle":"keeper"}' | jq -r .status)" = 403 ]; }
@@ -304,6 +318,19 @@ check "hogman-host add rejects semicolon in host"   fails "$HOST" add badpen 'hs
 check "front data dir is mode 700"  test "$(perm "$HOGMAN_HOME/front/data")" = 700
 check "host.env is mode 600"        test "$(perm "$HOGMAN_HOME/host.env")" = 600
 check "pen secret dirs are mode 700" secret_dirs_ok
+front_user_ok() {
+  local uid gid got
+  uid="$(grep -h '^FRONT_UID=' "$HOGMAN_HOME/host.env" | cut -d= -f2)"
+  gid="$(grep -h '^FRONT_GID=' "$HOGMAN_HOME/host.env" | cut -d= -f2)"
+  got="$(docker inspect -f '{{.Config.User}}' hogman-front-front-1)"
+  [ -n "$uid" ] && [ "$uid" != 0 ] && [ "$got" = "$uid:$gid" ]
+}
+portal_user_ok() {
+  local got; got="$(docker inspect -f '{{.Config.User}}' pen-bobo-portal-1)"
+  [ -n "$got" ] && [ "${got%%:*}" != 0 ]
+}
+check "front door Caddy runs non-root" front_user_ok
+check "pen portal Caddy runs non-root" portal_user_ok
 
 echo
 echo "Result: $pass passed, $fail failed"
