@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -484,7 +485,7 @@ func requireSameOriginAndJSON(zone string, next http.Handler) http.Handler {
 func identify(s *Service, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		if ip := net.ParseIP(host); !viaSocket(r.Context()) && (ip == nil || !ip.IsLoopback()) {
 			fail(w, forbidden("mesh API is only reachable through the portal"))
 			return
 		}
@@ -590,4 +591,43 @@ func ownerCount(s *Service, a Actor) int {
 	}
 	n, _ := s.st.CountOwners()
 	return n
+}
+
+// The mesh API trusts X-Forwarded-For to say who is asking, so who can reach
+// it matters (audit H2). In a pen it listens only on a Unix socket in a folder
+// mounted into the registrar and the portal and nothing else: other services
+// sharing the network namespace (step-ca, core-mesh) have no way to it, and
+// the kernel enforces that. MESH_ADDR "unix:/path" selects it; a host:port
+// (the default, for development and tests) listens on loopback TCP instead.
+type viaSocketKey struct{}
+
+func markSocketConn(ctx context.Context, c net.Conn) context.Context {
+	if _, ok := c.(*net.UnixConn); ok {
+		return context.WithValue(ctx, viaSocketKey{}, true)
+	}
+	return ctx
+}
+
+func viaSocket(ctx context.Context) bool {
+	v, _ := ctx.Value(viaSocketKey{}).(bool)
+	return v
+}
+
+func listenMesh(addr string) (net.Listener, error) {
+	path, ok := strings.CutPrefix(addr, "unix:")
+	if !ok {
+		return net.Listen("tcp", addr)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		ln.Close()
+		return nil, err
+	}
+	return ln, nil
 }

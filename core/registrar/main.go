@@ -156,15 +156,24 @@ func serve(s *Service) {
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	mesh := &http.Server{Addr: env("MESH_ADDR", "127.0.0.1:8082"), Handler: MeshHandler(s),
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
-		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
-	for _, srv := range []*http.Server{pub, mesh} {
-		go func(srv *http.Server) {
-			log.Printf("listening on %s", srv.Addr)
-			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Fatal(err)
-			}
-		}(srv)
-	}
+		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
+		ConnContext: markSocketConn}
+	go func() {
+		log.Printf("listening on %s", pub.Addr)
+		if err := pub.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	}()
+	go func() {
+		ln, err := listenMesh(mesh.Addr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("mesh API listening on %s", mesh.Addr)
+		if err := mesh.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	}()
 	<-ctx.Done()
 	shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

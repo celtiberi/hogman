@@ -100,6 +100,7 @@ services:
       - ./portal:/srv/portal:ro
       - ./data/pki/public:/pki:ro
       - ./data/portal:/data
+      - ./data/api:/run/hogman-api:ro   # the registrar's API socket (audit H2)
     depends_on:
       registrar: { condition: service_started }
       step-ca: { condition: service_healthy }   # else the first cert request fails and Caddy backs off
@@ -107,7 +108,8 @@ services:
   # The registrar: members, invites, devices, names, removal. Owns the access
   # policy (in Headscale) and serves authoritative DNS on :53 (UDP/TCP).
   #   public  :8081  invite redemption only, via edge/front door at https://<public host>/hogman/
-  #   mesh    127.0.0.1:8082  member/admin API, via the portal at https://home.<zone>/api/
+  #   mesh    unix socket in data/api (mounted only here and in the portal):
+  #           member/admin API, via the portal at https://home.<zone>/api/
   registrar:
     build:
       context: ./registrar
@@ -128,10 +130,12 @@ services:
       CORE_MESH_IP: ${CORE_MESH_IP:-}
       MEMBERS_CAN_INVITE: ${MEMBERS_CAN_INVITE:-false}
       NAME_HOLD: ${NAME_HOLD:-2160h}
+      MESH_ADDR: unix:/run/hogman-api/mesh.sock
       GOGC: "25"
       GOMEMLIMIT: 96MiB
     volumes:
       - ./data/registrar:/var/lib/registrar
+      - ./data/api:/run/hogman-api   # its API socket: shared with the portal only
       - ./data/secrets/registrar:/secrets:ro
       - ./data/pki/public:/pki:ro
     depends_on:

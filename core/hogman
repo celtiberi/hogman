@@ -161,7 +161,7 @@ own_runtime_files() {
   # The secrets below are handed over instead, and stay private.
   chmod 755 "$DATA/pki/public" "$DATA/step/config" 2>/dev/null || true
   chmod 644 "$DATA"/pki/public/*.crt "$DATA/step/config/ca.json" 2>/dev/null || true
-  for d in "$DATA/registrar" "$DATA/secrets/registrar" "$DATA/step/secrets" "$DATA/step/db"; do
+  for d in "$DATA/registrar" "$DATA/api" "$DATA/secrets/registrar" "$DATA/step/secrets" "$DATA/step/db"; do
     [ -e "$d" ] && chown -R "$HOGMAN_UID:$HOGMAN_GID" "$d"
   done
   return 0
@@ -339,7 +339,8 @@ cmd_up() {
   [ -f "$DATA/pki/public/root_ca.crt" ] || die "run ./hogman init first."
   # Folders a backup leaves out. Made here, as us: if Docker made them, they
   # would belong to root and step-ca could not write its database.
-  mkdir -p "$DATA"/{step/db,edge,portal,join-dl,tmp}
+  mkdir -p "$DATA"/{step/db,edge,portal,join-dl,tmp,api}
+  chmod 700 "$DATA/api"
   # Pens raised as root before audit H3 ran their registrar and step-ca as
   # root too. Move them to the unprivileged user on the next start.
   if [ "${HOGMAN_UID:-}" = 0 ] && [ "$(id -u)" = 0 ]; then
