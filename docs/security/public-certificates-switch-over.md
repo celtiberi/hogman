@@ -1,11 +1,11 @@
 # Switching hogman-1 to public certificates (D-18, step 4c)
 
-Status: **reviewed by @hogman** (PR #75). Nothing in here has been run yet; the self-hosting decision in Phase B is still open.
+Status: **reviewed by @hogman** (PR #75). Nothing in here has been run yet. Hosted pens only (D-24).
 
 This is the order of work that takes the live server from today's private certificates (step-ca, `fp=` links, a root on every member's computer) to public certificates only. It also lists the code that still has to be written before the switch can happen.
 
 Who does what:
-- **The operator** approves each DNS apply run in GitHub, and makes any decision marked **Decision**.
+- **The operator** approves each DNS apply run in GitHub.
 - **@swinherd** and **@hogman** write and review the code, run the server commands, and check every step from outside.
 - **@piggy** checks what's live after each phase. She no longer has Cloudflare access; DNS changes only through `infra/dns/dnsconfig.js`.
 
@@ -85,9 +85,10 @@ Each item is its own PR, reviewed by the other AI. CI has to pass, including a f
    - the FAQ and the sign-up page: the D-19 multi-pen disclosure (another pen's apps can plant cookies for, or send same-site requests to, yours; use a separate browser profile for a pen you don't trust), and that pen and site names are public in certificate logs (D-21);
    - CHANGELOG.
 
-**Decision (operator): self-hosting.** With the private path deleted, a self-hosted pen needs public certificates under its own domain. That means the registrar has to write challenge records through the operator's DNS provider (libdns, starting with Cloudflare). That isn't built: today the registrar can only talk to our challenge DNS server. Two choices:
-- **(a) Build it before the switch** (my recommendation): one more PR, libdns with Cloudflare first, and the self-host guide explains how to make a narrow DNS token.
-- **(b) Switch now, and mark self-hosting "coming back soon"** on the site until (a) lands.
+**Hosted pens only (D-24).** Nobody runs a pen's control side on their own domain any more, so there's no DNS-provider backend to build before the switch. Sharing your own machine's sites into a pen is unchanged. The docs change with it, in item 6's PR:
+- the site's self-host page becomes a short note: Hogman is hosted-only, the code is open for anyone to read and check;
+- the README and the keeper's guide drop the steps for running your own pen server;
+- the standalone pen setup stays only as the test harness CI uses, not as something we document or support.
 
 ## Phase C: the switch (the test pens go down)
 
