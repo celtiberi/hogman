@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `deploy/challenge-dns` (D-18, step 1): the authoritative DNS server for ACME DNS-01 challenges under `pens.hogman.network` and the front door's wildcard name. It serves only challenge TXT records, CAA, SOA and NS, never addresses. It answers NODATA rather than NXDOMAIN under its zones (RFC 8020), and refuses everything outside them. Each pen's credential can write only that pen's challenge names, capped at 10 new names a week; tokens are stored hashed. Single-use Google Trust Services account keys are minted on request for the fallback CA. Built by CI with provenance, and scanned by govulncheck. Not yet deployed or used.
+
 ### Security (audit quick wins, docs/security/audit-2026-11.md)
 - Caddy & front-door hardening (audit H3, D-19): all Caddy containers (`edge`, `portal`, and `hogman-host` shared `front`) run non-root (`HOGMAN_UID:HOGMAN_GID` / `65532:65532` on root hosts), read-only with `cap_drop: [ALL]` and `no-new-privileges`, using unprivileged port binding (`sysctls` / netns) and `tmpfs` `/tmp`; both the shared front door and per-pen `edge` replace the Headscale catch-all proxy with an explicit allow-list (`/ts2021`, `/key`, `/derp`, `/derp/probe`, `/derp/latency-check`, `/bootstrap-dns`, `/machine/ping-response`, `/health`, returning `404` on everything else), add `X-Content-Type-Options: nosniff` on `/join/dl/*` and `/hogman/*`, and send `Origin-Agent-Cluster: ?1` on Hogman pages (`/join`, `home.<zone>`, sign-up, and website).
 - Registrar (audit H2): the member and admin API trusts X-Forwarded-For to say who is asking, so in a pen it no longer listens on loopback TCP, where step-ca and anything else sharing the namespace could reach it and claim to be any member. It listens on a Unix socket in `data/api`, mounted only into the registrar and the portal (`MESH_ADDR=unix:…`); the kernel enforces who can connect.
