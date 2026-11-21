@@ -29,6 +29,17 @@ D("hogman.network", REG_NONE, DnsProvider(DSP_CLOUDFLARE),
   A("*.pens", "159.65.78.95"), // hosted pens' front doors (moving to *.gate at the switch-over)
   A("ns1", "159.65.78.95"),    // the challenge DNS server (D-18); IPv4 only
 
+  // Front doors under gate. (D-18 switch-over, Phase A). Addresses and CAA stay
+  // here; only the wildcard's challenge name is handed to the challenge DNS
+  // server, so it can never touch anything else in this zone.
+  A("*.gate", "159.65.78.95"),                          // every hosted pen's front door; IPv4 only
+  NS("_acme-challenge.gate", "ns1.hogman.network."),    // DNS-01 for the *.gate wildcard
+  // Only a wildcard may be issued for gate. (issue ";" alone forbids plain
+  // names: RFC 8659), only by Let's Encrypt, only by DNS-01 (RFC 8657).
+  // Phase A step 4 pins the host's account (accounturi); Phase E adds pki.goog.
+  CAA("gate", "issue", ";"),
+  CAA("gate", "issuewild", "letsencrypt.org; validationmethods=dns-01"),
+
   // Email from the sign-up page (Resend).
   CNAME("send", "send.forge.rmta.net."),
   CNAME("rsend", "rsend.forge.rmta.net."),
