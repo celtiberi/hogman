@@ -27,10 +27,7 @@ usage() {
 usage: hogman-host <command>
 
   init [--test]                  set up the front door (--test: self-signed certificates, for local trials)
-  add <network> <public-host> [--public <zone>]
-                                 create a pen, e.g.  add bobo hs.example.com
-                                 --public: public certificates (D-18), e.g.
-                                   add bobo bobo.gate.hogman.network --public bobo.pens.hogman.network
+  add <network> <public-host>    create a pen, e.g.  add bobo hs.example.com
   list                           pens on this host
   pen <network> <args...>        run ./hogman in a pen, e.g.  pen bobo member list
   upgrade <network>              update a pen's code from src/ and restart it
@@ -364,6 +361,9 @@ next_stun_port() {
   die "no free relay port in $STUN_BASE-$((STUN_BASE + 99))"
 }
 
+# --public <zone> is build scaffolding for the public-certificate switch-over
+# (D-22): deliberately undocumented, never offered as a choice, and removed
+# along with the private certificate authority at the switch-over.
 cmd_add() {
   load_host
   local n="${1:-}" host="${2:-}" zone=""
