@@ -263,7 +263,9 @@ the front door's challenge name. When the certificate changes, the front door re
 itself. It starts asking only once `_acme-challenge.gate.hogman.network` is delegated, because
 failed attempts count against Let's Encrypt's limits.
 
-Pens keep using their own certificate authority until the switch-over, which comes later.
+Pens keep their own certificate authority until the switch-over. At the switch-over every
+pen moves to public certificates at once and the old way is removed: there's no setting to
+choose between them (D-22).
 
 ## Everyday
 

@@ -73,7 +73,20 @@ load_env() {
   if [ -n "${PUBLIC_IPV4:-}" ]; then
     valid_ipv4 "$PUBLIC_IPV4" || die "PUBLIC_IPV4 must be a valid IPv4 address"
   fi
-  export ZONE="${NETWORK}.hogman"
+  # CERT_MODE: private (default) runs the pen's own certificate authority and
+  # members install its root; public (D-18) gets publicly trusted certificates
+  # by DNS-01 instead, and the pen's zone is a real name (ZONE in .env, e.g.
+  # bobo.pens.hogman.network for a hosted pen).
+  export CERT_MODE="${CERT_MODE:-private}"
+  case "$CERT_MODE" in
+    private) export ZONE="${NETWORK}.hogman" ;;
+    public)
+      : "${ZONE:?CERT_MODE=public needs ZONE in .env, e.g. ${NETWORK}.pens.hogman.network}"
+      valid_host "$ZONE" || die "ZONE must be a valid DNS name"
+      case "$ZONE" in "$NETWORK".*) ;; *) die "ZONE must start with the pen's name: $NETWORK.<domain>" ;; esac
+      export ZONE ;;
+    *) die "CERT_MODE must be private or public" ;;
+  esac
   export STUN_PORT="${STUN_PORT:-3478}"
   # FRONT_DOOR=true: this pen sits behind a shared front door (deploy/hogman-host)
   # that holds ports 80/443 and the public certificate for every pen on the host.
@@ -91,6 +104,7 @@ dc() {
   [ -f "$STATE" ] && args+=(--env-file "$STATE")
   local files=(-f compose.yaml)
   [ "$FRONT_DOOR" = true ] && files+=(-f compose.front.yaml)
+  [ "$CERT_MODE" = public ] && files+=(-f compose.public.yaml)
   [ "$TEST_MODE" = true ] && [ "$FRONT_DOOR" != true ] && [ -f test/compose.test.yaml ] && files+=(-f test/compose.test.yaml)
   ZONE="$ZONE" EDGE_TLS_MODE="$EDGE_TLS_MODE" docker compose -p "${COMPOSE_PROJECT_NAME:-hogman}" \
     "${args[@]}" "${files[@]}" "$@"
@@ -162,7 +176,7 @@ own_runtime_files() {
   chmod 755 "$DATA/pki/public" "$DATA/step/config" "$DATA/join-dl" 2>/dev/null || true
   chmod -R a+rX "$DATA/join-dl" 2>/dev/null || true
   chmod 644 "$DATA"/pki/public/*.crt "$DATA/step/config/ca.json" 2>/dev/null || true
-  for d in "$DATA/registrar" "$DATA/api" "$DATA/edge" "$DATA/portal" "$DATA/secrets/registrar" "$DATA/step/secrets" "$DATA/step/db"; do
+  for d in "$DATA/registrar" "$DATA/api" "$DATA/edge" "$DATA/portal" "$DATA/secrets/registrar" "$DATA/step/secrets" "$DATA/step/db" "$DATA/home-tls" "$DATA/caddy-admin"; do
     [ -e "$d" ] && chown -R "$HOGMAN_UID:$HOGMAN_GID" "$d"
   done
   return 0
@@ -173,6 +187,8 @@ own_runtime_files() {
 cmd_init() {
   load_env
   [ -f "$DATA/pki/public/root_ca.crt" ] && die "already initialised (data/pki exists)."
+  [ -n "${INITIALISED:-}" ] && die "already initialised ($INITIALISED)."
+  if [ "$CERT_MODE" = public ]; then init_public; return; fi
 
   info "Network $NETWORK, zone $ZONE, control host $PUBLIC_HOST"
   mkdir -p "$DATA"/{pki/public,pki/offline,step/config,step/secrets,step/db} \
@@ -231,6 +247,32 @@ manager) once you have checked the network works, and delete it from this server
 You will need it only to replace the intermediate CA.
 
 Next: ./hogman up
+EOF
+}
+
+# A pen with public certificates (D-18): no certificate authority, nothing for
+# members to install, and no root key to look after.
+init_public() {
+  info "Network $NETWORK, zone $ZONE, control host $PUBLIC_HOST (public certificates)"
+  mkdir -p "$DATA"/{headscale/config,headscale/lib,mesh/core} \
+           "$DATA"/{edge,edge-trust,portal,registrar,secrets/registrar,join-dl,tmp,api,home-tls,caddy-admin}
+  chmod 700 "$DATA/secrets/registrar" "$DATA/mesh" "$DATA/registrar" "$DATA/headscale/lib" \
+            "$DATA/api" "$DATA/home-tls" "$DATA/caddy-admin"
+  local ids; ids="$(run_ids)"
+  HOGMAN_UID="${ids% *}"; HOGMAN_GID="${ids#* }"
+  set_state HOGMAN_UID "$HOGMAN_UID"
+  set_state HOGMAN_GID "$HOGMAN_GID"
+  render templates/policy.hujson "$DATA/headscale/config/policy.hujson"
+  set_state INITIALISED public
+  own_runtime_files
+  cat >&2 <<EOF
+
+Initialised, with public certificates: there's no certificate authority and
+nothing for members to install. home.$ZONE gets its certificate from Let's
+Encrypt when the pen starts, through the host's challenge DNS server.
+
+Next: put this pen's challenge DNS token in data/secrets/registrar/challenge_dns_token
+(hogman-host does this for you), then ./hogman up
 EOF
 }
 
@@ -339,7 +381,14 @@ cleanup_old_ca() {
 
 cmd_up() {
   load_env
-  [ -f "$DATA/pki/public/root_ca.crt" ] || die "run ./hogman init first."
+  if [ "$CERT_MODE" = public ]; then
+    [ "${INITIALISED:-}" = public ] || die "run ./hogman init first."
+    [ -s "$DATA/secrets/registrar/challenge_dns_token" ] \
+      || die "no challenge DNS token in data/secrets/registrar/challenge_dns_token (hogman-host adds it)"
+    mkdir -p "$DATA"/{api,home-tls,caddy-admin}
+  else
+    [ -f "$DATA/pki/public/root_ca.crt" ] || die "run ./hogman init first."
+  fi
   # Folders a backup leaves out. Made here, as us: if Docker made them, they
   # would belong to root and step-ca could not write its database.
   mkdir -p "$DATA"/{step/db,edge,portal,join-dl,tmp,api}
@@ -416,7 +465,7 @@ cmd_up() {
     render_headscale
   fi
 
-  render templates/ca.json "$DATA/step/config/ca.json"
+  [ "$CERT_MODE" = public ] || render templates/ca.json "$DATA/step/config/ca.json"
   use_prebuilt_or_build
 
   if [ "$FRONT_DOOR" = true ]; then
