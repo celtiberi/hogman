@@ -25,6 +25,11 @@ Who does what:
 
 Everything here only adds names. No live pen is touched.
 
+0. **Preflight on hogman-1:**
+   - the installed release has `gate-cert-setup` (`hogman-host` prints it in its usage); if not, run `install.sh` first;
+   - port 53 answers from outside over both UDP and TCP (`dig @159.65.78.95 pens.hogman.network SOA` and the same with `+tcp`), including through DigitalOcean's cloud firewall if it's on;
+   - the registrar no longer sends a made-up `admin@<host>` email to the CA (@hogman's follow-up PR, which also covers shares).
+
 1. **DNS PR 1** (`infra/dns/dnsconfig.js`):
    - `_acme-challenge.gate` NS `ns1.hogman.network.`
    - `*.gate` A `159.65.78.95` (not proxied; IPv4 only, like the host)
@@ -40,17 +45,19 @@ Everything here only adds names. No live pen is touched.
    dig +short @1.1.1.1 gate.hogman.network CAA
    ```
 
-3. **On hogman-1:** `hogman-host gate-cert-setup gate.hogman.network`. It makes the host's challenge credential, installs the `hogman-gate-cert` units, and gets `*.gate.hogman.network` from Let's Encrypt.
+3. **On hogman-1:** `hogman-host gate-cert-setup gate.hogman.network`. It makes the host's challenge credential and installs `hogman-gate-cert.service`, which runs `/usr/local/bin/hogman-registrar gate-cert` continuously: it gets `*.gate.hogman.network` from Let's Encrypt and renews it itself.
 
-   Check: `/var/lib/hogman-gate/tls/gate.crt` exists and is from Let's Encrypt; `registrar gate-cert health` passes; the name shows up in CT (crt.sh).
+   Check: `systemctl status hogman-gate-cert` is active and its log shows the certificate; `/var/lib/hogman-gate/tls/gate.crt` exists and is from Let's Encrypt; the service's `gate-cert health` check passes; the name shows up in CT (crt.sh).
 
 4. **DNS PR 2:** add `accounturi=<the host's Let's Encrypt account URL>` to the `issuewild` CAA. The URL is in `/var/lib/hogman-gate/acme`. The GTS line gets added when the host has a GTS account (Phase E).
 
-   Check: a renewal still works with the tighter CAA (force one with the `gate-cert` renew command, or wait for the timer and read the log).
+   Check: `systemctl restart hogman-gate-cert` loads the existing certificate without a new order. The first real renewal under the tighter CAA happens about 60 days in; `hogman-watch` alerts if the certificate gets within 20 days of expiry (Phase D).
 
 ## Phase B: the code that has to land before the switch
 
 Each item is its own PR, reviewed by the other AI. CI has to pass, including a full public-pen run.
+
+0. **Remove `NO_PURGE`** from `infra/dns/dnsconfig.js`. While it's set, dnscontrol never deletes anything, so DNS PR 3 couldn't remove `*.pens` and `hs`. Read the preview first: the import counted 14 records and the file has 12, so the 2 extras (likely the apex NS records Cloudflare manages) must not be marked for deletion. If they are, add them to the file or ignore them explicitly.
 
 1. **Share retry backoff** (from the #71 review): keep a next-attempt time in `<share>/acme`, so restarts don't hammer the CA; drop the `admin@<zone>` default ACME email.
 
@@ -61,7 +68,7 @@ Each item is its own PR, reviewed by the other AI. CI has to pass, including a f
    - the `CERT_MODE` switch, `compose.public.yaml` (its contents become `compose.yaml`) and `portal.public.Caddyfile`;
    - the "two pens with one zone" refusal.
 
-   `hogman-join update` gains the clean-up from the design: remove any old Hogman root from the trust store (matched by fingerprint against the saved config), and move the agent's folder when the pen is re-joined.
+   `hogman-join update` gains the clean-up from the design: remove any old Hogman root from the trust store (matched by fingerprint against the saved config), and move the agent's folder when the pen is re-joined. So a small piece of the old code stays: reading `RootFP` from old configs, and removing a root by fingerprint. Nothing that installs a root stays.
 
 3. **`hogman-host add <pen>`.** The host and zone come from the pen's name:
    - front door `<pen>.<GATE_DOMAIN>`;
@@ -86,13 +93,13 @@ Each item is its own PR, reviewed by the other AI. CI has to pass, including a f
 
 Do this in one sitting, and tell Piggy and anyone on the test pens first.
 
-1. **Back up both pens:** `hogman-host backup`, then make sure the backup copied off the server. These are test pens, but the backup is the only way back if Phase C fails.
+0. **Before the sitting:** cut the release with all of Phase B (tagged, built in CI, provenance attested), and have DNS PR 3 open with its preview read and checked, ready to merge.
 
-2. **Remove the old pens:** `hogman-host remove farm`, `hogman-host remove qa-piggy4`.
+1. **Back up both pens:** `hogman-host backup`, then make sure the backup copied off the server and can be decrypted. These are test pens, but the backup is the only way back if Phase C fails.
 
-3. **Install the new release:** run `install.sh` on hogman-1. Then `hogman-host signup-setup gate.hogman.network get.hogman.network 40` to point sign-ups at `gate.` (exact arguments per Phase B item 3).
+2. **Remove the old pens:** `hogman-host remove farm`, `hogman-host remove qa-piggy4`. `remove` stops and unroutes a pen but keeps its folder, so once the backup is confirmed, move both folders out of the way (to `$HOGMAN_HOME/retired/`), or `add` would refuse the name.
 
-4. **DNS PR 3:**
+3. **DNS PR 3**, right away, so the delegation spreads while the server upgrades:
    - `pens` NS `ns1.hogman.network.`
    - remove `*.pens` A, and `hs` A (farm's old front door).
 
@@ -102,14 +109,18 @@ Do this in one sitting, and tell Piggy and anyone on the test pens first.
    ```
    dig +short @1.1.1.1 pens.hogman.network NS          # ns1.hogman.network.
    dig +short @1.1.1.1 pens.hogman.network CAA         # served by ns1
-   dig @1.1.1.1 nothing.pens.hogman.network A          # NXDOMAIN/NODATA, no address
+   dig @1.1.1.1 nothing.pens.hogman.network A          # no address
    ```
 
-5. **Recreate the test pens:** `hogman-host add farm` and `hogman-host add qa-piggy5` (or new names). Make their owners, then join the laptop and the Mac mini.
+4. **Install the new release** on hogman-1 (`install.sh`). Then the host settings:
+   - `PENS_ZONE=pens.hogman.network` (however Phase B item 3 sets it);
+   - point sign-ups at `gate.`: `hogman-host signup-setup` with the gate domain (exact arguments per Phase B item 3).
+
+5. **Recreate the test pens with new names**, for example `hogman-host add farm2` and `hogman-host add qa-piggy5`. New names because a pen name is used once, ever (D-21): once a public pen is made, its name is burned, so a retry after a failed attempt would need new names anyway. Make their owners, then join the laptop and the Mac mini.
 
    Check:
    - nothing on either computer asks for an administrator password, and no root gets installed;
-   - `home.farm.pens.hogman.network` shows a Let's Encrypt certificate in the browser;
+   - `home.farm2.pens.hogman.network` shows a Let's Encrypt certificate in the browser;
    - a share gets its own certificate within a minute;
    - `hogman-join update` on a computer that was on the old pens removes the old root.
 
@@ -120,13 +131,14 @@ Do this in one sitting, and tell Piggy and anyone on the test pens first.
 **If Phase C fails:** the private path is gone from the new release, so going back means:
 - a DNS PR reverting PR 3 (put back `*.pens` A and `hs` A, drop the NS);
 - reinstalling the previous release (`install.sh` pinned to the last tag);
-- restoring `farm` and `qa-piggy4` from the step 1 backup.
+- moving `farm` and `qa-piggy4` back from `retired/` (or restoring them from the step 1 backup) and `hogman-host upgrade` on each.
+
+Any pen names created during the failed attempt stay burned (D-21).
 
 That's a few minutes of DNS plus a restore, and it's acceptable because only test pens exist. Once real people have pens, there's no going back, which is why this happens now.
 
 ## Phase D: tidy up
 
-- Remove `NO_PURGE` in `infra/dns/dnscontrol`, after reading the preview for any surprise deletions (the zone import said 14 records, our file has 12: check the apex NS and anything mail-related first).
 - Make DNS-only PRs skip the e2e suites (`infra/**` in the changes filter).
 - Add `hogman-challenge-dns` and the gate certificate's expiry to `hogman-watch`.
 
