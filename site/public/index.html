@@ -24,6 +24,7 @@
     <a href="#what">What is it?</a>
     <a href="#how">How it works</a>
     <a href="#tech">Under the hood</a>
+    <a href="/docs/security.html">Security</a>
     <a href="/docs/">Docs</a>
     <a href="#ai">AI &amp; data</a>
     <a href="#inside">Inside the fence</a>
@@ -114,63 +115,73 @@
 <!-- ============================== UNDER THE HOOD ============================== -->
 <section id="tech">
   <h2>Under the hood</h2>
-  <p class="sub">The same thing, for people who want to know what's actually running. Everything
-    is open source: <a href="https://github.com/celtiberi/hogman">github.com/celtiberi/hogman</a>.</p>
+  <p class="sub">What actually runs on your machine, on the wire, and on our host. Everything is
+    open source (AGPL): <a href="https://github.com/celtiberi/hogman">github.com/celtiberi/hogman</a>.</p>
   <div class="split tech">
     <div>
       <dl class="parts">
-        <dt>The network: WireGuard, coordinated by Headscale</dt>
-        <dd>Each pen is a private <a href="https://www.wireguard.com">WireGuard</a> mesh with its own
-          <a href="https://github.com/juanfont/headscale">Headscale</a>, the open-source Tailscale
-          control server. Devices connect directly, encrypted end to end; when they can't, the
-          pen's relay carries the encrypted packets without being able to read them.</dd>
-        <dt>Names and padlocks: the pen's own DNS and CA</dt>
-        <dd>Each pen has a private DNS zone (<code>smith.hogman</code>) answered only inside the mesh,
-          and its own certificate authority whose root is name-constrained to that zone, so it can't
-          vouch for any other site.</dd>
-        <dt>HTTPS only, default deny</dt>
-        <dd>A pen carries HTTPS to its own names and nothing else: no ssh, no other ports. Hogman's
-          registrar keeps the member list and writes the access policy. Members reach servers on
-          443 only; personal devices accept no connections; anything uninvited
-          gets nothing.
-          The boot deletes every device a member has, in about two seconds.</dd>
-        <dt>Joining: a link that carries a fingerprint</dt>
-        <dd>Invite links carry the SHA-256 fingerprint of the pen's root. <code>hogman-join</code>
-          checks it before trusting anything, then starts a small connection, running as you, never
-          as administrator, that carries only HTTPS to the pen's names.</dd>
+        <dt>Unprivileged client: userspace WireGuard + blind CONNECT proxy</dt>
+        <dd><code>hogman-join</code> embeds Tailscale's userspace <code>tsnet</code> stack as you —
+          no <code>TUN</code> interface, no <code>sudo</code>, no <code>/etc/hosts</code> edits, and
+          zero interference with system Tailscale. A PAC-scoped loopback proxy hands pen hostnames
+          into a blind TCP <code>CONNECT</code> tunnel (never terminating TLS), verifies every
+          target IP against <code>tsnet</code> <code>WhoIs</code> (so malicious pen DNS can never
+          pivot your browser to <code>127.0.0.1</code> or your LAN), and rejects anything except
+          <code>:443</code>.</dd>
+        <dt>Split-horizon DNS-01: real TLS on private 100.x IPs</dt>
+        <dd>No OS root CA is ever installed. Shares run embedded
+          <a href="https://github.com/caddyserver/certmagic">CertMagic</a> locally (private keys
+          never leave the sharer's computer) and validate Let's Encrypt certificates (Google Trust
+          Services fallback) via our authoritative <code>ns1.hogman.network</code> challenge server,
+          which serves <em>only</em> <code>_acme-challenge.*</code> <code>TXT</code>,
+          <code>SOA</code>, <code>NS</code>, and <code>CAA</code> — zero public <code>A</code>/<code>AAAA</code>
+          records exist. Catch: hostnames appear in CT logs, and until <code>pens.hogman.network</code>
+          joins the Public Suffix List, use a separate browser profile for pens you don't fully
+          trust.</dd>
+        <dt>Default-deny ACLs, share sandboxing, 2s revocation</dt>
+        <dd>Personal devices accept zero inbound connections. Headscale ACLs grant enrolled nodes
+          <code>:443</code> toward <code>tag:server</code> shares only (no SSH, no UDP, no lateral
+          client traffic, no exit nodes). Folder shares confine reads inside Go's
+          <code>os.Root</code> (symlink escape refused), <code>serverMayUse</code> locks shares to
+          their own names, and kicking a member drops their devices and ACLs in ~2 s.</dd>
+        <dt>Host isolation &amp; verifiable builds</dt>
+        <dd>Hosted pens (D-24) run in separate container bridges with non-root (<code>uid 65532</code>),
+          read-only containers (<code>cap_drop: [ALL]</code>), Unix-socket registrar isolation, and
+          GitHub Actions-only releases attested with SLSA provenance
+          (<code>gh attestation verify hogman-join --repo celtiberi/hogman</code>).</dd>
       </dl>
-      <p><a class="btn" href="/docs/how-it-works.html">The full how it works</a></p>
+      <p class="cta" style="justify-content:flex-start">
+        <a class="btn primary" href="/docs/security.html">Architecture &amp; threat model</a>
+        <a class="btn" href="/docs/how-it-works.html">Full packet walkthrough</a>
+      </p>
     </div>
     <div>
-      <h3>What happens when Bob opens a site</h3>
-      <pre class="term" aria-label="What happens when a member opens a site in the pen"><span class="c"># bob types https://photos.smith.hogman</span>
+      <h3>One request on the wire</h3>
+      <pre class="term" aria-label="What happens when a member opens a site in the pen"><span class="c"># bob opens https://photos.smith.pens.hogman.network</span>
 
-<span class="b">1</span> DNS     photos.smith.hogman → 100.80.12.7
-          answered by the pen's DNS, on the mesh only
-<span class="b">2</span> policy  bob's laptop → alice's photos server:
-          allowed (a member's device → a server)
-<span class="b">3</span> tunnel  WireGuard, bob → alice, end to end
-          direct if possible, else the pen's relay
-<span class="b">4</span> TLS     certificate for photos.smith.hogman
-          signed by the pen's CA, whose root
-          hogman-join installed on bob's computer
-          after checking its fingerprint
-<span class="ok">✓ page loads, with the padlock</span>
+<span class="b">1</span> PAC     127.0.0.1:&lt;port&gt; catches *.smith.pens.hogman.network;
+          all non-pen traffic bypasses Hogman completely
+<span class="b">2</span> DNS     pen registrar (mesh :53) -&gt; 100.80.12.7 (random CGNAT)
+          verified peer via tsnet WhoIs (never LAN/127.0.0.1)
+<span class="b">3</span> policy  Headscale ACL: bob -&gt; server tag :443 ONLY
+<span class="b">4</span> tunnel  WireGuard E2E encrypted (direct UDP or DERP ciphertext)
+          hogman-join forwards blind TCP CONNECT bytes
+<span class="b">5</span> TLS 1.3 leaf cert served by alice's share (CertMagic local key)
+          verified by Bob's stock OS trust store — no custom root CA
+<span class="ok">✓ page loads, zero public IP, relay/host see only ciphertext</span>
 
-<span class="c"># a stranger types the same address</span>
-<span class="p">✗</span> DNS     no such name. There is nothing to reach.</pre>
+<span class="c"># stranger or scanner resolves the same hostname</span>
+<span class="p">✗</span> DNS     ns1 returns NODATA (zero A/AAAA records exist publicly)</pre>
       <h3>What it's built from</h3>
       <ul class="status">
-        <li class="yes">Headscale and the Tailscale client</li>
-        <li class="yes">step-ca and Caddy</li>
-        <li class="yes">Hogman's own pieces: the registrar (members, invites, names, policy,
-          DNS), <code>hogman-join</code> and the sign-up service in Go, plus shell tools to run
-          pens and hosts</li>
+        <li class="yes">Headscale + Tailscale <code>tsnet</code> (WireGuard mesh, random CGNAT IPs)</li>
+        <li class="yes">CertMagic + Caddy + authoritative <code>miekg/dns</code> DNS-01 server</li>
+        <li class="yes">Go registrar (ACLs, DNS, Unix-socket API), <code>hogman-join</code>, sign-up broker</li>
       </ul>
-      <p class="fine">Exact versions are pinned in
-        <a href="https://github.com/celtiberi/hogman/blob/main/core/compose.yaml">core/compose.yaml</a>.</p>
-      <p class="fine">Not audited yet. The keeper (and we, for hosted pens) can see who's in a pen
-        and which names get looked up, never what members send each other.</p>
+      <p class="fine">Pinned versions in
+        <a href="https://github.com/celtiberi/hogman/blob/main/core/compose.yaml">core/compose.yaml</a> ·
+        <a href="https://github.com/celtiberi/hogman/blob/main/docs/security/audit-2026-11.md">Public self-audit</a> ·
+        Not yet independently audited; host control plane sees membership &amp; mesh DNS lookups, never WireGuard/TLS payloads.</p>
     </div>
   </div>
 </section>
@@ -572,7 +583,8 @@
 <footer>
   <img class="foot-logo" src="/logo.webp" width="2000" height="900" alt="HÖGMAN" loading="lazy">
   <p>Keep a clean pen.</p>
-  <p class="foot-links"><a href="/docs/">Docs</a> · <a href="/docs/how-it-works.html">How it works</a> ·
+  <p class="foot-links"><a href="/docs/">Docs</a> · <a href="/docs/security.html">Security</a> ·
+    <a href="/docs/how-it-works.html">How it works</a> ·
     <a href="/docs/faq.html">FAQ</a> · <a href="https://get.hogman.network/">Get a pen</a> ·
     <a href="https://github.com/celtiberi/hogman">Source</a></p>
   <p class="fine">No pigs were excluded in the making of this website, except the filthy ones.</p>

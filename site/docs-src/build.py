@@ -19,6 +19,7 @@ PAGES = [  # (file, nav title, page title, description, sidebar group)
     ("use-cases", "Use cases", "Use cases, worked through", "Families, clubs, small companies, customer portals and side projects, set up step by step.", "Start here"),
     ("faq", "FAQ and troubleshooting", "FAQ and troubleshooting", "Common questions, and fixes for the problems people actually hit.", "Start here"),
     ("how-it-works", "How it works", "How Hogman works", "The parts of a pen, what happens on the wire, and what the keeper can and can't see.", "Going deeper"),
+    ("security", "Architecture & security", "Architecture and security", "Packet flow, client isolation, DNS-01 certificates, threat model, host hardening, and known limits.", "Going deeper"),
     ("self-host", "Raising your own pen", "Raising your own pen", "Run Hogman on a server of your own: what you need and where the full guide is.", "Going deeper"),
 ]
 
@@ -41,6 +42,7 @@ HEAD = """<!doctype html>
     <a href="/">Home</a>
     <a href="/docs/">Docs</a>
     <a href="/docs/how-it-works.html">How it works</a>
+    <a href="/docs/security.html">Security</a>
     <a href="https://get.hogman.network/">Get a pen</a>
     <a href="https://github.com/celtiberi/hogman">Source</a>
   </nav>
