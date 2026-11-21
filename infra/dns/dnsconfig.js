@@ -24,9 +24,12 @@ D("hogman.network", REG_NONE, DnsProvider(DSP_CLOUDFLARE),
 
   // The hosting server.
   A("get", "159.65.78.95"),    // sign-up page
-  A("hs", "159.65.78.95"),     // the farm pen's front door
-  A("*.pens", "159.65.78.95"), // hosted pens' front doors (moving to *.gate at the switch-over)
   A("ns1", "159.65.78.95"),    // the challenge DNS server (D-18); IPv4 only
+
+  // Hosted pens' sites live under pens. (D-18). The whole subzone is the
+  // challenge DNS server's: it answers only SOA, NS, CAA and challenge TXT, so
+  // nothing under it has a public address. Front doors are under gate. below.
+  NS("pens", "ns1.hogman.network."),
 
   // Front doors under gate. (D-18 switch-over, Phase A). Addresses and CAA stay
   // here; only the wildcard's challenge name is handed to the challenge DNS
