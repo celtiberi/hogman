@@ -1,6 +1,7 @@
-# Compile Hogman's own programs for every commit on main (and on demand), so a
-# release never needs Docker on our own machines. deploy/release.sh downloads
-# the artifact for the exact commit it releases.
+# Compile Hogman's own programs for every commit on main (and on demand).
+# Releases are built only here, never on a laptop (audit H5): deploy/release.sh
+# downloads this artifact for the exact commit it releases, and checks GitHub's
+# signed build provenance for every file before publishing anything.
 name: build
 
 on:
@@ -18,12 +19,23 @@ jobs:
     name: compile (join tool, registrar, sign-up page)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write       # sign the provenance (Sigstore, keyless)
+      attestations: write   # store it with the repository
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Compile
         run: deploy/build-bins.sh . prebuilt
       - name: List
         run: find prebuilt -type f | sort
+      # SLSA build provenance: which workflow, commit and runner made each file.
+      # Anyone can check it with `gh attestation verify FILE --repo celtiberi/hogman`.
+      - name: Attest provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: "prebuilt/**/*"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: hogman-bin-${{ github.sha }}
