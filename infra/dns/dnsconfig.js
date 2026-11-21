@@ -3,15 +3,14 @@
 // locked "infra" environment, after approval. Nobody edits records in the
 // Cloudflare dashboard.
 //
-// NO_PURGE: until the zone has been imported in full (workflow "dns", action
-// "import") and this file reviewed against it, dnscontrol may add or change
-// records but never deletes one it doesn't know about.
+// This file is the whole zone: a record that isn't here gets deleted by the
+// next apply. (Cloudflare's own apex NS records are managed by Cloudflare and
+// never touched.)
 
 var REG_NONE = NewRegistrar("none");
 var DSP_CLOUDFLARE = NewDnsProvider("cloudflare");
 
 D("hogman.network", REG_NONE, DnsProvider(DSP_CLOUDFLARE),
-  NO_PURGE,
   DefaultTTL(1), // Cloudflare's "auto"
 
   // Imported from the live zone on 2026-11-21 (workflow "dns", action "import").
