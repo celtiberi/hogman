@@ -56,11 +56,14 @@
 <ol class="docs-steps">
   <li><strong>Open your invite link</strong> on the computer you want to join. Invites work
     once and expire after 7 days.</li>
-  <li><strong>Copy the command it shows</strong> into a terminal. It downloads
-    <code>hogman-join</code> for your computer and runs it with your link:
-<pre class="term"><span class="p">$</span> curl -fsSLo hogman-join https://smith.gate.hogman.network/join/dl/hogman-join-Darwin-arm64 \
-    &amp;&amp; chmod +x hogman-join \
-    &amp;&amp; ./hogman-join 'https://smith.gate.hogman.network/join#t=…'</pre></li>
+  <li><strong>Paste the command it shows</strong> into Terminal. It's the same short command for
+    everyone in the pen:
+<pre class="term"><span class="p">$</span> curl -fsSL https://smith.gate.hogman.network/start | sh</pre>
+    It asks for your invite link (the page has a button to copy it), downloads
+    <code>hogman-join</code> for your computer, checks it against its published SHA-256, saves it
+    as <code>~/hogman-join</code>, and runs it. Your link never goes into the command.
+    <a href="https://smith.gate.hogman.network/start">The script</a> is short enough to read
+    first; the page also shows the same steps by hand.</li>
   <li>The page picks the right download for your computer. If you'd rather fetch it yourself,
     the files are on the same host under <code>/join/dl/</code>, with checksums in
     <code>SHA256SUMS</code>:

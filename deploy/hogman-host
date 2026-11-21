@@ -165,6 +165,19 @@ write_front() {
 		}
 		file_server
 	}
+	# The short join command: curl -fsSL https://<host>/start | sh. One plain
+	# script for everyone (no invite in it): it asks for the link itself.
+	handle /start {
+		root * /srv/join-page
+		rewrite * /start.sh
+		header {
+			Content-Type "text/plain; charset=utf-8"
+			X-Content-Type-Options nosniff
+			Cache-Control no-store
+			-Server
+		}
+		file_server
+	}
 	handle_path /join/assets/* {
 		root * /srv/join-page
 		header X-Content-Type-Options nosniff

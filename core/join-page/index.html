@@ -12,7 +12,7 @@
 <p class="sub" id="what">Checking your link…</p>
 
 <div id="main" hidden>
-  <p id="lead">Copy this into a terminal on the computer you want to join. It downloads <code>hogman-join</code> (no other software needed):</p>
+  <p id="lead">Open Terminal on the computer you want to join, and paste this:</p>
   <div class="tabs">
     <button data-os="unix" type="button">Mac / Linux</button>
     <button data-os="win" type="button">Windows</button>
@@ -20,7 +20,17 @@
   <div id="unix-panel">
     <pre id="cmd"></pre>
     <p><button id="copy" type="button">Copy</button> <span class="muted" id="copied"></span></p>
-    <p class="warn">This command embeds a one-time key — treat it like a password and don't share it.</p>
+    <div id="link-step">
+      <p>It asks for your invite link. Copy it here and paste it in:</p>
+      <p><button id="copy-link" type="button">Copy my invite link</button> <span class="muted" id="copied-link"></span></p>
+      <p class="warn">Your link works once. Treat it like a password and don't share it.</p>
+    </div>
+    <p class="warn" id="key-warn" hidden>This command embeds a one-time key — treat it like a password and don't share it.</p>
+    <details id="manual" class="muted">
+      <summary>Rather not pipe a script into <code>sh</code>?</summary>
+      <p><a href="/start">Read the script</a> first (it's short), or do the same steps by hand:</p>
+      <pre id="cmd-manual"></pre>
+    </details>
     <p class="note"><b>On a Mac, two things may pop up. Both are expected.</b></p>
     <ul class="note">
       <li><b>“Allow hogman-join to find devices on local networks?”</b> Either answer works.

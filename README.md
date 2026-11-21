@@ -208,9 +208,12 @@ A stranger typing the same address: NODATA from ns1. Zero A/AAAA records exist p
 
 ```text
 # the command your invite page gives you: copy, paste, enter
-$ curl -fsSLo hogman-join https://smith.gate.hogman.network/join/dl/hogman-join-Darwin-arm64 \
-    && chmod +x hogman-join \
-    && ./hogman-join 'https://smith.gate.hogman.network/join#t=(your invite)'
+$ curl -fsSL https://smith.gate.hogman.network/start | sh
+Paste your invite link (the page you opened has a button to copy it): https://smith.gate.hogman.network/join#t=(your invite)
+
+• Downloading hogman-join for Darwin arm64 from smith.gate.hogman.network
+  checked: SHA-256 matches
+  saved as /Users/you/hogman-join (keep it: it updates, shares and leaves later)
 
 • Checking the network at smith.gate.hogman.network
   network: smith.pens.hogman.network
