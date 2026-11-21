@@ -410,6 +410,9 @@ dc rm -sf portal registrar >/dev/null
 init_data_dirs
 curl -sf -X POST "http://127.0.0.1:${ACME_CHALLENGE_API_PORT}/test/reset" >/dev/null
 curl -sf -X POST "http://127.0.0.1:${ACME_HS_PORT}/test/hs-reset" >/dev/null
+dc restart pebble2 >/dev/null
+retry 30 1 curl -sf --cacert "$WORKDIR/certs/ca.crt" "https://127.0.0.1:${ACME_PEBBLE2_DIR_PORT}/dir" >/dev/null || fail "pebble2 not ready after restart for Test 5"
+curl -sf --cacert "$WORKDIR/certs/ca.crt" "https://127.0.0.1:${ACME_PEBBLE2_MGMT_PORT}/roots/0" >"$WORKDIR/pebble2-root.crt"
 
 ACME_CA_URL="https://pebble1:14000/dir" \
 ACME_FALLBACK_CA_URL="" \

@@ -48,7 +48,7 @@ func meshJSON(ctx context.Context, hc *http.Client, zone, method, path string, i
 	if err != nil {
 		return err
 	}
-	if in != nil {
+	if in != nil || method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := hc.Do(req)

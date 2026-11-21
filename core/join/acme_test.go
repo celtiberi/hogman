@@ -487,6 +487,15 @@ func TestShareCertManagerMockACME(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusCreated)
 		case "/api/acme/eab":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			ct, _, _ := strings.Cut(r.Header.Get("Content-Type"), ";")
+			if !strings.EqualFold(strings.TrimSpace(ct), "application/json") {
+				http.Error(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
+				return
+			}
 			eabHits.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{
@@ -628,10 +637,10 @@ func TestSharePublicCertPebbleE2E(t *testing.T) {
 	statsURL := mustEnv("ACME_STATS_URL")
 
 	type stats struct {
-		TXTWrites     int      `json:"txt_writes"`
-		EABCount      int      `json:"eab_count"`
-		DistinctFQDNs int      `json:"distinct_fqdns"`
-		Live          []string `json:"live"`
+		TXTWrites     int                 `json:"txt_writes"`
+		EABCount      int                 `json:"eab_count"`
+		DistinctFQDNs int                 `json:"distinct_fqdns"`
+		Live          map[string][]string `json:"live"`
 	}
 	getStats := func() stats {
 		resp, err := http.Get(statsURL)
