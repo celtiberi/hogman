@@ -56,7 +56,7 @@ done < <(find "$work/prebuilt" -type f -print0)
 echo "provenance checked: $checked files, each built by build.yml from $sha on GitHub's runners"
 
 # Only now that the compiled parts check out, write anything to the website.
-git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md deploy/signup LICENSE README.md \
+git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md deploy/signup deploy/challenge-dns LICENSE README.md \
   | gzip -9n > "$out/$tarball"
 # No macOS file metadata in the bundle (Linux tar warns about it).
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$work" -czf "$out/$bins" prebuilt
