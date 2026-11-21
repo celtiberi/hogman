@@ -29,8 +29,9 @@ guests, plus keeping it backed up, watched and up to date.
    Hogman into `/opt/hogman`, and starts the front door. The code comes from a release on
    hogman.network, checked against its published SHA-256, with the join tool and registrar
    already compiled by GitHub from a public commit. Each compiled file carries signed build
-   provenance: `gh attestation verify FILE --repo celtiberi/hogman` checks it. Pens' services
-   run as user 65532, not root, even though the installer runs as root.
+   provenance: `gh attestation verify FILE --repo celtiberi/hogman` checks it. Each pen's
+   registrar and certificate authority run as user 65532, not root, even though the installer
+   runs as root.
 
 3. **Lock the server down.** Manage it over your own tailnet, and close SSH to the internet:
 
