@@ -359,7 +359,7 @@ check "join page external JS/CSS load" join_assets_ok
 dl_hdrs="$(from_internet -sI "https://$PUBLIC_HOST/join/dl/SHA256SUMS" | tr -d '\r')"
 check "/join/dl/ sets nosniff" grep -iq '^x-content-type-options: nosniff' <<<"$dl_hdrs"
 check "edge allows Headscale /health" match '"pass"' from_internet "https://$PUBLIC_HOST/health"
-check "edge allows Tailscale /key" match '"PublicKey"' from_internet "https://$PUBLIC_HOST/key?v=138"
+check "edge allows Tailscale /key" match '"publicKey"' from_internet "https://$PUBLIC_HOST/key?v=138"
 check "edge allows /generate_204" test "$(from_internet_status "https://$PUBLIC_HOST/generate_204")" = 204
 check "edge blocks Headscale admin API (/api/v1/user -> 404)" test "$(from_internet_status "https://$PUBLIC_HOST/api/v1/user")" = 404
 check "edge blocks Headscale Swagger UI (/swagger -> 404)" test "$(from_internet_status "https://$PUBLIC_HOST/swagger")" = 404
