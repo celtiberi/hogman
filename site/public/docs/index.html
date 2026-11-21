@@ -17,6 +17,7 @@
     <a href="/">Home</a>
     <a href="/docs/">Docs</a>
     <a href="/docs/how-it-works.html">How it works</a>
+    <a href="/docs/security.html">Security</a>
     <a href="https://get.hogman.network/">Get a pen</a>
     <a href="https://github.com/celtiberi/hogman">Source</a>
   </nav>
@@ -36,6 +37,7 @@
 <p class="docs-nav-h">Going deeper</p>
 <ul>
 <li><a href="/docs/how-it-works.html">How it works</a></li>
+<li><a href="/docs/security.html">Architecture & security</a></li>
 <li><a href="/docs/self-host.html">Raising your own pen</a></li>
 </ul>
 </aside>
@@ -77,8 +79,13 @@
 <div class="cards three docs-cards">
   <a class="feature docs-card" href="/docs/how-it-works.html">
     <h3>How it works</h3>
-    <p>WireGuard and Headscale, the pen's own DNS and certificate authority, the access rules,
-      and what the keeper can and can't see.</p>
+    <p>WireGuard and Headscale, the pen's own DNS and certificates, the access rules, and what
+      the keeper can and can't see.</p>
+  </a>
+  <a class="feature docs-card" href="/docs/security.html">
+    <h3>Architecture &amp; security</h3>
+    <p>Packet flow, blind <code>CONNECT</code> + <code>WhoIs</code> dialing, DNS-01 certs,
+      threat model, host hardening, and honest limits.</p>
   </a>
   <a class="feature docs-card" href="/docs/self-host.html">
     <h3>Raising your own pen</h3>
