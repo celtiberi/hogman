@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,34 +25,40 @@ import (
 var webFiles embed.FS
 
 type web struct {
-	brokerURL string
-	token     string
-	domain    string
-	client    *http.Client
-	checks    *limiter // name checks while typing
-	creates   *limiter // sign-up attempts, which also bounds guessing codes
-	waits     *limiter // waiting-list joins
-	leaves    *limiter // taking yourself off the list (its own allowance)
-	jobs      *jobStore
+	brokerURL   string
+	token       string
+	domain      string
+	client      *http.Client
+	checks      *limiter // name checks while typing
+	creates     *limiter // sign-up attempts, which also bounds guessing codes
+	jobPolls    *limiter // status polls for /api/job
+	waits       *limiter // waiting-list joins
+	globalWaits *limiter // server-wide cap on waiting-list joins
+	leaves      *limiter // taking yourself off the list (its own allowance)
+	jobs        *jobStore
 }
 
 func runWeb() {
 	wb := newWeb(env("BROKER_URL", "http://broker:9090"), readToken(), env("PENS_DOMAIN", ""))
 	addr := env("LISTEN", ":8080")
 	log.Printf("sign-up page on %s", addr)
-	srv := &http.Server{Addr: addr, Handler: wb.handler(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: wb.handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	log.Fatal(srv.ListenAndServe())
 }
 
 func newWeb(brokerURL, token, domain string) *web {
 	return &web{
-		brokerURL: strings.TrimRight(brokerURL, "/"), token: token, domain: domain,
-		client:  &http.Client{Timeout: 16 * time.Minute},
-		checks:  newLimiter(60, time.Minute),
-		creates: newLimiter(5, time.Hour),
-		waits:   newLimiter(5, time.Hour),
-		leaves:  newLimiter(5, time.Hour),
-		jobs:    &jobStore{jobs: map[string]*job{}},
+		brokerURL:   strings.TrimRight(brokerURL, "/"),
+		token:       token,
+		domain:      domain,
+		client:      &http.Client{Timeout: 16 * time.Minute},
+		checks:      newLimiter(60, time.Minute),
+		creates:     newLimiter(5, time.Hour),
+		jobPolls:    newLimiter(120, time.Minute),
+		waits:       newLimiter(5, time.Hour),
+		globalWaits: newLimiterWithCap(30, time.Hour, 4),
+		leaves:      newLimiter(5, time.Hour),
+		jobs:        newJobStore(defaultMaxOpenJobs, defaultMaxStoredJobs, defaultJobTTL, defaultDeliveredTTL),
 	}
 }
 
@@ -107,7 +114,7 @@ func (wb *web) status(w http.ResponseWriter, r *http.Request) {
 }
 
 func (wb *web) check(w http.ResponseWriter, r *http.Request) {
-	if !wb.checks.allow(clientIP(r), time.Now()) {
+	if !wb.checks.allow(rateLimitKey(clientIP(r)), time.Now()) {
 		jsonOut(w, 429, map[string]string{"error": "slow down a little"})
 		return
 	}
@@ -121,7 +128,7 @@ func (wb *web) check(w http.ResponseWriter, r *http.Request) {
 }
 
 func (wb *web) create(w http.ResponseWriter, r *http.Request) {
-	if !wb.creates.allow(clientIP(r), time.Now()) {
+	if !wb.creates.allow(rateLimitKey(clientIP(r)), time.Now()) {
 		jsonOut(w, 429, map[string]string{"error": "too many tries from here; wait an hour"})
 		return
 	}
@@ -150,10 +157,15 @@ func (wb *web) create(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 403, map[string]string{"error": "that sign-up code isn't right"})
 		return
 	}
+	code, out := wb.ask(r.Context(), "POST", "/validate", map[string]string{"code": in.Code, "pen": in.Pen, "owner": in.Handle})
+	if code != 200 {
+		jsonOut(w, code, out)
+		return
+	}
 	// Raising a pen takes a minute or so. It runs as a job the page checks on,
 	// so no single request has to survive that long (proxies and browsers drop
 	// them) and a reload picks up where it left off.
-	id := wb.jobs.start(func() (int, map[string]any) {
+	id, ok := wb.jobs.start(func() (int, map[string]any) {
 		ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
 		defer cancel()
 		code, out := wb.ask(ctx, "POST", "/provision", map[string]string{"code": in.Code, "pen": in.Pen, "owner": in.Handle})
@@ -166,13 +178,22 @@ func (wb *web) create(w http.ResponseWriter, r *http.Request) {
 		}
 		return code, out
 	})
+	if !ok {
+		jsonOut(w, 503, map[string]string{"error": "sign-up is busy right now; try again in a minute"})
+		return
+	}
 	jsonOut(w, 202, map[string]string{"job": id})
 }
 
-// job reports on a sign-up: working, or its result (once, to whoever holds
-// the job's id, which only the page that started it knows).
+// job reports on a sign-up: working, or its terminal result (re-readable for
+// 5 minutes after first delivery within the 30-minute unread TTL, to whoever
+// holds the job's id, which only the page that started it knows).
 func (wb *web) job(w http.ResponseWriter, r *http.Request) {
-	j, ok := wb.jobs.get(r.URL.Query().Get("id"))
+	if !wb.jobPolls.allow(rateLimitKey(clientIP(r)), time.Now()) {
+		jsonOut(w, 429, map[string]string{"error": "slow down a little"})
+		return
+	}
+	j, ok := wb.jobs.take(r.URL.Query().Get("id"))
 	if !ok {
 		jsonOut(w, 404, map[string]string{"error": "we lost track of that sign-up; if it finished, your code is used and the pen exists. Ask whoever gave you the code."})
 		return
@@ -192,46 +213,147 @@ func (wb *web) job(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, map[string]any{"state": "failed", "status": j.status, "error": msg})
 }
 
+const (
+	defaultMaxOpenJobs   = 4
+	defaultMaxStoredJobs = 32
+	defaultJobTTL        = 30 * time.Minute
+	defaultDeliveredTTL  = 5 * time.Minute
+)
+
 type job struct {
-	started time.Time
-	done    bool
-	status  int
-	out     map[string]any
+	started   time.Time
+	finished  time.Time
+	delivered time.Time
+	done      bool
+	status    int
+	out       map[string]any
 }
 
 type jobStore struct {
-	mu   sync.Mutex
-	jobs map[string]*job
+	mu           sync.Mutex
+	maxOpen      int
+	maxStored    int
+	ttl          time.Duration
+	deliveredTTL time.Duration
+	now          func() time.Time
+	jobs         map[string]*job
 }
 
-func (s *jobStore) start(run func() (int, map[string]any)) string {
+func newJobStore(maxOpen, maxStored int, ttl, deliveredTTL time.Duration) *jobStore {
+	return &jobStore{
+		maxOpen:      maxOpen,
+		maxStored:    maxStored,
+		ttl:          ttl,
+		deliveredTTL: deliveredTTL,
+		now:          time.Now,
+		jobs:         map[string]*job{},
+	}
+}
+
+func (s *jobStore) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+func (s *jobStore) expired(j *job, now time.Time) bool {
+	if !j.done {
+		return false
+	}
+	ttl := s.ttl
+	if ttl <= 0 {
+		ttl = defaultJobTTL
+	}
+	if now.Sub(j.finished) > ttl {
+		return true
+	}
+	if !j.delivered.IsZero() {
+		dttl := s.deliveredTTL
+		if dttl <= 0 {
+			dttl = defaultDeliveredTTL
+		}
+		if now.Sub(j.delivered) > dttl {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *jobStore) start(run func() (int, map[string]any)) (string, bool) {
+	s.mu.Lock()
+	maxOpen := s.maxOpen
+	if maxOpen <= 0 {
+		maxOpen = defaultMaxOpenJobs
+	}
+	maxStored := s.maxStored
+	if maxStored <= 0 {
+		maxStored = defaultMaxStoredJobs
+	}
+	now := s.clock()
+	open := 0
+	for k, j := range s.jobs {
+		if s.expired(j, now) {
+			delete(s.jobs, k)
+			continue
+		}
+		if !j.done {
+			open++
+		}
+	}
+	if open >= maxOpen {
+		s.mu.Unlock()
+		return "", false
+	}
+	for len(s.jobs) >= maxStored {
+		var oldestID string
+		var oldestAt time.Time
+		found := false
+		for k, j := range s.jobs {
+			if !j.done {
+				continue
+			}
+			if !found || j.finished.Before(oldestAt) {
+				found = true
+				oldestID = k
+				oldestAt = j.finished
+			}
+		}
+		if !found {
+			s.mu.Unlock()
+			return "", false
+		}
+		delete(s.jobs, oldestID)
+	}
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	id := hex.EncodeToString(b)
-	s.mu.Lock()
-	for k, j := range s.jobs { // forget jobs older than a day
-		if time.Since(j.started) > 24*time.Hour {
-			delete(s.jobs, k)
-		}
-	}
-	j := &job{started: time.Now()}
+	j := &job{started: now}
 	s.jobs[id] = j
 	s.mu.Unlock()
 	go func() {
 		status, out := run()
 		s.mu.Lock()
-		j.done, j.status, j.out = true, status, out
+		j.done, j.finished, j.status, j.out = true, s.clock(), status, out
 		s.mu.Unlock()
 	}()
-	return id
+	return id, true
 }
 
-func (s *jobStore) get(id string) (job, bool) {
+func (s *jobStore) take(id string) (job, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j, ok := s.jobs[id]
 	if !ok {
 		return job{}, false
+	}
+	now := s.clock()
+	if s.expired(j, now) {
+		delete(s.jobs, id)
+		return job{}, false
+	}
+	if j.done && j.delivered.IsZero() {
+		j.delivered = now
 	}
 	return *j, true
 }
@@ -241,42 +363,101 @@ func (s *jobStore) get(id string) (job, bool) {
 func clientIP(r *http.Request) string {
 	if x := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); x != "" {
 		parts := strings.Split(x, ",")
-		if ip := net.ParseIP(strings.TrimSpace(parts[len(parts)-1])); ip != nil {
-			return ip.String()
+		if a, err := netip.ParseAddr(strings.TrimSpace(parts[len(parts)-1])); err == nil {
+			return a.Unmap().String()
 		}
 	}
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	return host
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		if a, perr := netip.ParseAddr(host); perr == nil {
+			return a.Unmap().String()
+		}
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func rateLimitKey(raw string) string {
+	a, err := netip.ParseAddr(strings.TrimSpace(raw))
+	if err != nil {
+		return raw
+	}
+	a = a.Unmap()
+	if a.Is6() {
+		return netip.PrefixFrom(a, 64).Masked().String()
+	}
+	return a.String()
+}
+
+type limitBucket struct {
+	hits []time.Time
+	last time.Time
 }
 
 type limiter struct {
-	mu     sync.Mutex
-	limit  int
-	window time.Duration
-	seen   map[string][]time.Time
+	mu      sync.Mutex
+	limit   int
+	window  time.Duration
+	maxKeys int
+	seen    map[string]*limitBucket
 }
 
 func newLimiter(limit int, window time.Duration) *limiter {
-	return &limiter{limit: limit, window: window, seen: map[string][]time.Time{}}
+	return newLimiterWithCap(limit, window, 4096)
+}
+
+func newLimiterWithCap(limit int, window time.Duration, maxKeys int) *limiter {
+	if maxKeys <= 0 {
+		maxKeys = 4096
+	}
+	return &limiter{limit: limit, window: window, maxKeys: maxKeys, seen: map[string]*limitBucket{}}
 }
 
 func (l *limiter) allow(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if len(l.seen) > 4096 {
-		l.seen = map[string][]time.Time{}
+	if b, exists := l.seen[key]; exists {
+		keep := b.hits[:0]
+		for _, t := range b.hits {
+			if now.Sub(t) < l.window {
+				keep = append(keep, t)
+			}
+		}
+		b.last = now
+		if len(keep) >= l.limit {
+			b.hits = keep
+			return false
+		}
+		b.hits = append(keep, now)
+		return true
 	}
-	keep := l.seen[key][:0]
-	for _, t := range l.seen[key] {
-		if now.Sub(t) < l.window {
-			keep = append(keep, t)
+	maxKeys := l.maxKeys
+	if maxKeys <= 0 {
+		maxKeys = 4096
+	}
+	if len(l.seen) >= maxKeys {
+		for k, b := range l.seen {
+			if len(b.hits) == 0 || now.Sub(b.hits[len(b.hits)-1]) >= l.window {
+				delete(l.seen, k)
+			}
 		}
 	}
-	if len(keep) >= l.limit {
-		l.seen[key] = keep
-		return false
+	if len(l.seen) >= maxKeys {
+		var oldestKey string
+		var oldestAt time.Time
+		first := true
+		for k, b := range l.seen {
+			if first || b.last.Before(oldestAt) {
+				first = false
+				oldestKey = k
+				oldestAt = b.last
+			}
+		}
+		if !first {
+			delete(l.seen, oldestKey)
+		}
 	}
-	l.seen[key] = append(keep, now)
+	l.seen[key] = &limitBucket{hits: []time.Time{now}, last: now}
 	return true
 }
 
@@ -308,8 +489,9 @@ func qrSVG(text string) (string, error) {
 func itoa(i int) string { return strconv.Itoa(i) }
 
 func (wb *web) waitlist(w http.ResponseWriter, r *http.Request) {
-	if !wb.waits.allow(clientIP(r), time.Now()) {
-		jsonOut(w, 429, map[string]string{"error": "too many tries from here; wait an hour"})
+	now := time.Now()
+	if !wb.waits.allow(rateLimitKey(clientIP(r)), now) || !wb.globalWaits.allow("*", now) {
+		jsonOut(w, 429, map[string]string{"error": "too many tries right now; try again later"})
 		return
 	}
 	var in struct {
@@ -333,7 +515,7 @@ func (wb *web) waitlist(w http.ResponseWriter, r *http.Request) {
 }
 
 func (wb *web) leaveWaitlist(w http.ResponseWriter, r *http.Request) {
-	if !wb.leaves.allow(clientIP(r), time.Now()) {
+	if !wb.leaves.allow(rateLimitKey(clientIP(r)), time.Now()) {
 		jsonOut(w, 429, map[string]string{"error": "too many tries from here; wait an hour"})
 		return
 	}

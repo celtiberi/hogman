@@ -103,6 +103,9 @@ func (b *broker) joinWaitlist(email, pen, note string) (place int, already bool,
 	if len(list) >= waitlistMax {
 		return 0, false, errFull
 	}
+	if !b.allowWaitlistJoin(time.Now()) {
+		return 0, false, errWaitlistBusy
+	}
 	f, err := os.OpenFile(b.waitPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return 0, false, err
@@ -112,7 +115,10 @@ func (b *broker) joinWaitlist(email, pen, note string) (place int, already bool,
 	return waiting + 1, false, err
 }
 
-var errFull = fmt.Errorf("the waiting list is full")
+var (
+	errFull         = fmt.Errorf("the waiting list is full")
+	errWaitlistBusy = fmt.Errorf("waiting list is busy")
+)
 
 func (b *broker) waitlist(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -144,6 +150,9 @@ func (b *broker) waitlist(w http.ResponseWriter, r *http.Request) {
 	case err == errFull:
 		jsonOut(w, 503, map[string]string{"error": "the waiting list is full right now; try again later"})
 		return
+	case err == errWaitlistBusy:
+		jsonOut(w, 429, map[string]string{"error": "the waiting list is busy right now; try again later"})
+		return
 	case err != nil:
 		log.Printf("waitlist: %v", err)
 		jsonOut(w, 500, map[string]string{"error": "internal error"})
@@ -151,14 +160,14 @@ func (b *broker) waitlist(w http.ResponseWriter, r *http.Request) {
 	}
 	if !already {
 		log.Printf("waitlist: someone joined (%d waiting)", place)
-		b.notify(fmt.Sprintf("Someone joined the waiting list. %d waiting. See: hogman-host waitlist", place))
+		b.notifyKind("waitlist", fmt.Sprintf("Someone joined the waiting list. %d waiting. See: hogman-host waitlist", place))
 	}
 	jsonOut(w, 200, map[string]any{"place": place, "already": already})
 }
 
-// notify pushes a short note to the operator's ntfy topic, if one is set.
-// Never personal details: just that something happened.
-func (b *broker) notify(msg string) {
+// notifyKind pushes a capped note to the operator's ntfy topic without growing
+// unbounded background requests. Never personal details: just that something happened.
+func (b *broker) notifyKind(kind, msg string) {
 	if b.ntfy == "" {
 		return
 	}
@@ -166,7 +175,18 @@ func (b *broker) notify(msg string) {
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
 		return
 	}
+	if !b.notifyLimiter(kind).allow("*", time.Now()) {
+		log.Printf("ntfy: rate cap hit for %s", kind)
+		return
+	}
+	select {
+	case b.ntfySem <- struct{}{}:
+	default:
+		log.Printf("ntfy: skipping %s push (too many in flight)", kind)
+		return
+	}
 	go func() {
+		defer func() { <-b.ntfySem }()
 		req, _ := http.NewRequest("POST", u.String(), strings.NewReader(msg))
 		req.Header.Set("Title", "Hogman sign-ups")
 		req.Header.Set("Tags", "pig")
