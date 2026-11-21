@@ -27,7 +27,6 @@ type Config struct {
 	PublicHost        string // control server hostname
 	CoreIP            string // mesh IP of the core node (DNS, portal)
 	CAIP              string // mesh IP of the CA
-	CertMode          string // "private" (default) or "public"
 	RootCAFile        string
 	NameHold          time.Duration
 	InviteTTL         time.Duration
@@ -94,16 +93,6 @@ type Service struct {
 }
 
 func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
-	switch cfg.CertMode {
-	case "":
-		cfg.CertMode = "private"
-	case "private", "public":
-	default:
-		return nil, fmt.Errorf("invalid cert_mode %q (want private or public)", cfg.CertMode)
-	}
-	if cfg.CertMode == "public" && cfg.RootCAFile != "" {
-		return nil, errors.New("root CA cannot be set when cert_mode is public")
-	}
 	if cfg.CAIP == "" {
 		cfg.CAIP = cfg.CoreIP
 	}
