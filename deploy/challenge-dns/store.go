@@ -28,11 +28,11 @@ const (
 	capNames     = 10 // distinct new names per pen per capWindow
 	eabPerDay    = 5  // GTS account keys per credential per day
 	acmePrefix   = "_acme-challenge."
-	maxSiteDepth = 4 // labels before <penid>, as pen names allow
+	maxSiteDepth = 4 // labels before the pen name, as site names allow
 )
 
 var (
-	penIDRE  = regexp.MustCompile(`^[a-z2-7]{12}$`)
+	penRE    = regexp.MustCompile(`^[a-z][a-z0-9-]{1,28}[a-z0-9]$`) // the hosted pen-name rule (D-21)
 	labelRE  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	valueRE  = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
 	errScope = errors.New("not allowed for this credential")
@@ -145,8 +145,8 @@ func newSecret(n int) string {
 func (s *Store) AddCred(kind, penID string) (Cred, string, error) {
 	switch kind {
 	case "pen":
-		if !penIDRE.MatchString(penID) {
-			return Cred{}, "", fmt.Errorf("pen ID must be 12 characters of a-z and 2-7")
+		if !penRE.MatchString(penID) {
+			return Cred{}, "", fmt.Errorf("pen name must be 3-30 lowercase letters, digits and dashes, starting with a letter")
 		}
 	case "host":
 		penID = ""

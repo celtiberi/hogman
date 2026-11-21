@@ -12,7 +12,7 @@ It never serves an address. Names under its zones that have nothing are answered
 (NODATA), never "doesn't exist" (NXDOMAIN, RFC 8020). Anything outside its zones is refused.
 
 **Who may write what.** Each pen's registrar has a credential for that pen alone: it can write
-`_acme-challenge.<site>.<its pen ID>.pens.hogman.network` and nothing else, and at most
+`_acme-challenge.<site>.<its pen name>.pens.hogman.network` and nothing else, and at most
 10 new names a week. The host's front door has one credential, for its `*.gate` wildcard
 only. Tokens are stored as SHA-256 hashes.
 
@@ -25,7 +25,7 @@ Design and threat model: [docs/security/public-certificates.md](../../docs/secur
 
 ```bash
 challenge-dns serve                      # CDNS_LISTEN=159.65.78.95:53, see `challenge-dns` for all settings
-challenge-dns cred add pen <penid>       # prints the token once
+challenge-dns cred add pen <penname>     # prints the token once
 challenge-dns cred add host
 challenge-dns cred list
 challenge-dns cred rm <id>

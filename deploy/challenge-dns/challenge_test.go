@@ -79,8 +79,10 @@ func TestScope(t *testing.T) {
 			t.Errorf("InScope(%s, %q) = %v, want %v", tc.c.Kind, tc.fqdn, got, tc.ok)
 		}
 	}
-	if _, _, err := s.AddCred("pen", "short"); err == nil {
-		t.Error("accepted a malformed pen ID")
+	for _, bad := range []string{"ab", "-bad", "Bad", "has.dot", "has_underscore", strings.Repeat("a", 31)} {
+		if _, _, err := s.AddCred("pen", bad); err == nil {
+			t.Errorf("accepted the malformed pen name %q", bad)
+		}
 	}
 	if _, _, err := s.AddCred("pen", penA); err == nil {
 		t.Error("allowed a second credential for the same pen")

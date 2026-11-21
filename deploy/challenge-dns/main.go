@@ -4,7 +4,7 @@
 // Design: docs/security/public-certificates.md (D-18, D-19).
 //
 //	challenge-dns serve
-//	challenge-dns cred add pen <penid> | cred add host | cred rm <id> | cred list
+//	challenge-dns cred add pen <penname> | cred add host | cred rm <id> | cred list
 package main
 
 import (
@@ -36,7 +36,7 @@ func env(k, def string) string {
 const usage = `challenge-dns: DNS-01 challenge server for Hogman pens
 
   challenge-dns serve
-  challenge-dns cred add pen <penid>     a credential for one pen (prints its token once)
+  challenge-dns cred add pen <penname>   a credential for one pen (prints its token once)
   challenge-dns cred add host            the front door's credential (gate wildcard)
   challenge-dns cred rm <id>
   challenge-dns cred list
@@ -198,7 +198,7 @@ func credCmd(args []string) error {
 		body := map[string]string{"kind": args[1]}
 		if args[1] == "pen" {
 			if len(args) != 3 {
-				return errors.New("usage: cred add pen <penid>")
+				return errors.New("usage: cred add pen <penname>")
 			}
 			body["pen_id"] = args[2]
 		}
@@ -239,7 +239,7 @@ func credCmd(args []string) error {
 			fmt.Printf("%-14s %-5s %-14s %s\n", c.ID, c.Kind, c.PenID, c.Created.Format("2006-01-02 15:04"))
 		}
 	default:
-		return errors.New("usage: cred add pen <penid> | cred add host | cred rm <id> | cred list")
+		return errors.New("usage: cred add pen <penname> | cred add host | cred rm <id> | cred list")
 	}
 	return nil
 }
