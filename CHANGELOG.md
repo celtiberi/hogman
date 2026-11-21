@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security (audit quick wins, docs/security/audit-2026-11.md)
+- Pens (audit H3): the registrar and step-ca never run as root. A pen set up as root (every hosted pen) now runs them as user 65532 ("nonroot"), and pens raised as root before this change move to it on their next start. The files they use are handed over, and the public certificates are made readable. A person running their own pen still runs them as themselves. The Caddy containers still run as root; that's a separate change.
 - Hosting (audit H9, H4): nightly backups never include `pki/offline/`, so a self-hosted root key that hasn't been moved off yet can't end up in backups. The sign-up broker, which can drive Docker, has no internet access unless push notifications are on (`hogman-host signup-notify`), its only outbound use.
 - Registrar (audit H7): two owners demoting each other at the same moment can no longer leave a pen with no owner (one conditional update, under the service lock), and an invite carries its maker's authority. A maker's open invites are revoked when their role shrinks, and redemption re-checks that the maker may still hand out that role.
 - The pen's CA offers only TLS-ALPN on 443 (`http-01` removed, matching HTTPS-only) and refuses certificates for IP addresses or wildcard names (step-ca issuance policy). The portal asks for TLS-ALPN explicitly.
