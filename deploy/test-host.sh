@@ -142,7 +142,7 @@ front_blocked_routes_ok() {
 }
 check "front door blocks Headscale root, register, auth, apple, windows, version (404)" front_blocked_routes_ok
 check "front door allows Headscale /health" match '"pass"' in_client bobo curl -sf https://control.bobo.example/health
-check "front door allows Tailscale /key" in_client bobo curl -sf 'https://control.bobo.example/key?v=100'
+check "front door allows Tailscale /key" match '"PublicKey"' in_client bobo curl -sf 'https://control.bobo.example/key?v=138'
 check "front door allows /generate_204" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/generate_204)" = 204
 join_hdrs="$(in_client bobo curl -sI https://control.bobo.example/join | tr -d '\r')"
 check "front door sets anti-framing headers and Origin-Agent-Cluster on /join" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\" && grep -iq '^origin-agent-cluster: ?1' <<<\"\$1\"" _ "$join_hdrs"
