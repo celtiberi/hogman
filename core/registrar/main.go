@@ -91,7 +91,6 @@ func setup() *Service {
 		Zone:             mustEnv("ZONE"),
 		PublicHost:       mustEnv("PUBLIC_HOST"),
 		CoreIP:           coreIP,
-		NameHold:         durEnv("NAME_HOLD", 90*24*time.Hour),
 		InviteTTL:        durEnv("INVITE_TTL", 7*24*time.Hour),
 		DeviceKeyTTL:     durEnv("DEVICE_KEY_TTL", time.Hour),
 		MembersCanInvite: env("MEMBERS_CAN_INVITE", "false") == "true",
@@ -428,8 +427,8 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("removed %s: %d devices deleted, %d keys and %d invites revoked, %d names held until %s\n",
-			rest[0], rep.Devices, rep.Keys, rep.Invites, rep.NamesHeld, ts(rep.HeldUntil))
+		fmt.Printf("removed %s: %d devices deleted, %d keys and %d invites revoked, %d names retired\n",
+			rest[0], rep.Devices, rep.Keys, rep.Invites, rep.NamesRetired)
 	case "member role":
 		if err := need(rest, 2, "member role <handle> <role>"); err != nil {
 			return err
@@ -516,8 +515,8 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		rows := [][]string{{"NAME", "MEMBER", "POINTS AT", "STATE", "NOTE"}}
 		for _, n := range ns {
 			state, at := "active", n.IPv4
-			if n.HeldUntil != nil {
-				state = "held until " + ts(*n.HeldUntil)
+			if n.RetiredAt != nil {
+				state = "retired"
 			}
 			if at == "" {
 				at = "-"

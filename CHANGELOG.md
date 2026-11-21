@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Retired private-CA `hogman-host add <pen> <public-host>`, `escrow_root`, `pki/offline/`, and `step/db/` handling in `deploy/hogman-host`; `hogman-host add <pen>` now always creates a public-certificate pen using `challenge-dns`. Updated `core/test/run.sh`, `core/test/compose.test.yaml`, and `deploy/test-host.sh` to run public-certificate e2e suites against `challenge-dns` + Pebble.
 
 ### Fixed
+- Permanently retire kicked members' site/share names in `core/registrar` instead of expiring them after 90 days (`NAME_HOLD` removed). Retired names can no longer be reclaimed or manually released by anyone (including owners and share servers), matching member handles and pen names (`D-21`); active members releasing their own shares is unchanged.
 - `core/join` public-certificate cleanup and ACME cap handling (D-22 prep):
   - Persist `root_fp` in side-by-side `agentConfig` on private joins, remove legacy Hogman root certificates (matching either stored `root_fp` or the exact `<zone> Root CA` + critical NameConstraints shape for pre-`root_fp` installs) during `hogman-join update` on public pens, and retire old same-server zone folders and roots when re-joining a renamed public zone.
   - Treat registrar `429` weekly limit responses on `/api/acme/txt` as a capped retry rather than permanent exit, jumping directly to the `1h` max backoff in `retry.json` without triggering EAB or fallback CA failover.

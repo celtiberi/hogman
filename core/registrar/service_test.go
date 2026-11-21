@@ -150,7 +150,6 @@ func newTestEnv(t *testing.T) *testEnv {
 		Zone:         "bobo.hogman",
 		PublicHost:   "hs.example.com",
 		CoreIP:       "100.64.0.1",
-		NameHold:     90 * 24 * time.Hour,
 		InviteTTL:    7 * 24 * time.Hour,
 		DeviceKeyTTL: time.Hour,
 	}
@@ -462,20 +461,25 @@ func TestRBACAdminRestrictions(t *testing.T) {
 		t.Fatalf("admin RemoveDevice(memberDev): %v", err)
 	}
 
-	// Admin cannot release owner's name, another admin's name, or a held name.
-	for _, name := range []string{"root-site", "carol-site", "gary-site"} {
+	// Admin cannot release owner's name or another admin's name.
+	for _, name := range []string{"root-site", "carol-site"} {
 		err := e.svc.Release(a1, name)
 		var prob *Problem
 		if !errors.As(err, &prob) || prob.Status != 403 {
 			t.Fatalf("admin Release(%q): got %v, want 403", name, err)
 		}
 	}
-	// Admin can release a regular member's active name, and owner can release held names.
+	// Nobody (admin, owner, or CLI) can release a permanently retired name.
+	for _, actor := range []Actor{a1, {Member: owner}, cli} {
+		err := e.svc.Release(actor, "gary-site")
+		var prob *Problem
+		if !errors.As(err, &prob) || prob.Status != 409 {
+			t.Fatalf("%s Release(gary-site): got %v, want 409", actor, err)
+		}
+	}
+	// Admin can still release a regular active member's name.
 	if err := e.svc.Release(a1, "bob-site"); err != nil {
 		t.Fatalf("admin Release(bob-site): %v", err)
-	}
-	if err := e.svc.Release(Actor{Member: owner}, "gary-site"); err != nil {
-		t.Fatalf("owner Release(gary-site): %v", err)
 	}
 
 	// Admin cannot issue device keys or claim names for owner or another admin.
@@ -894,5 +898,110 @@ func TestInvitesFollowTheirMakersRole(t *testing.T) {
 	}
 	if _, err := e.svc.Redeem(ctx, memberInv.Token, "fay"); err == nil {
 		t.Fatal("a member invite from someone who can no longer invite still worked")
+	}
+}
+
+func TestKickedNamesPermanentlyRetired(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+
+	owner, err := e.svc.AddMember(ctx, cli, "root", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := e.svc.AddMember(ctx, cli, "ada", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := e.svc.AddMember(ctx, cli, "bob", "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice, err := e.svc.AddMember(ctx, cli, "alice", "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, ownerSrv := e.addDevice(t, "root", "server", "root-srv", "100.64.0.10", "")
+	_, adminSrv := e.addDevice(t, "ada", "server", "ada-srv", "100.64.0.11", "")
+	_, bobSrv := e.addDevice(t, "bob", "server", "bob-srv", "100.64.0.12", "")
+	_, aliceSrv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.13", "")
+
+	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "photos", aliceSrv.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "raw.photos", aliceSrv.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := e.svc.Kick(ctx, cli, "alice", "left")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.NamesRetired != 2 {
+		t.Fatalf("NamesRetired = %d, want 2", rep.NamesRetired)
+	}
+	if res, err := e.st.ResolvableNames(); err != nil || len(res) != 0 {
+		t.Fatalf("ResolvableNames after kick = %d (err=%v), want 0", len(res), err)
+	}
+
+	// Simulate an existing DB row whose old 90-day held_until timestamp is in the past.
+	if _, err := e.st.db.Exec(`UPDATE names SET held_until = 1 WHERE name IN ('photos', 'raw.photos')`); err != nil {
+		t.Fatal(err)
+	}
+
+	assertConflict := func(label string, err error) {
+		t.Helper()
+		var prob *Problem
+		if !errors.As(err, &prob) || prob.Status != 409 {
+			t.Fatalf("%s: got %v, want 409 Conflict", label, err)
+		}
+	}
+
+	// Nobody — member, admin, owner, CLI, or share server — can reclaim a retired name or subdomain under it.
+	_, err = e.svc.Claim(Actor{Member: bob}, "bob", "photos", bobSrv.ID, nil)
+	assertConflict("member Claim retired name", err)
+	_, err = e.svc.Claim(Actor{Member: admin}, "ada", "photos", adminSrv.ID, nil)
+	assertConflict("admin Claim retired name", err)
+	_, err = e.svc.Claim(Actor{Member: owner}, "root", "photos", ownerSrv.ID, nil)
+	assertConflict("owner Claim retired name", err)
+	_, err = e.svc.Claim(cli, "root", "photos", ownerSrv.ID, nil)
+	assertConflict("CLI Claim retired name", err)
+	_, err = e.svc.ServerClaim(Actor{Member: bob}, bobSrv, "photos", nil)
+	assertConflict("server Claim retired name", err)
+	_, err = e.svc.ServerClaim(Actor{Member: owner}, ownerSrv, "photos", nil)
+	assertConflict("owner server Claim retired name", err)
+	_, err = e.svc.Claim(cli, "root", "new.photos", ownerSrv.ID, nil)
+	assertConflict("CLI Claim subdomain under retired name", err)
+	_, err = e.svc.ServerClaim(Actor{Member: bob}, bobSrv, "new.photos", nil)
+	assertConflict("server Claim subdomain under retired name", err)
+
+	// Nobody — member, admin, owner, or CLI — can release a retired name.
+	for _, actor := range []Actor{{Member: bob}, {Member: admin}, {Member: owner}, cli} {
+		assertConflict(actor.String()+" Release retired name", e.svc.Release(actor, "photos"))
+		assertConflict(actor.String()+" Release retired child", e.svc.Release(actor, "raw.photos"))
+	}
+
+	// Defense in depth at the store layer: UpsertName refuses and DeleteName leaves retired rows intact.
+	if err := e.st.UpsertName("photos", owner.ID, &ownerSrv.ID, ""); err == nil {
+		t.Fatal("UpsertName overwrote retired name")
+	}
+	if err := e.st.DeleteName("photos"); err != nil {
+		t.Fatalf("DeleteName: %v", err)
+	}
+	if got, err := e.st.NameByName("photos"); err != nil || got.RetiredAt == nil {
+		t.Fatalf("retired name should remain in store after DeleteName, got %+v err=%v", got, err)
+	}
+
+	// Active members can still voluntarily release their own active names for reuse.
+	if _, err := e.svc.Claim(Actor{Member: bob}, "bob", "temp", bobSrv.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.Release(Actor{Member: bob}, "temp"); err != nil {
+		t.Fatalf("active member Release(temp): %v", err)
+	}
+	if _, err := e.svc.Claim(Actor{Member: owner}, "root", "temp", ownerSrv.ID, nil); err != nil {
+		t.Fatalf("reclaim voluntarily released active name: %v", err)
 	}
 }

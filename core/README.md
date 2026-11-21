@@ -94,7 +94,7 @@ personal devices accept no connections. Reserved: `home`, `ns`, `ns[0-9]*`, `nod
 A kick, in order: marks the member removed; drops their devices from the access
 policy (this is the moment they lose access); revokes their unused device keys and
 open invites; deletes all their devices from the mesh; deletes their Headscale user;
-takes their names out of DNS and holds them for 90 days (`NAME_HOLD`) so nobody can
+takes their names out of DNS and retires them permanently so nobody can
 impersonate their sites; writes the audit record.
 
 Nobody can suspend or kick the owner. Only the owner can suspend or kick an admin.

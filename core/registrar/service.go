@@ -23,7 +23,6 @@ type Config struct {
 	Zone              string // bobo.pens.hogman.network
 	PublicHost        string // control server hostname
 	CoreIP            string // mesh IP of the core node (DNS, portal)
-	NameHold          time.Duration
 	InviteTTL         time.Duration
 	DeviceKeyTTL      time.Duration
 	MembersCanInvite  bool
@@ -367,11 +366,10 @@ func (s *Service) Resume(ctx context.Context, a Actor, handle string) error {
 }
 
 type KickReport struct {
-	Devices   int   `json:"devices_removed"`
-	Keys      int   `json:"keys_revoked"`
-	Invites   int   `json:"invites_revoked"`
-	NamesHeld int   `json:"names_held"`
-	HeldUntil int64 `json:"held_until"`
+	Devices      int `json:"devices_removed"`
+	Keys         int `json:"keys_revoked"`
+	Invites      int `json:"invites_revoked"`
+	NamesRetired int `json:"names_retired"`
 }
 
 // Kick ends a membership. Order matters: mark removed and drop from policy
@@ -423,13 +421,12 @@ func (s *Service) Kick(ctx context.Context, a Actor, handle, reason string) (*Ki
 	if err := s.hs.DeleteUser(ctx, m.HSUserID); err != nil {
 		log.Printf("kick %s: delete user: %v", handle, err)
 	}
-	// 6. Withdraw their names and hold them so nobody can impersonate their sites.
-	rep.HeldUntil = time.Now().Add(s.cfg.NameHold).Unix()
-	held, err := s.st.HoldNames(m.ID, rep.HeldUntil)
+	// 6. Withdraw their names and retire them permanently so nobody can impersonate their sites.
+	retired, err := s.st.RetireNames(m.ID)
 	if err != nil {
-		log.Printf("kick %s: hold names: %v", handle, err)
+		log.Printf("kick %s: retire names: %v", handle, err)
 	}
-	rep.NamesHeld = int(held)
+	rep.NamesRetired = int(retired)
 	// 7. Audit.
 	detail, _ := json.Marshal(rep)
 	if reason != "" {
@@ -845,10 +842,10 @@ func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, r
 	}
 	existing, err := s.st.NameByName(name)
 	if err == nil {
-		if existing.HeldUntil != nil && *existing.HeldUntil > now() && !a.IsOwner() {
-			return "", conflict("%s is held until %s", name, time.Unix(*existing.HeldUntil, 0).UTC().Format("2006-01-02"))
+		if existing.RetiredAt != nil {
+			return "", conflict("%s is retired and cannot be reused", name)
 		}
-		if existing.HeldUntil == nil && existing.MemberID != m.ID && !a.IsOwner() {
+		if existing.MemberID != m.ID && !a.IsOwner() {
 			return "", conflict("%s belongs to %s", name, existing.Member)
 		}
 	} else if !errors.Is(err, ErrNotFound) {
@@ -858,7 +855,7 @@ func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, r
 	}
 	// A server always counts against the cap, even the owner's: a leaked server
 	// link must not be able to claim names without limit.
-	if (!a.IsOwner() || server != nil) && (existing == nil || existing.MemberID != m.ID || existing.HeldUntil != nil) {
+	if (!a.IsOwner() || server != nil) && (existing == nil || existing.MemberID != m.ID) {
 		count, err := s.st.CountMemberNames(m.ID)
 		if err != nil {
 			return "", err
@@ -869,7 +866,10 @@ func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, r
 	}
 	if top := topLabel(name); top != name {
 		parent, err := s.st.NameByName(top)
-		if err != nil || parent.MemberID != m.ID || parent.HeldUntil != nil {
+		if err == nil && parent.RetiredAt != nil {
+			return "", conflict("%s is retired and cannot be reused", top)
+		}
+		if err != nil || parent.MemberID != m.ID {
 			return "", forbidden("claim %s first; names under it belong to whoever owns it", top)
 		}
 	}
@@ -886,7 +886,7 @@ func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, r
 			return "", err
 		}
 		for _, x := range all {
-			if strings.HasSuffix(x.Name, "."+name) && x.MemberID != m.ID {
+			if strings.HasSuffix(x.Name, "."+name) && x.MemberID != m.ID && x.RetiredAt == nil {
 				if err := s.st.DeleteName(x.Name); err != nil {
 					return "", err
 				}
@@ -896,7 +896,7 @@ func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, r
 	note := ""
 	if rawNote != nil {
 		note = cleanNameNote(*rawNote)
-	} else if existing != nil && existing.HeldUntil == nil && existing.MemberID == m.ID {
+	} else if existing != nil && existing.RetiredAt == nil && existing.MemberID == m.ID {
 		note = existing.Note
 	}
 	if err := s.st.UpsertName(name, m.ID, &d.ID, note); err != nil {
@@ -907,28 +907,32 @@ func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, r
 }
 
 // serverMayUse (s.mu held): a server naming itself may take a name that is
-// free (or whose hold has run out) or already points at it, never one of its
-// member's other names; and a name under another (x.blog) only if the parent
-// points at it too, so one server can't squat under another's name.
+// free or already points at it, never a retired name or one of its member's
+// other names; and a name under another (x.blog) only if the parent points at
+// it too, so one server can't squat under another's name.
 func (s *Service) serverMayUse(d *Device, rawName string) error {
 	name, err := s.normaliseName(rawName)
 	if err != nil {
 		return err
 	}
 	pointsHere := func(n *Name) bool {
-		return n.MemberID == d.MemberID && n.HeldUntil == nil && n.DeviceID != nil && *n.DeviceID == d.ID
+		return n.MemberID == d.MemberID && n.RetiredAt == nil && n.DeviceID != nil && *n.DeviceID == d.ID
 	}
 	n, err := s.st.NameByName(name)
 	switch {
 	case errors.Is(err, ErrNotFound):
 	case err != nil:
 		return err
-	case n.HeldUntil != nil && *n.HeldUntil <= now():
+	case n.RetiredAt != nil:
+		return conflict("%s is retired and cannot be reused", name)
 	case !pointsHere(n):
 		return conflict("%s is already taken; pick another name", name)
 	}
 	if top := topLabel(name); top != name {
 		p, err := s.st.NameByName(top)
+		if err == nil && p.RetiredAt != nil {
+			return conflict("%s is retired and cannot be reused", top)
+		}
 		if err != nil || !pointsHere(p) {
 			return forbidden("%s belongs under %s, which doesn't point at this server", name, top)
 		}
@@ -952,7 +956,7 @@ func (s *Service) serverOwnsName(d *Device, rawName string) error {
 		if x.Name != name && !strings.HasSuffix(x.Name, "."+name) {
 			continue
 		}
-		if x.MemberID != d.MemberID || x.HeldUntil != nil || x.DeviceID == nil || *x.DeviceID != d.ID {
+		if x.MemberID != d.MemberID || x.RetiredAt != nil || x.DeviceID == nil || *x.DeviceID != d.ID {
 			return forbidden("%s does not point at this server", x.Name)
 		}
 		found = found || x.Name == name
@@ -965,7 +969,7 @@ func (s *Service) serverOwnsName(d *Device, rawName string) error {
 
 // serverOwnsACMEName (s.mu held) enforces strict active ownership for ACME
 // DNS-01 challenges: the device must be a server and must currently own the
-// normalized name (never unclaimed, held, or reserved labels).
+// normalized name (never unclaimed, retired, or reserved labels).
 func (s *Service) serverOwnsACMEName(d *Device, rawName string) (string, error) {
 	if d == nil || d.Kind != "server" {
 		return "", forbidden("server devices only")
@@ -986,7 +990,7 @@ func (s *Service) serverOwnsACMEName(d *Device, rawName string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	if n.HeldUntil != nil || n.MemberID != d.MemberID || n.DeviceID == nil || *n.DeviceID != d.ID {
+	if n.RetiredAt != nil || n.MemberID != d.MemberID || n.DeviceID == nil || *n.DeviceID != d.ID {
 		return "", forbidden("%s does not point at this server", name)
 	}
 	return name, nil
@@ -1002,7 +1006,7 @@ func (s *Service) serverHasClaimedName(d *Device) (bool, error) {
 		return false, err
 	}
 	for _, n := range all {
-		if n.HeldUntil == nil && n.MemberID == d.MemberID && n.DeviceID != nil && *n.DeviceID == d.ID {
+		if n.RetiredAt == nil && n.MemberID == d.MemberID && n.DeviceID != nil && *n.DeviceID == d.ID {
 			return true, nil
 		}
 	}
@@ -1099,8 +1103,8 @@ func (s *Service) releaseLocked(a Actor, rawName string) error {
 	} else if err != nil {
 		return err
 	}
-	if n.HeldUntil != nil && *n.HeldUntil > now() && !a.IsOwner() {
-		return forbidden("only the owner can release a held name")
+	if n.RetiredAt != nil {
+		return conflict("%s is retired and cannot be released", name)
 	}
 	if !a.IsOwner() {
 		owner, err := s.st.MemberByID(n.MemberID)
@@ -1108,9 +1112,9 @@ func (s *Service) releaseLocked(a Actor, rawName string) error {
 			return err
 		}
 		switch {
-		case a.Member != nil && a.Member.ID == n.MemberID && n.HeldUntil == nil:
+		case a.Member != nil && a.Member.ID == n.MemberID:
 			// members and admins may release their own active names
-		case a.IsAdmin() && owner.Role == "member" && n.HeldUntil == nil:
+		case a.IsAdmin() && owner.Role == "member":
 			// admins may release regular members' active names
 		case a.IsAdmin():
 			return forbidden("only the owner can release names belonging to an owner or admin")
@@ -1120,6 +1124,9 @@ func (s *Service) releaseLocked(a Actor, rawName string) error {
 	}
 	all, _ := s.st.Names()
 	for _, x := range all {
+		if x.RetiredAt != nil {
+			continue
+		}
 		if x.Name == name || strings.HasSuffix(x.Name, "."+name) {
 			_ = s.st.DeleteName(x.Name)
 		}
