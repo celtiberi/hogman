@@ -297,6 +297,58 @@ func MeshHandler(s *Service) http.Handler {
 		done(w, s.Release(c.actor(), r.PathValue("name")))
 	})
 
+	h("POST /api/acme/txt", false, true, func(w http.ResponseWriter, r *http.Request, c caller) {
+		if c.device.Kind != "server" {
+			fail(w, forbidden("server devices only"))
+			return
+		}
+		var in struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}
+		if !readJSON(w, r, &in) {
+			return
+		}
+		fqdn, err := s.ServerSetACMETXT(r.Context(), c.device, in.Name, in.Value)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]string{"fqdn": fqdn})
+	})
+
+	h("DELETE /api/acme/txt", false, true, func(w http.ResponseWriter, r *http.Request, c caller) {
+		if c.device.Kind != "server" {
+			fail(w, forbidden("server devices only"))
+			return
+		}
+		var in struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}
+		if !readJSON(w, r, &in) {
+			return
+		}
+		if err := s.ServerDeleteACMETXT(r.Context(), c.device, in.Name, in.Value); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	h("POST /api/acme/eab", false, true, func(w http.ResponseWriter, r *http.Request, c caller) {
+		if c.device.Kind != "server" {
+			fail(w, forbidden("server devices only"))
+			return
+		}
+		pair, err := s.ServerMintACMEEAB(r.Context(), c.device)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, pair)
+	})
+
 	h("GET /api/directory", false, true, func(w http.ResponseWriter, r *http.Request, c caller) {
 		names, err := s.st.ResolvableNames()
 		if err != nil {
