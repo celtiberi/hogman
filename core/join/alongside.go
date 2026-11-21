@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -126,7 +127,9 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		if existing == nil && link.InviteToken != "" {
 			note("redeem the invite (handle: %s)", orAsk(o.handle))
 		}
-		if !o.noTrust {
+		if root == nil {
+			note("verify %s using this computer's built-in trusted certificates", n.Zone)
+		} else if !o.noTrust {
 			note("add the %s certificate to this computer's trust store (trusted now: %v)", n.Zone, trustInstalled(root))
 		}
 		note("run a small background agent as %q, with a local proxy for .%s (already set up: %v)", hostname, n.Zone, existing != nil)
@@ -142,17 +145,27 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 			"  leave the other one first: hogman-join leave '<its link>'",
 			n.Zone, strings.TrimPrefix(existing.LoginServer, "https://"), link.Host)
 	}
-
-	certFile, cleanupCert, err := writeTempCert(root.PEM)
-	if err != nil {
-		return err
+	if existing != nil && existing.CertMode != "" && existing.CertMode != n.CertMode {
+		return errorf("this computer is already in %s using certificate mode %q, not %q; leave first: hogman-join leave '<its link>'",
+			n.Zone, existing.CertMode, n.CertMode)
 	}
-	defer cleanupCert()
-	trustedBefore := trustInstalled(root)
-	if !o.noTrust {
-		step("Adding the %s certificate to this computer", n.Zone)
-		if err := installTrust(root, certFile); err != nil {
+
+	var certFile string
+	trustedBefore := false
+	if root != nil {
+		var cleanupCert func()
+		var err error
+		certFile, cleanupCert, err = writeTempCert(root.PEM)
+		if err != nil {
 			return err
+		}
+		defer cleanupCert()
+		trustedBefore = trustInstalled(root)
+		if !o.noTrust {
+			step("Adding the %s certificate to this computer", n.Zone)
+			if err := installTrust(root, certFile); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -181,7 +194,7 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		cfg = &agentConfig{Zone: n.Zone, LoginServer: n.LoginServer, DNSServer: n.DNSServer, Hostname: hostname, ProxyAddr: addr}
+		cfg = &agentConfig{Zone: n.Zone, LoginServer: n.LoginServer, CertMode: n.CertMode, DNSServer: n.DNSServer, Hostname: hostname, ProxyAddr: addr}
 		if o.controlCA != "" {
 			pemBytes, err := os.ReadFile(o.controlCA)
 			if err != nil {
@@ -211,13 +224,25 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		// An old server link without the for=share mark: never expose a whole
 		// computer to the pen. Undo the join.
 		leaveAlongside(n.Zone)
-		if !o.noTrust && !trustedBefore {
+		if root != nil && !o.noTrust && !trustedBefore {
 			_ = removeTrust(root, certFile)
 		}
 		return errorf("that's a server link: it's for putting something in the pen, not for joining a computer.\n" +
 			"  Use a new one with share, for example: hogman-join share blog 8080 '<server link>'")
 	}
 	note("online as %s", strings.Join(st.IPs, ", "))
+
+	step("Checking %s loads securely", n.Portal)
+	who, err := checkPortalVia(n.Portal, cfg.proxyURL(), root, o.noTrust)
+	if err != nil {
+		if n.CertMode == "public" && existing == nil {
+			leaveAlongside(n.Zone)
+		}
+		return err
+	}
+	if handle == "" {
+		handle = who
+	}
 
 	pens := normalizePenConfigs(loadInstalledPenConfigs(hogmanConfigBase()), cfg)
 	browsers := "set your browser's automatic proxy configuration to " + cfg.pacURL()
@@ -227,15 +252,6 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		} else if msg != "" {
 			browsers = msg
 		}
-	}
-
-	step("Checking %s loads securely", n.Portal)
-	who, err := checkPortalVia(n.Portal, cfg.proxyURL(), root, o.noTrust)
-	if err != nil {
-		return err
-	}
-	if handle == "" {
-		handle = who
 	}
 	say("\n✓ You're in. You are %s on %s.", handle, n.Zone)
 	say("  Start at %s", n.Portal)
@@ -254,9 +270,22 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 	return nil
 }
 
-// checkPortalVia loads the portal through the agent's proxy. With pinned set,
-// it trusts only the pen's root (used when the certificate was not installed).
+// checkPortalVia loads the portal through the agent's proxy. With root == nil
+// (public certificates), it verifies with system roots (or HOGMAN_ACME_CA_ROOT).
+// With pinned set in private mode, it trusts only the pen's root.
 func checkPortalVia(portal, proxy string, root *RootInfo, pinned bool) (string, error) {
+	if root == nil {
+		pool, err := testACMECAPool()
+		if err != nil {
+			return "", err
+		}
+		pu, _ := url.Parse(proxy)
+		c := &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{
+			Proxy:           http.ProxyURL(pu),
+			TLSClientConfig: &tls.Config{RootCAs: pool},
+		}}
+		return pollPortal(c, portal, 45*time.Second)
+	}
 	if !pinned {
 		// A fresh process, so a just-installed certificate is seen.
 		os.Setenv("HOGMAN_CHECK_PROXY", proxy)
@@ -290,6 +319,10 @@ func pollPortal(c *http.Client, portal string, d time.Duration) (string, error) 
 		last = err
 		time.Sleep(2 * time.Second)
 	}
+	var ue x509.UnknownAuthorityError
+	if errors.As(last, &ue) {
+		return "", errorf("the portal's certificate is not trusted on this computer: %v", last)
+	}
 	return "", errorf("joined, but the portal did not load: %v", last)
 }
 
@@ -300,8 +333,17 @@ func removeOwnDevice(zone string, root *RootInfo) {
 	if err != nil {
 		return
 	}
-	pool := x509.NewCertPool()
-	pool.AppendCertsFromPEM([]byte(root.PEM))
+	var pool *x509.CertPool
+	if root != nil {
+		pool = x509.NewCertPool()
+		pool.AppendCertsFromPEM([]byte(root.PEM))
+	} else {
+		pool, err = testACMECAPool()
+		if err != nil {
+			note("could not read HOGMAN_ACME_CA_ROOT while leaving: %v", err)
+			return
+		}
+	}
 	pu, err := url.Parse(cfg.proxyURL())
 	if err != nil {
 		return

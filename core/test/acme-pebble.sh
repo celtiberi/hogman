@@ -52,7 +52,7 @@ cleanup() {
     dc ps >&2 || true
     dc logs --tail=80 >&2 || true
   fi
-  dc down -v --remove-orphans >/dev/null 2>&1 || true
+  dc --profile join-e2e down -v --remove-orphans >/dev/null 2>&1 || true
   rm -rf "$WORKDIR"
   e2e_unlock
   exit "$rc"
@@ -404,6 +404,33 @@ fb_started2="$(docker inspect --format '{{.State.StartedAt}}' "$(dc ps -q portal
 stats4b_after="$(stats_json)"
 [ "$(jq -r .eab_count <<<"$stats4b_after")" = "1" ] || fail "expected reused fallback account without extra EAB mint: $stats4b_after"
 pass "SIGHUP renewed on pebble2 in-place with eab_count still 1"
+
+step "Test 5: Share public-certificate DNS-01 issuance, cache reuse, and failover (Pebble e2e)"
+dc rm -sf portal registrar >/dev/null
+init_data_dirs
+curl -sf -X POST "http://127.0.0.1:${ACME_CHALLENGE_API_PORT}/test/reset" >/dev/null
+curl -sf -X POST "http://127.0.0.1:${ACME_HS_PORT}/test/hs-reset" >/dev/null
+dc restart pebble2 >/dev/null
+retry 30 1 curl -sf --cacert "$WORKDIR/certs/ca.crt" "https://127.0.0.1:${ACME_PEBBLE2_DIR_PORT}/dir" >/dev/null || fail "pebble2 not ready after restart for Test 5"
+curl -sf --cacert "$WORKDIR/certs/ca.crt" "https://127.0.0.1:${ACME_PEBBLE2_MGMT_PORT}/roots/0" >"$WORKDIR/pebble2-root.crt"
+
+ACME_CA_URL="https://pebble1:14000/dir" \
+ACME_FALLBACK_CA_URL="" \
+ACME_PROPAGATION_TIMEOUT="10s" \
+  dc up -d registrar portal
+retry 45 1 portal_http_ok "$WORKDIR/pebble1-root.crt" || fail "portal/registrar not ready for Test 5"
+
+dc exec -T registrar registrar member add alice >/dev/null
+k_alice_srv5="$(issue_key alice server)"
+register_node "$k_alice_srv5" "100.64.0.11" "alice-srv5"
+dc exec -T registrar registrar sync >/dev/null
+
+assert_mesh_status "alice-srv5 claims photos" 201 "100.64.0.11" POST /api/names '{"name":"photos"}'
+assert_mesh_status "alice-srv5 claims sharefb" 201 "100.64.0.11" POST /api/names '{"name":"sharefb"}'
+
+dc --profile join-e2e build join-e2e
+dc --profile join-e2e run --rm join-e2e go test -count=1 -v -run TestSharePublicCertPebbleE2E . || fail "TestSharePublicCertPebbleE2E failed"
+pass "share public-certificate issuance, restart cache reuse, ownership enforcement, and 429 EAB failover passed"
 
 FAILED=0
 echo ""

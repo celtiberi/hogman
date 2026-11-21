@@ -28,6 +28,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 var version = "dev"
@@ -203,6 +205,7 @@ func main() {
 type networkInfo struct {
 	Zone            string `json:"zone"`
 	LoginServer     string `json:"login_server"`
+	CertMode        string `json:"cert_mode"`
 	RootCA          string `json:"root_ca"`
 	RootFingerprint string `json:"root_fingerprint"`
 	Portal          string `json:"portal"`
@@ -230,11 +233,115 @@ func controlClient(caFile string) (*http.Client, error) {
 	return &http.Client{Timeout: 20 * time.Second, Transport: tr}, nil
 }
 
-var zoneRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?\.hogman$`)
+var (
+	zoneRE     = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?\.hogman$`)
+	dnsLabelRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+)
+
+func validPublicDNSName(name string) bool {
+	if name == "" || len(name) > 253 || name != strings.ToLower(name) ||
+		strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") || strings.Contains(name, "..") {
+		return false
+	}
+	labels := strings.Split(name, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, lbl := range labels {
+		if !dnsLabelRE.MatchString(lbl) {
+			return false
+		}
+	}
+	return true
+}
+
+func validatePublicZone(inviteHost, zone string) error {
+	h := strings.TrimSpace(inviteHost)
+	if hostPart, _, err := net.SplitHostPort(h); err == nil {
+		h = hostPart
+	}
+	h = strings.TrimSuffix(strings.ToLower(h), ".")
+	if net.ParseIP(h) != nil || !validPublicDNSName(h) {
+		return errorf("%s is not a valid domain name for public certificates", inviteHost)
+	}
+	if !validPublicDNSName(zone) || strings.HasSuffix(zone, ".hogman") {
+		return errorf("%s sent an unexpected network name %q", inviteHost, zone)
+	}
+	eTLD1, err := publicsuffix.EffectiveTLDPlusOne(h)
+	if err != nil {
+		return errorf("%s is not under a registrable public domain: %v", inviteHost, err)
+	}
+	if _, err := publicsuffix.EffectiveTLDPlusOne(zone); err != nil {
+		return errorf("%s sent an invalid public network name %q", inviteHost, zone)
+	}
+	// Hosted gates (<pen>.gate.<base>) must bind exclusively to <pen>.pens.<base>.
+	if parts := strings.SplitN(h, ".", 3); len(parts) == 3 && parts[1] == "gate" && parts[0] != "" && parts[2] != "" &&
+		(parts[2] == eTLD1 || strings.HasSuffix(parts[2], "."+eTLD1)) {
+		want := parts[0] + ".pens." + parts[2]
+		if zone != want {
+			return errorf("refusing: %s claimed zone %q instead of %q", inviteHost, zone, want)
+		}
+		return nil
+	}
+	// Self-hosted gates must choose a strict subdomain of the gate's registrable domain.
+	if !strings.HasSuffix(zone, "."+eTLD1) || len(zone) <= len("."+eTLD1) {
+		return errorf("refusing: %s claimed zone %q outside %s", inviteHost, zone, eTLD1)
+	}
+	return nil
+}
+
+func testACMECAPool() (*x509.CertPool, error) {
+	path := strings.TrimSpace(os.Getenv("HOGMAN_ACME_CA_ROOT"))
+	if path == "" {
+		return nil, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, errorf("HOGMAN_ACME_CA_ROOT: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(b) {
+		return nil, errorf("HOGMAN_ACME_CA_ROOT: %s contains no valid certificate", path)
+	}
+	return pool, nil
+}
+
+func checkLinkCertMode(link *Link, n *networkInfo) (*RootInfo, error) {
+	switch n.CertMode {
+	case "private":
+		if link.Fingerprint == "" {
+			return nil, errorf("this link has no certificate fingerprint (fp=), which %s requires; ask whoever sent it for a fresh link", n.Zone)
+		}
+		root, err := CheckRoot(n.RootCA, link.Fingerprint, n.Zone)
+		if err != nil {
+			return nil, errorf("%v", err)
+		}
+		return root, nil
+	case "public":
+		if link.Fingerprint != "" {
+			return nil, errorf("this network (%s) uses public certificates and should not carry a certificate fingerprint (fp=)", n.Zone)
+		}
+		return nil, nil
+	default:
+		return nil, errorf("%s returned unsupported certificate mode %q", link.Host, n.CertMode)
+	}
+}
 
 func validateNetworkInfo(host string, n *networkInfo) error {
-	if !zoneRE.MatchString(n.Zone) {
-		return errorf("%s sent an unexpected network name %q", host, n.Zone)
+	switch n.CertMode {
+	case "private":
+		if !zoneRE.MatchString(n.Zone) {
+			return errorf("%s sent an unexpected network name %q", host, n.Zone)
+		}
+	case "public":
+		if err := validatePublicZone(host, n.Zone); err != nil {
+			return err
+		}
+		if n.RootCA != "" || n.RootFingerprint != "" {
+			return errorf("refusing: %s sent root CA data while in public certificate mode", host)
+		}
+	default:
+		return errorf("%s returned unsupported certificate mode %q", host, n.CertMode)
 	}
 	if n.LoginServer != "https://"+host {
 		return errorf("refusing: %s redirected login to %q instead of https://%s", host, n.LoginServer, host)
@@ -347,13 +454,17 @@ func join(raw string, o options) error {
 	if err != nil {
 		return err
 	}
-	root, err := CheckRoot(n.RootCA, link.Fingerprint, n.Zone)
+	root, err := checkLinkCertMode(link, n)
 	if err != nil {
-		return errorf("%v", err)
+		return err
 	}
 	note("network: %s", n.Zone)
-	note("its certificate matches the link (%s)", short(root.Fingerprint))
-	note("and can only vouch for names ending in .%s", n.Zone)
+	if root != nil {
+		note("its certificate matches the link (%s)", short(root.Fingerprint))
+		note("and can only vouch for names ending in .%s", n.Zone)
+	} else {
+		note("uses public certificates")
+	}
 
 	// One way in (D-11): the agent, which runs as this user and carries HTTPS to
 	// the pen's names and nothing else. Joining through this computer's
@@ -480,9 +591,9 @@ func leave(raw string, o options) error {
 	if err != nil {
 		return err
 	}
-	root, err := CheckRoot(n.RootCA, link.Fingerprint, n.Zone)
+	root, err := checkLinkCertMode(link, n)
 	if err != nil {
-		return errorf("%v", err)
+		return err
 	}
 	// Shares on this pen go first, while they can still give their names back.
 	for _, dir := range allShares(n.Zone) {
@@ -497,19 +608,21 @@ func leave(raw string, o options) error {
 	// The certificate next: it is the part that matters on this computer, and
 	// it needs nothing from the network. It goes before the device, so that
 	// cancelling the password prompt leaves this computer still on the pen.
-	certFile, cleanupCert, err := writeTempCert(root.PEM)
-	if err != nil {
-		return err
-	}
-	defer cleanupCert()
-	had := trustInstalled(root)
-	if err := removeTrust(root, certFile); err != nil {
-		return err
-	}
-	if had {
-		note("removed the %s certificate", n.Zone)
-	} else {
-		note("the %s certificate was not installed", n.Zone)
+	if root != nil {
+		certFile, cleanupCert, err := writeTempCert(root.PEM)
+		if err != nil {
+			return err
+		}
+		defer cleanupCert()
+		had := trustInstalled(root)
+		if err := removeTrust(root, certFile); err != nil {
+			return err
+		}
+		if had {
+			note("removed the %s certificate", n.Zone)
+		} else {
+			note("the %s certificate was not installed", n.Zone)
+		}
 	}
 	// This computer's own device, through its connection while it's still up,
 	// so old devices don't pile up in "Your devices".
