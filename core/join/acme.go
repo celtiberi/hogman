@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -297,6 +298,55 @@ func shareACMEConfigFromEnv(zone, host, storageDir string, hc *http.Client) shar
 	}
 }
 
+var defaultShareACMEBackoff = []time.Duration{
+	5 * time.Second,
+	15 * time.Second,
+	45 * time.Second,
+	2 * time.Minute,
+	5 * time.Minute,
+	15 * time.Minute,
+	30 * time.Minute,
+	time.Hour,
+}
+
+const (
+	defaultShareACMEMaxInProcessWait     = 30 * time.Second
+	defaultShareACMEMaxInProcessAttempts = 3
+	acmeRetryStateFile                   = "retry.json"
+)
+
+type acmeRetryState struct {
+	Failures    int       `json:"failures"`
+	NextAttempt time.Time `json:"next_attempt"`
+}
+
+// nonInteractiveACMEIssuer forces non-interactive PreCheck on synchronous
+// CertMagic calls so an empty ACME contact email never prompts stdin (even
+// in an interactive foreground terminal). The long-lived cache configs keep
+// the unwrapped *certmagic.ACMEIssuer so CertMagic's concrete type assertion
+// for ARI "replaces" continues working during background renewals.
+type nonInteractiveACMEIssuer struct {
+	*certmagic.ACMEIssuer
+}
+
+func (n nonInteractiveACMEIssuer) PreCheck(ctx context.Context, names []string, _ bool) error {
+	return n.ACMEIssuer.PreCheck(ctx, names, false)
+}
+
+func defaultACMEWait(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
 type shareCertManager struct {
 	cfg     shareACMEConfig
 	host    string
@@ -311,9 +361,13 @@ type shareCertManager struct {
 	fallbackCfg *certmagic.Config
 	fallbackIss *certmagic.ACMEIssuer
 
-	renewMu    sync.Mutex
-	failoverCh chan struct{}
-	backoff    []time.Duration
+	renewMu              sync.Mutex
+	failoverCh           chan struct{}
+	backoff              []time.Duration
+	maxInProcessWait     time.Duration
+	maxInProcessAttempts int
+	now                  func() time.Time
+	waitFn               func(context.Context, time.Duration) error
 }
 
 func newShareCertManager(cfg shareACMEConfig) (*shareCertManager, error) {
@@ -333,9 +387,6 @@ func newShareCertManager(cfg shareACMEConfig) (*shareCertManager, error) {
 	}
 	if cfg.PrimaryCA == "" {
 		cfg.PrimaryCA = certmagic.LetsEncryptProductionCA
-	}
-	if cfg.Email == "" {
-		cfg.Email = "admin@" + cfg.Zone
 	}
 	if len(cfg.Resolvers) == 0 {
 		cfg.Resolvers = []string{"1.1.1.1:53", "8.8.8.8:53"}
@@ -373,10 +424,14 @@ func newShareCertManager(cfg shareACMEConfig) (*shareCertManager, error) {
 				},
 			},
 		},
-		roots:      roots,
-		logger:     logger,
-		failoverCh: make(chan struct{}, 1),
-		backoff:    []time.Duration{2 * time.Second, 6 * time.Second, 15 * time.Second, 35 * time.Second},
+		roots:                roots,
+		logger:               logger,
+		failoverCh:           make(chan struct{}, 1),
+		backoff:              append([]time.Duration(nil), defaultShareACMEBackoff...),
+		maxInProcessWait:     defaultShareACMEMaxInProcessWait,
+		maxInProcessAttempts: defaultShareACMEMaxInProcessAttempts,
+		now:                  time.Now,
+		waitFn:               defaultACMEWait,
 	}
 
 	m.cache = certmagic.NewCache(certmagic.CacheOptions{
@@ -455,6 +510,16 @@ func (m *shareCertManager) newManagedConfig(caURL string, withEAB bool) (*certma
 	return cfg, iss
 }
 
+func (m *shareCertManager) syncCert(ctx context.Context, cfg *certmagic.Config, iss *certmagic.ACMEIssuer) error {
+	syncCfg := certmagic.New(m.cache, certmagic.Config{
+		Storage: m.storage,
+		OnEvent: cfg.OnEvent,
+		Logger:  m.logger,
+		Issuers: []certmagic.Issuer{nonInteractiveACMEIssuer{iss}},
+	})
+	return syncCfg.ManageSync(ctx, []string{m.host})
+}
+
 func (m *shareCertManager) storageHasPair(ctx context.Context, issuerKey string) bool {
 	return m.storage.Exists(ctx, certmagic.StorageKeys.SiteCert(issuerKey, m.host)) &&
 		m.storage.Exists(ctx, certmagic.StorageKeys.SitePrivateKey(issuerKey, m.host))
@@ -484,6 +549,142 @@ func (m *shareCertManager) cachedNeedsRenewal(ctx context.Context, cfg *certmagi
 	return cert.NeedsRenewal(cfg), nil
 }
 
+func (m *shareCertManager) ensureCachedLocked(ctx context.Context) bool {
+	needsRenew, err := m.cachedNeedsRenewal(ctx, m.primaryCfg, m.primaryIss)
+	if err == nil && !needsRenew {
+		return true
+	}
+	if errors.Is(err, fs.ErrNotExist) && m.fallbackCfg != nil {
+		fbRenew, fbErr := m.cachedNeedsRenewal(ctx, m.fallbackCfg, m.fallbackIss)
+		if fbErr == nil && !fbRenew {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *shareCertManager) ensureCached(ctx context.Context) bool {
+	m.renewMu.Lock()
+	defer m.renewMu.Unlock()
+	return m.ensureCachedLocked(ctx)
+}
+
+func (m *shareCertManager) retryStatePath() string {
+	return filepath.Join(m.cfg.StorageDir, acmeRetryStateFile)
+}
+
+func (m *shareCertManager) loadRetryState() acmeRetryState {
+	raw, err := os.ReadFile(m.retryStatePath())
+	if err != nil {
+		return acmeRetryState{}
+	}
+	var st acmeRetryState
+	if err := json.Unmarshal(raw, &st); err != nil || st.Failures < 0 {
+		return acmeRetryState{}
+	}
+	return st
+}
+
+func (m *shareCertManager) saveRetryState(st acmeRetryState) {
+	if err := os.MkdirAll(m.cfg.StorageDir, 0o700); err != nil {
+		log.Printf("acme: could not prepare retry state dir: %v", err)
+		return
+	}
+	data, err := json.Marshal(st)
+	if err != nil {
+		log.Printf("acme: could not encode retry state: %v", err)
+		return
+	}
+	tmp, err := os.CreateTemp(m.cfg.StorageDir, "retry-*.tmp")
+	if err != nil {
+		log.Printf("acme: could not create retry state temp file: %v", err)
+		return
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		log.Printf("acme: could not set retry state permissions: %v", err)
+		return
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		log.Printf("acme: could not write retry state: %v", err)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		log.Printf("acme: could not close retry state: %v", err)
+		return
+	}
+	if err := os.Rename(tmpName, m.retryStatePath()); err != nil {
+		log.Printf("acme: could not save retry state: %v", err)
+		return
+	}
+	cleanup = false
+}
+
+func (m *shareCertManager) clearRetryState() {
+	_ = os.Remove(m.retryStatePath())
+}
+
+func (m *shareCertManager) backoffSchedule() []time.Duration {
+	if len(m.backoff) > 0 {
+		return m.backoff
+	}
+	return defaultShareACMEBackoff
+}
+
+func (m *shareCertManager) backoffDelay(failures int) time.Duration {
+	sched := m.backoffSchedule()
+	idx := failures - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(sched) {
+		idx = len(sched) - 1
+	}
+	return sched[idx]
+}
+
+func (m *shareCertManager) maxBackoff() time.Duration {
+	sched := m.backoffSchedule()
+	return sched[len(sched)-1]
+}
+
+func (m *shareCertManager) currentTime() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+func (m *shareCertManager) cappedWait(nextAttempt time.Time) time.Duration {
+	now := m.currentTime()
+	if !now.Before(nextAttempt) {
+		return 0
+	}
+	wait := nextAttempt.Sub(now)
+	if maxWait := m.maxBackoff(); wait > maxWait {
+		return maxWait
+	}
+	return wait
+}
+
+func (m *shareCertManager) wait(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	if m.waitFn != nil {
+		return m.waitFn(ctx, d)
+	}
+	return defaultACMEWait(ctx, d)
+}
+
 // Ensure loads a valid cached certificate from storage or obtains one via
 // DNS-01 from the primary CA, failing over with lazy EAB only on CA outages or
 // rate limits.
@@ -491,20 +692,15 @@ func (m *shareCertManager) Ensure(ctx context.Context) error {
 	m.renewMu.Lock()
 	defer m.renewMu.Unlock()
 
-	needsRenew, err := m.cachedNeedsRenewal(ctx, m.primaryCfg, m.primaryIss)
-	if err == nil && !needsRenew {
+	if m.ensureCachedLocked(ctx) {
+		m.clearRetryState()
 		return nil
 	}
-	if errors.Is(err, fs.ErrNotExist) && m.fallbackCfg != nil {
-		fbRenew, fbErr := m.cachedNeedsRenewal(ctx, m.fallbackCfg, m.fallbackIss)
-		if fbErr == nil && !fbRenew {
-			return nil
-		}
-	}
 
-	err = m.primaryCfg.ManageSync(ctx, []string{m.host})
+	err := m.syncCert(ctx, m.primaryCfg, m.primaryIss)
 	if err == nil {
 		_, _ = m.cachedNeedsRenewal(ctx, m.primaryCfg, m.primaryIss)
+		m.clearRetryState()
 		return nil
 	}
 	if m.fallbackCfg == nil || !shouldFailoverACME(err) {
@@ -512,11 +708,12 @@ func (m *shareCertManager) Ensure(ctx context.Context) error {
 	}
 
 	log.Printf("acme: primary CA failed for %s (%v); failing over to fallback CA", m.host, err)
-	fbErr := m.fallbackCfg.ManageSync(ctx, []string{m.host})
+	fbErr := m.syncCert(ctx, m.fallbackCfg, m.fallbackIss)
 	if fbErr != nil {
 		return fmt.Errorf("primary failed (%w); fallback failed: %v", err, fbErr)
 	}
 	_, _ = m.cachedNeedsRenewal(ctx, m.fallbackCfg, m.fallbackIss)
+	m.clearRetryState()
 	return nil
 }
 
@@ -542,27 +739,60 @@ func isNonRetryableShareCertErr(err error) bool {
 	return false
 }
 
-// EnsureWithBackoff obtains or loads a certificate with exponential backoff so
-// validation failures do not hammer Let's Encrypt's 5-per-hour limit.
+// EnsureWithBackoff obtains or loads a certificate with persistent exponential
+// backoff in StorageDir/retry.json so validation failures or service restarts
+// do not hammer the CA.
 func (m *shareCertManager) EnsureWithBackoff(ctx context.Context) error {
+	if m.ensureCached(ctx) {
+		m.clearRetryState()
+		return nil
+	}
+
+	state := m.loadRetryState()
+	if !state.NextAttempt.IsZero() {
+		if wait := m.cappedWait(state.NextAttempt); wait > 0 {
+			log.Printf("acme: backing off certificate retry for %s for %s (until %s)", m.host, wait.Round(time.Second), state.NextAttempt.UTC().Format(time.RFC3339))
+			if err := m.wait(ctx, wait); err != nil {
+				return err
+			}
+		}
+	}
+
+	maxAttempts := 1
+	if state.Failures == 0 && m.maxInProcessAttempts > 1 {
+		maxAttempts = m.maxInProcessAttempts
+	}
+
 	var last error
-	for attempt := 0; ; attempt++ {
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if err := m.Ensure(ctx); err == nil {
+			m.clearRetryState()
 			return nil
 		} else {
 			last = err
 		}
-		if ctx.Err() != nil || isNonRetryableShareCertErr(last) || attempt >= len(m.backoff) {
+		if ctx.Err() != nil {
 			return last
 		}
-		wait := m.backoff[attempt]
-		log.Printf("acme: certificate for %s failed (%v); retrying in %s", m.host, last, wait)
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(wait):
+		if isNonRetryableShareCertErr(last) {
+			return last
+		}
+
+		state.Failures++
+		delay := m.backoffDelay(state.Failures)
+		state.NextAttempt = m.currentTime().UTC().Add(delay)
+		m.saveRetryState(state)
+
+		if attempt+1 >= maxAttempts || (m.maxInProcessWait > 0 && delay > m.maxInProcessWait) {
+			log.Printf("acme: certificate for %s failed (%v); next retry after %s", m.host, last, delay)
+			return last
+		}
+		log.Printf("acme: certificate for %s failed (%v); retrying in %s", m.host, last, delay)
+		if err := m.wait(ctx, delay); err != nil {
+			return err
 		}
 	}
+	return last
 }
 
 // RunFailoverLoop watches for background primary renewal failures that qualify
@@ -578,17 +808,15 @@ func (m *shareCertManager) RunFailoverLoop(ctx context.Context) {
 			return
 		case <-m.failoverCh:
 			m.renewMu.Lock()
-			if err := m.fallbackCfg.ManageSync(ctx, []string{m.host}); err != nil {
+			if err := m.syncCert(ctx, m.fallbackCfg, m.fallbackIss); err != nil {
 				log.Printf("acme: fallback renewal failed for %s: %v", m.host, err)
 			} else {
 				_, _ = m.cachedNeedsRenewal(ctx, m.fallbackCfg, m.fallbackIss)
 			}
 			m.renewMu.Unlock()
 
-			select {
-			case <-ctx.Done():
+			if err := m.wait(ctx, time.Minute); err != nil {
 				return
-			case <-time.After(time.Minute):
 			}
 		}
 	}
