@@ -29,7 +29,7 @@ The service-account key never leaves this server.
 Design and threat model: [docs/security/public-certificates.md](../../docs/security/public-certificates.md).
 
 ```bash
-challenge-dns serve                      # CDNS_LISTEN=159.65.78.95:53, see `challenge-dns` for all settings
+challenge-dns serve                      # CDNS_LISTEN=203.0.113.10:53, see `challenge-dns` for all settings
 challenge-dns cred add pen <penname>     # prints the token once
 challenge-dns cred add host
 challenge-dns cred list

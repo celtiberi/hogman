@@ -224,6 +224,34 @@ Mail goes out only when you invite someone, never when someone joins, so nobody 
 page to make you email an address they typed. Pushes never include personal details. Link
 people straight to the list with `https://<signup-host>/#wait`.
 
+## Public certificates (being built)
+
+Pens are moving to certificates that browsers already trust, so members never install
+anything (decision D-18; design in
+[docs/security/public-certificates.md](../docs/security/public-certificates.md)). The first
+piece is the **challenge DNS server**, which answers Let's Encrypt and Google when they check
+a certificate request. It runs on the host:
+
+```bash
+hogman-host challenge-dns-setup 203.0.113.10              # this server's public IPv4
+hogman-host challenge-dns-setup 203.0.113.10 gcp-eab.json # with the Google fallback CA
+hogman-host challenge-dns cred list
+```
+
+- **It runs as a locked-down systemd service** (`hogman-challenge-dns`): its own system user
+  with no login, only allowed to bind port 53, read-only everywhere else. Its state (credential
+  hashes and the pen names ever used) is in the nightly backups.
+- **It answers only for `pens.hogman.network` and `_acme-challenge.gate.hogman.network`,** and
+  only once Cloudflare delegates those names to `ns1.hogman.network`. Until then nobody asks it
+  anything. Check it with `dig @<ip> pens.hogman.network SOA`, then again with `+tcp`.
+- **The Google key** (a service account that can only create single-use account keys) is
+  handed over as a systemd credential, readable only by the service. Make it fresh, straight
+  onto the server, when you set this up.
+- **Port 53** is opened in the server's firewall. If DigitalOcean's cloud firewall is on,
+  open TCP and UDP 53 there too.
+
+Pens keep using their own certificate authority until the switch-over, which comes later.
+
 ## Everyday
 
 ```bash
