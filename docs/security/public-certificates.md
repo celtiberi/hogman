@@ -1,6 +1,6 @@
 # Public certificates (D-18, D-19): design
 
-Status: **draft**, for @hogman's red-team before any code.
+Status: **revision 2**, folding in @hogman's red-team (PR #61). Waiting for sign-off before any code.
 
 Decisions:
 - **D-18:** publicly trusted certificates only, with no private root.
@@ -36,23 +36,32 @@ We follow two existing models rather than invent our own:
 | Home page | `home.<penid>.pens.hogman.network` | `home.pen.example.com` |
 | Public front door (Headscale control, join page, invite redemption) | `<pen>.gate.hogman.network` | The operator's `PUBLIC_HOST` |
 
-- A **pen ID** is 8 random characters from `[a-z2-7]`, about 40 bits. It hides *whose* pen a name belongs to. The names themselves still appear in public CT logs, and we say so.
+- A **pen ID** is 12 random characters from `[a-z2-7]`, about 60 bits. It hides *whose* pen a name belongs to. The names themselves still appear in public CT logs, and we say so.
+- **Zones are checked before anything trusts them,** so a hostile pen can't make your browser send other sites through it:
+  - hosted zones must match exactly `^[a-z2-7]{12}\.pens\.hogman\.network$`;
+  - a self-hosted zone must sit under the invite host's registrable domain (checked against the PSL), and must not be a public suffix itself;
+  - `hogman-join` connects to `https://home.<zone>` and checks it with the system's trusted roots **before** it writes the zone into its config or the PAC.
 - **Front doors move off `pens.` to `gate.`** A pen's human name and a random pen ID must never share a namespace: someone could otherwise choose a pen name that equals another pen's ID. It also keeps the front door's wildcard certificate (below) out of every pen zone. The PSL entry will be `pens.hogman.network`, which covers only the mesh sites, the ones that run third-party apps.
 - **No public A or AAAA records exist for anything under a pen zone.** Browsers never resolve pen names: the PAC sends those hosts to the local agent, which resolves them through the pen's own DNS over the mesh, as today. Public DNS only ever answers the challenge records, CAA, NS and SOA.
 
 ## DNS
 
-- **NS delegation.** In Cloudflare, delegate `pens.hogman.network` and `gate.hogman.network` to a dedicated **challenge DNS server** on the host. Nothing it can be made to do can change `hogman.network` itself (hosting `install.sh`, releases, the site): @hogman's condition that won't be given up.
-- **The challenge DNS server is small and authoritative.** It serves only:
-  - **SOA and NS** for the two zones.
-  - **CAA at `pens.hogman.network` and `gate.hogman.network`:**
-    ```
-    0 issue "letsencrypt.org; validationmethods=dns-01; accounturi=<ours>"
-    0 issue "pki.goog; validationmethods=dns-01; accounturi=<ours>"
-    0 issuewild ";"          (pens)   /   0 issuewild "letsencrypt.org; validationmethods=dns-01" (gate)
-    ```
-  - **TXT `_acme-challenge.<name>`.** These records are written only through its API, and expire after 10 minutes even if nobody cleans them up.
-- **Each pen gets its own API credential, scoped to that pen.** It can write TXT records under `_acme-challenge.*.<its penid>.pens.hogman.network`, and nothing else: no other pen, no other record type, nothing under `gate.`. It has a **cap on new certificates per pen per week** (proposed 10), so one runaway pen can't exhaust the shared quota. The host has one separate credential, which only the front door uses, for the `*.gate.hogman.network` wildcard.
+- **NS delegation, as narrow as each name allows.**
+  - `pens.hogman.network`: the whole subzone is delegated to the challenge DNS server. Nothing under it needs a public address.
+  - `gate.hogman.network` stays in Cloudflare, with `*.gate` A/AAAA and CAA, because front doors need public addresses. Only `_acme-challenge.gate.hogman.network` is delegated, for the front door's wildcard.
+  - The NS target is `ns1.hogman.network`, out of bailiwick. The server binds `:53` on the host's public IPs explicitly, not on `127.0.0.53`, where systemd-resolved sits.
+  - Nothing the server can be made to do changes `hogman.network` itself (`install.sh`, releases, the site). That's @hogman's condition that won't be given up.
+- **The challenge DNS server is small and authoritative:** our own server on `miekg/dns`, the library the registrar already uses. It serves only:
+  - SOA and NS;
+  - CAA at `pens.hogman.network`: `0 issue "letsencrypt.org; validationmethods=dns-01"`, `0 issue "pki.goog; validationmethods=dns-01"` and `0 issuewild ";"`;
+  - TXT `_acme-challenge.<name>`, written only through its API, and expiring after 10 minutes even if nobody cleans them up.
+  - There's no `accounturi` on `pens.`, because every share has its own ACME account, so pinning one account would refuse them all.
+  - CAA for the front door's wildcard lives in Cloudflare at `gate.`: `issuewild` for `letsencrypt.org` and `pki.goog`, each with `validationmethods=dns-01` and the host's `accounturi`.
+- **Each pen gets its own API credential, scoped to that pen.** It can write TXT records under `_acme-challenge.*.<its penid>.pens.hogman.network`, and nothing else: no other pen, no other record type, nothing under `gate.`.
+  - It allows at most 2 live TXT records per name.
+  - Its **weekly cap** (10) counts distinct names whose challenge was written this week, not raw TXT writes. A renewal touches its name about once every 60 days, so renewals barely count.
+  - The host has one separate credential, which only the front door uses, for the `*.gate.hogman.network` wildcard.
+  - The registrar reaches the server's HTTP API over a host-only Docker network, documented in `hogman-host`. The API never faces the internet.
 - **Self-hosted pens:** the registrar uses a DNS provider library (libdns) with the operator's DNS API token. The docs recommend the narrowest token the provider allows. They also show the standard trick for making it narrower: delegate `_acme-challenge` with a CNAME to a zone used only for challenges.
 
 ## Who gets which certificate
@@ -60,24 +69,30 @@ We follow two existing models rather than invent our own:
 **Shares and other servers in the pen** run ACME themselves, with their own account key and private key.
 - They use **certmagic** (Caddy's library), which supports DNS-01 through libdns, ARI, a fallback issuer and cache reuse. It replaces `autocert`, which can't do DNS-01.
 - The share's DNS-01 "provider" is a tiny libdns implementation that calls the registrar over the mesh: `POST /api/acme/txt {name, value}` and `DELETE`.
-- **The registrar writes the record only for a name that device may use.** It applies `serverMayUse`, the same rule as claiming the name, so a share can only ever get a certificate for its own name.
-- Shares hold no DNS credential and no CA credential.
+  - The endpoint is for **server devices only**.
+  - It applies `serverMayUse`, the same rule as claiming the name, so a share can only ever get a certificate for its own name.
+  - It refuses `home`, `ns*`, `nodes` and `_acme-challenge` labels.
+- certmagic checks propagation against **public resolvers** (1.1.1.1, 8.8.8.8), not the pen's split DNS, because the pen's DNS doesn't serve challenge records.
+- The certmagic cache (account, keys, certificates, ARI state) lives in the share's folder, and survives restarts and `hogman-join update`, so renewals carry ARI's `replaces`.
+- Shares hold no DNS credential. For the fallback CA, they hold a single-use EAB pair (see below).
 
-**The home page** (Caddy in the pen) doesn't need a custom Caddy build.
-- The registrar gets `home.<zone>` the same way. Caddy fetches it with `get_certificate http` over the registrar's private socket (the same isolation as audit H2).
-- Caddy keeps serving; certmagic in the registrar renews.
+**The home page** (Caddy in the pen) doesn't need a custom Caddy build, and doesn't use `get_certificate`.
+- Caddy's `get_certificate http` uses a plain HTTP client: no Unix sockets, no auth, and a request on every handshake. So it was dropped.
+- Instead, the registrar gets `home.<zone>` with certmagic and writes the certificate and key **atomically** to `data/home-tls`. That folder is mounted read-write into the registrar and read-only into the portal, and nowhere else, the same isolation as audit H2.
+- On renewal, the registrar reloads Caddy through Caddy's admin API, which listens on a **Unix socket** in a folder shared only with the registrar. The admin API is off on TCP.
 
-**The front door** (the host's shared Caddy) gets one `*.gate.hogman.network` wildcard by DNS-01, with the host's credential.
-- That's one certificate for every front door, and it keeps human pen names out of CT.
-- It needs either a Caddy build with our DNS provider module or the same `get_certificate` pattern from a small host-side issuer. Recommended: `get_certificate`, so we don't maintain a custom Caddy build.
+**The front door** (the host's shared Caddy) gets one `*.gate.hogman.network` wildcard by DNS-01, with the host's credential. That's one certificate for every front door, and it keeps human pen names out of CT.
+- A small host-side issuer (`hogman-host`, run on a systemd timer) writes the files.
+- `docker exec … caddy reload` picks them up.
 - A self-hosted front door keeps today's normal Let's Encrypt certificate for its `PUBLIC_HOST`.
 
 ## Certificate authorities, quota and failover
 
 - **Primary: Let's Encrypt.** Before launch, file the rate-limit increase for `hogman.network`, the registered domain, and check that it's actually live before relying on it.
 - **Fallback: Google Trust Services** (`pki.goog`). It supports the RFC 8657 CAA parameters and ARI, and requires EAB.
-  - The EAB key (an HMAC) stays in the challenge DNS service. For each new ACME account it signs a one-time EAB binding over that account's public key (RFC 8555 §7.3.4).
-  - Pens and shares never see the HMAC.
+  - GTS issues each EAB key as a **single-use pair that expires after 7 days** (`gcloud publicca external-account-keys create`). certmagic takes the pair directly, so a remotely signed JWS doesn't fit.
+  - So the challenge DNS service holds a Google service account limited to `roles/publicca.externalAccountKeyCreator`. When a share sets up its fallback account, the registrar asks the service for **one fresh pair** and passes it to that share alone. The pair binds that share's account once and is useless after that.
+  - No long-lived GTS secret ever reaches a pen or a share.
   - ZeroSSL was considered and set aside: it issues through Sectigo, whose CAA handling of `validationmethods` is unreliable, and it doesn't document ARI.
 - **When to fail over.** Switch to the fallback only on `rateLimited`, HTTP 429, or a CA 5xx or outage. Never on DNS validation errors (`unauthorized`, `dns`): those mean our DNS is wrong, and retrying at a second CA would burn its failed-validation limit too.
 - **Renewal:** 90-day certificates. Renew when ARI says to, or at about 30 days left. Renewals don't count against the new-certificate limit.
@@ -113,7 +128,7 @@ We follow two existing models rather than invent our own:
 - **The registrar:**
   - new `POST /api/acme/txt` and `DELETE /api/acme/txt` endpoints (mesh only, server or own device);
   - a certmagic issuer for `home`;
-  - `GET /internal/cert/home` on the private socket for Caddy;
+  - writes `home`'s certificate to the isolated `data/home-tls` folder, and reloads Caddy over its admin socket;
   - a client for the challenge DNS service, or libdns for self-hosters;
   - reserved names: `ca` is removed, `_acme-challenge` is added as invalid.
 - **Sign-up and `hogman-host`:**
@@ -138,7 +153,7 @@ We follow two existing models rather than invent our own:
 - **CI stays offline.** It uses **Pebble** (Let's Encrypt's test CA) with its `pebble-challtestsrv` as the challenge DNS, and a fake challenge DNS service.
 - The e2e suites assert:
   - shares get certificates through the registrar's TXT endpoint, and **a share can't get one for another share's name**;
-  - home gets its certificate through `get_certificate`;
+  - home gets its certificate through the shared folder and the reload;
   - nothing on members' machines touches a trust store;
   - the PAC and the proxy work with the new zone;
   - a share restart reuses its certificate (no new order);
@@ -171,7 +186,25 @@ The docs say, in one sentence, that pens created before this change need to be r
 | The challenge DNS service is down | Existing certificates keep working for up to about 60 days, and ARI starts renewing early. Monitor it with `hogman-watch`. |
 | The pen's server reads members' traffic | Not possible: TLS ends at each share, never at the server (wildcard termination at the server was rejected) |
 
-## Open questions for the red-team
+## Red-team resolutions (revision 2)
+
+| Question | Answer |
+|---|---|
+| `gate.` for front doors | Kept. Only `_acme-challenge.gate` is delegated; addresses and CAA stay in Cloudflare. |
+| acme-dns or our own | Our own small server on `miekg/dns`. |
+| certmagic | Yes, with public resolvers for propagation checks and its cache kept across updates. |
+| `get_certificate` | Dropped. Atomic files in a mount-isolated folder, and a reload over Caddy's admin Unix socket. |
+| Weekly cap | 10, counting distinct new names, not TXT writes. |
+| Pen ID length | 12 characters (60 bits). |
+
+Also fixed:
+- `accounturi` is dropped on `pens.`;
+- the GTS fallback uses single-use EAB pairs minted per share;
+- zones are verified, and pinned to a pattern, before they reach the PAC;
+- the TXT endpoint is for server devices only, limited to 2 live records per name;
+- the registrar's path to the challenge API is documented.
+
+## Original open questions
 
 1. `gate.hogman.network` for front doors: right separation, or does it create new trouble (one more PSL question)?
 2. Should the challenge DNS service be acme-dns itself (joohoi/acme-dns, extended with pen scopes and the cap), or our own small server on `miekg/dns`, which the registrar already uses?
@@ -180,11 +213,16 @@ The docs say, in one sentence, that pens created before this change need to be r
 5. Is a per-pen cap of 10 new certificates a week right for the trial?
 6. Keep 8-character pen IDs, or longer?
 
-## What @patrick needs to set up (before code reaches production)
+## What the operator needs to set up (before code reaches production)
 
-1. **Cloudflare:** NS records delegating `pens.hogman.network` and `gate.hogman.network` to the host. I'll give the exact records once the challenge DNS service runs.
+1. **Cloudflare:**
+   - NS records delegating `pens.hogman.network`, and `_acme-challenge.gate.hogman.network`, to `ns1.hogman.network`, plus its A/AAAA;
+   - `*.gate` A/AAAA;
+   - CAA at `gate.`.
+
+   The exact records come once the challenge DNS service runs.
 2. **Let's Encrypt:** the rate-limit increase form for `hogman.network`. It takes weeks, so file it early. I'll draft the answers.
-3. **Google Trust Services:** a Google Cloud project with the Public CA API enabled, and an EAB key, which goes only into the challenge DNS service's config on the server.
+3. **Google Trust Services:** a Google Cloud project with the Public CA API enabled, and a service account limited to `roles/publicca.externalAccountKeyCreator`. Its key goes only into the challenge DNS service's config on the server.
 4. **Later:** the PSL pull request for `pens.hogman.network`, once we're eligible.
 
 ## Plan, after sign-off
