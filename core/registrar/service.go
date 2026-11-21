@@ -27,6 +27,7 @@ type Config struct {
 	PublicHost        string // control server hostname
 	CoreIP            string // mesh IP of the core node (DNS, portal)
 	CAIP              string // mesh IP of the CA
+	CertMode          string // "private" (default) or "public"
 	RootCAFile        string
 	NameHold          time.Duration
 	InviteTTL         time.Duration
@@ -93,6 +94,16 @@ type Service struct {
 }
 
 func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
+	switch cfg.CertMode {
+	case "":
+		cfg.CertMode = "private"
+	case "private", "public":
+	default:
+		return nil, fmt.Errorf("invalid cert_mode %q (want private or public)", cfg.CertMode)
+	}
+	if cfg.CertMode == "public" && cfg.RootCAFile != "" {
+		return nil, errors.New("root CA cannot be set when cert_mode is public")
+	}
 	if cfg.CAIP == "" {
 		cfg.CAIP = cfg.CoreIP
 	}
@@ -133,6 +144,7 @@ func (s *Service) LoginServer() string { return "https://" + s.cfg.PublicHost }
 type NetworkInfo struct {
 	Zone            string `json:"zone"`
 	LoginServer     string `json:"login_server"`
+	CertMode        string `json:"cert_mode"`
 	RootCA          string `json:"root_ca"`
 	RootFingerprint string `json:"root_fingerprint"`
 	Portal          string `json:"portal"`
@@ -142,16 +154,27 @@ type NetworkInfo struct {
 }
 
 func (s *Service) NetworkInfo() NetworkInfo {
-	return NetworkInfo{Zone: s.cfg.Zone, LoginServer: s.LoginServer(), RootCA: s.rootPEM,
-		RootFingerprint: s.rootFP, Portal: "https://home." + s.cfg.Zone, DNSServer: s.cfg.CoreIP}
+	return NetworkInfo{
+		Zone:            s.cfg.Zone,
+		LoginServer:     s.LoginServer(),
+		CertMode:        s.cfg.CertMode,
+		RootCA:          s.rootPEM,
+		RootFingerprint: s.rootFP,
+		Portal:          "https://home." + s.cfg.Zone,
+		DNSServer:       s.cfg.CoreIP,
+	}
 }
 
 // Links handed to people. The part after # never reaches any server: the
-// join page and join tool read it locally.
+// join page and join tool read it locally. Public-certificate pens omit
+// &fp= because members verify certificates against the system trust store.
 //
-//	invite: https://<host>/join#t=<invite token>&fp=<root fingerprint>
-//	device: https://<host>/join#k=<device key>&fp=<root fingerprint>
+//	invite: https://<host>/join#t=<invite token>[&fp=<root fingerprint>]
+//	device: https://<host>/join#k=<device key>[&fp=<root fingerprint>]
 func (s *Service) InviteLink(token string) string {
+	if s.cfg.CertMode == "public" {
+		return fmt.Sprintf("https://%s/join#t=%s", s.cfg.PublicHost, token)
+	}
 	return fmt.Sprintf("https://%s/join#t=%s&fp=%s", s.cfg.PublicHost, token, s.rootFP)
 }
 
@@ -159,7 +182,12 @@ func (s *Service) InviteLink(token string) string {
 // marked for=share: server links only put things in the pen with
 // `hogman-join share`, they don't join a whole computer (D-11).
 func (s *Service) DeviceLink(key, kind string) string {
-	link := fmt.Sprintf("https://%s/join#k=%s&fp=%s", s.cfg.PublicHost, key, s.rootFP)
+	var link string
+	if s.cfg.CertMode == "public" {
+		link = fmt.Sprintf("https://%s/join#k=%s", s.cfg.PublicHost, key)
+	} else {
+		link = fmt.Sprintf("https://%s/join#k=%s&fp=%s", s.cfg.PublicHost, key, s.rootFP)
+	}
 	if kind == "server" {
 		link += "&for=share"
 	}

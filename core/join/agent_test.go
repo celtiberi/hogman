@@ -370,12 +370,14 @@ func TestFetchNetworkValidation(t *testing.T) {
 	host := strings.TrimPrefix(srv.URL, "https://")
 	c := srv.Client()
 
-	payload = networkInfo{
+	baseValid := networkInfo{
 		Zone:        "bobo.hogman",
 		LoginServer: "https://" + host,
+		CertMode:    "private",
 		Portal:      "https://home.bobo.hogman",
 		DNSServer:   "100.64.0.2",
 	}
+	payload = baseValid
 	if _, err := fetchNetwork(c, host); err != nil {
 		t.Fatalf("valid networkInfo rejected: %v", err)
 	}
@@ -384,23 +386,91 @@ func TestFetchNetworkValidation(t *testing.T) {
 		name   string
 		mutate func(*networkInfo)
 	}{
+		{"missing cert_mode", func(n *networkInfo) { n.CertMode = "" }},
+		{"unknown cert_mode", func(n *networkInfo) { n.CertMode = "bogus" }},
 		{"mismatched login_server", func(n *networkInfo) { n.LoginServer = "https://evil.example" }},
 		{"foreign portal", func(n *networkInfo) { n.Portal = "https://evil.example/phish" }},
 		{"non-mesh dns_server", func(n *networkInfo) { n.DNSServer = "8.8.8.8" }},
 	}
 	for _, tc := range cases {
-		bad := payload
+		bad := baseValid
 		tc.mutate(&bad)
 		payload = bad
 		if _, err := fetchNetwork(c, host); err == nil {
 			t.Errorf("%s: expected fetchNetwork to reject payload", tc.name)
 		}
-		payload = networkInfo{
-			Zone:        "bobo.hogman",
-			LoginServer: "https://" + host,
-			Portal:      "https://home.bobo.hogman",
-			DNSServer:   "100.64.0.2",
+		payload = baseValid
+	}
+}
+
+func TestValidatePublicZoneAndNetworkInfo(t *testing.T) {
+	hostedOK := []struct {
+		host string
+		zone string
+	}{
+		{"bobo.gate.example.com", "bobo.pens.example.com"},
+		{"bobo.gate.example.com:8443", "bobo.pens.example.com"},
+		{"bobo.gate.hogman.test", "bobo.pens.hogman.test"},
+		{"hs.example.com", "bobo.example.com"},
+		{"gate.hogman.test", "bobo.pens.hogman.test"},
+		{"login.corp.example.co.uk", "bobo.example.co.uk"},
+	}
+	for _, tc := range hostedOK {
+		if err := validatePublicZone(tc.host, tc.zone); err != nil {
+			t.Errorf("validatePublicZone(%q, %q) unexpected error: %v", tc.host, tc.zone, err)
 		}
+	}
+
+	hostedBad := []struct {
+		host string
+		zone string
+	}{
+		{"bobo.gate.example.com", "alice.pens.example.com"},
+		{"bobo.gate.example.com", "bobo.other.example.com"},
+		{"bobo.gate.example.com", "bobo.example.com"},
+		{"bobo.gate.example.com", "example.com"},
+		{"bobo.gate.example.com", "bobo.hogman"},
+		{"evil.gate.co.uk", "evil.pens.co.uk"},
+		{"hs.example.com", "example.com"},
+		{"hs.example.com", "bobo.other.com"},
+		{"hs.example.com", "bobo.hogman"},
+		{"hs.example.com", "Bobo.example.com"},
+		{"hs.example.com", "bobo.example.com."},
+		{"127.0.0.1:8443", "bobo.example.com"},
+	}
+	for _, tc := range hostedBad {
+		if err := validatePublicZone(tc.host, tc.zone); err == nil {
+			t.Errorf("validatePublicZone(%q, %q) expected error, got nil", tc.host, tc.zone)
+		}
+	}
+
+	badPub := networkInfo{
+		Zone:            "bobo.pens.example.com",
+		LoginServer:     "https://bobo.gate.example.com",
+		CertMode:        "public",
+		RootCA:          "PEM",
+		RootFingerprint: fp64,
+		Portal:          "https://home.bobo.pens.example.com",
+		DNSServer:       "100.64.0.1",
+	}
+	if err := validateNetworkInfo("bobo.gate.example.com", &badPub); err == nil {
+		t.Fatal("expected public networkInfo with RootCA/RootFingerprint to fail")
+	}
+
+	goodPEM, goodFP := makeRoot(t, []string{"bobo.hogman"}, true)
+	privInfo := &networkInfo{Zone: "bobo.hogman", CertMode: "private", RootCA: goodPEM, RootFingerprint: goodFP}
+	if _, err := checkLinkCertMode(&Link{Host: "hs.example.com", Fingerprint: ""}, privInfo); err == nil {
+		t.Fatal("private link without fp= must fail")
+	}
+	if root, err := checkLinkCertMode(&Link{Host: "hs.example.com", Fingerprint: goodFP}, privInfo); err != nil || root == nil {
+		t.Fatalf("valid private link failed: root=%v err=%v", root, err)
+	}
+	pubInfo := &networkInfo{Zone: "bobo.pens.example.com", CertMode: "public"}
+	if _, err := checkLinkCertMode(&Link{Host: "bobo.gate.example.com", Fingerprint: fp64}, pubInfo); err == nil {
+		t.Fatal("public link carrying fp= must fail")
+	}
+	if root, err := checkLinkCertMode(&Link{Host: "bobo.gate.example.com"}, pubInfo); err != nil || root != nil {
+		t.Fatalf("valid public link failed: root=%v err=%v", root, err)
 	}
 }
 

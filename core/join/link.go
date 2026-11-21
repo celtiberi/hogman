@@ -58,7 +58,7 @@ func ParseLink(raw string) (*Link, error) {
 		return nil, errors.New("the link has no invite or device key in it; was it copied whole?")
 	case l.InviteToken != "" && l.DeviceKey != "":
 		return nil, errors.New("the link has both an invite and a device key")
-	case !fpRE.MatchString(l.Fingerprint):
+	case l.Fingerprint != "" && !fpRE.MatchString(l.Fingerprint):
 		return nil, errors.New("the link has no valid certificate fingerprint (fp=...); was it copied whole?")
 	}
 	return l, nil

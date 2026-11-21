@@ -64,6 +64,7 @@ type shareConfig struct {
 	Name        string `json:"name"`
 	Zone        string `json:"zone"`
 	LoginServer string `json:"login_server"`
+	CertMode    string `json:"cert_mode,omitempty"`
 	DNSServer   string `json:"dns_server"`
 	RootCA      string `json:"root_ca"`
 	Target      string `json:"target"` // http://host:port, or an absolute folder path
@@ -74,6 +75,22 @@ type shareConfig struct {
 
 func (c *shareConfig) fqdn() string { return c.Name + "." + c.Zone }
 func (c *shareConfig) url() string  { return "https://" + c.fqdn() }
+
+func (c *shareConfig) effectiveCertMode() (string, error) {
+	switch c.CertMode {
+	case "public", "private":
+		return c.CertMode, nil
+	case "":
+		// Older share configs saved before cert_mode existed only came from
+		// private-CA pens that recorded their root CA.
+		if c.RootCA != "" {
+			return "private", nil
+		}
+		return "", errorf("share configuration for %s has no certificate mode; recreate the share", c.url())
+	default:
+		return "", errorf("unsupported certificate mode %q for %s", c.CertMode, c.url())
+	}
+}
 
 func (c *shareConfig) agentConfig() *agentConfig {
 	return &agentConfig{Zone: c.Zone, LoginServer: c.LoginServer, DNSServer: c.DNSServer,
@@ -276,13 +293,13 @@ func shareFromLink(name, raw string, o options) (*shareConfig, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if _, err := CheckRoot(n.RootCA, link.Fingerprint, n.Zone); err != nil {
-		return nil, "", errorf("%v", err)
+	if _, err := checkLinkCertMode(link, n); err != nil {
+		return nil, "", err
 	}
 	if n.DNSServer == "" {
 		return nil, "", errorf("this pen's server is too old to share from here (it does not publish its DNS address)")
 	}
-	cfg := &shareConfig{Name: name, Zone: n.Zone, LoginServer: n.LoginServer, DNSServer: n.DNSServer, RootCA: n.RootCA}
+	cfg := &shareConfig{Name: name, Zone: n.Zone, LoginServer: n.LoginServer, CertMode: n.CertMode, DNSServer: n.DNSServer, RootCA: n.RootCA}
 	if o.controlCA != "" {
 		b, err := os.ReadFile(o.controlCA)
 		if err != nil {
@@ -294,9 +311,11 @@ func shareFromLink(name, raw string, o options) (*shareConfig, string, error) {
 }
 
 type penConn struct {
-	zone      string
-	proxy     string // side by side: the agent's proxy; empty for this computer's Tailscale
-	controlCA string
+	zone        string
+	proxy       string // side by side: the agent's proxy; empty for this computer's Tailscale
+	controlCA   string
+	loginServer string
+	certMode    string
 }
 
 // myPens finds the pens this computer is on (each has its own connection).
@@ -305,7 +324,8 @@ func myPens() []penConn {
 	m, _ := filepath.Glob(filepath.Join(filepath.Dir(stateDir("x")), "*", "config.json"))
 	for _, f := range m {
 		if c, err := loadAgentConfig(filepath.Dir(f)); err == nil && c.Zone != "" {
-			out = append(out, penConn{zone: c.Zone, proxy: c.proxyURL(), controlCA: c.ControlCA})
+			out = append(out, penConn{zone: c.Zone, proxy: c.proxyURL(), controlCA: c.ControlCA,
+				loginServer: c.LoginServer, certMode: c.CertMode})
 		}
 	}
 	return out
@@ -334,14 +354,21 @@ func pickPen(want string) (*penConn, error) {
 }
 
 // memberClient talks to the pen's home page as this computer's member.
-func (p *penConn) memberClient() *http.Client {
+func (p *penConn) memberClient() (*http.Client, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil
 	if p.proxy != "" {
 		pu, _ := url.Parse(p.proxy)
 		tr.Proxy = http.ProxyURL(pu)
 	}
-	return &http.Client{Timeout: 20 * time.Second, Transport: tr}
+	if p.certMode == "public" {
+		pool, err := testACMECAPool()
+		if err != nil {
+			return nil, err
+		}
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool}
+	}
+	return &http.Client{Timeout: 20 * time.Second, Transport: tr}, nil
 }
 
 type meView struct {
@@ -397,7 +424,10 @@ func shareFromMembership(name string, o options) (*shareConfig, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	c := p.memberClient()
+	c, err := p.memberClient()
+	if err != nil {
+		return nil, "", err
+	}
 	var me meView
 	if _, err := homeAPI(c, p.zone, "GET", "/me", nil, &me); err != nil {
 		var ue x509.UnknownAuthorityError
@@ -406,14 +436,30 @@ func shareFromMembership(name string, o options) (*shareConfig, string, error) {
 		}
 		return nil, "", errorf("could not reach home.%s as you: %v", p.zone, err)
 	}
-	if me.Network == nil || me.Network.DNSServer == "" || me.Network.Zone != p.zone {
+	if me.Network == nil || me.Network.DNSServer == "" {
 		return nil, "", errorf("this pen's server is too old for sharing; ask its keeper to upgrade it")
 	}
-	if _, err := CheckRoot(me.Network.RootCA, me.Network.RootFingerprint, p.zone); err != nil {
-		return nil, "", errorf("%v", err)
+	loginHost := strings.TrimPrefix(p.loginServer, "https://")
+	if err := validateNetworkInfo(loginHost, me.Network); err != nil {
+		return nil, "", err
+	}
+	if me.Network.Zone != p.zone || me.Network.LoginServer != p.loginServer {
+		return nil, "", errorf("refusing: %s returned mismatched network identity (%s at %s)", p.zone, me.Network.Zone, me.Network.LoginServer)
+	}
+	wantMode := p.certMode
+	if wantMode == "" {
+		wantMode = "private"
+	}
+	if me.Network.CertMode != wantMode {
+		return nil, "", errorf("refusing: %s reported certificate mode %q, expected %q", p.zone, me.Network.CertMode, wantMode)
+	}
+	if me.Network.CertMode == "private" {
+		if _, err := CheckRoot(me.Network.RootCA, me.Network.RootFingerprint, p.zone); err != nil {
+			return nil, "", errorf("%v", err)
+		}
 	}
 	cfg := &shareConfig{Name: name, Zone: p.zone, LoginServer: me.Network.LoginServer,
-		DNSServer: me.Network.DNSServer, RootCA: me.Network.RootCA, ControlCA: p.controlCA}
+		CertMode: me.Network.CertMode, DNSServer: me.Network.DNSServer, RootCA: me.Network.RootCA, ControlCA: p.controlCA}
 	if old, err := loadShare(shareDir(p.zone, name)); err == nil && old.Zone == p.zone {
 		return cfg, "", nil // already has its device
 	}
@@ -481,6 +527,10 @@ func isPermanentNodeError(hasAuthKey bool, backendState string, err error) bool 
 // shareNode brings a share's own device onto the pen and returns it with a
 // client for reaching the pen through it.
 func shareNode(ctx context.Context, dir string, c *shareConfig) (*tsnet.Server, *agent, *http.Client, error) {
+	mode, err := c.effectiveCertMode()
+	if err != nil {
+		return nil, nil, nil, permanentShare(err)
+	}
 	ac := c.agentConfig()
 	ac.trustControlCA()
 	key, _ := os.ReadFile(filepath.Join(dir, "authkey"))
@@ -517,8 +567,20 @@ func shareNode(ctx context.Context, dir string, c *shareConfig) (*tsnet.Server, 
 		return nil, nil, nil, permanentShare(errorf("that link adds a personal device, which can't be visited. Use a share link (Get a share link on your home page)"))
 	}
 	a := newAgent(ac, node)
-	pool := x509.NewCertPool()
-	pool.AppendCertsFromPEM([]byte(c.RootCA))
+	var pool *x509.CertPool
+	if mode == "private" {
+		pool = x509.NewCertPool()
+		if !pool.AppendCertsFromPEM([]byte(c.RootCA)) {
+			node.Close()
+			return nil, nil, nil, permanentShare(errorf("share %s is missing a valid private root CA", c.url()))
+		}
+	} else {
+		pool, err = testACMECAPool()
+		if err != nil {
+			node.Close()
+			return nil, nil, nil, permanentShare(err)
+		}
+	}
 	hc := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
 		DialContext:     func(ctx context.Context, _, addr string) (net.Conn, error) { return a.dial(ctx, addr) },
 		TLSClientConfig: &tls.Config{RootCAs: pool},
@@ -551,6 +613,11 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 		writeShareStatus(dir, "error", err.Error())
 		return permanentShare(err)
 	}
+	mode, err := c.effectiveCertMode()
+	if err != nil {
+		writeShareStatus(dir, "error", err.Error())
+		return permanentShare(err)
+	}
 	// Foreground or background, the pid file says a share is running, so
 	// list, stop and a second start all see it.
 	pidFile := filepath.Join(dir, "share.pid")
@@ -559,7 +626,11 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 	writeShareStatus(dir, "starting", "")
 	fail := func(err error) error { writeShareStatus(dir, "error", err.Error()); return err }
 
-	_, statErr := os.Stat(filepath.Join(dir, "certs"))
+	certStateDir := filepath.Join(dir, "certs")
+	if mode == "public" {
+		certStateDir = filepath.Join(dir, "acme")
+	}
+	_, statErr := os.Stat(certStateDir)
 	fresh := os.IsNotExist(statErr) // never got as far as a certificate
 	node, _, hc, err := shareNode(ctx, dir, c)
 	if err != nil {
@@ -594,13 +665,6 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 		return fail(out)
 	}
 
-	m := &autocert.Manager{
-		Prompt:      autocert.AcceptTOS,
-		HostPolicy:  autocert.HostWhitelist(c.fqdn()),
-		Cache:       autocert.DirCache(filepath.Join(dir, "certs")),
-		RenewBefore: 56 * time.Hour, // the pen's certificates last a week
-		Client:      &acme.Client{DirectoryURL: "https://ca." + c.Zone + ":9000/acme/acme/directory", HTTPClient: hc},
-	}
 	h, closeH, err := shareHandler(c)
 	if err != nil {
 		return fail(err)
@@ -611,22 +675,50 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 		return fail(err)
 	}
 	quiet := log.New(io.Discard, "", 0)
-	tlsSrv := &http.Server{Handler: h, TLSConfig: m.TLSConfig(), ReadHeaderTimeout: 20 * time.Second, ErrorLog: quiet}
-	go func() { _ = tlsSrv.ServeTLS(ln443, "", "") }()
-	defer tlsSrv.Close()
 
-	// Get the certificate now, rather than on the first visitor.
-	hello := &tls.ClientHelloInfo{ServerName: c.fqdn(),
-		CipherSuites:      []uint16{tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
-		SignatureSchemes:  []tls.SignatureScheme{tls.ECDSAWithP256AndSHA256},
-		SupportedCurves:   []tls.CurveID{tls.CurveP256},
-		SupportedVersions: []uint16{tls.VersionTLS13, tls.VersionTLS12}}
-	err = untilOK(ctx, 2*time.Minute, func() (bool, error) {
-		_, err := m.GetCertificate(hello)
-		return true, err
-	})
-	if err != nil {
-		return fail(errorf("no certificate for %s from the pen's CA: %v", c.fqdn(), err))
+	if mode == "public" {
+		cm, err := newShareCertManager(shareACMEConfigFromEnv(c.Zone, c.fqdn(), certStateDir, hc))
+		if err != nil {
+			_ = ln443.Close()
+			return fail(err)
+		}
+		defer cm.Close()
+		if err := cm.EnsureWithBackoff(ctx); err != nil {
+			_ = ln443.Close()
+			if isNonRetryableShareCertErr(err) && ctx.Err() == nil {
+				return fail(permanentShare(errorf("no certificate for %s: %v", c.fqdn(), err)))
+			}
+			return fail(errorf("no certificate for %s: %v", c.fqdn(), err))
+		}
+		go cm.RunFailoverLoop(ctx)
+		tlsSrv := &http.Server{Handler: h, TLSConfig: cm.TLSConfig(), ReadHeaderTimeout: 20 * time.Second, ErrorLog: quiet}
+		go func() { _ = tlsSrv.ServeTLS(ln443, "", "") }()
+		defer tlsSrv.Close()
+	} else {
+		m := &autocert.Manager{
+			Prompt:      autocert.AcceptTOS,
+			HostPolicy:  autocert.HostWhitelist(c.fqdn()),
+			Cache:       autocert.DirCache(certStateDir),
+			RenewBefore: 56 * time.Hour, // the pen's certificates last a week
+			Client:      &acme.Client{DirectoryURL: "https://ca." + c.Zone + ":9000/acme/acme/directory", HTTPClient: hc},
+		}
+		tlsSrv := &http.Server{Handler: h, TLSConfig: m.TLSConfig(), ReadHeaderTimeout: 20 * time.Second, ErrorLog: quiet}
+		go func() { _ = tlsSrv.ServeTLS(ln443, "", "") }()
+		defer tlsSrv.Close()
+
+		// Get the certificate now, rather than on the first visitor.
+		hello := &tls.ClientHelloInfo{ServerName: c.fqdn(),
+			CipherSuites:      []uint16{tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
+			SignatureSchemes:  []tls.SignatureScheme{tls.ECDSAWithP256AndSHA256},
+			SupportedCurves:   []tls.CurveID{tls.CurveP256},
+			SupportedVersions: []uint16{tls.VersionTLS13, tls.VersionTLS12}}
+		err = untilOK(ctx, 2*time.Minute, func() (bool, error) {
+			_, err := m.GetCertificate(hello)
+			return true, err
+		})
+		if err != nil {
+			return fail(errorf("no certificate for %s from the pen's CA: %v", c.fqdn(), err))
+		}
 	}
 	writeShareStatus(dir, "up", "")
 	if ready != nil {

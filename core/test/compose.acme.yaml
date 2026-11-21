@@ -95,6 +95,7 @@ services:
     environment:
       ZONE: "${ACME_ZONE:?}"
       PUBLIC_HOST: "${ACME_PUBLIC_HOST:-gate.hogman.test}"
+      CERT_MODE: "public"
       CORE_MESH_IP: "100.64.0.1"
       HEADSCALE_URL: "http://fake-challengedns:8085"
       HEADSCALE_API_KEY_FILE: "/secrets/headscale_api_key"
@@ -151,6 +152,32 @@ services:
     depends_on:
       registrar:
         condition: service_healthy
+    networks: [acme]
+
+  join-e2e:
+    build:
+      context: ../join
+      dockerfile: Dockerfile.e2e
+    image: hogman/join-e2e:test
+    profiles: [join-e2e]
+    environment:
+      HOGMAN_PEBBLE_E2E: "1"
+      ACME_ZONE: "${ACME_ZONE:?}"
+      ACME_MESH_SOCK: "/run/hogman-api/mesh.sock"
+      ACME_SERVER_IP: "${ACME_SERVER_IP:-100.64.0.11}"
+      ACME_PEBBLE1_CA_URL: "https://pebble1:14000/dir"
+      ACME_PEBBLE2_CA_URL: "https://pebble2:14000/dir"
+      ACME_MOCK429_CA_URL: "https://mock429:14000/dir"
+      ACME_CA_ROOT: "/certs/ca.crt"
+      ACME_PEBBLE1_ROOT: "/work/pebble1-root.crt"
+      ACME_PEBBLE2_ROOT: "/work/pebble2-root.crt"
+      ACME_RESOLVER: "fake-challengedns:8054"
+      ACME_STATS_URL: "http://fake-challengedns:8080/test/stats"
+    volumes:
+      - "${ACME_WORKDIR:?}/data/api:/run/hogman-api"
+      - "${ACME_WORKDIR:?}/certs:/certs:ro"
+      - "${ACME_WORKDIR:?}:/work:ro"
+    depends_on: [fake-challengedns, pebble1, pebble2]
     networks: [acme]
 
 networks:

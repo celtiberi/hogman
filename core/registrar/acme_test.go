@@ -791,3 +791,81 @@ func selfSignedPair(t *testing.T, name string) ([]byte, []byte) {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kb})
 }
+
+func TestCertMode(t *testing.T) {
+	// Default empty CertMode normalizes to "private" and keeps fp= in links.
+	e := newTestEnv(t)
+	info := e.svc.NetworkInfo()
+	if info.CertMode != "private" {
+		t.Fatalf("default CertMode = %q, want private", info.CertMode)
+	}
+	if info.RootCA == "" || info.RootFingerprint == "" {
+		t.Fatalf("private mode should populate RootCA and RootFingerprint")
+	}
+	if got := e.svc.InviteLink("tok1"); !strings.Contains(got, "&fp="+info.RootFingerprint) {
+		t.Fatalf("private InviteLink missing fp: %q", got)
+	}
+	if got := e.svc.DeviceLink("key1", "server"); !strings.Contains(got, "&fp="+info.RootFingerprint) || !strings.HasSuffix(got, "&for=share") {
+		t.Fatalf("private server DeviceLink unexpected: %q", got)
+	}
+
+	// Public mode sets cert_mode=public, clears root CA fields, and omits &fp= from links.
+	dir := t.TempDir()
+	st, err := OpenStore(filepath.Join(dir, "registrar.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.db.Close() })
+	hs := newFakeHeadscale(t)
+	pubSvc, err := NewService(Config{
+		Zone:       "bobo.pens.example.com",
+		PublicHost: "bobo.gate.example.com",
+		CoreIP:     "100.64.0.1",
+		CertMode:   "public",
+	}, st, NewHeadscale(hs.srv.URL, "test-key"))
+	if err != nil {
+		t.Fatalf("NewService public: %v", err)
+	}
+	pubInfo := pubSvc.NetworkInfo()
+	if pubInfo.CertMode != "public" {
+		t.Fatalf("public CertMode = %q, want public", pubInfo.CertMode)
+	}
+	if pubInfo.RootCA != "" || pubInfo.RootFingerprint != "" {
+		t.Fatalf("public mode should omit root CA fields, got CA=%q FP=%q", pubInfo.RootCA, pubInfo.RootFingerprint)
+	}
+	if got := pubSvc.InviteLink("tok1"); got != "https://bobo.gate.example.com/join#t=tok1" {
+		t.Fatalf("public InviteLink = %q", got)
+	}
+	if got := pubSvc.DeviceLink("key1", "personal"); got != "https://bobo.gate.example.com/join#k=key1" {
+		t.Fatalf("public personal DeviceLink = %q", got)
+	}
+	if got := pubSvc.DeviceLink("key1", "server"); got != "https://bobo.gate.example.com/join#k=key1&for=share" {
+		t.Fatalf("public server DeviceLink = %q", got)
+	}
+	req, _ := http.NewRequest("GET", "/hogman/v1/network", nil)
+	rec := httptest.NewRecorder()
+	PublicHandler(pubSvc).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /hogman/v1/network status = %d", rec.Code)
+	}
+	rawJSON := rec.Body.String()
+	if !strings.Contains(rawJSON, `"cert_mode":"public"`) || strings.Contains(rawJSON, `"pens_zone"`) {
+		t.Fatalf("unexpected /hogman/v1/network payload: %s", rawJSON)
+	}
+
+	// Public mode refuses RootCAFile, and unknown CertMode is rejected.
+	rootPath := filepath.Join(dir, "root.crt")
+	writeTestRootCA(t, rootPath)
+	if _, err := NewService(Config{
+		Zone: "bobo.pens.example.com", PublicHost: "bobo.gate.example.com", CoreIP: "100.64.0.1",
+		CertMode: "public", RootCAFile: rootPath,
+	}, st, NewHeadscale(hs.srv.URL, "test-key")); err == nil {
+		t.Fatal("expected error when RootCAFile set in public cert_mode")
+	}
+	if _, err := NewService(Config{
+		Zone: "bobo.hogman", PublicHost: "hs.example.com", CoreIP: "100.64.0.1",
+		CertMode: "hybrid",
+	}, st, NewHeadscale(hs.srv.URL, "test-key")); err == nil {
+		t.Fatal("expected error for invalid cert_mode")
+	}
+}
