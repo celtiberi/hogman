@@ -726,7 +726,7 @@ func updateCmd(args []string, o options) error {
 			break
 		}
 	}
-	cleanupOps := defaultLegacyCleanupOps(metaClient, plan.host, configBase)
+	cleanupOps := defaultLegacyCleanupOps()
 	if !anyUpdate {
 		if !o.dryRun {
 			cleanupLegacyRootsForUpdate(plan, false, cleanupOps)
@@ -852,24 +852,12 @@ func updateCmd(args []string, o options) error {
 }
 
 type legacyCleanupOps struct {
-	fetchCertMode func() string
-	loadAllPens   func() []penTarget
-	removeRoot    func(zone, rootFP string) (bool, error)
-	saveConfig    func(dir string, c *agentConfig) error
+	removeRoot func(zone, rootFP string) (bool, error)
+	saveConfig func(dir string, c *agentConfig) error
 }
 
-func defaultLegacyCleanupOps(metaClient *http.Client, host, configBase string) legacyCleanupOps {
+func defaultLegacyCleanupOps() legacyCleanupOps {
 	return legacyCleanupOps{
-		fetchCertMode: func() string {
-			n, err := fetchNetwork(metaClient, host)
-			if err != nil || n == nil {
-				return ""
-			}
-			return n.CertMode
-		},
-		loadAllPens: func() []penTarget {
-			return loadPenTargets(configBase)
-		},
 		removeRoot: removeLegacyHogmanRoot,
 		saveConfig: func(dir string, c *agentConfig) error {
 			return c.save(dir)
@@ -881,54 +869,14 @@ func cleanupLegacyRootsForUpdate(plan *updatePlan, dryRun bool, ops legacyCleanu
 	if plan == nil {
 		return nil
 	}
-	targetPublic := false
-	for _, p := range plan.pens {
-		if p.cfg != nil && p.cfg.CertMode == "public" {
-			targetPublic = true
-			break
-		}
-	}
-	if !targetPublic {
-		for _, s := range plan.shares {
-			if s.cfg != nil && s.cfg.CertMode == "public" {
-				targetPublic = true
-				break
-			}
-		}
-	}
-	if !targetPublic && ops.fetchCertMode != nil {
-		targetPublic = ops.fetchCertMode() == "public"
-	}
-	if !targetPublic {
-		// Until Item 2b retires private mode, keep active private pen roots intact.
-		return nil
-	}
-
-	// TODO(item-2b): once private mode is retired, unconditionally sweep all legacy
-	// Hogman roots without preserving unrelated private pens.
-	hasOtherPrivatePen := false
-	if ops.loadAllPens != nil {
-		for _, p := range ops.loadAllPens() {
-			if p.cfg != nil && p.cfg.CertMode != "public" && p.cfg.LoginServer != plan.baseURL {
-				hasOtherPrivatePen = true
-				break
-			}
-		}
-	}
-
 	var cleaned []string
 	for _, p := range plan.pens {
-		if p.cfg == nil {
+		if p.cfg == nil || p.cfg.RootFP == "" {
 			continue
 		}
 		if dryRun {
-			if p.cfg.RootFP != "" || p.cfg.CertMode != "public" {
-				note("would remove old %s certificate from trust store", p.zone)
-				cleaned = append(cleaned, p.zone)
-			}
-			continue
-		}
-		if !hasOtherPrivatePen && p.cfg.RootFP == "" {
+			note("would remove old %s certificate from trust store", p.zone)
+			cleaned = append(cleaned, p.zone)
 			continue
 		}
 		if ops.removeRoot == nil {
@@ -943,27 +891,23 @@ func cleanupLegacyRootsForUpdate(plan *updatePlan, dryRun bool, ops legacyCleanu
 			note("removed old %s network certificate from this computer's trust store", p.zone)
 			cleaned = append(cleaned, p.zone)
 		}
-		if p.cfg.RootFP != "" {
-			p.cfg.RootFP = ""
-			if ops.saveConfig != nil {
-				if ser := ops.saveConfig(p.dir, p.cfg); ser != nil {
-					note("could not update %s settings after certificate cleanup: %v", p.zone, ser)
-				}
+		p.cfg.RootFP = ""
+		if ops.saveConfig != nil {
+			if ser := ops.saveConfig(p.dir, p.cfg); ser != nil {
+				note("could not update %s settings after certificate cleanup: %v", p.zone, ser)
 			}
 		}
 	}
 
-	if !hasOtherPrivatePen {
-		if dryRun {
-			note("would check for and remove any leftover old network root certificates")
-		} else if ops.removeRoot != nil {
-			removed, err := ops.removeRoot("", "")
-			if err != nil {
-				note("could not remove leftover old network certificate(s): %v", err)
-			} else if removed {
-				note("removed leftover old network certificate(s) from this computer's trust store")
-				cleaned = append(cleaned, "*")
-			}
+	if dryRun {
+		note("would check for and remove any leftover old network root certificates")
+	} else if ops.removeRoot != nil {
+		removed, err := ops.removeRoot("", "")
+		if err != nil {
+			note("could not remove leftover old network certificate(s): %v", err)
+		} else if removed {
+			note("removed leftover old network certificate(s) from this computer's trust store")
+			cleaned = append(cleaned, "*")
 		}
 	}
 	return cleaned

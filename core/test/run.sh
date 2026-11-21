@@ -15,12 +15,15 @@ set -uo pipefail
 e2e_lock
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="$(cd "$SRC/.." && pwd)"
 KEEP=false; [ "${1:-}" = --keep ] && KEEP=true
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/hogman-test.XXXXXX")"
 export COMPOSE_PROJECT_NAME=hogman-test
-ROOT=/pki/root_ca.crt
-ZONE=bobo.hogman
-PUBLIC_HOST=control.bobo-test.example
+ACME="$WORK/acme"
+export ACME_DIR="$ACME"
+ROOT=/acme/issued-root.crt
+ZONE=bobo.pens.hogman.test
+PUBLIC_HOST=bobo.gate.hogman.test
 
 pass=0; fail=0
 step()  { echo; echo "== $*"; }
@@ -61,29 +64,80 @@ no_match() { # no_match <grep-pattern> <command...>: command succeeds and stdout
 cleanup() {
   if [ "$KEEP" = true ]; then
     echo; echo "Stack left running in $WORK"
-    echo "  cd there, export COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME, then ./hogman <command>; ./hogman down -v to stop"
+    echo "  cd there, export COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME ACME_DIR=$ACME, then ./hogman <command>; ./hogman down -v to stop"
   else
+    docker rm -f hogman-run-cdns hogman-run-pebble >/dev/null 2>&1 || true
     dc down -v --remove-orphans >/dev/null 2>&1
+    docker network rm hogman-test-acme >/dev/null 2>&1 || true
     rm -rf "$WORK"
   fi
 }
 trap 'cleanup; e2e_unlock' EXIT
 
+step "Challenge DNS and test public CA (Pebble)"
+if [ "$(uname -s)" != Linux ]; then
+  echo "  SKIP  Linux required (Unix socket bind mounts for challenge-dns); CI runs this suite"
+  exit 0
+fi
+
+mkdir -p "$ACME/cdns" "$ACME/sock" "$ACME/certs"
+if [ "$(id -u)" = 0 ]; then chgrp 65532 "$ACME/sock"; fi
+chmod 0750 "$ACME/sock"
+
+docker run --rm -v "$REPO/deploy/challenge-dns:/src:ro" -v "$ACME/cdns:/out" -w /src \
+  -e CGO_ENABLED=0 -e GOFLAGS=-buildvcs=false golang:1.27-alpine go build -o /out/challenge-dns . || exit 1
+docker network inspect hogman-test-acme >/dev/null 2>&1 || docker network create hogman-test-acme >/dev/null
+docker rm -f hogman-run-cdns hogman-run-pebble >/dev/null 2>&1 || true
+docker run -d --name hogman-run-cdns --network hogman-test-acme \
+  -v "$ACME/cdns:/cdns" -v "$ACME/sock:/run/hogman-acme" \
+  -e CDNS_LISTEN=0.0.0.0:53 -e CDNS_PENS_ZONE=pens.hogman.test -e CDNS_GATE_NAME=_acme-challenge.gate.hogman.test \
+  -e CDNS_STATE=/cdns/state.json -e CDNS_API_SOCK=/run/hogman-acme/api.sock -e CDNS_ADMIN_SOCK=/cdns/admin.sock \
+  alpine:3.22 /cdns/challenge-dns serve >/dev/null
+retry 20 env CDNS_ADMIN_SOCK="$ACME/cdns/admin.sock" "$ACME/cdns/challenge-dns" cred list || exit 1
+
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$ACME/certs/ca.key" -out "$ACME/certs/ca.crt" \
+  -days 2 -subj "/CN=hogman-test-ca" -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign" >/dev/null 2>&1
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$ACME/certs/server.key" -out "$ACME/certs/server.csr" -subj "/CN=pebble" >/dev/null 2>&1
+printf 'basicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:pebble\n' > "$ACME/certs/ext.cnf"
+openssl x509 -req -in "$ACME/certs/server.csr" -CA "$ACME/certs/ca.crt" -CAkey "$ACME/certs/ca.key" -CAcreateserial \
+  -out "$ACME/certs/server.crt" -days 2 -extfile "$ACME/certs/ext.cnf" >/dev/null 2>&1
+chmod 644 "$ACME/certs/"*
+cat > "$ACME/pebble.json" <<'JSON'
+{"pebble": {"listenAddress": "0.0.0.0:14000", "managementListenAddress": "0.0.0.0:15000",
+  "certificate": "/certs/server.crt", "privateKey": "/certs/server.key", "httpPort": 5002, "tlsPort": 5001,
+  "externalAccountBindingRequired": false, "retryAfter": {"authz": 1, "order": 1}, "keyAlgorithm": "ecdsa"}}
+JSON
+docker run -d --name hogman-run-pebble --network hogman-test-acme --network-alias pebble -e PEBBLE_VA_NOSLEEP=1 \
+  -v "$ACME/certs:/certs:ro" -v "$ACME/pebble.json:/pebble.json:ro" \
+  ghcr.io/letsencrypt/pebble:2.10.3 -config /pebble.json -dnsserver hogman-run-cdns:53 >/dev/null
+retry 30 docker run --rm --network hogman-test-acme -v "$ACME/certs:/c:ro" nicolaka/netshoot:v0.14 \
+  curl -sf --cacert /c/ca.crt https://pebble:14000/dir || exit 1
+docker run --rm --network hogman-test-acme -v "$ACME/certs:/c:ro" nicolaka/netshoot:v0.14 \
+  curl -sf --cacert /c/ca.crt https://pebble:15000/roots/0 > "$ACME/issued-root.crt" || exit 1
+cat "$ACME/certs/ca.crt" "$ACME/issued-root.crt" > "$ACME/bundle.crt"
+chmod 644 "$ACME/issued-root.crt" "$ACME/bundle.crt"
+
 rsync -a --exclude data --exclude .env "$SRC/" "$WORK/"
 cd "$WORK"
 cat > .env <<EOF
 NETWORK=bobo
+ZONE=$ZONE
 PUBLIC_HOST=$PUBLIC_HOST
 PUBLIC_IPV4=
 TEST_MODE=true
+HOGMAN_ACME_SOCK_DIR=$ACME/sock
+ACME_CA_URL=https://pebble:14000/dir
+ACME_RESOLVERS=hogman-run-cdns:53
+HOGMAN_TEST_ACME_ROOT=$ACME/certs/ca.crt
 EOF
+export HOGMAN_TEST_ACME_ROOT="$ACME/certs/ca.crt"
 
 H=./hogman
 dc() {
   local envs=(--env-file .env)
   [ -f data/state.env ] && envs+=(--env-file data/state.env)
-  ZONE=$ZONE EDGE_TLS_MODE=local_certs docker compose "${envs[@]}" \
-    -f compose.yaml -f test/compose.test.yaml --profile clients "$@"
+  ZONE=$ZONE EDGE_TLS_MODE=local_certs ACME_DIR="$ACME" HOGMAN_TEST_ACME_ROOT="$ACME/certs/ca.crt" \
+    docker compose "${envs[@]}" -f compose.yaml -f test/compose.test.yaml -f test/compose.acme-root.yaml --profile clients "$@"
 }
 run()   { local c="$1"; shift; dc exec -T "$c" "$@"; }
 ip_of() {
@@ -134,28 +188,25 @@ fetch() {
 }
 can_ping()     { run "$1" ping -c2 -W2 "$2"; }
 port_open()    { run "$1" nc -z -w3 "$2" "$3"; }
-verify_cert()  { openssl verify -CAfile data/pki/public/root_ca.crt \
-                   -untrusted data/pki/public/intermediate_ca.crt "$1"; }
 has_device()   { match "$1" $H device list; }
 no_device_of() {
   local out
   out="$($H device list)" || return 1
   ! awk -v u="$1" '$2 == u { found=1 } END { exit !found }' <<<"$out"
 }
-
-site_cert() { run bob-tools sh -c "echo | openssl s_client -connect $1:443 -servername $1 \
-                -CAfile $ROOT 2>/dev/null | openssl x509"; }
-expires_within() {
-  local pem; pem="$(site_cert "$1")" || return 1
-  [ -n "$pem" ] || return 1
-  openssl x509 -noout -checkend 0 <<<"$pem" >/dev/null || return 1
-  ! openssl x509 -noout -checkend $(( $2 * 3600 )) <<<"$pem" >/dev/null
+cert_verifies() {
+  run bob-tools sh -c "echo | openssl s_client -connect $1:443 -servername $1 -CAfile $ROOT -verify_return_error >/dev/null 2>&1"
 }
 
 # ===========================================================================
 
 step "Deploy"
 $H init || exit 1
+cdns_out="$(CDNS_ADMIN_SOCK="$ACME/cdns/admin.sock" "$ACME/cdns/challenge-dns" cred add pen bobo)" || exit 1
+cdns_tok="$(awk '/^token:/ {print $2}' <<<"$cdns_out")"
+[ -n "$cdns_tok" ] || exit 1
+install -d -m 0700 "$WORK/data/secrets/registrar"
+( umask 077; printf '%s' "$cdns_tok" > "$WORK/data/secrets/registrar/challenge_dns_token" )
 $H up   || exit 1
 . ./data/state.env
 check "the registrar is up and in sync" $H sync
@@ -170,8 +221,8 @@ check "owner minted two invites" test -n "$ALICE_TOKEN" -a -n "$BOB_TOKEN"
 r="$(redeem "$ALICE_TOKEN" alice)"; alice_json="${r% *}"
 check "alice redeems her invite (HTTP ${r##* })" test "${r##* }" = 201
 ALICE_LAPTOP_KEY="$(jq -r .auth_key <<<"$alice_json")"
-fp="$(jq -r .root_fingerprint <<<"$alice_json")"
-check "the enrolment carries the network's root (fingerprint matches)" test "$fp" = "$(tr -d ':' <<<"$ROOT_FINGERPRINT")"
+check "the enrolment is public mode without root fingerprint" \
+  jq -e '.cert_mode == "public" and (.root_fingerprint // "") == "" and (.root_ca // "") == ""' <<<"$alice_json"
 check "the enrolment carries the control server" test "$(jq -r .login_server <<<"$alice_json")" = "https://$PUBLIC_HOST"
 r="$(redeem "$ALICE_TOKEN" mallory)"
 check "an invite works only once (HTTP ${r##* })" test "${r##* }" = 403
@@ -203,10 +254,11 @@ check "the portal knows alice from her mesh address (alice, admin)" \
 me="$(api bob-tools GET /api/me)"
 check "... and bob from his (bob, member)" test "$(jq -r '.member.handle + "/" + .member.role' <<<"$me")" = bob/member
 
-step "Alice adds a server and names it"
+step "Alice adds a server and shares a site"
 srv="$(api alice-laptop-tools POST /api/devices '{"kind":"server"}')"
 ALICE_SERVER_KEY="$(jq -r .auth_key <<<"$srv")"
 check "alice gets a server key from the portal" test -n "$ALICE_SERVER_KEY" -a "$ALICE_SERVER_KEY" != null
+check "the device link carries no fingerprint" bash -c '! grep -q "fp=" <<<"$1"' _ "$(jq -r .join_link <<<"$srv")"
 check "the device link comes with a QR code drawn inside the pen" grep -q '^<svg ' <<<"$(jq -r .join_qr_svg <<<"$srv")"
 portal_has_ui() {
   local body
@@ -222,63 +274,60 @@ portal_assets_ok() {
 }
 check "portal external JS/CSS load" portal_assets_ok
 export ALICE_SERVER_KEY
-dc up -d alice-server alice-web alice-tools
+dc up -d alice-server alice-tools
 retry 90 has_ip alice-server; ALICE_SERVER_IP="$(ip_of alice-server)"
+docker exec -d "$(dc ps -q alice-tools)" sh -c 'while true; do nc -l -p 443 >/dev/null 2>&1 || nc -l 443 >/dev/null 2>&1; done'
+docker exec -d "$(dc ps -q alice-tools)" sh -c 'while true; do nc -l -p 2222 >/dev/null 2>&1 || nc -l 2222 >/dev/null 2>&1; done'
 check "her server is recorded as hers" retry 20 match 'alice.*server' $H device list
 SERVER_ID="$(api alice-laptop-tools GET /api/me | jq -r '.devices[] | select(.kind=="server") | .id')"
 echo "  core=$CORE_MESH_IP alice-laptop=$ALICE_LAPTOP_IP bob-laptop=$BOB_LAPTOP_IP alice-server=$ALICE_SERVER_IP (#$SERVER_ID) stray=$STRAY_IP"
 LAPTOP_ID="$(api alice-laptop-tools GET /api/me | jq -r '.devices[] | select(.kind=="personal") | .id')"
-check "a name can't point at a personal device"  expect 400 alice-laptop-tools POST /api/names "{\"name\":\"alice\",\"device_id\":$LAPTOP_ID}"
-check "a sub-name needs its parent claimed first" expect 403 alice-laptop-tools POST /api/names "{\"name\":\"blog.alice\",\"device_id\":$SERVER_ID}"
-check "alice claims alice.$ZONE"      expect 201 alice-laptop-tools POST /api/names "{\"name\":\"alice\",\"device_id\":$SERVER_ID}"
-check "alice claims blog.alice.$ZONE" expect 201 alice-laptop-tools POST /api/names "{\"name\":\"blog.alice\",\"device_id\":$SERVER_ID}"
+check "a name can't point at a personal device"  expect 400 alice-laptop-tools POST /api/names "{\"name\":\"srv\",\"device_id\":$LAPTOP_ID}"
+check "a sub-name needs its parent claimed first" expect 403 alice-laptop-tools POST /api/names "{\"name\":\"sub.srv\",\"device_id\":$SERVER_ID}"
+check "alice claims srv.$ZONE"      expect 201 alice-laptop-tools POST /api/names "{\"name\":\"srv\",\"device_id\":$SERVER_ID}"
+check "alice claims sub.srv.$ZONE" expect 201 alice-laptop-tools POST /api/names "{\"name\":\"sub.srv\",\"device_id\":$SERVER_ID}"
 check "reserved names are refused"    expect 403 alice-laptop-tools POST /api/names "{\"name\":\"home\",\"device_id\":$SERVER_ID}"
-check "bob can't take alice's name"   expect 409 bob-tools POST /api/names "{\"name\":\"alice\",\"device_id\":$SERVER_ID}"
+check "bob can't take srv"          expect 409 bob-tools POST /api/names "{\"name\":\"srv\",\"device_id\":$SERVER_ID}"
 check "bob can't point a name at alice's server" expect 400 bob-tools POST /api/names "{\"name\":\"bobsite\",\"device_id\":$SERVER_ID}"
 
+srv_share="$(api alice-laptop-tools POST /api/devices '{"kind":"server"}')"
+ALICE_SHARE_LINK="$(jq -r .join_link <<<"$srv_share")"
+dc up -d alice-share
+retry 20 run alice-share test -s /etc/ssl/certs/ca-certificates.crt
+run alice-share sh -c 'mkdir -p /tmp/www && echo "hello from alice.'"$ZONE"'" > /tmp/www/index.html'
+out="$(run alice-share sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open share alice /tmp/www "$1" --background' _ "$ALICE_SHARE_LINK" 2>&1)"; rc=$?
+[ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
+check "alice shares https://alice.$ZONE with hogman-join share (exit $rc)" grep -q "https://alice.$ZONE is up" <<<"$out"
+
 step "Naming"
-check "bob resolves alice.$ZONE to alice's server" retry 30 resolves_to alice.$ZONE "$ALICE_SERVER_IP"
+check "bob resolves srv.$ZONE to alice's server" retry 30 resolves_to srv.$ZONE "$ALICE_SERVER_IP"
+check "bob resolves alice.$ZONE to alice's share" retry 30 resolves_any alice.$ZONE
 check "bob resolves home.$ZONE to the core node"   resolves_to home.$ZONE "$CORE_MESH_IP"
-check "bob resolves ca.$ZONE to the core node"     resolves_to ca.$ZONE "$CORE_MESH_IP"
+check "ca.$ZONE has no DNS record"                 resolves_none ca.$ZONE
 check "device names work (alice-server.nodes.$ZONE)" resolves_to alice-server.nodes.$ZONE "$ALICE_SERVER_IP"
 check "ordinary names still resolve (example.com)" resolves_any example.com
 check "the network's DNS refuses outside names (not an open resolver)" refused example.com
 in_directory() { match "$1" api bob-tools GET /api/directory; }
-check "the directory lists alice's sites" in_directory "blog.alice.$ZONE"
+check "the directory lists alice's server sub-name" in_directory "sub.srv.$ZONE"
+check "the directory lists alice's shared site"     in_directory "alice.$ZONE"
 
-step "HTTPS with the network's own CA"
-legacy_acme_dir_ok() {
-  run bob-tools curl -sf -m5 --cacert $ROOT "https://ca.$ZONE/acme/acme/directory" \
-    | jq -e --arg p "https://ca.$ZONE/" \
-      '(.newNonce | startswith($p)) and (.newAccount | startswith($p)) and (.newOrder | startswith($p))'
-}
-check "legacy CA URL https://ca.$ZONE/acme/acme/directory serves port-443 links" retry 60 legacy_acme_dir_ok
-check "portal https://home.$ZONE is trusted"                    retry 60 fetch home.$ZONE "You're in"
-check "alice's site https://alice.$ZONE is trusted (ACME cert)" retry 150 fetch alice.$ZONE "hello from alice.$ZONE"
-check "sub-names work via legacy port-443 CA URL (https://blog.alice.$ZONE)" retry 150 fetch blog.alice.$ZONE "hello from blog.alice"
-check "site certs are short-lived (expire within 7 days)" retry 10 expires_within alice.$ZONE 168
-check "the CA is healthy" retry 30 sh -c "[ \"\$(docker inspect -f '{{.State.Health.Status}}' $COMPOSE_PROJECT_NAME-step-ca-1)\" = healthy ]"
-
-step "Name constraints: the CA cannot vouch for outside names"
-docker run --rm --user "$(id -u):$(id -g)" -v "$WORK/data:/d" --entrypoint sh smallstep/step-ca:0.30.2 -c '
-  for n in www.google.com inside.bobo.hogman; do
-    step certificate create "$n" "/d/$n.crt" "/d/$n.key" --profile leaf \
-      --ca /d/pki/public/intermediate_ca.crt --ca-key /d/step/secrets/intermediate_ca_key \
-      --ca-password-file /d/step/secrets/intermediate_password \
-      --not-after 1h --no-password --insecure --force >/dev/null
-  done'
-check "a cert for inside.$ZONE verifies"                         verify_cert data/inside.bobo.hogman.crt
-check "a cert for www.google.com from our own CA key is rejected" not verify_cert data/www.google.com.crt
+step "Public HTTPS certificates (ACME DNS-01)"
+check "there is no step-ca container"            not docker inspect "$COMPOSE_PROJECT_NAME-step-ca-1"
+check "there is no private PKI directory"        test ! -e "$WORK/data/pki"
+check "portal https://home.$ZONE answers"        retry 60 fetch home.$ZONE "You're in"
+check "portal certificate verifies against test public CA" cert_verifies "home.$ZONE"
+check "alice's site https://alice.$ZONE answers" retry 150 fetch alice.$ZONE "hello from alice.$ZONE"
+check "alice's site certificate verifies against test public CA" cert_verifies "alice.$ZONE"
 
 step "Default-deny access policy"
 # HTTPS only (D-11): members reach servers on 443 and nothing else.
-docker exec -d "$(dc ps -q alice-tools)" sh -c 'nc -lk -p 2222 -e cat >/dev/null 2>&1 || nc -lk 2222'
 check "bob's laptop can reach alice's server on 443"     retry 20 port_open bob-tools "$ALICE_SERVER_IP" 443
 check "... but not on 80"                                 not port_open bob-tools "$ALICE_SERVER_IP" 80
 check "... but on no other port (2222 is open there)"    not port_open bob-tools "$ALICE_SERVER_IP" 2222
 # (Ping still answers: Tailscale's filter lets ICMP through between devices
 # allowed any port. It can't carry data, so it isn't a way in.)
 check "the server itself has 2222 open (so the above means something)" run alice-tools nc -z -w3 127.0.0.1 2222
+check "bob's laptop cannot reach retired CA port 9000"     not port_open bob-tools "$CORE_MESH_IP" 9000
 check "bob's laptop cannot reach alice's laptop"         not port_open bob-tools "$ALICE_LAPTOP_IP" 443
 check "alice's server cannot reach bob's laptop"         not port_open alice-tools "$BOB_LAPTOP_IP" 443
 check "members cannot reach other ports on the core (22)" not port_open bob-tools "$CORE_MESH_IP" 22
@@ -317,7 +366,7 @@ check "mesh API rejects same-site browser requests (403)" \
 step "A device that bypassed the registrar gets nothing"
 check "it is not recorded as anyone's device" no_match stray-device $H device list
 check "it cannot reach the portal"     not port_open stray-tools "$CORE_MESH_IP" 443
-check "it cannot reach the CA"         not port_open stray-tools "$CORE_MESH_IP" 9000
+check "it cannot reach retired CA port 9000" not port_open stray-tools "$CORE_MESH_IP" 9000
 check "it cannot reach alice's server" not port_open stray-tools "$ALICE_SERVER_IP" 443
 check "bob cannot reach it"            not can_ping bob-tools "$STRAY_IP"
 
@@ -343,7 +392,7 @@ page_ok() {
   html="$(from_internet "https://$PUBLIC_HOST/join")" || return 1
   grep -q 'hogman-join' <<<"$html"
 }
-net_ok()   { match '"zone":"bobo.hogman"' from_internet "https://$PUBLIC_HOST/hogman/v1/network"; }
+net_ok()   { from_internet "https://$PUBLIC_HOST/hogman/v1/network" | jq -e --arg z "$ZONE" '.zone == $z and .cert_mode == "public" and (.root_ca // "") == "" and (.root_fingerprint // "") == ""'; }
 check "https://<host>/join serves the join page" page_ok
 check "edge runs non-root ($HOGMAN_UID:$HOGMAN_GID)" bash -c 'test "$1" != 0 && test "$2" = "$1:$3"' _ "$HOGMAN_UID" "$(docker inspect -f '{{.Config.User}}' "$(dc ps -q edge)")" "$HOGMAN_GID"
 check "portal runs non-root ($HOGMAN_UID:$HOGMAN_GID)" bash -c 'test "$1" != 0 && test "$2" = "$1:$3"' _ "$HOGMAN_UID" "$(docker inspect -f '{{.Config.User}}' "$(dc ps -q portal)")" "$HOGMAN_GID"
@@ -382,19 +431,20 @@ join_tool() {  # join_tool <container> <args...>
   run "$c" sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open "$@"' _ "$@"
 }
 CAROL_LINK="$($H invite create --note carol | awk '/^link:/ {print $2}')"
-BAD_LINK="${CAROL_LINK%fp=*}fp=$(printf '%064d' 0)"
+check "the invite link carries no fingerprint" bash -c '! grep -q "fp=" <<<"$1"' _ "$CAROL_LINK"
+BAD_LINK="${CAROL_LINK}&fp=$(printf '%064d' 0)"
 out="$(join_tool carol-laptop --handle carol "$BAD_LINK" 2>&1)"
-check "a link with the wrong fingerprint is refused" grep -q 'fingerprint mismatch' <<<"$out"
+check "a legacy link with fp= is refused" grep -q 'older release' <<<"$out"
 check "... before the invite is used" match 'open.*carol' $H invite list
 out="$(join_tool carol-laptop --handle carol --hostname carol-laptop "$CAROL_LINK" 2>&1)"; rc=$?
 echo "$out" | sed 's/^/        | /'
 check "the join tool succeeds (exit $rc)" test $rc = 0
-check "it reports carol is in" grep -q "You're in. You are carol on bobo.hogman" <<<"$out"
+check "it reports carol is in" grep -q "You're in. You are carol on $ZONE" <<<"$out"
 check "with Tailscale installed, it still joins the usual HTTPS-only way" grep -q "own small connection" <<<"$out"
 ts_untouched() { [ "$(run carol-laptop tailscale status --json | jq -r .BackendState)" != Running ]; }
 check "... and leaves this computer's Tailscale alone" ts_untouched
-check "it installed the network's root in the system store" \
-  run carol-laptop test -s /usr/local/share/ca-certificates/hogman-bobo.hogman.crt
+check "nothing was added to the system trust store" \
+  no_match hogman run carol-laptop ls /usr/local/share/ca-certificates
 check "the registrar recorded carol's laptop" retry 10 match 'carol.*carol-laptop' $H device list
 check "no account recovery: the server won't make a device link for carol, who has joined" not $H device key carol personal
 check "a new member can still be given a first device link from the server" $H member add erin
@@ -407,10 +457,8 @@ check "a device link joins that member (exit $rc)" grep -q "You're in. You are e
 check "the registrar recorded it as erin's" retry 10 match 'erin.*carol-desktop' $H device list
 out="$(join_tool carol-desktop leave "$DEVICE_LINK" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
-check "leave works (exit $rc)" grep -q "Left bobo.hogman" <<<"$out"
-check "leave removed the root from the system store" \
-  run carol-desktop sh -c '! test -e /usr/local/share/ca-certificates/hogman-bobo.hogman.crt'
-conn_gone() { ! run carol-desktop test -e /root/.config/hogman/bobo.hogman; }
+check "leave works (exit $rc)" grep -q "Left $ZONE" <<<"$out"
+conn_gone() { ! run carol-desktop test -e "/root/.config/hogman/$ZONE"; }
 check "leave removed the pen's connection and its settings" conn_gone
 
 step "Side by side: a computer with no Tailscale at all"
@@ -421,15 +469,17 @@ out="$(join_tool dave-laptop --handle dave --hostname dave-laptop "$DAVE_LINK" 2
 echo "$out" | sed 's/^/        | /'
 check "the join tool succeeds without Tailscale installed (exit $rc)" test $rc = 0
 check "it joined the usual way (side by side)" grep -q "joining side by side" <<<"$out"
-check "it reports dave is in" grep -q "You're in. You are dave on bobo.hogman" <<<"$out"
+check "it reports dave is in" grep -q "You're in. You are dave on $ZONE" <<<"$out"
+check "nothing was added to dave's system trust store" \
+  no_match hogman run dave-laptop ls /usr/local/share/ca-certificates
 check "the registrar recorded dave's laptop" retry 10 match 'dave.*dave-laptop' $H device list
-PROXY="$(run dave-laptop sh -c 'grep -o "127.0.0.1:[0-9]*" /root/.config/hogman/bobo.hogman/config.json | head -1' | tr -d '\r')"
-via_pen()   { run dave-laptop curl -sf -m10 --proxy "http://$PROXY" "$1"; }
+PROXY="$(run dave-laptop sh -c 'grep -o "127.0.0.1:[0-9]*" "/root/.config/hogman/'"$ZONE"'/config.json" | head -1' | tr -d '\r')"
+via_pen()   { run dave-laptop curl -sf -m10 --cacert $ROOT --proxy "http://$PROXY" "$1"; }
 alice_via() { match "hello from alice.$ZONE" via_pen "https://alice.$ZONE"; }
 check "dave loads alice's site through the pen, trusted by the system store" retry 20 alice_via
 outside_code() { run dave-laptop curl -s -m10 -o /dev/null -w '%{http_code}' --proxy "http://$PROXY" http://example.com | tr -d '\r'; }
 check "the pen's proxy refuses anything outside the pen (HTTP $(outside_code))" test "$(outside_code)" = 403
-pac_ok() { match 'dnsDomainIs(host, ".bobo.hogman")' run dave-laptop curl -sf "http://$PROXY/proxy.pac"; }
+pac_ok() { match "dnsDomainIs(host, \".$ZONE\")" run dave-laptop curl -sf "http://$PROXY/proxy.pac"; }
 check "its rules file sends only pen names through the pen" pac_ok
 no_tun() {
   local out
@@ -475,6 +525,7 @@ dc up -d dave-server
 retry 20 run dave-server test -s /etc/ssl/certs/ca-certificates.crt
 SHARE_LINK="$($H device key dave server | awk '/^link:/ {print $2}')"
 check "a server link is marked for share" grep -q 'for=share' <<<"$SHARE_LINK"
+check "the server link carries no fingerprint" bash -c '! grep -q "fp=" <<<"$1"' _ "$SHARE_LINK"
 out="$(join_tool dave-server --hostname dave-server "$SHARE_LINK" 2>&1)"; rc=$?
 check "joining a whole computer with a server link is refused (exit $rc)" test $rc != 0
 check "... and says to use it with share" grep -q "hogman-join share" <<<"$out"
@@ -492,23 +543,23 @@ check "and it stops cleanly (exit $rc)" grep -q "app.$ZONE is down" <<<"$out"
 
 out="$(join_tool dave-laptop update --dry-run 2>&1)"; rc=$?
 check "hogman-join update --dry-run checks SHA256SUMS cleanly (exit $rc)" bash -c 'test "$1" = 0 && grep -q "already up to date" <<<"$2"' _ "$rc" "$out"
-BEFORE_PID="$(run dave-laptop cat /root/.config/hogman/bobo.hogman/agent.pid 2>/dev/null | tr -d '\r')"
-run dave-laptop sh -c 'printf "#!/bin/sh\nexit 1\n" > /root/.config/hogman/bobo.hogman/.stale-join && chmod 755 /root/.config/hogman/bobo.hogman/.stale-join && mv /root/.config/hogman/bobo.hogman/.stale-join /root/.config/hogman/bobo.hogman/hogman-join'
+BEFORE_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>/dev/null | tr -d '\r')"
+run dave-laptop sh -c 'printf "#!/bin/sh\nexit 1\n" > "/root/.config/hogman/'"$ZONE"'/.stale-join" && chmod 755 "/root/.config/hogman/'"$ZONE"'/.stale-join" && mv "/root/.config/hogman/'"$ZONE"'/.stale-join" "/root/.config/hogman/'"$ZONE"'/hogman-join"'
 out="$(join_tool dave-laptop update 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
 check "hogman-join update repairs stale pen copy and restarts agent (exit $rc)" bash -c 'test "$1" = 0 && grep -q "Updated " <<<"$2"' _ "$rc" "$out"
-AFTER_PID="$(run dave-laptop cat /root/.config/hogman/bobo.hogman/agent.pid 2>/dev/null | tr -d '\r')"
+AFTER_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>/dev/null | tr -d '\r')"
 check "... restarted agent with a new process" test -n "$BEFORE_PID" -a -n "$AFTER_PID" -a "$BEFORE_PID" != "$AFTER_PID"
-check "... and installed binary matches /join/dl exactly" run dave-laptop sh -c 'cmp -s /root/.config/hogman/bobo.hogman/hogman-join "/dl/hogman-join-$(uname -s)-$(uname -m)"'
+check "... and installed binary matches /join/dl exactly" run dave-laptop sh -c 'cmp -s "/root/.config/hogman/'"$ZONE"'/hogman-join" "/dl/hogman-join-$(uname -s)-$(uname -m)"'
 check "... and restarted agent still loads alice.$ZONE" retry 20 alice_via
 
 out="$(join_tool dave-laptop leave "$DAVE_LINK" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
-check "leave works (exit $rc)" grep -q "Left bobo.hogman" <<<"$out"
+check "leave works (exit $rc)" grep -q "Left $ZONE" <<<"$out"
 check "... and removed dave's laptop from his devices" grep -q "removed this computer from your devices" <<<"$out"
 dave_laptop_gone() { local out; out="$($H device list)" || return 1; [ -z "$(awk '$2 == "dave" && $4 == "dave-laptop"' <<<"$out")" ]; }
 check "... so it's no longer listed" retry 10 dave_laptop_gone
-gone() { ! run dave-laptop test -e /root/.config/hogman/bobo.hogman; }
+gone() { ! run dave-laptop test -e "/root/.config/hogman/$ZONE"; }
 check "leave removed the connection and its settings" gone
 proxy_closed() { ! run dave-laptop curl -s -m3 -o /dev/null "http://$PROXY/status"; }
 check "the proxy is no longer running" retry 10 proxy_closed

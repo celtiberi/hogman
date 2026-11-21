@@ -10,7 +10,7 @@ updates:
   - package-ecosystem: docker
     directories: ["/core/join", "/core/registrar", "/deploy/signup", "/site"]
     schedule: { interval: weekly }
-  # The pens' runtime images (Headscale, step-ca, Caddy, Tailscale) in compose.
+  # The pens' runtime images (Headscale, Caddy, Tailscale) in compose.
   - package-ecosystem: docker-compose
     directory: "/core"
     schedule: { interval: weekly }

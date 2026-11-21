@@ -49,62 +49,6 @@ func sbinTool(name string) string {
 	return ""
 }
 
-func anchorPath(s *anchorStore, r *RootInfo) string {
-	return filepath.Join(s.dir, "hogman-"+r.Zone+".crt")
-}
-
-func trustInstalled(r *RootInfo) bool {
-	s, err := linuxStore()
-	if err != nil {
-		return false
-	}
-	b, err := os.ReadFile(anchorPath(s, r))
-	return err == nil && string(b) == r.PEM
-}
-
-// installTrust adds the root to the system store used by curl, git, Go,
-// Python's requests (via certifi only if configured) and most tools.
-// Chrome and Firefox on Linux keep their own stores (NSS); see the hint printed.
-func installTrust(r *RootInfo, file string) error {
-	s, err := linuxStore()
-	if err != nil {
-		return err
-	}
-	if trustInstalled(r) {
-		note("already trusted")
-		return nil
-	}
-	if out, err := run(true, "install", "-m", "0644", file, anchorPath(s, r)); err != nil {
-		return errorf("could not copy the certificate: %v\n%s", err, out)
-	}
-	if out, err := run(true, s.update[0], s.update[1:]...); err != nil {
-		return errorf("could not refresh the certificate store: %v\n%s", err, out)
-	}
-	note("browsers on Linux keep their own list; if Chrome or Firefox warn, import %s there", anchorPath(s, r))
-	note("(it's also at https://home.%s/root_ca.crt once you're in)", r.Zone)
-	return nil
-}
-
-func removeTrust(r *RootInfo, _ string) error {
-	s, err := linuxStore()
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(anchorPath(s, r)); err != nil {
-		return nil
-	}
-	if out, err := run(true, "rm", "-f", anchorPath(s, r)); err != nil {
-		return errorf("could not remove the certificate: %v\n%s", err, out)
-	}
-	// --fresh rebuilds /etc/ssl/certs, so no dangling link to the removed file is left.
-	args := s.update[1:]
-	if filepath.Base(s.update[0]) == "update-ca-certificates" {
-		args = append([]string{"--fresh"}, args...)
-	}
-	_, err = run(true, s.update[0], args...)
-	return err
-}
-
 func removeLegacyHogmanRoot(zone, rootFP string) (bool, error) {
 	s, err := linuxStore()
 	if err != nil {

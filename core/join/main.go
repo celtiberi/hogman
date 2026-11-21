@@ -1,11 +1,10 @@
 // Command hogman-join puts a device on a Hogman network in one step:
 //
-//	hogman-join 'https://hs.example.com/join#t=...&fp=...'
+//	hogman-join 'https://bobo.gate.example.com/join#t=...'
 //
-// It checks the network's certificate against the fingerprint in the link,
-// redeems the invite (or uses the device key in the link), adds the
-// certificate to this computer's trust store, joins with the Tailscale client
-// as a separate profile, and checks the network's portal loads over HTTPS.
+// It verifies the network over this computer's built-in trusted certificates,
+// redeems the invite (or uses the device key in the link), joins side by side
+// with a local proxy for pen names only, and checks the portal loads over HTTPS.
 package main
 
 import (
@@ -20,9 +19,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -45,8 +42,8 @@ const usageText = `hogman-join: join this device to a Hogman private network
 usage:
   hogman-join [options] '<link>'      join, using an invite or device link
   hogman-join update ['<link|host>']  update hogman-join from a pen's server (verifies SHA-256)
-  hogman-join leave '<link>'          remove the network's certificate and log out of it
-  hogman-join share NAME WHAT         put a port or a folder on the pen as https://NAME.<pen>.hogman
+  hogman-join leave '<link>'          log out and remove this computer from the pen
+  hogman-join share NAME WHAT         put a port or a folder on the pen over HTTPS
                                       (hogman-join share --help for more)
 
 options:
@@ -55,7 +52,6 @@ options:
   --no-service      don't register a login item, just run in the background
   --no-system-proxy don't change this computer's automatic proxy setting
   --dry-run         check the link and the network, then stop without changing anything
-  --no-trust        don't add the network's certificate to this computer
   --no-open         don't open the portal in a browser at the end
   --verbose         show the commands being run
   --control-ca FILE extra certificate to trust for the public control server
@@ -65,14 +61,14 @@ Quote the link: it contains '#' and '&'.
 `
 
 type options struct {
-	handle, hostname, controlCA  string
-	yes, dryRun, noTrust, noOpen bool
-	alongside                    bool // accepted for old scripts; it's the only way now
-	noService, noSystemProxy     bool
-	pen                          string // share: which pen
-	background                   bool   // share: keep running after the window closes
-	note                         string // share: one-line note for the pen directory
-	noteSet                      bool
+	handle, hostname, controlCA string
+	yes, dryRun, noOpen         bool
+	alongside                   bool // accepted for old scripts; it's the only way now
+	noService, noSystemProxy    bool
+	pen                         string // share: which pen
+	background                  bool   // share: keep running after the window closes
+	note                        string // share: one-line note for the pen directory
+	noteSet                     bool
 }
 
 func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err error) {
@@ -92,7 +88,6 @@ func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err 
 	fs.StringVar(&o.controlCA, "control-ca", "", "")
 	fs.BoolVar(&o.yes, "yes", false, "")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "")
-	fs.BoolVar(&o.noTrust, "no-trust", false, "")
 	fs.BoolVar(&o.noOpen, "no-open", false, "")
 	fs.BoolVar(&verbose, "verbose", false, "")
 	fs.BoolVar(&o.alongside, "alongside", false, "")
@@ -144,16 +139,6 @@ func main() {
 		return
 	}
 	switch {
-	case len(pos) == 2 && pos[0] == "__check-portal":
-		// Internal: runs in a fresh process so the trust store is read anew
-		// (Go loads the system's certificates once per process on Linux).
-		who, cerr := checkPortal(pos[1], 45*time.Second)
-		if cerr != nil {
-			fmt.Fprintln(os.Stderr, cerr.Error())
-			os.Exit(1)
-		}
-		fmt.Println(who)
-		return
 	case len(pos) == 2 && pos[0] == "__agent-logout":
 		agentLogout(pos[1])
 		return
@@ -203,13 +188,11 @@ func main() {
 // ---------------------------------------------------------------- network --
 
 type networkInfo struct {
-	Zone            string `json:"zone"`
-	LoginServer     string `json:"login_server"`
-	CertMode        string `json:"cert_mode"`
-	RootCA          string `json:"root_ca"`
-	RootFingerprint string `json:"root_fingerprint"`
-	Portal          string `json:"portal"`
-	DNSServer       string `json:"dns_server"`
+	Zone        string `json:"zone"`
+	LoginServer string `json:"login_server"`
+	CertMode    string `json:"cert_mode"`
+	Portal      string `json:"portal"`
+	DNSServer   string `json:"dns_server"`
 }
 
 type enrolment struct {
@@ -306,42 +289,12 @@ func testACMECAPool() (*x509.CertPool, error) {
 	return pool, nil
 }
 
-func checkLinkCertMode(link *Link, n *networkInfo) (*RootInfo, error) {
-	switch n.CertMode {
-	case "private":
-		if link.Fingerprint == "" {
-			return nil, errorf("this link has no certificate fingerprint (fp=), which %s requires; ask whoever sent it for a fresh link", n.Zone)
-		}
-		root, err := CheckRoot(n.RootCA, link.Fingerprint, n.Zone)
-		if err != nil {
-			return nil, errorf("%v", err)
-		}
-		return root, nil
-	case "public":
-		if link.Fingerprint != "" {
-			return nil, errorf("this network (%s) uses public certificates and should not carry a certificate fingerprint (fp=)", n.Zone)
-		}
-		return nil, nil
-	default:
-		return nil, errorf("%s returned unsupported certificate mode %q", link.Host, n.CertMode)
-	}
-}
-
 func validateNetworkInfo(host string, n *networkInfo) error {
-	switch n.CertMode {
-	case "private":
-		if !zoneRE.MatchString(n.Zone) {
-			return errorf("%s sent an unexpected network name %q", host, n.Zone)
-		}
-	case "public":
-		if err := validatePublicZone(host, n.Zone); err != nil {
-			return err
-		}
-		if n.RootCA != "" || n.RootFingerprint != "" {
-			return errorf("refusing: %s sent root CA data while in public certificate mode", host)
-		}
-	default:
+	if n.CertMode != "" && n.CertMode != "public" {
 		return errorf("%s returned unsupported certificate mode %q", host, n.CertMode)
+	}
+	if err := validatePublicZone(host, n.Zone); err != nil {
+		return err
 	}
 	if n.LoginServer != "https://"+host {
 		return errorf("refusing: %s redirected login to %q instead of https://%s", host, n.LoginServer, host)
@@ -454,17 +407,7 @@ func join(raw string, o options) error {
 	if err != nil {
 		return err
 	}
-	root, err := checkLinkCertMode(link, n)
-	if err != nil {
-		return err
-	}
 	note("network: %s", n.Zone)
-	if root != nil {
-		note("its certificate matches the link (%s)", short(root.Fingerprint))
-		note("and can only vouch for names ending in .%s", n.Zone)
-	} else {
-		note("uses public certificates")
-	}
 
 	// One way in (D-11): the agent, which runs as this user and carries HTTPS to
 	// the pen's names and nothing else. Joining through this computer's
@@ -478,7 +421,7 @@ func join(raw string, o options) error {
 				"  Then run hogman-join leave '<this link>', and join with the fresh link.", n.Zone, n.Portal)
 		}
 	}
-	return joinAlongside(link, n, root, client, o, "the pen's own small connection: HTTPS to the pen and nothing else")
+	return joinAlongside(link, n, client, o, "the pen's own small connection: HTTPS to the pen and nothing else")
 }
 
 func firstLine(s string) string { return strings.SplitN(strings.TrimSpace(s), "\n", 2)[0] }
@@ -521,60 +464,6 @@ func redeemWithHandle(c *http.Client, link *Link, o options) (*enrolment, error)
 	}
 }
 
-// checkPortalFresh runs checkPortal in a new copy of this program, so the
-// check sees the trust store as any newly started app would.
-func checkPortalFresh(portal string) (string, error) {
-	self, err := os.Executable()
-	if err != nil {
-		return checkPortal(portal, 45*time.Second)
-	}
-	cmd := exec.Command(self, "__check-portal", portal)
-	var out, errOut bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errOut
-	if err := cmd.Run(); err != nil {
-		return "", errorf("%s", strings.TrimSpace(errOut.String()))
-	}
-	return strings.TrimSpace(out.String()), nil
-}
-
-// checkPortal loads the portal using this computer's own trust store and DNS:
-// exactly what a browser will do. It returns the member's handle.
-func checkPortal(portal string, d time.Duration) (string, error) {
-	c := &http.Client{Timeout: 8 * time.Second}
-	if p := os.Getenv("HOGMAN_CHECK_PROXY"); p != "" {
-		if pu, err := url.Parse(p); err == nil {
-			c.Transport = &http.Transport{Proxy: http.ProxyURL(pu)}
-		}
-	}
-	deadline := time.Now().Add(d)
-	var last error
-	for time.Now().Before(deadline) {
-		resp, err := c.Get(portal + "/api/me")
-		if err == nil {
-			var me struct {
-				Member struct{ Handle string }
-			}
-			data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-			resp.Body.Close()
-			if resp.StatusCode == 200 && json.Unmarshal(data, &me) == nil {
-				return me.Member.Handle, nil
-			}
-			err = fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
-		}
-		last = err
-		time.Sleep(2 * time.Second)
-	}
-	var ue x509.UnknownAuthorityError
-	if errors.As(last, &ue) {
-		return "", errorf("the portal's certificate is not trusted on this computer yet: %v", last)
-	}
-	var dnsErr *net.DNSError
-	if errors.As(last, &dnsErr) {
-		return "", errorf("this computer cannot find the network's names yet (%v). Is Tailscale's DNS enabled?", last)
-	}
-	return "", errorf("joined, but the portal did not load: %v", last)
-}
-
 // ------------------------------------------------------------------ leave --
 
 func leave(raw string, o options) error {
@@ -591,10 +480,6 @@ func leave(raw string, o options) error {
 	if err != nil {
 		return err
 	}
-	root, err := checkLinkCertMode(link, n)
-	if err != nil {
-		return err
-	}
 	// Shares on this pen go first, while they can still give their names back.
 	for _, dir := range allShares(n.Zone) {
 		if c, err := loadShare(dir); err == nil {
@@ -605,28 +490,20 @@ func leave(raw string, o options) error {
 			}
 		}
 	}
-	// The certificate next: it is the part that matters on this computer, and
-	// it needs nothing from the network. It goes before the device, so that
-	// cancelling the password prompt leaves this computer still on the pen.
-	if root != nil {
-		certFile, cleanupCert, err := writeTempCert(root.PEM)
-		if err != nil {
-			return err
-		}
-		defer cleanupCert()
-		had := trustInstalled(root)
-		if err := removeTrust(root, certFile); err != nil {
-			return err
-		}
-		if had {
-			note("removed the %s certificate", n.Zone)
-		} else {
-			note("the %s certificate was not installed", n.Zone)
-		}
+	// Legacy private-CA cleanup goes before removing the device, so cancelling
+	// an OS trust prompt leaves this computer still on the pen.
+	rootFP := ""
+	if cfg, err := loadAgentConfig(stateDir(n.Zone)); err == nil {
+		rootFP = cfg.RootFP
+	}
+	if removed, err := removeLegacyHogmanRoot(n.Zone, rootFP); err != nil {
+		return err
+	} else if removed {
+		note("removed the old %s certificate", n.Zone)
 	}
 	// This computer's own device, through its connection while it's still up,
 	// so old devices don't pile up in "Your devices".
-	removeOwnDevice(n.Zone, root)
+	removeOwnDevice(n.Zone)
 	leaveAlongside(n.Zone)
 	if ts, err := findTailscale(); err == nil {
 		if st, err := ts.Status(); err == nil && st.OnNetwork(n.Zone) {

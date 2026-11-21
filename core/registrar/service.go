@@ -4,16 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"log"
 	"net/netip"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -23,12 +20,9 @@ import (
 )
 
 type Config struct {
-	Zone              string // bobo.hogman
+	Zone              string // bobo.pens.hogman.network
 	PublicHost        string // control server hostname
 	CoreIP            string // mesh IP of the core node (DNS, portal)
-	CAIP              string // mesh IP of the CA
-	CertMode          string // "private" (default) or "public"
-	RootCAFile        string
 	NameHold          time.Duration
 	InviteTTL         time.Duration
 	DeviceKeyTTL      time.Duration
@@ -81,12 +75,10 @@ func missing(f string, a ...any) error   { return &Problem{404, fmt.Sprintf(f, a
 func conflict(f string, a ...any) error  { return &Problem{409, fmt.Sprintf(f, a...)} }
 
 type Service struct {
-	cfg     Config
-	st      *Store
-	hs      *Headscale
-	acme    ACMEBackend
-	rootPEM string
-	rootFP  string
+	cfg  Config
+	st   *Store
+	hs   *Headscale
+	acme ACMEBackend
 
 	mu         sync.Mutex // serialises changes that touch Headscale or policy
 	lastPolicy string
@@ -94,19 +86,6 @@ type Service struct {
 }
 
 func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
-	switch cfg.CertMode {
-	case "":
-		cfg.CertMode = "private"
-	case "private", "public":
-	default:
-		return nil, fmt.Errorf("invalid cert_mode %q (want private or public)", cfg.CertMode)
-	}
-	if cfg.CertMode == "public" && cfg.RootCAFile != "" {
-		return nil, errors.New("root CA cannot be set when cert_mode is public")
-	}
-	if cfg.CAIP == "" {
-		cfg.CAIP = cfg.CoreIP
-	}
 	if cfg.MaxOpenDeviceKeys <= 0 {
 		cfg.MaxOpenDeviceKeys = 10
 	}
@@ -119,35 +98,16 @@ func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
 	if cfg.MaxInviteNoteLen <= 0 {
 		cfg.MaxInviteNoteLen = 256
 	}
-	s := &Service{cfg: cfg, st: st, hs: hs, acme: cfg.ACMEBackend, orphans: map[string]bool{}}
-	if cfg.RootCAFile != "" {
-		raw, err := os.ReadFile(cfg.RootCAFile)
-		if err != nil {
-			return nil, fmt.Errorf("root CA: %w", err)
-		}
-		blk, _ := pem.Decode(raw)
-		if blk == nil {
-			return nil, errors.New("root CA: not PEM")
-		}
-		if _, err := x509.ParseCertificate(blk.Bytes); err != nil {
-			return nil, fmt.Errorf("root CA: %w", err)
-		}
-		sum := sha256.Sum256(blk.Bytes)
-		s.rootPEM = string(raw)
-		s.rootFP = strings.ToUpper(hex.EncodeToString(sum[:]))
-	}
-	return s, nil
+	return &Service{cfg: cfg, st: st, hs: hs, acme: cfg.ACMEBackend, orphans: map[string]bool{}}, nil
 }
 
 func (s *Service) LoginServer() string { return "https://" + s.cfg.PublicHost }
 
 type NetworkInfo struct {
-	Zone            string `json:"zone"`
-	LoginServer     string `json:"login_server"`
-	CertMode        string `json:"cert_mode"`
-	RootCA          string `json:"root_ca"`
-	RootFingerprint string `json:"root_fingerprint"`
-	Portal          string `json:"portal"`
+	Zone        string `json:"zone"`
+	LoginServer string `json:"login_server"`
+	CertMode    string `json:"cert_mode"`
+	Portal      string `json:"portal"`
 	// Mesh address of the pen's DNS server. Only reachable from inside the
 	// mesh; side-by-side clients resolve pen names through it.
 	DNSServer string `json:"dns_server"`
@@ -155,39 +115,28 @@ type NetworkInfo struct {
 
 func (s *Service) NetworkInfo() NetworkInfo {
 	return NetworkInfo{
-		Zone:            s.cfg.Zone,
-		LoginServer:     s.LoginServer(),
-		CertMode:        s.cfg.CertMode,
-		RootCA:          s.rootPEM,
-		RootFingerprint: s.rootFP,
-		Portal:          "https://home." + s.cfg.Zone,
-		DNSServer:       s.cfg.CoreIP,
+		Zone:        s.cfg.Zone,
+		LoginServer: s.LoginServer(),
+		CertMode:    "public",
+		Portal:      "https://home." + s.cfg.Zone,
+		DNSServer:   s.cfg.CoreIP,
 	}
 }
 
 // Links handed to people. The part after # never reaches any server: the
-// join page and join tool read it locally. Public-certificate pens omit
-// &fp= because members verify certificates against the system trust store.
+// join page and join tool read it locally.
 //
-//	invite: https://<host>/join#t=<invite token>[&fp=<root fingerprint>]
-//	device: https://<host>/join#k=<device key>[&fp=<root fingerprint>]
+//	invite: https://<host>/join#t=<invite token>
+//	device: https://<host>/join#k=<device key>
 func (s *Service) InviteLink(token string) string {
-	if s.cfg.CertMode == "public" {
-		return fmt.Sprintf("https://%s/join#t=%s", s.cfg.PublicHost, token)
-	}
-	return fmt.Sprintf("https://%s/join#t=%s&fp=%s", s.cfg.PublicHost, token, s.rootFP)
+	return fmt.Sprintf("https://%s/join#t=%s", s.cfg.PublicHost, token)
 }
 
 // DeviceLink is the one-time link for a device key. A server key's link is
 // marked for=share: server links only put things in the pen with
 // `hogman-join share`, they don't join a whole computer (D-11).
 func (s *Service) DeviceLink(key, kind string) string {
-	var link string
-	if s.cfg.CertMode == "public" {
-		link = fmt.Sprintf("https://%s/join#k=%s", s.cfg.PublicHost, key)
-	} else {
-		link = fmt.Sprintf("https://%s/join#k=%s&fp=%s", s.cfg.PublicHost, key, s.rootFP)
-	}
+	link := fmt.Sprintf("https://%s/join#k=%s", s.cfg.PublicHost, key)
 	if kind == "server" {
 		link += "&for=share"
 	}
@@ -200,7 +149,7 @@ var (
 	handleRE          = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`)
 	labelRE           = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	reservedNSLabelRE = regexp.MustCompile(`^ns[0-9]*$`)
-	reserved          = map[string]bool{"home": true, "ca": true, "ns": true, "registrar": true,
+	reserved          = map[string]bool{"home": true, "ns": true, "registrar": true,
 		"search": true, "nodes": true, "www": true, "join": true, "admin": true}
 	validRoles = map[string]bool{"owner": true, "admin": true, "member": true}
 )
@@ -575,14 +524,12 @@ func (s *Service) RevokeInvite(a Actor, id int64) error {
 }
 
 type Enrolment struct {
-	Handle          string `json:"handle"`
-	Zone            string `json:"zone"`
-	LoginServer     string `json:"login_server"`
-	AuthKey         string `json:"auth_key"`
-	AuthKeyExpires  int64  `json:"auth_key_expires"`
-	RootCA          string `json:"root_ca"`
-	RootFingerprint string `json:"root_fingerprint"`
-	Portal          string `json:"portal"`
+	Handle         string `json:"handle"`
+	Zone           string `json:"zone"`
+	LoginServer    string `json:"login_server"`
+	AuthKey        string `json:"auth_key"`
+	AuthKeyExpires int64  `json:"auth_key_expires"`
+	Portal         string `json:"portal"`
 }
 
 // Redeem turns an invite into a membership plus a key for the first device.
@@ -649,7 +596,7 @@ func (s *Service) Redeem(ctx context.Context, token, handle string) (*Enrolment,
 	s.st.Audit(handle, "invite.redeem", fmt.Sprintf("invite#%d", inv.ID), "")
 	return &Enrolment{
 		Handle: handle, Zone: s.cfg.Zone, LoginServer: s.LoginServer(),
-		AuthKey: key, AuthKeyExpires: exp, RootCA: s.rootPEM, RootFingerprint: s.rootFP,
+		AuthKey: key, AuthKeyExpires: exp,
 		Portal: "https://home." + s.cfg.Zone,
 	}, nil
 }
@@ -1328,15 +1275,15 @@ func (s *Service) buildPolicy() (string, error) {
 	}
 	sort.Strings(src)
 	sort.Strings(servers)
-	src = append(src, "tag:infra") // the CA validates certs on servers; the portal on itself
+	src = append(src, "tag:infra")
 
 	type grant struct {
 		Src []string `json:"src"`
 		Dst []string `json:"dst"`
 		IP  []string `json:"ip"`
 	}
-	// The pen's own services: DNS, the home page (HTTPS) and the CA.
-	grants := []grant{{Src: src, Dst: []string{"tag:infra"}, IP: []string{"53", "443", "9000"}}}
+	// The pen's own services: DNS and the home page (HTTPS).
+	grants := []grant{{Src: src, Dst: []string{"tag:infra"}, IP: []string{"53", "443"}}}
 	if len(servers) > 0 {
 		// HTTPS only (D-11): members reach servers on 443 and nothing else.
 		grants = append(grants, grant{Src: src, Dst: servers, IP: []string{"443"}})

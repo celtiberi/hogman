@@ -27,7 +27,7 @@ case "$1" in
     [ $(ls "$HOGMAN_HOME/pens" | wc -l) -ge ${FAKE_MAX:-3} ] && exit 3
     mkdir "$HOGMAN_HOME/pens/$2"
     echo "==> lots of progress" >&2
-    echo "{\"pen\":\"$2\",\"zone\":\"$2.hogman\",\"host\":\"$2.pens.test\",\"owner\":\"$3\",\"join_link\":\"https://$2.pens.test/join#k=abc&fp=AA\",\"valid_until\":\"x\"}" ;;
+    echo "{\"pen\":\"$2\",\"zone\":\"$2.pens.example.com\",\"host\":\"$2.gate.example.com\",\"owner\":\"$3\",\"join_link\":\"https://$2.gate.example.com/join#k=abc\",\"valid_until\":\"x\"}" ;;
   name-free) [ -e "$HOGMAN_HOME/pens/$2" ] && exit 2; [ "$2" = burned ] && exit 2; exit 0 ;;
   *) exit 9 ;;
 esac
@@ -89,7 +89,7 @@ func TestBrokerProvisionUsesCodeOnce(t *testing.T) {
 		t.Fatalf("unknown code: %d %v", code, out)
 	}
 	code, out := call(h, "POST", "/provision", body("pig-aaaa-bbbb", "smith", "alice"), auth)
-	if code != 201 || out["zone"] != "smith.hogman" || !strings.Contains(out["join_link"].(string), "#k=") {
+	if code != 201 || out["zone"] != "smith.pens.example.com" || !strings.Contains(out["join_link"].(string), "#k=") || strings.Contains(out["join_link"].(string), "fp=") {
 		t.Fatalf("provision: %d %v", code, out)
 	}
 	if code, _ := call(h, "POST", "/provision", body("PIG-AAAA-BBBB", "jones", "alice"), auth); code != 403 {

@@ -109,7 +109,7 @@ func waitAgentUp(c *agentConfig, d time.Duration) (*agentStatus, error) {
 
 // joinAlongside sets up side-by-side mode. why explains, in a few words, why
 // this mode was chosen.
-func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Client, o options, why string) error {
+func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, why string) error {
 	if n.DNSServer == "" {
 		return errorf("this pen's server is too old for side-by-side mode (it does not publish its DNS address)")
 	}
@@ -131,49 +131,12 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		if existing == nil && link.InviteToken != "" {
 			note("redeem the invite (handle: %s)", orAsk(o.handle))
 		}
-		if root == nil {
-			note("verify %s using this computer's built-in trusted certificates", n.Zone)
-		} else if !o.noTrust {
-			note("add the %s certificate to this computer's trust store (trusted now: %v)", n.Zone, trustInstalled(root))
-		}
+		note("verify %s using this computer's built-in trusted certificates", n.Zone)
 		note("run a small background agent as %q, with a local proxy for .%s (already set up: %v)", hostname, n.Zone, existing != nil)
 		for _, old := range oldSameServer {
 			note("retire old %s pen setup (%s)", old.zone, old.dir)
 		}
 		return nil
-	}
-
-	// A pen can't take over a name this computer already uses for another pen:
-	// two roots trusted for one zone would let either impersonate the other.
-	// Refuse before trusting anything.
-	if existing != nil && existing.LoginServer != n.LoginServer {
-		return errorf("this computer is already in a pen called %s (at %s), and %s claims the same name.\n"+
-			"  Refusing: two pens with one name could impersonate each other. If you meant to switch,\n"+
-			"  leave the other one first: hogman-join leave '<its link>'",
-			n.Zone, strings.TrimPrefix(existing.LoginServer, "https://"), link.Host)
-	}
-	if existing != nil && existing.CertMode != "" && existing.CertMode != n.CertMode {
-		return errorf("this computer is already in %s using certificate mode %q, not %q; leave first: hogman-join leave '<its link>'",
-			n.Zone, existing.CertMode, n.CertMode)
-	}
-
-	var certFile string
-	trustedBefore := false
-	if root != nil {
-		var cleanupCert func()
-		var err error
-		certFile, cleanupCert, err = writeTempCert(root.PEM)
-		if err != nil {
-			return err
-		}
-		defer cleanupCert()
-		trustedBefore = trustInstalled(root)
-		if !o.noTrust {
-			step("Adding the %s certificate to this computer", n.Zone)
-			if err := installTrust(root, certFile); err != nil {
-				return err
-			}
-		}
 	}
 
 	handle := ""
@@ -183,8 +146,8 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		if link.InviteToken != "" {
 			note("not using the invite; it stays valid for another device or person")
 		}
-		if root != nil && cfg.RootFP != root.Fingerprint {
-			cfg.RootFP = root.Fingerprint
+		if cfg.LoginServer != n.LoginServer {
+			cfg.LoginServer = n.LoginServer
 			if err := cfg.save(dir); err != nil {
 				return err
 			}
@@ -207,11 +170,7 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		rootFP := ""
-		if root != nil {
-			rootFP = root.Fingerprint
-		}
-		cfg = &agentConfig{Zone: n.Zone, LoginServer: n.LoginServer, CertMode: n.CertMode, RootFP: rootFP, DNSServer: n.DNSServer, Hostname: hostname, ProxyAddr: addr}
+		cfg = &agentConfig{Zone: n.Zone, LoginServer: n.LoginServer, DNSServer: n.DNSServer, Hostname: hostname, ProxyAddr: addr}
 		if o.controlCA != "" {
 			pemBytes, err := os.ReadFile(o.controlCA)
 			if err != nil {
@@ -241,18 +200,15 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 		// An old server link without the for=share mark: never expose a whole
 		// computer to the pen. Undo the join.
 		leaveAlongside(n.Zone)
-		if root != nil && !o.noTrust && !trustedBefore {
-			_ = removeTrust(root, certFile)
-		}
 		return errorf("that's a server link: it's for putting something in the pen, not for joining a computer.\n" +
 			"  Use a new one with share, for example: hogman-join share blog 8080 '<server link>'")
 	}
 	note("online as %s", strings.Join(st.IPs, ", "))
 
 	step("Checking %s loads securely", n.Portal)
-	who, err := checkPortalVia(n.Portal, cfg.proxyURL(), root, o.noTrust)
+	who, err := checkPortalVia(n.Portal, cfg.proxyURL())
 	if err != nil {
-		if n.CertMode == "public" && existing == nil {
+		if existing == nil {
 			leaveAlongside(n.Zone)
 		}
 		return err
@@ -260,7 +216,7 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 	if handle == "" {
 		handle = who
 	}
-	retireLegacySameServerPens(oldSameServer, o.noTrust, defaultLegacyRetireOps())
+	retireLegacySameServerPens(oldSameServer, defaultLegacyRetireOps())
 
 	pens := normalizePenConfigs(loadInstalledPenConfigs(hogmanConfigBase()), cfg)
 	browsers := "set your browser's automatic proxy configuration to " + cfg.pacURL()
@@ -288,33 +244,18 @@ func joinAlongside(link *Link, n *networkInfo, root *RootInfo, client *http.Clie
 	return nil
 }
 
-// checkPortalVia loads the portal through the agent's proxy. With root == nil
-// (public certificates), it verifies with system roots (or HOGMAN_ACME_CA_ROOT).
-// With pinned set in private mode, it trusts only the pen's root.
-func checkPortalVia(portal, proxy string, root *RootInfo, pinned bool) (string, error) {
-	if root == nil {
-		pool, err := testACMECAPool()
-		if err != nil {
-			return "", err
-		}
-		pu, _ := url.Parse(proxy)
-		c := &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{
-			Proxy:           http.ProxyURL(pu),
-			TLSClientConfig: &tls.Config{RootCAs: pool},
-		}}
-		return pollPortal(c, portal, 45*time.Second)
+// checkPortalVia loads the portal through the agent's proxy, verifying with
+// system roots (or HOGMAN_ACME_CA_ROOT).
+func checkPortalVia(portal, proxy string) (string, error) {
+	pool, err := testACMECAPool()
+	if err != nil {
+		return "", err
 	}
-	if !pinned {
-		// A fresh process, so a just-installed certificate is seen.
-		os.Setenv("HOGMAN_CHECK_PROXY", proxy)
-		defer os.Unsetenv("HOGMAN_CHECK_PROXY")
-		return checkPortalFresh(portal)
-	}
-	pool := x509.NewCertPool()
-	pool.AppendCertsFromPEM([]byte(root.PEM))
 	pu, _ := url.Parse(proxy)
 	c := &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{
-		Proxy: http.ProxyURL(pu), TLSClientConfig: &tls.Config{RootCAs: pool}}}
+		Proxy:           http.ProxyURL(pu),
+		TLSClientConfig: &tls.Config{RootCAs: pool},
+	}}
 	return pollPortal(c, portal, 45*time.Second)
 }
 
@@ -346,21 +287,15 @@ func pollPortal(c *http.Client, portal string, d time.Duration) (string, error) 
 
 // removeOwnDevice asks the pen, as this computer, to remove this computer's
 // device. Best effort: leaving still works if the pen can't be reached.
-func removeOwnDevice(zone string, root *RootInfo) {
+func removeOwnDevice(zone string) {
 	cfg, err := loadAgentConfig(stateDir(zone))
 	if err != nil {
 		return
 	}
-	var pool *x509.CertPool
-	if root != nil {
-		pool = x509.NewCertPool()
-		pool.AppendCertsFromPEM([]byte(root.PEM))
-	} else {
-		pool, err = testACMECAPool()
-		if err != nil {
-			note("could not read HOGMAN_ACME_CA_ROOT while leaving: %v", err)
-			return
-		}
+	pool, err := testACMECAPool()
+	if err != nil {
+		note("could not read HOGMAN_ACME_CA_ROOT while leaving: %v", err)
+		return
 	}
 	pu, err := url.Parse(cfg.proxyURL())
 	if err != nil {
@@ -432,7 +367,7 @@ func defaultLegacyRetireOps() legacyRetireOps {
 	}
 }
 
-func retireLegacySameServerPens(oldPens []penTarget, noTrust bool, ops legacyRetireOps) {
+func retireLegacySameServerPens(oldPens []penTarget, ops legacyRetireOps) {
 	if len(oldPens) == 0 {
 		return
 	}
@@ -444,7 +379,7 @@ func retireLegacySameServerPens(oldPens []penTarget, noTrust bool, ops legacyRet
 		if ops.logout != nil {
 			ops.logout(old.dir)
 		}
-		if !noTrust && old.cfg.CertMode != "public" && ops.removeRoot != nil {
+		if ops.removeRoot != nil {
 			if removed, err := ops.removeRoot(old.zone, old.cfg.RootFP); err != nil {
 				note("could not remove old %s certificate: %v", old.zone, err)
 			} else if removed {

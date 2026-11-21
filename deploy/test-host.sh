@@ -41,7 +41,7 @@ no_match() { # no_match <grep-pattern> <command...>: command succeeds and stdout
 perm()  { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 secret_dirs_ok() {
   local d
-  for d in pki/offline step/secrets secrets/registrar mesh registrar headscale/lib; do
+  for d in secrets/registrar mesh registrar headscale/lib api home-tls caddy-admin; do
     [ "$(perm "$HOGMAN_HOME/pens/bobo/data/$d")" = 700 ] || return 1
   done
 }
@@ -63,135 +63,6 @@ step "Set up the host"
 mkdir -p "$HOGMAN_HOME/src"
 rsync -a --exclude data --exclude .env "$REPO/core/" "$HOGMAN_HOME/src/"
 check "front door starts" "$HOST" init --test
-
-step "Two pens on one host"
-"$HOST" add bobo control.bobo.example || exit 1
-"$HOST" add zebra control.zebra.example || exit 1
-"$HOST" list
-check "both pens are listed as running" sh -c "'$HOST' list | grep -c running | grep -qx 2"
-check "each pen has its own relay port" sh -c "[ \"\$(grep -h ^STUN_PORT= $HOGMAN_HOME/pens/*/.env | sort -u | wc -l | tr -d ' ')\" = 2 ]"
-
-# A computer on the internet with nothing but the join tool. It reaches the
-# host only through the front door.
-client() {  # client <pen>. Public DNS would point both names at the host; here, at the front door.
-  local front_ip; front_ip="$(docker inspect -f '{{(index .NetworkSettings.Networks "hogman-front").IPAddress}}' hogman-front-front-1)"
-  docker run -d --name "client-$1" --network hogman-front \
-    --add-host "control.bobo.example:$front_ip" --add-host "control.zebra.example:$front_ip" \
-    -v "$FRONT_CA:/front-ca.crt:ro" -v "$HOGMAN_HOME/pens/$1/data/join-dl:/dl:ro" \
-    --entrypoint sh nicolaka/netshoot:v0.14 -c \
-    'cp /front-ca.crt /usr/local/share/ca-certificates/front.crt && update-ca-certificates >/dev/null 2>&1; exec sleep infinity' >/dev/null
-}
-in_client() { local c="$1"; shift; docker exec "client-$c" "$@"; }
-
-for pen in bobo zebra; do
-  step "Pen $pen, through the front door"
-  host="control.$pen.example"
-  "$HOST" pen "$pen" member add "${pen}-owner" --role owner >/dev/null
-  link="$("$HOST" pen "$pen" invite create --note test | awk '/^link:/ {print $2}')"
-  client "$pen"
-  retry 20 in_client "$pen" test -s /etc/ssl/certs/ca-certificates.crt
-  info_ok() { in_client "$pen" curl -sf "https://$host/hogman/v1/network" | jq -e --arg z "$pen.hogman" '.zone == $z'; }
-  check "https://$host answers as pen $pen" info_ok
-  check "the join page is served for $pen" match hogman-join in_client "$pen" curl -sf "https://$host/join"
-  out="$(in_client "$pen" sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open --handle member1 --hostname laptop "$1"' _ "$link" 2>&1)"; rc=$?
-  [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
-  check "a member joins $pen (exit $rc)" grep -q "You're in. You are member1 on $pen.hogman" <<<"$out"
-  check "the registrar of $pen recorded the device" retry 10 match 'member1.*laptop' "$HOST" pen "$pen" device list
-  stun="$(grep -h ^STUN_PORT= "$HOGMAN_HOME/pens/$pen/.env" | cut -d= -f2)"
-  derp_port() {
-    local out
-    out="$(docker exec "pen-$pen-core-mesh-1" tailscale debug derp-map 2>/dev/null | jq -r '.Regions[].Nodes[].STUNPort')" || return 1
-    grep -qx -- "$stun" <<<"$out"
-  }
-  check "$pen's relay advertises its own port ($stun)" derp_port
-done
-
-step "Pens are separate"
-check "bobo has no per-pen edge container"  fails docker inspect pen-bobo-edge-1
-check "zebra has no per-pen edge container" fails docker inspect pen-zebra-edge-1
-check "bobo has no coredns container"       fails docker inspect pen-bobo-coredns-1
-check "zebra has no coredns container"      fails docker inspect pen-zebra-coredns-1
-check "bobo runs 5 containers"  test "$(docker ps -q --filter name=^/pen-bobo- | wc -l | tr -d ' ')" = 5
-check "zebra runs 5 containers" test "$(docker ps -q --filter name=^/pen-zebra- | wc -l | tr -d ' ')" = 5
-pen_isolated() {  # no container in a pen joins hogman-front or another pen's network
-  local pen="$1" nets
-  nets="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "pen-$pen-core-mesh-1" "pen-$pen-headscale-1")"
-  [ "$(tr ' ' '\n' <<<"$nets" | grep -v '^$' | sort -u | tr '\n' ' ')" = "pen-$pen-core " ]
-}
-check "bobo's containers stay off hogman-front and zebra" pen_isolated bobo
-check "zebra's containers stay off hogman-front and bobo" pen_isolated zebra
-front_dns_ok() {  # the front door resolves each pen's unique container names only to that pen
-  local pen="$1" want_core want_hs got_core got_hs
-  want_core="$(docker inspect -f '{{(index .NetworkSettings.Networks "pen-'"$pen"'-core").IPAddress}}' "pen-$pen-core-mesh-1")"
-  want_hs="$(docker inspect -f '{{(index .NetworkSettings.Networks "pen-'"$pen"'-core").IPAddress}}' "pen-$pen-headscale-1")"
-  for _ in 1 2 3 4 5 6; do
-    got_core="$(docker exec hogman-front-front-1 getent hosts "pen-$pen-core-mesh-1" | awk 'NR==1 {print $1}')"
-    got_hs="$(docker exec hogman-front-front-1 getent hosts "pen-$pen-headscale-1" | awk 'NR==1 {print $1}')"
-    [ "$got_core" = "$want_core" ] && [ "$got_hs" = "$want_hs" ] || return 1
-  done
-}
-check "front door reaches only bobo's core and headscale"  front_dns_ok bobo
-check "front door reaches only zebra's core and headscale" front_dns_ok zebra
-check "front door hides Headscale admin API (404)" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/api/v1/node)" = 404
-check "front door hides Headscale Swagger (404)"   test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/swagger)" = 404
-front_blocked_routes_ok() {
-  local p
-  for p in / /version /apple /windows /register/test /auth/test; do
-    [ "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' "https://control.bobo.example$p")" = 404 ] || return 1
-  done
-}
-check "front door blocks Headscale root, register, auth, apple, windows, version (404)" front_blocked_routes_ok
-check "front door allows Headscale /health" match '"pass"' in_client bobo curl -sf https://control.bobo.example/health
-check "front door allows Tailscale /key" match '"publicKey"' in_client bobo curl -sf 'https://control.bobo.example/key?v=138'
-check "front door allows /generate_204" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/generate_204)" = 204
-join_hdrs="$(in_client bobo curl -sI https://control.bobo.example/join | tr -d '\r')"
-check "front door sets anti-framing headers and Origin-Agent-Cluster on /join" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\" && grep -iq '^origin-agent-cluster: ?1' <<<\"\$1\"" _ "$join_hdrs"
-check "front door serves /join/assets/join.js" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/join/assets/join.js)" = 200
-check "front door serves /join/dl/SHA256SUMS"  test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://control.bobo.example/join/dl/SHA256SUMS)" = 200
-dl_hdrs="$(in_client bobo curl -sI https://control.bobo.example/join/dl/SHA256SUMS | tr -d '\r')"
-check "front door sets nosniff on /join/dl/" grep -iq '^x-content-type-options: nosniff' <<<"$dl_hdrs"
-cross() { in_client bobo curl -sf "https://control.zebra.example/hogman/v1/network" | jq -e '.zone == "zebra.hogman"'; }
-check "both control hosts answer through the same front door" cross
-fp_b="$(in_client bobo curl -sf https://control.bobo.example/hogman/v1/network | jq -r .root_fingerprint)"
-fp_z="$(in_client zebra curl -sf https://control.zebra.example/hogman/v1/network | jq -r .root_fingerprint)"
-check "each pen has its own certificate authority" test -n "$fp_b" -a "$fp_b" != "$fp_z"
-check "bobo's members are not zebra's" no_match bobo-owner "$HOST" pen zebra member list
-
-step "One computer joins two pens (combined PAC)"
-link2="$("$HOST" pen zebra invite create --note multi-pen | awk '/^link:/ {print $2}')"
-out2="$(in_client bobo sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open --handle member2 --hostname laptop2 "$1"' _ "$link2" 2>&1)"; rc2=$?
-[ $rc2 = 0 ] || echo "$out2" | sed 's/^/        | /'
-check "client-bobo joins zebra too (exit $rc2)" grep -q "You're in. You are member2 on zebra.hogman" <<<"$out2"
-bobo_proxy="$(in_client bobo sh -c 'jq -r .proxy_addr "${XDG_CONFIG_HOME:-$HOME/.config}/hogman/bobo.hogman/config.json"')"
-zebra_proxy="$(in_client bobo sh -c 'jq -r .proxy_addr "${XDG_CONFIG_HOME:-$HOME/.config}/hogman/zebra.hogman/config.json"')"
-pac_bobo="$(in_client bobo curl -sf "http://$bobo_proxy/proxy.pac")"
-pac_zebra="$(in_client bobo curl -sf "http://$zebra_proxy/proxy.pac")"
-check "bobo /proxy.pac routes bobo and zebra" bash -c 'grep -q "dnsDomainIs(host, \".bobo.hogman\").*PROXY $1" <<<"$3" && grep -q "dnsDomainIs(host, \".zebra.hogman\").*PROXY $2" <<<"$3"' _ "$bobo_proxy" "$zebra_proxy" "$pac_bobo"
-check "zebra /proxy.pac matches bobo /proxy.pac" test "$pac_bobo" = "$pac_zebra"
-check "client-bobo reaches home.bobo.hogman through bobo proxy" in_client bobo sh -c 'curl -sf -x "http://$1" https://home.bobo.hogman/api/me | jq -e ".member.handle == \"member1\""' _ "$bobo_proxy"
-check "client-bobo reaches home.zebra.hogman through zebra proxy" in_client bobo sh -c 'curl -sf -x "http://$1" https://home.zebra.hogman/api/me | jq -e ".member.handle == \"member2\""' _ "$zebra_proxy"
-out_leave="$(in_client bobo sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" leave "$1" </dev/null' _ "$link2" 2>&1)"; rc_leave=$?
-[ $rc_leave = 0 ] || echo "$out_leave" | sed 's/^/        | /'
-check "client-bobo leaves zebra cleanly (exit $rc_leave)" test $rc_leave = 0
-pac_after="$(in_client bobo curl -sf "http://$bobo_proxy/proxy.pac")"
-check "bobo /proxy.pac drops zebra after leave" bash -c 'grep -q "dnsDomainIs(host, \".bobo.hogman\")" <<<"$1" && ! grep -q "zebra.hogman" <<<"$1"' _ "$pac_after"
-
-step "Restore a pen from a backup, as on a new server"
-# What hogman-host backup keeps: .env and data/, minus what the pen rebuilds.
-(cd "$HOGMAN_HOME/pens/zebra" && tar -czf "$HOGMAN_HOME/zebra-backup.tar.gz" \
-  --exclude data/join-dl --exclude data/edge --exclude data/portal --exclude data/step/db --exclude data/tmp .env data)
-"$HOST" remove zebra >/dev/null 2>&1
-mv "$HOGMAN_HOME/pens/zebra" "$HOGMAN_HOME/zebra-old"
-check "zebra is gone" fails docker network inspect pen-zebra-core
-mkdir "$HOGMAN_HOME/pens/zebra" && tar -xzf "$HOGMAN_HOME/zebra-backup.tar.gz" -C "$HOGMAN_HOME/pens/zebra"
-out="$("$HOST" upgrade zebra 2>&1)"; rc=$?
-[ $rc = 0 ] || echo "$out" | tail -15 | sed 's/^/        | /'
-check "hogman-host upgrade brings the restored pen up (exit $rc)" test $rc = 0
-restored() { in_client zebra curl -sf https://control.zebra.example/hogman/v1/network | jq -e --arg f "$fp_z" '.root_fingerprint == $f'; }
-check "the restored pen answers with its own certificate authority" retry 30 restored
-check "the restored pen kept its members" match zebra-owner "$HOST" pen zebra member list
-check "the restored pen kept its devices" match 'member1.*laptop' "$HOST" pen zebra device list
-check "the restored pen is listed as running" match 'zebra.*running' "$HOST" list
 
 step "Public certificates (D-18): the challenge DNS server and a test CA"
 # The registrars reach the challenge DNS server over a Unix socket in a bind
@@ -245,7 +116,7 @@ ACME_RESOLVERS='hogman-test-cdns:53'
 HOGMAN_TEST_ACME_ROOT='$ACME/certs/ca.crt'
 GATE_DOMAIN='gate.hogman.test'
 EOF
-check "add <pen> refuses before a pens zone is set" fails "$HOST" add alpha
+check "add <pen> refuses before a pens zone is set" fails "$HOST" add bobo
 check "pens-zone sets where public pens live" "$HOST" pens-zone pens.hogman.test
 # A pen's registrar reaches the challenge DNS server and the CA on the pen's
 # own network (on a real host: the socket, and the internet).
@@ -255,35 +126,158 @@ pen_net() {
   docker network connect --alias pebble "pen-$1-core" hogman-test-pebble
 }
 
-step "A public pen: add <pen>"
+step "Two pens on one host"
+pen_net bobo && "$HOST" add bobo || exit 1
+pen_net zebra && "$HOST" add zebra || exit 1
+"$HOST" list
+check "both pens are listed as running" sh -c "'$HOST' list | grep -c running | grep -qx 2"
+check "each pen has its own relay port" sh -c "[ \"\$(grep -h ^STUN_PORT= $HOGMAN_HOME/pens/*/.env | sort -u | wc -l | tr -d ' ')\" = 2 ]"
+
+# A computer on the internet with nothing but the join tool. It reaches the
+# host only through the front door.
+client() {  # client <pen>. Public DNS would point both names at the host; here, at the front door.
+  local front_ip; front_ip="$(docker inspect -f '{{(index .NetworkSettings.Networks "hogman-front").IPAddress}}' hogman-front-front-1)"
+  docker run -d --name "client-$1" --network hogman-front \
+    --add-host "bobo.gate.hogman.test:$front_ip" --add-host "zebra.gate.hogman.test:$front_ip" \
+    -e HOGMAN_ACME_CA_ROOT=/issued-root.crt -v "$ACME/issued-root.crt:/issued-root.crt:ro" \
+    -v "$FRONT_CA:/front-ca.crt:ro" -v "$HOGMAN_HOME/pens/$1/data/join-dl:/dl:ro" \
+    --entrypoint sh nicolaka/netshoot:v0.14 -c \
+    'cp /front-ca.crt /usr/local/share/ca-certificates/front.crt && update-ca-certificates >/dev/null 2>&1; exec sleep infinity' >/dev/null
+}
+in_client() { local c="$1"; shift; docker exec "client-$c" "$@"; }
+
+for pen in bobo zebra; do
+  step "Pen $pen, through the front door"
+  host="$pen.gate.hogman.test"
+  zone="$pen.pens.hogman.test"
+  check "$pen's front door is $host" grep -qx "PUBLIC_HOST=$host" "$HOGMAN_HOME/pens/$pen/.env"
+  check "$pen's zone is $zone" grep -qx "ZONE=$zone" "$HOGMAN_HOME/pens/$pen/.env"
+  check "$pen runs no certificate authority" fails docker inspect "pen-$pen-step-ca-1"
+  check "$pen has no root key" test ! -e "$HOGMAN_HOME/pens/$pen/data/pki"
+  check "$pen's challenge DNS credential is kept for the registrar only" test "$(perm "$HOGMAN_HOME/pens/$pen/data/secrets/registrar")" = 700
+  "$HOST" pen "$pen" member add "${pen}-owner" --role owner >/dev/null
+  link="$("$HOST" pen "$pen" invite create --note test | awk '/^link:/ {print $2}')"
+  check "$pen's invite link carries no fingerprint" bash -c '[[ "$1" =~ ^https://'"$pen"'\.gate\.hogman\.test/join#t=[A-Za-z0-9._-]+$ ]]' _ "$link"
+  client "$pen"
+  retry 20 in_client "$pen" test -s /etc/ssl/certs/ca-certificates.crt
+  info_ok() { in_client "$pen" curl -sf "https://$host/hogman/v1/network" | jq -e --arg z "$zone" '.zone == $z and .cert_mode == "public" and (.root_ca // "") == "" and (.root_fingerprint // "") == ""'; }
+  check "https://$host answers as public pen $pen" info_ok
+  check "the join page is served for $pen" match hogman-join in_client "$pen" curl -sf "https://$host/join"
+  out="$(in_client "$pen" sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open --handle member1 --hostname laptop "$1"' _ "$link" 2>&1)"; rc=$?
+  [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
+  check "a member joins $pen (exit $rc)" grep -q "You're in. You are member1 on $zone" <<<"$out"
+  check "nothing was added to the computer's trust store" no_match hogman docker exec "client-$pen" ls /usr/local/share/ca-certificates
+  pen_proxy="$(in_client "$pen" sh -c 'jq -r .proxy_addr "${XDG_CONFIG_HOME:-$HOME/.config}/hogman/'"$zone"'/config.json"' 2>/dev/null)"
+  check "home.$zone has a public certificate from the CA" in_client "$pen" sh -c 'curl -sf --cacert /issued-root.crt -x "http://$1" "https://home.'"$zone"'/api/me" | jq -e ".member.handle == \"member1\""' _ "$pen_proxy"
+  check "the registrar of $pen recorded the device" retry 10 match 'member1.*laptop' "$HOST" pen "$pen" device list
+  stun="$(grep -h ^STUN_PORT= "$HOGMAN_HOME/pens/$pen/.env" | cut -d= -f2)"
+  derp_port() {
+    local out
+    out="$(docker exec "pen-$pen-core-mesh-1" tailscale debug derp-map 2>/dev/null | jq -r '.Regions[].Nodes[].STUNPort')" || return 1
+    grep -qx -- "$stun" <<<"$out"
+  }
+  check "$pen's relay advertises its own port ($stun)" derp_port
+done
+
+step "Pens are separate"
+check "bobo has no per-pen edge container"  fails docker inspect pen-bobo-edge-1
+check "zebra has no per-pen edge container" fails docker inspect pen-zebra-edge-1
+check "bobo has no coredns container"       fails docker inspect pen-bobo-coredns-1
+check "zebra has no coredns container"      fails docker inspect pen-zebra-coredns-1
+check "bobo runs 4 containers"  test "$(docker ps -q --filter name=^/pen-bobo- | wc -l | tr -d ' ')" = 4
+check "zebra runs 4 containers" test "$(docker ps -q --filter name=^/pen-zebra- | wc -l | tr -d ' ')" = 4
+pen_isolated() {  # no container in a pen joins hogman-front or another pen's network
+  local pen="$1" nets
+  nets="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "pen-$pen-core-mesh-1" "pen-$pen-headscale-1")"
+  [ "$(tr ' ' '\n' <<<"$nets" | grep -v '^$' | sort -u | tr '\n' ' ')" = "pen-$pen-core " ]
+}
+check "bobo's containers stay off hogman-front and zebra" pen_isolated bobo
+check "zebra's containers stay off hogman-front and bobo" pen_isolated zebra
+front_dns_ok() {  # the front door resolves each pen's unique container names only to that pen
+  local pen="$1" want_core want_hs got_core got_hs
+  want_core="$(docker inspect -f '{{(index .NetworkSettings.Networks "pen-'"$pen"'-core").IPAddress}}' "pen-$pen-core-mesh-1")"
+  want_hs="$(docker inspect -f '{{(index .NetworkSettings.Networks "pen-'"$pen"'-core").IPAddress}}' "pen-$pen-headscale-1")"
+  for _ in 1 2 3 4 5 6; do
+    got_core="$(docker exec hogman-front-front-1 getent hosts "pen-$pen-core-mesh-1" | awk 'NR==1 {print $1}')"
+    got_hs="$(docker exec hogman-front-front-1 getent hosts "pen-$pen-headscale-1" | awk 'NR==1 {print $1}')"
+    [ "$got_core" = "$want_core" ] && [ "$got_hs" = "$want_hs" ] || return 1
+  done
+}
+check "front door reaches only bobo's core and headscale"  front_dns_ok bobo
+check "front door reaches only zebra's core and headscale" front_dns_ok zebra
+check "front door hides Headscale admin API (404)" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://bobo.gate.hogman.test/api/v1/node)" = 404
+check "front door hides Headscale Swagger (404)"   test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://bobo.gate.hogman.test/swagger)" = 404
+front_blocked_routes_ok() {
+  local p
+  for p in / /version /apple /windows /register/test /auth/test; do
+    [ "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' "https://bobo.gate.hogman.test$p")" = 404 ] || return 1
+  done
+}
+check "front door blocks Headscale root, register, auth, apple, windows, version (404)" front_blocked_routes_ok
+check "front door allows Headscale /health" match '"pass"' in_client bobo curl -sf https://bobo.gate.hogman.test/health
+check "front door allows Tailscale /key" match '"publicKey"' in_client bobo curl -sf 'https://bobo.gate.hogman.test/key?v=138'
+check "front door allows /generate_204" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://bobo.gate.hogman.test/generate_204)" = 204
+join_hdrs="$(in_client bobo curl -sI https://bobo.gate.hogman.test/join | tr -d '\r')"
+check "front door sets anti-framing headers and Origin-Agent-Cluster on /join" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\" && grep -iq '^origin-agent-cluster: ?1' <<<\"\$1\"" _ "$join_hdrs"
+check "front door serves /join/assets/join.js" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://bobo.gate.hogman.test/join/assets/join.js)" = 200
+check "front door serves /join/dl/SHA256SUMS"  test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://bobo.gate.hogman.test/join/dl/SHA256SUMS)" = 200
+dl_hdrs="$(in_client bobo curl -sI https://bobo.gate.hogman.test/join/dl/SHA256SUMS | tr -d '\r')"
+check "front door sets nosniff on /join/dl/" grep -iq '^x-content-type-options: nosniff' <<<"$dl_hdrs"
+cross() { in_client bobo curl -sf "https://zebra.gate.hogman.test/hogman/v1/network" | jq -e '.zone == "zebra.pens.hogman.test"'; }
+check "both control hosts answer through the same front door" cross
+id_b="$(cat "$HOGMAN_HOME/pens/bobo/.challenge-dns-id")"
+id_z="$(cat "$HOGMAN_HOME/pens/zebra/.challenge-dns-id")"
+check "each pen has its own challenge DNS credential and no CA" bash -c 'test -n "$1" -a -n "$2" -a "$1" != "$2" && test ! -e "$3/pens/bobo/data/pki" && test ! -e "$3/pens/zebra/data/pki"' _ "$id_b" "$id_z" "$HOGMAN_HOME"
+check "bobo's members are not zebra's" no_match bobo-owner "$HOST" pen zebra member list
+
+step "One computer joins two pens (combined PAC)"
+link2="$("$HOST" pen zebra invite create --note multi-pen | awk '/^link:/ {print $2}')"
+out2="$(in_client bobo sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open --handle member2 --hostname laptop2 "$1"' _ "$link2" 2>&1)"; rc2=$?
+[ $rc2 = 0 ] || echo "$out2" | sed 's/^/        | /'
+check "client-bobo joins zebra too (exit $rc2)" grep -q "You're in. You are member2 on zebra.pens.hogman.test" <<<"$out2"
+bobo_proxy="$(in_client bobo sh -c 'jq -r .proxy_addr "${XDG_CONFIG_HOME:-$HOME/.config}/hogman/bobo.pens.hogman.test/config.json"')"
+zebra_proxy="$(in_client bobo sh -c 'jq -r .proxy_addr "${XDG_CONFIG_HOME:-$HOME/.config}/hogman/zebra.pens.hogman.test/config.json"')"
+pac_bobo="$(in_client bobo curl -sf "http://$bobo_proxy/proxy.pac")"
+pac_zebra="$(in_client bobo curl -sf "http://$zebra_proxy/proxy.pac")"
+check "bobo /proxy.pac routes bobo and zebra" bash -c 'grep -q "dnsDomainIs(host, \".bobo.pens.hogman.test\").*PROXY $1" <<<"$3" && grep -q "dnsDomainIs(host, \".zebra.pens.hogman.test\").*PROXY $2" <<<"$3"' _ "$bobo_proxy" "$zebra_proxy" "$pac_bobo"
+check "zebra /proxy.pac matches bobo /proxy.pac" test "$pac_bobo" = "$pac_zebra"
+check "client-bobo reaches home.bobo.pens.hogman.test through bobo proxy" in_client bobo sh -c 'curl -sf --cacert /issued-root.crt -x "http://$1" https://home.bobo.pens.hogman.test/api/me | jq -e ".member.handle == \"member1\""' _ "$bobo_proxy"
+check "client-bobo reaches home.zebra.pens.hogman.test through zebra proxy" in_client bobo sh -c 'curl -sf --cacert /issued-root.crt -x "http://$1" https://home.zebra.pens.hogman.test/api/me | jq -e ".member.handle == \"member2\""' _ "$zebra_proxy"
+out_leave="$(in_client bobo sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" leave "$1" </dev/null' _ "$link2" 2>&1)"; rc_leave=$?
+[ $rc_leave = 0 ] || echo "$out_leave" | sed 's/^/        | /'
+check "client-bobo leaves zebra cleanly (exit $rc_leave)" test $rc_leave = 0
+pac_after="$(in_client bobo curl -sf "http://$bobo_proxy/proxy.pac")"
+check "bobo /proxy.pac drops zebra after leave" bash -c 'grep -q "dnsDomainIs(host, \".bobo.pens.hogman.test\")" <<<"$1" && ! grep -q "zebra.pens.hogman.test" <<<"$1"' _ "$pac_after"
+
+step "Restore a pen from a backup, as on a new server"
+# What hogman-host backup keeps: .env and data/, minus what the pen rebuilds.
+(cd "$HOGMAN_HOME/pens/zebra" && tar -czf "$HOGMAN_HOME/zebra-backup.tar.gz" \
+  --exclude data/join-dl --exclude data/edge --exclude data/portal --exclude data/tmp --exclude data/api .env data)
+"$HOST" remove zebra >/dev/null 2>&1
+mv "$HOGMAN_HOME/pens/zebra" "$HOGMAN_HOME/zebra-old"
+check "zebra is gone" fails docker network inspect pen-zebra-core
+mkdir "$HOGMAN_HOME/pens/zebra" && tar -xzf "$HOGMAN_HOME/zebra-backup.tar.gz" -C "$HOGMAN_HOME/pens/zebra"
+pen_net zebra
+out="$("$HOST" upgrade zebra 2>&1)"; rc=$?
+[ $rc = 0 ] || echo "$out" | tail -15 | sed 's/^/        | /'
+check "hogman-host upgrade brings the restored pen up (exit $rc)" test $rc = 0
+zebra_client_proxy="$(in_client zebra sh -c 'jq -r .proxy_addr "${XDG_CONFIG_HOME:-$HOME/.config}/hogman/zebra.pens.hogman.test/config.json"' 2>/dev/null)"
+restored() {
+  in_client zebra curl -sf https://zebra.gate.hogman.test/hogman/v1/network \
+    | jq -e '.zone == "zebra.pens.hogman.test" and .cert_mode == "public"' >/dev/null || return 1
+  in_client zebra curl -sf --cacert /issued-root.crt -x "http://$zebra_client_proxy" https://home.zebra.pens.hogman.test/api/me \
+    | jq -e '.member.handle == "member1"' >/dev/null
+}
+check "the restored pen serves its public zone and home portal" retry 30 restored
+check "the restored pen kept its members" match zebra-owner "$HOST" pen zebra member list
+check "the restored pen kept its devices" match 'member1.*laptop' "$HOST" pen zebra device list
+check "the restored pen is listed as running" match 'zebra.*running' "$HOST" list
+
+step "Removed pen name stays burned (D-21)"
 pen_net alpha
 out="$("$HOST" add alpha 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | tail -15 | sed 's/^/        | /'
 check "hogman-host add alpha raises a public pen (exit $rc)" test $rc = 0
-check "its front door is alpha.gate.hogman.test" grep -qx 'PUBLIC_HOST=alpha.gate.hogman.test' "$HOGMAN_HOME/pens/alpha/.env"
-check "its zone is alpha.pens.hogman.test" grep -qx 'ZONE=alpha.pens.hogman.test' "$HOGMAN_HOME/pens/alpha/.env"
-check "it runs no certificate authority" fails docker inspect pen-alpha-step-ca-1
-check "it has no root key" test ! -e "$HOGMAN_HOME/pens/alpha/data/pki"
-check "its challenge DNS credential is kept for the registrar only" test "$(perm "$HOGMAN_HOME/pens/alpha/data/secrets/registrar")" = 700
-"$HOST" pen alpha member add alpha-owner --role owner >/dev/null
-link="$("$HOST" pen alpha invite create --note test | awk '/^link:/ {print $2}')"
-check "its invite link carries no fingerprint" bash -c '[[ "$1" =~ ^https://alpha\.gate\.hogman\.test/join#t=[A-Za-z0-9._-]+$ ]]' _ "$link"
-front_ip="$(docker inspect -f '{{(index .NetworkSettings.Networks "hogman-front").IPAddress}}' hogman-front-front-1)"
-docker run -d --name client-alpha --network hogman-front --add-host "alpha.gate.hogman.test:$front_ip" \
-  -e HOGMAN_ACME_CA_ROOT=/issued-root.crt -v "$ACME/issued-root.crt:/issued-root.crt:ro" \
-  -v "$FRONT_CA:/front-ca.crt:ro" -v "$HOGMAN_HOME/pens/alpha/data/join-dl:/dl:ro" \
-  --entrypoint sh nicolaka/netshoot:v0.14 -c \
-  'cp /front-ca.crt /usr/local/share/ca-certificates/front.crt && update-ca-certificates >/dev/null 2>&1; exec sleep infinity' >/dev/null
-retry 20 docker exec client-alpha test -s /etc/ssl/certs/ca-certificates.crt
-pub_info() { docker exec client-alpha curl -sf https://alpha.gate.hogman.test/hogman/v1/network | jq -e '.zone == "alpha.pens.hogman.test" and .cert_mode == "public" and .root_ca == ""'; }
-check "the front door answers as a public pen" pub_info
-out="$(docker exec client-alpha sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open --handle member1 --hostname laptop "$1"' _ "$link" 2>&1)"; rc=$?
-[ $rc = 0 ] || echo "$out" | tail -10 | sed 's/^/        | /'
-check "a member joins alpha (exit $rc)" grep -q "You're in. You are member1 on alpha.pens.hogman.test" <<<"$out"
-check "nothing was added to the computer's trust store" no_match hogman docker exec client-alpha ls /usr/local/share/ca-certificates
-alpha_proxy="$(docker exec client-alpha sh -c 'jq -r .proxy_addr "${XDG_CONFIG_HOME:-$HOME/.config}/hogman/alpha.pens.hogman.test/config.json"' 2>/dev/null)"
-home_public() { docker exec client-alpha sh -c 'curl -sf --cacert /issued-root.crt -x "http://$1" https://home.alpha.pens.hogman.test/api/me | jq -e ".member.handle == \"member1\""' _ "$alpha_proxy"; }
-check "home.alpha.pens.hogman.test has a certificate from the CA" home_public
 check "the name alpha is now used" match '^used$' env CDNS_ADMIN_SOCK="$ACME/cdns/admin.sock" "$ACME/cdns/challenge-dns" name used alpha
 "$HOST" remove alpha >/dev/null 2>&1
 mv "$HOGMAN_HOME/pens/alpha" "$HOGMAN_HOME/alpha-old"
@@ -411,8 +405,8 @@ step "Host & secret hardening"
 check "hogman-host pen rejects path traversal"     fails "$HOST" pen ../front status
 check "hogman-host upgrade rejects path traversal" fails "$HOST" upgrade ../front
 check "hogman-host remove rejects path traversal"  fails "$HOST" remove ../front
-check "hogman-host add rejects Caddy block in host" fails "$HOST" add badpen 'hs.example.com { respond 200 }'
-check "hogman-host add rejects semicolon in host"   fails "$HOST" add badpen 'hs.example.com;id'
+check "hogman-host add rejects extra arguments"     fails "$HOST" add badpen 'hs.example.com { respond 200 }'
+check "hogman-host add rejects bad characters in name" fails "$HOST" add 'badpen;id'
 check "front data dir is mode 700"  test "$(perm "$HOGMAN_HOME/front/data")" = 700
 check "host.env is mode 600"        test "$(perm "$HOGMAN_HOME/host.env")" = 600
 check "pen secret dirs are mode 700" secret_dirs_ok

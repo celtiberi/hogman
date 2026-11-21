@@ -25,11 +25,11 @@
       No code? <a href="#wait" id="to-wait">Join the waiting list</a>.</p>
 
     <label for="pen">Network name (your pen)</label>
-    <div class="suffix"><input id="pen" name="pen" placeholder="your-network" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30" required><span>.<span class="sites">hogman</span></span></div>
-    <p class="hint" id="pen-hint">For your private network itself. Sites and addresses will end in .<span class="penname">&lt;network&gt;</span>.<span class="sites">hogman</span></p>
+    <div class="suffix"><input id="pen" name="pen" placeholder="your-network" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30" required><span>.<span class="sites">pens.hogman.network</span></span></div>
+    <p class="hint" id="pen-hint">For your private network itself. Sites and addresses will end in .<span class="penname">&lt;network&gt;</span>.<span class="sites">pens.hogman.network</span></p>
 
     <label for="handle">Your personal name in it</label>
-    <div class="suffix"><input id="handle" name="handle" placeholder="your-name" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" required><span>.<span class="penname">&lt;network&gt;</span>.<span class="sites">hogman</span></span></div>
+    <div class="suffix"><input id="handle" name="handle" placeholder="your-name" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" required><span>.<span class="penname">&lt;network&gt;</span>.<span class="sites">pens.hogman.network</span></span></div>
     <p class="hint">For you as the pen's keeper: you invite people and can remove anyone.</p>
 
     <button class="btn" id="go" type="submit">Raise my pen</button>
@@ -42,7 +42,7 @@
     <label for="w-email">Email</label>
     <input id="w-email" type="email" autocomplete="email" maxlength="254" required>
     <label for="w-pen">The pen name you'd like <span class="opt">(optional)</span></label>
-    <div class="suffix"><input id="w-pen" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30"><span>.<span class="sites">hogman</span></span></div>
+    <div class="suffix"><input id="w-pen" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30"><span>.<span class="sites">pens.hogman.network</span></span></div>
     <label for="w-note">Anything you'd like us to know <span class="opt">(optional)</span></label>
     <input id="w-note" maxlength="280" autocomplete="off" placeholder="who it's for, how you heard of us">
     <p class="hint">We keep your email only to send you a code, and delete it once you've signed up,
@@ -74,7 +74,7 @@
         <div class="linkbox" id="link"></div>
         <button class="btn small" id="copy" type="button">Copy link</button></li>
       <li>The link opens a page with one command to paste into a terminal. It downloads <code>hogman-join</code>,
-        checks your pen's certificate, trusts it, and joins.</li>
+        sets up a local connection for your pen, and joins.</li>
       <li>You land on <code id="done-home-step"></code>, where you add other devices, invite
         people, and run the herd.</li>
     </ol>

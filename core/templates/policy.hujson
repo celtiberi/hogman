@@ -3,7 +3,7 @@
 //
 //   personal devices  - accept nothing inbound
 //   servers           - reachable by every active member's devices
-//   core (tag:infra)  - DNS, HTTP, HTTPS for every active member's devices
+//   core (tag:infra)  - DNS and HTTPS for every active member's devices
 //
 // Suspended and removed members' devices appear in no rule, so they reach
 // nothing. Devices not enrolled through the registrar get no access either.
@@ -16,7 +16,7 @@
     {
       "src": ["tag:infra"],
       "dst": ["tag:infra"],
-      "ip": ["53", "80", "443", "9000"]
+      "ip": ["53", "443"]
     }
   ]
 }

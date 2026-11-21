@@ -118,16 +118,13 @@ func TestDNSAuthoritativeAndRefused(t *testing.T) {
 	if got := mustResolveA(t, dnsSrv, "home.bobo.hogman."); got != "100.64.0.1" {
 		t.Fatalf("home = %s want 100.64.0.1", got)
 	}
-	if got := mustResolveA(t, dnsSrv, "ca.bobo.hogman."); got != "100.64.0.2" {
-		t.Fatalf("ca = %s want 100.64.0.2", got)
-	}
 
 	// Core service AAAA and HTTPS must return NOERROR (NODATA) + SOA, never NXDOMAIN.
 	for _, tc := range []struct {
 		name  string
 		qtype dnsmessage.Type
 	}{
-		{"ca.bobo.hogman.", dnsmessage.TypeAAAA},
+		{"home.bobo.hogman.", dnsmessage.TypeAAAA},
 		{"home.bobo.hogman.", dnsmessage.Type(65)}, // HTTPS
 		{"bobo.hogman.", dnsmessage.TypeA},         // Apex A
 	} {
@@ -301,7 +298,7 @@ func TestDNSUDPAndTCPRoundTrip(t *testing.T) {
 				return
 			}
 			defer conn.Close()
-			req := buildDNSQuery(t, id, "ca.bobo.hogman.", dnsmessage.TypeA, true, 0)
+			req := buildDNSQuery(t, id, "home.bobo.hogman.", dnsmessage.TypeA, true, 0)
 			frame := make([]byte, 2+len(req))
 			binary.BigEndian.PutUint16(frame[:2], uint16(len(req)))
 			copy(frame[2:], req)
