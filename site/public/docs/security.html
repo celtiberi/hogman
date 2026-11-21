@@ -38,7 +38,7 @@
 <ul>
 <li><a href="/docs/how-it-works.html">How it works</a></li>
 <li><a href="/docs/security.html" aria-current="page">Architecture & security</a></li>
-<li><a href="/docs/self-host.html">Raising your own pen</a></li>
+<li><a href="/docs/self-host.html">Self-hosting</a></li>
 </ul>
 </aside>
 <main class="docs-main">
@@ -80,8 +80,9 @@
   *.gate.hogman.network  --&gt;  Shared Caddy front door (strict path allowlist + TLS wildcard)
                                 │
                                 ▼
-                        Per-pen container network (pen-&lt;name&gt;-core)
+                        Per-pen container network (pen-&lt;name&gt;-core, 4 containers)
                           ├── Headscale   (random 100.64.0.0/10 IPs, WireGuard keys, ACL grants)
+                          ├── core-mesh   (Tailscale node terminating mesh DNS &amp; portal IP)
                           ├── Registrar   (Go ledger, pen DNS :53, Unix socket API to portal)
                           └── Portal      (home.&lt;zone&gt; Caddy + CertMagic local key)
 

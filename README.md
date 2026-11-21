@@ -17,21 +17,16 @@
 # Your pen. Your rules. Clean pigs only.
 
 **Get a pen:** [get.hogman.network](https://get.hogman.network). Free while we test it; sign-ups
-are by invitation for now.
-
-**Or run your own server:**
-
-```bash
-curl -fsSL https://hogman.network/install.sh | sudo bash     # on a fresh Ubuntu 24.04 server
-```
+are by invitation for now. Hogman runs pen control planes on `hogman.network` (hosted-only,
+D-24), with the full [AGPL-3.0](LICENSE) codebase open to inspect, audit, and verify.
 
 Invited to someone's pen? You don't install anything up front: open the invite link and
 copy the one command its page gives you.
 
-
-Hogman gives you your own **private internet** for the people you choose. Get a pen on our
-server in about a minute, or raise one on your own. You hold the gate. Your swine get real
-names, real websites and real padlocks. The filthy horde stays outside the fence, howling.
+Hogman gives you your own **private internet** for the people you choose: hosted on our server
+in about a minute, while your sites and folders are served straight from your own computers. You
+hold the gate. Your swine get real names, real websites, and standard browser HTTPS. The filthy
+horde stays outside the fence, howling.
 
 ## In plain words
 
@@ -59,8 +54,8 @@ good free ones), put them in your pen with one command, and Hogman makes them pr
 - **A small company:** internal tools and a wiki, reachable by employees from anywhere and
   invisible to everyone else.
 - **A community:** a forum or archive away from bots, trolls and drive-by strangers.
-- **Your own projects:** the home server or side project, reachable from your laptop or phone
-  anywhere, with real HTTPS.
+- **Your own projects:** the home server or side project, reachable from your laptop anywhere,
+  with real HTTPS.
 
 **Questions people ask.**
 
@@ -70,20 +65,23 @@ good free ones), put them in your pen with one command, and Hogman makes them pr
   photo gallery) you install on an always-on computer, then share the same way.
 - *Do my people install anything?* A small program, once; the invite link walks them through
   it on a Mac or Linux (Windows and a phone app are coming).
-- *Can strangers find my pen?* No. Nothing in it has a public address.
+- *Can strangers find my pen?* No. Nothing in it has a public address (`ns1.hogman.network`
+  answers only temporary ACME challenge records, never IP addresses).
 - *Is it a VPN?* No. A VPN hides your browsing; a pen is a private place with its own sites
   and its own guest list, and your normal internet keeps working.
 - *Why not just use Tailscale?* If you're technical and only want your own devices
   connected, do: Hogman is built on Tailscale's open-source pieces and runs alongside it.
   Hogman is for running a private place for a group of people: guests join from a link, the
-  keeper runs the guest list from a web page, every pen has its own names, and its
-  certificates stay inside the pen instead of appearing in public certificate logs.
-- *Can you see what we do?* What members send each other is encrypted end to end. If we host
-  your pen we can see who is in it, not what anyone says. Run your own if that's too much trust.
+  keeper runs the guest list from a web page, and every pen gets its own names and real HTTPS
+  without exposing any site IPs (pen and site hostnames appear in public Certificate
+  Transparency logs, never what's on the sites).
+- *Can you see what we do?* Traffic between members is encrypted end to end. Because we host
+  your pen's control plane, we can see who is in it and which pen names are looked up, not
+  what anyone says or sends (see [The honest bit](#the-honest-bit)).
 
 ## How it works
 
-Full guides, use cases and the technical details: **[hogman.network/docs](https://hogman.network/docs/)**.
+Full guides, use cases and security architecture: **[hogman.network/docs](https://hogman.network/docs/)**.
 
 **A private corner of the internet for you and your people.**
 
@@ -99,17 +97,17 @@ in your pen can't be found from the open internet: to everyone you didn't invite
 doesn't exist.
 
 **Putting something in.** Once you're in, one command puts a folder or a website you're
-building into the pen, with its own name and the padlock:
+building into the pen, with its own name and standard HTTPS:
 
 ```text
 $ ./hogman-join share photos ~/holiday --note "Summer trip photos"
 $ ./hogman-join share blog 3000               # a site you're building, by its port
 
-✓ https://blog.smith.hogman is up.
+✓ https://blog.smith.pens.hogman.network is up.
   Everyone in the pen can open it.
 ```
 
-Each share is a small server device of its own, so your laptop itself still takes no
+Each share is a small server device of its own (`tag:server`), so your laptop itself still takes no
 visitors, and nothing needs administrator rights or an open port. Everything shared or named
 shows up in the **Sites in this pen** list on your home page (with who runs it and its
 optional `--note`). Add `--background` to run in the background and start automatically at login
@@ -122,64 +120,71 @@ to the end of the command.
 `'https://<host>'` or `--pen ZONE` if you're on more than one pen). It downloads the matching
 binary from `/join/dl/`, checks its SHA-256 digest against `SHA256SUMS` from the same server over
 the same HTTPS connection (catching corrupted or truncated downloads, with the same server trust as
-the initial download), replaces `hogman-join`, restarts the pen's agent if running, and updates
+the initial download), replaces `hogman-join`, restarts the pen's agent if running, updates
 cached `share` binaries on disk (restarting service-managed background shares automatically while
-foreground shares keep serving until restarted).
+foreground shares keep serving until restarted), and removes any leftover legacy Hogman root
+certificates from older releases.
 
 ## Under the hood
 
 - **The network:** each pen is a private [WireGuard](https://www.wireguard.com) mesh with its own
-  [Headscale](https://github.com/juanfont/headscale) (the open-source Tailscale control server);
-  devices use the stock Tailscale client. Traffic is end-to-end encrypted, device to device,
-  through the pen's own relay (built into its control server) only when a firewall blocks a
-  direct path. Relaying, it carries only encrypted WireGuard packets and never sees what
-  anyone sends.
-- **Names:** a private DNS zone per pen (`smith.hogman`), answered only on the mesh. `.hogman`
-  isn't a public top-level domain, so nothing in a pen exists on the open internet.
-- **Padlocks (certificates):** each pen runs [step-ca](https://smallstep.com/certificates/). Its root carries
-  X.509 name constraints (only the pen's zone, no IP addresses), so trusting it can't be used
-  against any other site. Servers get 7-day certificates over ACME. The root key is kept
-  offline, encrypted.
+  [Headscale](https://github.com/juanfont/headscale) control plane. Devices join via embedded
+  userspace `tsnet`. Traffic is end-to-end encrypted, device to device, through the pen's own
+  relay (built into its control server) only when a firewall blocks a direct path. Relaying, it
+  carries only encrypted WireGuard packets and never sees what anyone sends.
+- **Names:** a pen zone such as `smith.pens.hogman.network`, answered with mesh IPs only inside the
+  pen (pen names are used once and never recycled, D-21). Public DNS (`ns1.hogman.network`) serves
+  only temporary `_acme-challenge.*` TXT records, `SOA`, `NS`, and `CAA` — zero public
+  `A`/`AAAA` records exist under `pens.hogman.network`.
+- **Padlocks (certificates):** standard public HTTPS certificates issued via split-horizon ACME
+  DNS-01 (Let's Encrypt primary with Google Trust Services EAB fallback via embedded
+  [CertMagic](https://github.com/caddyserver/certmagic)). Your browser verifies certificates with its
+  normal operating system trust store — no custom root CA is ever installed (`D-18`, `D-22`).
+  Private keys stay on the sharer's computer (or the portal). Trade-offs to note: pen and site
+  names appear in public Certificate Transparency logs (never site contents, `D-21`), and hosted
+  pens share `pens.hogman.network` until PSL listing, so use a separate browser profile for any
+  pen you don't fully trust (`D-19`). Pens made before the public-certificates switch-over must
+  be recreated (`fp=` invite links are refused).
 - **Access:** default deny. Hogman's registrar keeps the member list and writes the access
-  policy. A *personal* device is a member's laptop or phone; a *server* is anything set up to
-  host sites (a share, say). Members' devices can reach servers (on 443 only) and the pen's services; personal devices accept no incoming connections; a
-  device that joins without an invite gets nothing. A pen carries HTTPS and nothing else: no
-  ssh, no other ports (decision D-11: the best fix for a surface is to delete it).
-- **Invites:** a single-use token in a link that also carries the SHA-256 fingerprint of the
-  pen's root. `hogman-join` checks it before trusting anything, installs the root, and starts
-  a small built-in client, running as you (never as administrator), whose local proxy carries
-  only HTTPS to the pen's names.
+  policy. A *personal* device is a member's laptop or desktop; a *server* is a share node.
+  Members' devices can reach servers (on `:443` only) and the pen's services; personal devices
+  accept no incoming connections; a device that joins without an invite gets nothing. A pen carries
+  HTTPS and nothing else: no ssh, no other ports (decision D-11: the best fix for a surface is
+  to delete it). `hogman-join`'s loopback proxy pins every dialed IP to a verified mesh peer via
+  `WhoIs`, never touching `127.0.0.1` or LAN hosts.
+- **Invites:** a single-use token in `https://smith.gate.hogman.network/join#t=...` (covered by the
+  shared wildcard `*.gate.hogman.network` certificate). `hogman-join` runs unprivileged as you
+  (never as administrator), with a local PAC-scoped proxy that carries only HTTPS to the pen's names.
 - **The boot:** deletes all of a member's devices, revokes their keys and invites, rewrites the
   policy, and holds their names for 90 days. About two seconds.
-- **Hosted pens:** five containers per pen (Headscale, registrar, step-ca, Caddy for the home
-  page, and the pen's own Tailscale node, which gives its DNS, home page and CA an address on
-  the mesh), its own data folder, about 75 MB of memory. Only each pen's
-  control address and the relay port are exposed to the internet.
+- **Hosted pens:** four containers per pen (Headscale, registrar, Caddy for `home.<zone>`, and
+  the pen's own `core-mesh` Tailscale node), running non-root (`uid 65532`) on an isolated Docker
+  bridge with its own folder and about 75 MB of memory. Only each pen's front-door route and relay
+  port are exposed to the internet.
 
-What happens when Bob opens `https://photos.smith.hogman`:
+What happens when Bob opens `https://photos.smith.pens.hogman.network`:
 
 ```text
-1 DNS     photos.smith.hogman → 100.80.12.7   (the pen's DNS, on the mesh only)
-2 policy  bob's laptop → alice's photos server: allowed (member → server)
-3 tunnel  WireGuard, bob → alice, end to end (direct, else the pen's relay)
-4 TLS     certificate signed by the pen's CA; hogman-join installed its root on bob's
-          computer after checking its fingerprint
+1 DNS     photos.smith.pens.hogman.network → 100.80.12.7   (the pen's DNS, on the mesh only)
+2 policy  bob's laptop → alice's photos server: allowed (member → server, :443 only)
+3 tunnel  WireGuard, bob → alice, end to end (direct, else the pen's relay ciphertext)
+4 TLS     standard CertMagic cert presented by alice's share; verified by Bob's stock OS trust store
 ✓ page loads, with the padlock
 
-A stranger typing the same address: no such name. There is nothing to reach.
+A stranger typing the same address: NODATA from ns1. Zero A/AAAA records exist publicly.
 ```
 
 ## What you get
 
 - **Proper names.** Every pen has its own name, and so does everything in it:
-  `alice.yourpen.hogman`, `blog.alice.yourpen.hogman`. Nobody outside can look them up.
-- **The padlock, without the paperwork.** Each pen runs its own certificate authority, so
-  sites get HTTPS automatically. That authority can only vouch for names inside the pen.
+  `alice.yourpen.pens.hogman.network`, `blog.alice.yourpen.pens.hogman.network`. Nobody outside
+  can look up an address for them.
+- **The padlock, without the paperwork.** Standard web HTTPS works out of the box in stock
+  browsers with no root certificates to install.
 - **Invitation only.** Single-use invite links. How someone earns one is up to you.
 - **The boot.** One press and a member is back outside the fence, every device at once.
-- **Walled off from everyone else.** Every pen has its own gate, names and certificate
-  authority. Traffic between members is encrypted end to end; whoever keeps the pen never
-  sees it. Want nobody upstream at all? Raise it on a server of your own.
+- **Walled off from everyone else.** Every pen has its own isolated control plane, names, and
+  relay port. Traffic between members is encrypted end to end.
 
 ## Meet the farm
 
@@ -194,28 +199,26 @@ A stranger typing the same address: no such name. There is nothing to reach.
 
 ## Getting in, if you're on the list
 
-1. **You get a link.** It carries your invitation and the fingerprint of the pen's
-   certificate, so you know you're at the right gate.
-2. **You run one command.** The link's page gives it to you. It checks the fingerprint,
-   asks what you'd like to be called, and adds the pen's certificate to your computer.
+1. **You get a link.** It carries your single-use invitation to your pen's gate (`smith.gate.hogman.network`).
+2. **You run one command.** The link's page gives it to you. It checks the network over
+   normal HTTPS, asks what you'd like to be called, and starts a small local connection as you —
+   no admin password, no custom root certificate.
 3. **You're in.** Open your ordinary browser and go.
 
 ```text
 # the command your invite page gives you: copy, paste, enter
-$ curl -fsSLo hogman-join https://smith.pens.hogman.network/join/dl/hogman-join-Darwin-arm64 \
+$ curl -fsSLo hogman-join https://smith.gate.hogman.network/join/dl/hogman-join-Darwin-arm64 \
     && chmod +x hogman-join \
-    && ./hogman-join 'https://smith.pens.hogman.network/join#t=(your invite)&fp=(the pen's fingerprint)'
+    && ./hogman-join 'https://smith.gate.hogman.network/join#t=(your invite)'
 
-• Checking the network at smith.pens.hogman.network
-  network: smith.hogman
-  its certificate matches the link
-  and can only vouch for names ending in .smith.hogman
+• Checking the network at smith.gate.hogman.network
+  network: smith.pens.hogman.network
 
 • Redeeming the invite
   Choose your name on the network: alice
   welcome, alice
 
-✓ You're in. You are alice on smith.hogman.
+✓ You're in. You are alice on smith.pens.hogman.network.
 ```
 
 **No Tailscale needed, and it won't fight yours.** The join tool runs its own small
@@ -243,81 +246,54 @@ gone and their names held so nobody can pretend to be them.
 ## Get a pen
 
 1. **Sign up** at [get.hogman.network](https://get.hogman.network): name your pen and
-   yourself. About a minute later it's up on our server, with its own gate, names and
-   certificate authority. While we test, you need a sign-up code from someone already in;
+   yourself. About a minute later it's up on our server, with its own isolated gate and zone.
+   While we test, you need a sign-up code from someone already in;
    no code, or the farm is full? Join the waiting list on the same page.
 2. **Get your laptop in.** Open the link you're given on your laptop and copy one command.
 3. **Let your people in.** Your pen's home page makes invite links and QR codes, and shows
    the herd: suspend anyone, or give them the boot. No server, no shell.
 
-Same software as a self-hosted pen, so you can take your pen's folder and leave whenever you
-like. Hosting your pen means we can see who's in it (not what anyone says), and could in
-principle add a device to it, the same catch as Tailscale. If that's too much trust, raise
-your own.
+## Open source
 
-## Raise your own pen
-
-You need a small Ubuntu 24.04 server (2 GB is plenty; about $12 a month) and a hostname
-pointing at it, such as `hs.example.com`.
+Hogman runs pen control planes only on `hogman.network` (`D-24`, no self-hosted pen server
+support), while your sites and folders run on your own computers via `hogman-join share`. All
+code is open source under [AGPL-3.0](LICENSE) so anyone can audit it and verify every release binary
+against GitHub's SLSA build provenance:
 
 ```bash
-# 1. Install. Sets the server up (updates, Docker, firewall), installs Hogman, starts the front door.
-curl -fsSL https://hogman.network/install.sh | sudo bash
-
-# 2. Raise a pen and make yourself its keeper.
-hogman-host add mypen hs.example.com
-hogman-host pen mypen member add you --role owner
-
-# 3. Get your own laptop in: open the link this prints, on the laptop.
-#    (Only for a member's first device: there is no account recovery.)
-hogman-host pen mypen device key you personal
-
-# 4. Let the clean ones in, and show the filthy ones out.
-hogman-host pen mypen invite create --note "alice, clean pig"
-hogman-host pen mypen member kick gary "rolled in something"
+gh attestation verify hogman-join --repo celtiberi/hogman
 ```
 
-The installer prints what's next: managing the server over your own Tailscale network with
-SSH closed to the internet, and moving the pen's root key somewhere safe. Run the same
-`curl` again later to update, then `hogman-host upgrade mypen`. Compiled parts are built by
-GitHub from a public commit with signed provenance; check any of them with
-`gh attestation verify FILE --repo celtiberi/hogman`.
-
-One server can hold many pens: `hogman-host add` again with another name and hostname. Each
-pen is walled off from the others, in its own folder you can move to another server.
-
-**[The keeper's guide](deploy/README.md)** goes step by step from an empty server, and covers
-nightly backups, alerts on your phone, and a sign-up page if you want to host pens for others. To run a single pen by hand instead, see
-[core/README.md](core/README.md).
-
-How and why it's built this way: [DESIGN.md](DESIGN.md).
+- [The operator guide](deploy/README.md) documents how the hosted server, `challenge-dns`, backups,
+  monitoring, and sign-ups run.
+- [`core/README.md`](core/README.md) documents the core stack and Docker test harness.
+- [`DESIGN.md`](DESIGN.md) covers the initial design background and superseded architecture notes.
 
 ## The honest bit
 
-- **A pen is private, not anonymous.** The keeper knows who is in the pen, their devices,
-  and which pen names get looked up.
-- **What the keeper can't see:** what members say to each other, or their ordinary browsing
-  outside the pen.
+- **A pen is private, not anonymous.** The keeper (and us as host) can see who is in the pen,
+  their devices, and which pen names get looked up. Site names appear in public CT logs.
+- **What neither can see:** what members say or send to each other (WireGuard + TLS 1.3), or
+  their ordinary browsing outside the pen.
 - **Choose your Top Hog.** Joining a pen means trusting the person who runs it.
 
 ## Status
 
-**Experimental.** Young security software, not audited, running its first public server.
-Try it, break it, tell us what you find. Don't trust it with anything that matters yet.
+**Experimental.** Young security software, not independently audited, running its public hosted
+service. Try it, break it, tell us what you find. Don't trust it with anything that matters yet.
 
 | On tour now | Not on the bill yet |
 |---|---|
-| The pen: server, names, certificates, invites, the boot | Phones (the app is in the works) |
+| Hosted pens: control plane, names, public DNS-01 certs, invites, the boot | Phones (the app is in the works) |
 | Joining from Linux and a Mac: HTTPS only, never as administrator, alongside your own Tailscale | Windows (built, never tried) |
-| Many pens on one server, kept apart | Open sign-ups for everyone |
-| A one-line installer for servers; updates in under a minute | A security audit |
-| A real pen live on the internet: `farm.hogman`, joined from a Mac | |
-| Nightly encrypted backups, pulled to a machine you own; restore tested | |
-| Alerts on your phone when the server or its backups stop | |
+| Isolated pens on a shared host behind `*.gate.hogman.network` | Open sign-ups for everyone |
+| Verifiable GitHub-built releases (`gh attestation verify`) | Independent security audit |
+| Nightly encrypted backups, pulled to a separate machine; restore tested | PSL listing for `pens.hogman.network` |
+| Alerts when the server, certs, or backups fail | |
 | Pens on our server: sign up by invitation while we test, or join the waiting list | |
 | Run your pen from its home page: invites, the herd, the boot | |
 | Put a folder or a website in your pen with one command (`hogman-join share`) | |
-| End-to-end tests: 122 checks for a pen, 74 for a shared host | |
+| Automated Docker e2e suites covering pens, ACME DNS-01, and shared hosts | |
 
 **Found a security problem?** Please don't open a public issue. Report it privately
 with GitHub's **Security → Report a vulnerability** button on this repository.
@@ -325,14 +301,15 @@ with GitHub's **Security → Report a vulnerability** button on this repository.
 ## How it's built
 
 Forged from good open-source steel: [Headscale](https://github.com/juanfont/headscale), the
-[Tailscale](https://tailscale.com) client, [step-ca](https://smallstep.com/certificates/)
-and [Caddy](https://caddyserver.com), plus three pieces of our own:
+[Tailscale](https://tailscale.com) `tsnet` stack, [Caddy](https://caddyserver.com), and
+[CertMagic](https://github.com/caddyserver/certmagic), plus four pieces of our own:
 
 | Piece | What it does |
 |---|---|
-| [`core/registrar`](core/registrar) | The ledger: members, invites, devices, names, the boot. Writes the pen's access rules and DNS. |
-| [`core/join`](core/join) | `hogman-join`: verifies, trusts, enrols and joins, on macOS, Linux and Windows. |
-| [`deploy/hogman-host`](deploy/hogman-host) | Runs many pens on one server behind a shared front door. |
+| [`core/registrar`](core/registrar) | The ledger: members, invites, devices, names, the boot. Writes access rules, serves mesh DNS, and manages ACME DNS-01 challenges. |
+| [`core/join`](core/join) | `hogman-join`: verifies, enrols, joins side by side, proxies `:443` only, and shares sites with CertMagic TLS. |
+| [`deploy/challenge-dns`](deploy/challenge-dns) | Authoritative DNS-01 challenge server (`_acme-challenge.*` TXT, SOA, NS, CAA; never A/AAAA). |
+| [`deploy/hogman-host`](deploy/hogman-host) | Runs isolated hosted pens behind a shared front door, backups, and sign-ups. |
 
 ## License
 

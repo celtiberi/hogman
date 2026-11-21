@@ -36,8 +36,9 @@
   *.gate.hogman.network  --&gt;  Shared Caddy front door (strict path allowlist + TLS wildcard)
                                 │
                                 ▼
-                        Per-pen container network (pen-&lt;name&gt;-core)
+                        Per-pen container network (pen-&lt;name&gt;-core, 4 containers)
                           ├── Headscale   (random 100.64.0.0/10 IPs, WireGuard keys, ACL grants)
+                          ├── core-mesh   (Tailscale node terminating mesh DNS &amp; portal IP)
                           ├── Registrar   (Go ledger, pen DNS :53, Unix socket API to portal)
                           └── Portal      (home.&lt;zone&gt; Caddy + CertMagic local key)
 

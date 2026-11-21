@@ -1,49 +1,20 @@
-<h1 class="docs-h1">Raising your own pen</h1>
-<p class="lede">Hogman is open source. Run it on a server you own and nobody upstream holds your
-  gate: not us, not anyone. Same software as the pens we host.</p>
+<h1 class="docs-h1">Self-hosting</h1>
+<p class="lede">Hogman is hosted-only for pen control planes (decision D-24): we run every pen's
+  gate, registrar, and challenge DNS on <code>hogman.network</code>, and do not support running
+  self-hosted pen servers or custom pen domains.</p>
 
-<h2 class="docs-h2">What you need</h2>
-<ul>
-  <li><strong>A server</strong> running Ubuntu 24.04 with 2 GB of memory and a public IPv4
-    address. A small cloud server (about $12 a month) is plenty, and one server holds many pens.</li>
-  <li><strong>A hostname you control</strong> for each pen's control address, such as
-    <code>hs.example.com</code>, pointed at the server.</li>
-  <li><strong>A password manager</strong>, for the pen's root key once it's off the server.</li>
-  <li>Recommended: a free Tailscale account, so you manage the server over your own tailnet and
-    close SSH to the internet. Hogman runs side by side with it.</li>
-</ul>
+<h2 class="docs-h2">Where your things still run on your machines</h2>
+<p>Only the coordination control plane lives on our host. Everything you put inside a pen
+  using <a href="/docs/share.html"><code>hogman-join share</code></a> (folders, photo galleries,
+  wikis, apps) runs directly on your own laptop, home server, or VM and talks peer-to-peer over
+  end-to-end encrypted WireGuard.</p>
 
-<h2 class="docs-h2">The short version</h2>
-<pre class="term"><span class="c"># on the server: updates, Docker, firewall, Hogman itself</span>
-<span class="p">$</span> curl -fsSL https://hogman.network/install.sh | sudo bash
-
-<span class="c"># raise a pen and make yourself its keeper</span>
-<span class="p">$</span> hogman-host add mypen hs.example.com
-<span class="p">$</span> hogman-host pen mypen member add you --role owner
-
-<span class="c"># a one-time link for your laptop</span>
-<span class="p">$</span> hogman-host pen mypen device key you personal</pre>
-<p>Open that link on your laptop and copy the one command. From then on, run the pen from its
-  home page like any other pen (see <a href="/docs/keeper.html">Running your pen</a>). Its
-  registrar and certificate authority run as an unprivileged user, even though the installer
-  runs as root.</p>
-<p>Want to check what you're installing? Every compiled part is built by GitHub from a public
-  commit, with signed provenance; see <a href="/docs/how-it-works.html#releases">Releases</a>.</p>
-
-<h2 class="docs-h2">The full guide</h2>
-<p><a href="https://github.com/celtiberi/hogman/blob/main/deploy/README.md">The keeper's guide</a>
-  goes step by step from an empty server, and covers what the short version leaves out:</p>
-<ul>
-  <li>locking SSH down to your own tailnet;</li>
-  <li>taking the pen's root key off the server;</li>
-  <li>nightly encrypted backups, pulled to a machine you own, and restoring them;</li>
-  <li>alerts on your phone when the server or its backups stop;</li>
-  <li>updating (under a minute per pen; members stay joined);</li>
-  <li>moving a pen to another server (a pen is one folder);</li>
-  <li>hosting pens for other people, with a sign-up page and a waiting list.</li>
-</ul>
-
-<h2 class="docs-h2">Already have a hosted pen?</h2>
-<p>A pen we host is the same software. Ask, and you get your pen's folder (members, names, its
-  certificate authority) to run on your own server. Its control address changes to a hostname
-  of yours, so each member's devices join once more, with a new link, keeping their names.</p>
+<h2 class="docs-h2">Open source to read and verify</h2>
+<p>The entire codebase is free software under AGPL-3.0 on
+  <a href="https://github.com/celtiberi/hogman">GitHub</a> so anyone can inspect how isolation,
+  DNS-01 validation, and membership enforcement work. Every release binary is built exclusively by
+  GitHub Actions from a public commit with SLSA build provenance:</p>
+<pre class="term"><span class="p">$</span> gh attestation verify hogman-join --repo celtiberi/hogman</pre>
+<p>Operators who want to inspect how our hosted server is provisioned and run can read
+  <a href="https://github.com/celtiberi/hogman/blob/main/deploy/README.md">the operator guide</a>
+  and the <a href="/docs/security.html">Architecture &amp; security</a> page.</p>

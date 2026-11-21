@@ -38,7 +38,7 @@
 <ul>
 <li><a href="/docs/how-it-works.html">How it works</a></li>
 <li><a href="/docs/security.html">Architecture & security</a></li>
-<li><a href="/docs/self-host.html">Raising your own pen</a></li>
+<li><a href="/docs/self-host.html">Self-hosting</a></li>
 </ul>
 </aside>
 <main class="docs-main">
@@ -60,7 +60,7 @@
     their computer and copy the command.</li>
   <li>Put the photos in a folder, then:
 <pre class="term"><span class="p">$</span> ./hogman-join share photos ~/Pictures/2026 --background</pre></li>
-  <li>Tell everyone: <code>https://photos.yourpen.hogman</code>.</li>
+  <li>Tell everyone: <code>https://photos.yourpen.pens.hogman.network</code>.</li>
 </ol>
 <p><strong>Going further:</strong> for albums, uploads and face search, run a photo app such as
   Immich or PhotoPrism on an always-on computer and share it from there (<code>share photos 2283</code>).
@@ -85,8 +85,8 @@
 <p><strong>Goal:</strong> a wiki, dashboards and admin tools that employees reach from anywhere,
   with nothing exposed to the internet.</p>
 <ol class="docs-steps">
-  <li>Raise a pen of your own (<a href="/docs/self-host.html">raising your own pen</a>), so the
-    company holds its own keys.</li>
+  <li>Sign up for a pen at <a href="https://get.hogman.network/">get.hogman.network</a> and
+    appoint a second owner in case someone loses a device.</li>
   <li>Invite each employee. Each one joins their laptop; anyone already using Tailscale for
     work keeps it, untouched.</li>
   <li>Share each tool from the machine it runs on, each with its own server link from the home
@@ -101,8 +101,7 @@
 <p><strong>Goal:</strong> invited customers reach their portal; attackers never even see its
   login page.</p>
 <ol class="docs-steps">
-  <li>Invite each customer contact. Make invites from the home page (or script them with
-    <code>invite create</code> on your own server).</li>
+  <li>Invite each customer contact from your pen's home page.</li>
   <li>Share the portal from the machine it runs on: <code>share portal 8080</code>.</li>
   <li>When a customer relationship ends, kick that contact.</li>
 </ol>
@@ -113,7 +112,7 @@
   deploying it anywhere.</p>
 <pre class="term"><span class="p">$</span> npm run dev                          <span class="c"># listening on 5173, say</span>
 <span class="p">$</span> ./hogman-join share demo 5173</pre>
-<p>Send <code>https://demo.yourpen.hogman</code> to the people in the pen. It has real HTTPS, so
+<p>Send <code>https://demo.yourpen.pens.hogman.network</code> to the people in the pen. It has real HTTPS, so
   service workers, secure cookies and camera access behave as they will in production. Ctrl-C
   takes it down; run it again later and it's back at the same address.</p>
 
@@ -123,7 +122,7 @@
 <ol class="docs-steps">
   <li>On a computer at home that's in the pen, share the device's local address:
 <pre class="term"><span class="p">$</span> ./hogman-join share media http://192.168.1.20:8096 --background</pre></li>
-  <li>From anywhere, members open <code>https://media.yourpen.hogman</code>.</li>
+  <li>From anywhere, members open <code>https://media.yourpen.pens.hogman.network</code>.</li>
 </ol>
 <p>Nothing on your home router is opened or forwarded.</p>
 

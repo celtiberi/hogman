@@ -15,12 +15,12 @@ PAGES = [  # (file, nav title, page title, description, sidebar group)
     ("index", "Docs home", "Hogman docs", "Guides, use cases and how Hogman works, in detail.", "Start here"),
     ("join", "Joining a pen", "Joining a pen", "Getting your computer into a pen, adding more devices, and leaving.", "Start here"),
     ("share", "Putting things in your pen", "Putting things in your pen", "One command puts a folder, an app or a website in your pen with its own name and HTTPS.", "Start here"),
-    ("keeper", "Running your pen", "Running your pen", "Invites, the herd, suspend and the boot, names and roles, from the home page or the command line.", "Start here"),
+    ("keeper", "Running your pen", "Running your pen", "Invites, the herd, suspend and the boot, names and roles, from your pen's home page.", "Start here"),
     ("use-cases", "Use cases", "Use cases, worked through", "Families, clubs, small companies, customer portals and side projects, set up step by step.", "Start here"),
     ("faq", "FAQ and troubleshooting", "FAQ and troubleshooting", "Common questions, and fixes for the problems people actually hit.", "Start here"),
     ("how-it-works", "How it works", "How Hogman works", "The parts of a pen, what happens on the wire, and what the keeper can and can't see.", "Going deeper"),
     ("security", "Architecture & security", "Architecture and security", "Packet flow, client isolation, DNS-01 certificates, threat model, host hardening, and known limits.", "Going deeper"),
-    ("self-host", "Raising your own pen", "Raising your own pen", "Run Hogman on a server of your own: what you need and where the full guide is.", "Going deeper"),
+    ("self-host", "Self-hosting", "Self-hosting", "Hogman is hosted-only (D-24); the code is open source to read and check.", "Going deeper"),
 ]
 
 HEAD = """<!doctype html>

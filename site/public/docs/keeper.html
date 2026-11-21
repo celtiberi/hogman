@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Running your pen · Hogman</title>
-<meta name="description" content="Invites, the herd, suspend and the boot, names and roles, from the home page or the command line.">
+<meta name="description" content="Invites, the herd, suspend and the boot, names and roles, from your pen's home page.">
 <meta name="theme-color" content="#0e080c">
 <link rel="icon" href="/favicon.svg?v=metal5" type="image/svg+xml">
 <link rel="stylesheet" href="/styles.css?v=metal10">
@@ -38,14 +38,13 @@
 <ul>
 <li><a href="/docs/how-it-works.html">How it works</a></li>
 <li><a href="/docs/security.html">Architecture & security</a></li>
-<li><a href="/docs/self-host.html">Raising your own pen</a></li>
+<li><a href="/docs/self-host.html">Self-hosting</a></li>
 </ul>
 </aside>
 <main class="docs-main">
 <h1 class="docs-h1">Running your pen</h1>
 <p class="lede">For the keeper (the pen's owner) and anyone they make an admin. Everything here
-  is on your pen's home page, <code>https://home.yourpen.hogman</code>. If you raised your
-  own pen, each section also shows the command line.</p>
+  is on your pen's home page, <code>https://home.yourpen.pens.hogman.network</code>.</p>
 
 <h2 class="docs-h2">Roles</h2>
 <table class="docs-table">
@@ -67,11 +66,9 @@
   club") and press <strong>Make an invite</strong>. You get a link and a QR code. Each invite
   works for one person, once, and expires after 7 days. Send it however you like: the link is
   the only way in, so treat it like a key.</p>
-<p><strong>Open invites</strong> lists the ones nobody has used yet; revoke any of them.</p>
-<pre class="term"><span class="c"># on your own server</span>
-<span class="p">$</span> hogman-host pen mypen invite create --note "alice"
-<span class="p">$</span> hogman-host pen mypen invite list
-<span class="p">$</span> hogman-host pen mypen invite revoke 3</pre>
+<p><strong>Open invites</strong> lists the ones nobody has used yet; revoke any of them. (Invite
+  links from before public certificates — carrying <code>fp=</code> — no longer work; old pens
+  created on <code>.hogman</code> zones must be recreated.)</p>
 
 <h2 class="docs-h2">The herd</h2>
 <p><strong>The herd</strong> lists everyone in the pen with their role, status and number of
@@ -90,34 +87,21 @@
     again, give the new account the old one's role, and kick the old account (make an old owner
     an admin first).</li>
 </ul>
-<pre class="term"><span class="p">$</span> hogman-host pen mypen member list
-<span class="p">$</span> hogman-host pen mypen member suspend gary "spamming the forum"
-<span class="p">$</span> hogman-host pen mypen member resume gary
-<span class="p">$</span> hogman-host pen mypen member kick gary "second time"
-<span class="p">$</span> hogman-host pen mypen member role alice admin
-<span class="p">$</span> hogman-host pen mypen member role alice owner</pre>
 
 <h2 class="docs-h2">Devices and names</h2>
 <p>Every member manages their own devices on the home page: <strong>Add a device</strong> for a
   one-time join link, and <strong>Get a share link</strong> to put something in the pen from a
   computer that isn't in it. Names belong to <a href="/docs/share.html">shares</a>, which name
-  themselves. From the command line:</p>
-<pre class="term"><span class="p">$</span> hogman-host pen mypen device list
-<span class="p">$</span> hogman-host pen mypen device key alice personal     <span class="c"># alice's first device only: no account recovery</span>
-<span class="p">$</span> hogman-host pen mypen device rm 12                  <span class="c"># a lost laptop</span>
-<span class="p">$</span> hogman-host pen mypen name list
-<span class="p">$</span> hogman-host pen mypen name release blog</pre>
-<p>The owner can also claim, reassign or release any name, including held ones.</p>
-
-<h2 class="docs-h2">The audit log</h2>
-<p>Every invite, join, name change, suspension and removal is recorded with who did it and
-  when:</p>
-<pre class="term"><span class="p">$</span> hogman-host pen mypen audit 50</pre>
+  themselves. Every site hostname gets a standard web certificate, so its hostname appears in
+  public Certificate Transparency logs (contents stay private).</p>
 
 <h2 class="docs-h2">What to tell your members</h2>
 <p>As keeper you can see who is in the pen, their devices, when they're online and which pen
-  names they look up. You can't see what they send each other, or anything they do outside the
-  pen. Say so when you invite people: <a href="/docs/how-it-works.html#trust">who sees what</a>.</p>
+  names they look up. You can't see what members send each other, or anything they do outside the
+  pen. Let members know that pen and shared-site names are public in CT logs, and that if they
+  join other hosted pens under <code>pens.hogman.network</code>, they should use a separate
+  browser profile for pens they don't fully trust (<code>D-19</code>). See
+  <a href="/docs/how-it-works.html#trust">who sees what</a>.</p>
 
 <p class="docs-edit fine">Something wrong or unclear on this page? Its source is in
   <a href="https://github.com/celtiberi/hogman/tree/main/site/docs-src">site/docs-src</a>; issues and fixes welcome.</p>
