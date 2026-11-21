@@ -555,6 +555,14 @@ cmd_backup() {
     backup_pen "$n"; ok=$((ok + 1))
   done
   [ "$ok" -gt 0 ] || info "no pens to back up"
+  # The challenge DNS server's state: credential hashes and the pen names ever
+  # used (D-21), so a rebuilt host can't hand a used name out again.
+  if [ -f "$CDNS_STATE" ]; then
+    local ts out; ts="$(date -u +%Y%m%dT%H%M%SZ)"; out="$BACKUPS/challenge-dns-$ts.tar.gz.age"
+    tar -C "$(dirname "$CDNS_STATE")" -czf - "$(basename "$CDNS_STATE")" | age -r "$(cat "$RECIPIENT")" > "$out.part" \
+      && chown root:hogman-backup "$out.part" && chmod 0640 "$out.part" && mv "$out.part" "$out"
+    ls -1t "$BACKUPS"/challenge-dns-*.tar.gz.age 2>/dev/null | tail -n +$((KEEP_LOCAL + 1)) | xargs -r rm -f
+  fi
 }
 
 # --------------------------------------------------------------- hosting ----
@@ -918,30 +926,48 @@ cmd_signup_notify() {
 # and only once Cloudflare delegates those to ns1 (docs: public-certificates).
 CDNS_BIN=/usr/local/bin/challenge-dns
 CDNS_UNIT=/etc/systemd/system/hogman-challenge-dns.service
+CDNS_USER=hogman-cdns
+CDNS_KEY=/etc/hogman/gcp-eab.json
+CDNS_STATE=/var/lib/challenge-dns/state.json
 PEN_GID=65532   # the group the pens' registrars run as (H3); it may use the API socket
 cmd_challenge_dns_setup() {
   load_host
   local ip="${1:-}" key="${2:-}" arch
   valid_ipv4 "$ip" || die "usage: hogman-host challenge-dns-setup <public IPv4 of this server> [gcp-key.json]"
-  ip -4 addr show 2>/dev/null | grep -qw "inet $ip" || die "$ip isn't an address of this server (answering on 127.0.0.53 would clash with systemd-resolved)"
+  ip -4 -o addr show scope global 2>/dev/null | grep -Fq " inet $ip/" \
+    || die "$ip isn't a public address of this server (answering on 127.0.0.53 would clash with systemd-resolved)"
   case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) die "unsupported CPU $(uname -m)" ;; esac
   local bin="$SRC/prebuilt/challenge-dns/challenge-dns-linux-$arch"
   [ -f "$bin" ] || die "no compiled challenge-dns in this release ($bin); update first: curl -fsSL https://hogman.network/install.sh | sudo bash"
   install -m 0755 "$bin" "$CDNS_BIN"
 
-  # The registrars' group, so the service can hand them the API socket.
+  # A fixed system user (not DynamicUser): the API socket's folder is bind-
+  # mounted into the registrars, so it must outlive restarts and keep one
+  # owner. The registrars' group may use the socket, and nothing else may.
   getent group "$PEN_GID" >/dev/null || groupadd --system --gid "$PEN_GID" hogman-pen
   local pengroup; pengroup="$(getent group "$PEN_GID" | cut -d: -f1)"
+  id "$CDNS_USER" >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$CDNS_USER"
+  cat > /etc/tmpfiles.d/hogman-acme.conf <<TMP
+# The challenge DNS API socket's folder: owned by the service, usable by the pens' registrars.
+d /run/hogman-acme 0750 $CDNS_USER $pengroup -
+TMP
+  systemd-tmpfiles --create /etc/tmpfiles.d/hogman-acme.conf
 
   # The Google key (optional) is handed over as a systemd credential: read
   # only by this service, never in its environment or on its command line.
-  local cred=""
+  # Re-running without a key keeps one already installed.
   if [ -n "$key" ]; then
     [ -f "$key" ] || die "no such file: $key"
     install -d -m 0700 /etc/hogman
-    install -m 0600 "$key" /etc/hogman/gcp-eab.json
-    cred=$'LoadCredential=gcp-eab.json:/etc/hogman/gcp-eab.json\nEnvironment=CDNS_GCP_KEY=%d/gcp-eab.json'
+    install -m 0600 "$key" "$CDNS_KEY"
   fi
+  local cred=""
+  [ -f "$CDNS_KEY" ] && cred="LoadCredential=gcp-eab.json:$CDNS_KEY
+Environment=CDNS_GCP_KEY=%d/gcp-eab.json"
+
+  # Keep a copy of the state before changing anything (credential hashes and
+  # the used pen names, nothing secret beyond the hashes).
+  [ -f "$CDNS_STATE" ] && cp -p "$CDNS_STATE" "$CDNS_STATE.bak"
 
   cat > "$CDNS_UNIT" <<UNIT
 [Unit]
@@ -952,17 +978,19 @@ Wants=network-online.target
 [Service]
 ExecStart=$CDNS_BIN serve
 Environment=CDNS_LISTEN=$ip:53
-Environment=CDNS_STATE=/var/lib/challenge-dns/state.json
+Environment=CDNS_STATE=$CDNS_STATE
 Environment=CDNS_API_SOCK=/run/hogman-acme/api.sock
 Environment=CDNS_API_GID=$PEN_GID
 Environment=CDNS_ADMIN_SOCK=/run/challenge-dns/admin.sock
-$(printf '%b' "$cred")
-DynamicUser=yes
+$cred
+User=$CDNS_USER
+Group=$CDNS_USER
 SupplementaryGroups=$pengroup
 StateDirectory=challenge-dns
 StateDirectoryMode=0700
-RuntimeDirectory=challenge-dns hogman-acme
-RuntimeDirectoryMode=0755
+RuntimeDirectory=challenge-dns
+RuntimeDirectoryMode=0700
+ReadWritePaths=/run/hogman-acme
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
@@ -976,6 +1004,7 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
+ProtectProc=invisible
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes
@@ -984,6 +1013,8 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallFilter=@chown
 UMask=0077
 Restart=on-failure
 RestartSec=5
@@ -1000,7 +1031,7 @@ UNIT
   fi
   sleep 1
   systemctl is-active --quiet hogman-challenge-dns.service || die "it didn't start: journalctl -u hogman-challenge-dns"
-  info "challenge-dns answers on $ip:53 (UDP and TCP)${key:+, with the Google fallback CA}"
+  info "challenge-dns answers on $ip:53 (UDP and TCP)$( [ -n "$cred" ] && echo ", with the Google fallback CA")"
   info "Check from outside:  dig @$ip pens.hogman.network SOA   (and +tcp)"
   info "If DigitalOcean's cloud firewall is on, allow TCP and UDP 53 there too."
 }

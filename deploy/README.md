@@ -233,13 +233,14 @@ piece is the **challenge DNS server**, which answers Let's Encrypt and Google wh
 a certificate request. It runs on the host:
 
 ```bash
-hogman-host challenge-dns-setup 159.65.78.95              # this server's public IPv4
-hogman-host challenge-dns-setup 159.65.78.95 gcp-eab.json # with the Google fallback CA
+hogman-host challenge-dns-setup 203.0.113.10              # this server's public IPv4
+hogman-host challenge-dns-setup 203.0.113.10 gcp-eab.json # with the Google fallback CA
 hogman-host challenge-dns cred list
 ```
 
-- **It runs as a locked-down systemd service** (`hogman-challenge-dns`): a throwaway system
-  user, only allowed to bind port 53, read-only everywhere else.
+- **It runs as a locked-down systemd service** (`hogman-challenge-dns`): its own system user
+  with no login, only allowed to bind port 53, read-only everywhere else. Its state (credential
+  hashes and the pen names ever used) is in the nightly backups.
 - **It answers only for `pens.hogman.network` and `_acme-challenge.gate.hogman.network`,** and
   only once Cloudflare delegates those names to `ns1.hogman.network`. Until then nobody asks it
   anything. Check it with `dig @<ip> pens.hogman.network SOA`, then again with `+tcp`.

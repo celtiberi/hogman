@@ -43,7 +43,7 @@ const usage = `challenge-dns: DNS-01 challenge server for Hogman pens
   challenge-dns name used <penname>      prints "used" (exit 0) if the name was ever given out
 
 Settings (environment):
-  CDNS_LISTEN        public address for DNS, e.g. 159.65.78.95:53 (required to serve)
+  CDNS_LISTEN        public address for DNS, e.g. 203.0.113.10:53 (required to serve)
   CDNS_PENS_ZONE     default pens.hogman.network
   CDNS_GATE_NAME     default _acme-challenge.gate.hogman.network
   CDNS_NS            default ns1.hogman.network
@@ -90,7 +90,7 @@ func zonesFromEnv() Zones {
 func serve() error {
 	listen := os.Getenv("CDNS_LISTEN")
 	if listen == "" {
-		return errors.New("set CDNS_LISTEN to the public address to answer on, e.g. 159.65.78.95:53 (not 127.0.0.53, where systemd-resolved sits)")
+		return errors.New("set CDNS_LISTEN to the public address to answer on, e.g. 203.0.113.10:53 (not 127.0.0.53, where systemd-resolved sits)")
 	}
 	zones := zonesFromEnv()
 	statePath := env("CDNS_STATE", "/var/lib/challenge-dns/state.json")
