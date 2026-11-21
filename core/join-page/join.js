@@ -39,8 +39,19 @@
   const cleanLink = `https://${host}/join#${t ? 't=' + t : 'k=' + k}${forShare ? '&for=share' : ''}`;
   const quoted = `'${cleanLink}'`;
   const verb = forShare ? 'share blog 8080 ' : '';
-  const unixCmd = `curl -fsSLo hogman-join "https://${host}/join/dl/hogman-join-$(uname -s)-$(uname -m)" && chmod +x hogman-join && ./hogman-join ${verb}${quoted}`;
+  const longCmd = `curl -fsSLo hogman-join "https://${host}/join/dl/hogman-join-$(uname -s)-$(uname -m)" && chmod +x hogman-join && ./hogman-join ${verb}${quoted}`;
+  // Joining: one short command that's the same for everyone; it asks for the
+  // link, so the secret never sits in the command. Sharing keeps the long form.
+  const unixCmd = forShare ? longCmd : `curl -fsSL https://${host}/start | sh`;
   document.getElementById('cmd').textContent = unixCmd;
+  document.getElementById('cmd-manual').textContent = longCmd;
+  document.getElementById('link-step').hidden = forShare;
+  document.getElementById('manual').hidden = forShare;
+  document.getElementById('key-warn').hidden = !forShare;
+  document.getElementById('copy-link').onclick = async () => {
+    await navigator.clipboard.writeText(cleanLink);
+    document.getElementById('copied-link').textContent = 'Copied. Paste it into Terminal when it asks.';
+  };
   // Sharing doesn't touch the browser proxy, so no password note there.
   document.getElementById('pw-note').hidden = forShare;
   if (forShare) {

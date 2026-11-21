@@ -248,6 +248,18 @@ id_z="$(cat "$HOGMAN_HOME/pens/zebra/.challenge-dns-id")"
 check "each pen has its own challenge DNS credential and no CA" bash -c 'test -n "$1" -a -n "$2" -a "$1" != "$2" && test ! -e "$3/pens/bobo/data/pki" && test ! -e "$3/pens/zebra/data/pki"' _ "$id_b" "$id_z" "$HOGMAN_HOME"
 check "bobo's members are not zebra's" no_match bobo-owner "$HOST" pen zebra member list
 
+step "The short join command: curl https://<pen>.gate.../start | sh"
+start_hdrs="$(in_client zebra curl -sI https://bobo.gate.hogman.test/start | tr -d '\r')"
+check "the front door serves /start as plain text" grep -iq '^content-type: text/plain' <<<"$start_hdrs"
+link3="$("$HOST" pen bobo invite create --note start-script | awk '/^link:/ {print $2}')"
+out3="$(in_client zebra sh -c 'curl -fsSL https://bobo.gate.hogman.test/start | sh -s -- "$1" --no-open --handle member3 --hostname laptop3' _ "$link3" 2>&1)"; rc3=$?
+[ $rc3 = 0 ] || echo "$out3" | tail -12 | sed 's/^/        | /'
+check "it checks the download's SHA-256" grep -q "checked: SHA-256 matches" <<<"$out3"
+check "a member joins bobo with it (exit $rc3)" grep -q "You're in. You are member3 on bobo.pens.hogman.test" <<<"$out3"
+check "the tool is kept as ~/hogman-join" in_client zebra test -x /root/hogman-join
+bad_link="$(in_client zebra sh -c 'curl -fsSL https://bobo.gate.hogman.test/start | sh -s -- "https://evil.example/notjoin" 2>&1' || true)"
+check "it refuses something that isn't an invite link" grep -q "doesn't look like a Hogman invite link" <<<"$bad_link"
+
 step "One computer joins two pens (combined PAC)"
 link2="$("$HOST" pen zebra invite create --note multi-pen | awk '/^link:/ {print $2}')"
 out2="$(in_client bobo sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open --handle member2 --hostname laptop2 "$1"' _ "$link2" 2>&1)"; rc2=$?
