@@ -279,7 +279,9 @@ hogman-host pen mypen member kick gary "rolled in something"
 
 The installer prints what's next: managing the server over your own Tailscale network with
 SSH closed to the internet, and moving the pen's root key somewhere safe. Run the same
-`curl` again later to update, then `hogman-host upgrade mypen`.
+`curl` again later to update, then `hogman-host upgrade mypen`. Compiled parts are built by
+GitHub from a public commit with signed provenance; check any of them with
+`gh attestation verify FILE --repo celtiberi/hogman`.
 
 One server can hold many pens: `hogman-host add` again with another name and hostname. Each
 pen is walled off from the others, in its own folder you can move to another server.

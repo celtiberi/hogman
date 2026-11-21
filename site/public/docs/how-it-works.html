@@ -65,7 +65,8 @@
         reach each other directly.</td></tr>
     <tr><td>Registrar</td><td>Hogman (Go)</td>
       <td>The ledger: members, roles, invites, devices, names, the audit log. Writes the access
-        policy into Headscale, answers DNS for the pen's zone, and serves the home page's API.</td></tr>
+        policy into Headscale, answers DNS for the pen's zone, and serves the home page's API,
+        over a private socket that only the home page can reach.</td></tr>
     <tr><td>Certificate authority</td><td><a href="https://smallstep.com/certificates/">step-ca</a></td>
       <td>Issues HTTPS certificates for names in the pen over ACME (the standard way to get certificates automatically), the protocol Let's Encrypt
         uses.</td></tr>
@@ -79,7 +80,8 @@
 <p>Exact versions are pinned in
   <a href="https://github.com/celtiberi/hogman/blob/main/core/compose.yaml">core/compose.yaml</a>.
   Members' computers run Hogman's built-in client (see <a href="#join">joining</a>). Hogman's own code is the registrar, the join tool
-  (<code>hogman-join</code>), the sign-up service, and shell tools that run pens and hosts.</p>
+  (<code>hogman-join</code>), the sign-up service, and shell tools that run pens and hosts. The
+  registrar and the CA never run as root.</p>
 
 <h2 class="docs-h2" id="request">One request, start to finish</h2>
 <p>Bob is a member. Alice shared a photo folder as <code>photos.smith.hogman</code>. Bob types
@@ -175,9 +177,10 @@
   <li>The CA speaks ACME at <code>ca.yourpen.hogman:9000</code>, inside the mesh only.
     Certificates last 7 days and renew automatically; the short life is the revocation
     mechanism.</li>
-  <li>A server proves it owns a name the usual ACME way (TLS-ALPN or HTTP challenge) at the
-    address the pen's DNS gives for it. Since the registrar controls DNS, <strong>owning a name
-    in the pen is what entitles you to a certificate for it.</strong></li>
+  <li>A server proves it owns a name the usual ACME way, over HTTPS on port 443 (the TLS-ALPN
+    challenge) at the address the pen's DNS gives for it. Since the registrar controls DNS,
+    <strong>owning a name in the pen is what entitles you to a certificate for it.</strong> The
+    CA refuses certificates for IP addresses and wildcard names.</li>
 </ul>
 
 <h2 class="docs-h2" id="share">Shares</h2>
@@ -227,10 +230,22 @@
   means trusting its admin. If you'd rather trust nobody upstream,
   <a href="/docs/self-host.html">raise your own pen</a>.</p>
 
+<h2 class="docs-h2" id="releases">Releases</h2>
+<p>Every compiled part of a release is built by GitHub from a public commit, never on someone's
+  laptop. GitHub signs a record of which workflow and commit built each file (SLSA build
+  provenance), and the release is published only if every file checks out. You can check any
+  file yourself:</p>
+<pre class="term"><span class="p">$</span> gh attestation verify hogman-join --repo celtiberi/hogman</pre>
+<p>The installer and <code>hogman-join update</code> check each download against its SHA-256
+  checksum, which catches broken downloads but trusts the server it came from. Signed updates,
+  checked against a key built into Hogman, are planned.</p>
+
 <h2 class="docs-h2" id="limits">Limits, honestly</h2>
 <ul>
-  <li><strong>Not audited.</strong> Young security software. Don't put anything high-stakes in a
-    pen yet.</li>
+  <li><strong>Not independently audited.</strong> Young security software. Don't put anything
+    high-stakes in a pen yet. Our own audit against the standard checklists (OWASP ASVS, CIS,
+    SLSA), and what we fixed, is
+    <a href="https://github.com/celtiberi/hogman/blob/main/docs/security/audit-2026-11.md">public</a>.</li>
   <li><strong>Phones</strong> can't join yet; the app is in the works.</li>
   <li><strong>Windows</strong> is built but untested.</li>
   <li>One control server per pen: if it's down, new connections, joins, DNS for the pen and

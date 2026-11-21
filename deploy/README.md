@@ -28,7 +28,10 @@ guests, plus keeping it backed up, watched and up to date.
    This sets the server up (security updates, Docker, Tailscale, firewall, swap), installs
    Hogman into `/opt/hogman`, and starts the front door. The code comes from a release on
    hogman.network, checked against its published SHA-256, with the join tool and registrar
-   already compiled.
+   already compiled by GitHub from a public commit. Each compiled file carries signed build
+   provenance: `gh attestation verify FILE --repo celtiberi/hogman` checks it. Each pen's
+   registrar and certificate authority run as user 65532, not root, even though the installer
+   runs as root.
 
 3. **Lock the server down.** Manage it over your own tailnet, and close SSH to the internet:
 
@@ -194,7 +197,8 @@ certificate, and Let's Encrypt allows about 50 new names a week per domain.
 How it's built: the page runs unprivileged and can only ask a **broker**, over a private
 network the two share, to report capacity, check a name, or raise a pen with a valid code. The
 broker drives Docker, so it is as powerful as root; it does only those three things, one at a
-time, and a failed attempt doesn't use up the code. Each hosted pen's **root key never stays
+time, and a failed attempt doesn't use up the code. It has no internet access unless you turn
+on push notifications (`hogman-host signup-notify`), its only outbound use. Each hosted pen's **root key never stays
 on the server in the clear**: it's encrypted to your backup key
 (`data/pki/root-escrow.tar.gz.age`) and the plain copy deleted. The pen runs on its
 intermediate certificate for five years; you need the root only to renew that.
