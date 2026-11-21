@@ -125,6 +125,10 @@ pen_net() {
   docker network connect "pen-$1-core" hogman-test-cdns
   docker network connect --alias pebble "pen-$1-core" hogman-test-pebble
 }
+pen_net_disconnect() {
+  docker network disconnect -f "pen-$1-core" hogman-test-cdns >/dev/null 2>&1 || true
+  docker network disconnect -f "pen-$1-core" hogman-test-pebble >/dev/null 2>&1 || true
+}
 
 step "Two pens on one host"
 pen_net bobo && "$HOST" add bobo || exit 1
@@ -253,6 +257,7 @@ step "Restore a pen from a backup, as on a new server"
 # What hogman-host backup keeps: .env and data/, minus what the pen rebuilds.
 (cd "$HOGMAN_HOME/pens/zebra" && tar -czf "$HOGMAN_HOME/zebra-backup.tar.gz" \
   --exclude data/join-dl --exclude data/edge --exclude data/portal --exclude data/tmp --exclude data/api .env data)
+pen_net_disconnect zebra
 "$HOST" remove zebra >/dev/null 2>&1
 mv "$HOGMAN_HOME/pens/zebra" "$HOGMAN_HOME/zebra-old"
 check "zebra is gone" fails docker network inspect pen-zebra-core
@@ -279,6 +284,7 @@ out="$("$HOST" add alpha 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | tail -15 | sed 's/^/        | /'
 check "hogman-host add alpha raises a public pen (exit $rc)" test $rc = 0
 check "the name alpha is now used" match '^used$' env CDNS_ADMIN_SOCK="$ACME/cdns/admin.sock" "$ACME/cdns/challenge-dns" name used alpha
+pen_net_disconnect alpha
 "$HOST" remove alpha >/dev/null 2>&1
 mv "$HOGMAN_HOME/pens/alpha" "$HOGMAN_HOME/alpha-old"
 reuse="$("$HOST" add alpha 2>&1)"

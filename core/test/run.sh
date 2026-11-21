@@ -221,8 +221,8 @@ check "owner minted two invites" test -n "$ALICE_TOKEN" -a -n "$BOB_TOKEN"
 r="$(redeem "$ALICE_TOKEN" alice)"; alice_json="${r% *}"
 check "alice redeems her invite (HTTP ${r##* })" test "${r##* }" = 201
 ALICE_LAPTOP_KEY="$(jq -r .auth_key <<<"$alice_json")"
-check "the enrolment is public mode without root fingerprint" \
-  jq -e '.cert_mode == "public" and (.root_fingerprint // "") == "" and (.root_ca // "") == ""' <<<"$alice_json"
+check "the enrolment carries the public zone without root fingerprint" \
+  jq -e --arg z "$ZONE" '.zone == $z and (.root_fingerprint // "") == "" and (.root_ca // "") == ""' <<<"$alice_json"
 check "the enrolment carries the control server" test "$(jq -r .login_server <<<"$alice_json")" = "https://$PUBLIC_HOST"
 r="$(redeem "$ALICE_TOKEN" mallory)"
 check "an invite works only once (HTTP ${r##* })" test "${r##* }" = 403
