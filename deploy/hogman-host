@@ -119,6 +119,11 @@ write_front() {
   mkdir -p "$FRONT/data" "$FRONT/config"
   chmod 700 "$FRONT/data"
   if [ "$(id -u)" = 0 ]; then
+    local cur
+    cur="$(docker inspect -f '{{.Config.User}}' hogman-front-front-1 2>/dev/null || true)"
+    if [ -n "$(docker ps -q --filter name=^/hogman-front-front-1$ 2>/dev/null)" ] && [ "$cur" != "$fuid:$fgid" ]; then
+      docker stop hogman-front-front-1 >/dev/null 2>&1 || true
+    fi
     chown -R "$fuid:$fgid" "$FRONT/data" "$FRONT/config"
   fi
   local caddy="$FRONT/Caddyfile.new" compose="$FRONT/compose.yaml.new" aliases="" n host

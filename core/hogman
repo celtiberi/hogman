@@ -353,6 +353,17 @@ cmd_up() {
     set_state HOGMAN_GID "$HOGMAN_GID"
     info "registrar and step-ca now run as user $HOGMAN_UID, not root"
   fi
+  if [ "$(id -u)" = 0 ] && [ -n "${HOGMAN_UID:-}" ] && [ "$HOGMAN_UID" != 0 ]; then
+    local svc cid cur
+    for svc in step-ca registrar portal edge; do
+      cid="$(dc ps -q "$svc" 2>/dev/null || true)"
+      [ -n "$cid" ] || continue
+      cur="$(docker inspect -f '{{.Config.User}}' "$cid" 2>/dev/null || true)"
+      if [ "$cur" != "$HOGMAN_UID:$HOGMAN_GID" ]; then
+        dc stop "$svc" >/dev/null 2>&1 || true
+      fi
+    done
+  fi
   own_runtime_files
 
   if [ -z "${CORE_MESH_IP:-}" ]; then
