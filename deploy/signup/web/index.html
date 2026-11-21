@@ -31,6 +31,10 @@
     <label for="handle">Your personal name in it</label>
     <div class="suffix"><input id="handle" name="handle" placeholder="your-name" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" required><span>.<span class="penname">&lt;network&gt;</span>.<span class="sites">pens.hogman.network</span></span></div>
     <p class="hint">For you as the pen's keeper: you invite people and can remove anyone.</p>
+    <p class="hint">Pen names are permanent (a used name is never given out again). Pen and site names
+      appear in public Certificate Transparency logs (contents stay private), and hosted pens
+      currently share <code>pens.hogman.network</code> so use a separate browser profile for any
+      pen you don't fully trust.</p>
 
     <button class="btn" id="go" type="submit">Raise my pen</button>
     <p class="error" id="err" role="alert" hidden></p>

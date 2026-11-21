@@ -17,6 +17,7 @@
     <a href="/">Home</a>
     <a href="/docs/">Docs</a>
     <a href="/docs/how-it-works.html">How it works</a>
+    <a href="/docs/security.html">Security</a>
     <a href="https://get.hogman.network/">Get a pen</a>
     <a href="https://github.com/celtiberi/hogman">Source</a>
   </nav>
@@ -36,13 +37,14 @@
 <p class="docs-nav-h">Going deeper</p>
 <ul>
 <li><a href="/docs/how-it-works.html" aria-current="page">How it works</a></li>
-<li><a href="/docs/self-host.html">Raising your own pen</a></li>
+<li><a href="/docs/security.html">Architecture & security</a></li>
+<li><a href="/docs/self-host.html">Self-hosting</a></li>
 </ul>
 </aside>
 <main class="docs-main">
 <h1 class="docs-h1">How Hogman works</h1>
 <p class="lede">A pen is a private network for a group of people: its own encrypted mesh, its own
-  names, its own certificate authority and its own member list. This page goes through each
+  DNS zone, standard web certificates, and its own member list. This page goes through each
   part, then follows a request from start to finish.</p>
 
 <nav class="toc" aria-label="On this page">
@@ -54,8 +56,10 @@
 </nav>
 
 <h2 class="docs-h2" id="parts">The parts</h2>
-<p>Each pen runs five small services, in containers, with its own data folder. Only the first is
-  reachable from the internet; the rest answer only inside the mesh.</p>
+<p>Each pen runs four small services, in containers, with its own data folder on the host,
+  plus the host's ACME challenge DNS server (<code>ns1.hogman.network</code>). Only the shared front door
+  and each pen's UDP relay port are reachable from the internet; the rest answer only inside the
+  mesh.</p>
 <table class="docs-table">
   <thead><tr><th>Part</th><th>Software</th><th>Job</th></tr></thead>
   <tbody>
@@ -65,69 +69,65 @@
         reach each other directly.</td></tr>
     <tr><td>Registrar</td><td>Hogman (Go)</td>
       <td>The ledger: members, roles, invites, devices, names, the audit log. Writes the access
-        policy into Headscale, answers DNS for the pen's zone, and serves the home page's API,
-        over a private socket that only the home page can reach.</td></tr>
-    <tr><td>Certificate authority</td><td><a href="https://smallstep.com/certificates/">step-ca</a></td>
-      <td>Issues HTTPS certificates for names in the pen over ACME (the standard way to get certificates automatically), the protocol Let's Encrypt
-        uses.</td></tr>
+        policy into Headscale, answers DNS for the pen's zone, keeps <code>home.&lt;zone&gt;</code>'s
+        public certificate via CertMagic DNS-01, scopes share TXT/EAB requests, and serves the
+        home page's API over a private Unix socket.</td></tr>
     <tr><td>Home page</td><td><a href="https://caddyserver.com">Caddy</a></td>
-      <td>Serves <code>home.yourpen.hogman</code>, where members manage devices and names and the
-        keeper runs the pen.</td></tr>
+      <td>Serves <code>home.yourpen.pens.hogman.network</code> inside the mesh, where members
+        manage devices and names and the keeper runs the pen.</td></tr>
     <tr><td>The pen's own node</td><td>Tailscale client</td>
-      <td>Puts the pen's DNS, home page and CA at one address inside the mesh.</td></tr>
+      <td>Puts the pen's DNS and home page at one address inside the mesh.</td></tr>
   </tbody>
 </table>
 <p>Exact versions are pinned in
   <a href="https://github.com/celtiberi/hogman/blob/main/core/compose.yaml">core/compose.yaml</a>.
-  Members' computers run Hogman's built-in client (see <a href="#join">joining</a>). Hogman's own code is the registrar, the join tool
-  (<code>hogman-join</code>), the sign-up service, and shell tools that run pens and hosts. The
-  registrar and the CA never run as root.</p>
+  Members' computers run Hogman's unprivileged Go client (<code>hogman-join</code>). Everything
+  on the host runs non-root (<code>uid 65532</code>).</p>
 
 <h2 class="docs-h2" id="request">One request, start to finish</h2>
-<p>Bob is a member. Alice shared a photo folder as <code>photos.smith.hogman</code>. Bob types
-  that address into his browser:</p>
+<p>Bob is a member. Alice shared a photo folder as
+  <code>photos.smith.pens.hogman.network</code>. Bob types that address into his browser:</p>
 <ol class="docs-steps">
-  <li><strong>DNS.</strong> Bob's browser hands any address ending in <code>.smith.hogman</code> to
-    the pen's background connection (its automatic proxy setting says so; every other address
-    goes to the internet as usual). The connection asks the pen's DNS, inside the mesh, and the
-    registrar answers with the mesh address of Alice's share, something like
-    <code>100.80.12.7</code>. The connection only ever dials devices the pen itself knows,
-    whatever the answer.</li>
+  <li><strong>DNS.</strong> Bob's browser hands any address ending in
+    <code>.smith.pens.hogman.network</code> to the pen's loopback proxy (its automatic proxy
+    setting says so; every other address goes straight to the internet as usual). The connection
+    asks the pen's DNS inside the mesh, and the registrar answers with the mesh IP of Alice's
+    share, something like <code>100.80.12.7</code>. <code>hogman-join</code> checks via
+    <code>tsnet</code> <code>WhoIs</code> that the IP belongs to a live enrolled peer before
+    dialing.</li>
   <li><strong>Policy.</strong> Bob's laptop may connect to that address on port 443 because the
     policy says members' devices may reach servers over HTTPS, and Alice's share is a server. If Bob were suspended,
     his devices would simply not be in the policy and nothing would connect.</li>
   <li><strong>Tunnel.</strong> The connection goes over WireGuard, Bob's device to Alice's, end
-    to end. If a firewall blocks a direct path, it goes through the pen's relay, still
-    encrypted; the relay can't read it.</li>
-  <li><strong>TLS.</strong> The share presents a certificate for <code>photos.smith.hogman</code>
-    signed by the pen's CA. Bob's computer trusts that CA because <code>hogman-join</code>
-    installed its root when he joined, after checking its fingerprint against his invite link.
-    The browser shows the padlock.</li>
+    to end. If a firewall blocks a direct path, it goes through the pen's relay as encrypted
+    WireGuard ciphertext; the relay can't read it.</li>
+  <li><strong>TLS.</strong> The share presents a standard HTTPS certificate for
+    <code>photos.smith.pens.hogman.network</code> issued to Alice's local CertMagic keypair.
+    Bob's browser verifies it with his computer's normal operating-system trust store — no custom
+    root certificate is ever installed — and shows the padlock.</li>
 </ol>
-<p>A stranger typing the same address gets nowhere at step 1: <code>.hogman</code> isn't a
-  public top-level domain, so the name doesn't resolve. Even with the IP address, there's no
-  route to it: <code>100.80.12.7</code> exists only inside the mesh.</p>
+<p>A stranger typing the same address gets nowhere at step 1: <code>ns1.hogman.network</code>
+  returns empty <code>NODATA</code> for any non-challenge query (zero <code>A</code>/<code>AAAA</code>
+  records exist), and mesh IPs exist only inside the tunnel.</p>
 
 <h2 class="docs-h2" id="join">Joining</h2>
 <ol class="docs-steps">
   <li>The keeper makes an invite: a single-use token, valid for 7 days. The link looks like
-    <code>https://&lt;control host&gt;/join#t=&lt;token&gt;&amp;fp=&lt;fingerprint&gt;</code>.
+    <code>https://&lt;pen&gt;.gate.hogman.network/join#t=&lt;token&gt;</code>.
     The part after <code>#</code> never leaves the browser except when the invite is redeemed.</li>
   <li>The link's page shows one command, which downloads <code>hogman-join</code> for your
     computer and runs it with the link.</li>
-  <li><code>hogman-join</code> fetches the pen's root certificate and checks it against the
-    fingerprint in the link, and that it can only vouch for the pen's own names. Only then does it
-    trust anything from the pen.</li>
-  <li>It adds the root to your computer's trust store (your password, once), then redeems the
-    invite with the name you choose. The registrar creates your membership and returns a
-    one-time device key.</li>
+  <li><code>hogman-join</code> checks <code>/hogman/v1/network</code> over standard HTTPS,
+    verifies that the pen zone matches the gate host, and redeems the invite with the name you
+    choose. (Legacy links carrying <code>fp=</code> from before public certificates are refused;
+    old private-CA pens must be recreated.)</li>
   <li>It starts the pen's background connection: a small built-in client (Tailscale's
-    <code>tsnet</code>, its library for building a connection into a program) running as you, not as administrator, with a local proxy that carries
-    only HTTPS to the pen's names (an <code>http://</code> address is answered on your own computer
-    with a redirect to HTTPS). Browsers use it
-    through an automatic proxy setting; everything else on the computer, including any
-    Tailscale of your own, is untouched.</li>
-  <li>It checks that your home page loads over HTTPS, and you're in.</li>
+    <code>tsnet</code>) running as you, never as administrator, with a loopback proxy that carries
+    only HTTPS to the pen's names (plain <code>http://</code> redirects locally to HTTPS).
+    Browsers use it through an automatic proxy setting; everything else on the computer, including
+    any Tailscale of your own, is untouched.</li>
+  <li>It verifies that your pen's home page loads over HTTPS using the system trust store, and
+    you're in — with zero OS root CA prompts.</li>
 </ol>
 <p>Details and options: <a href="/docs/join.html">Joining a pen</a>.</p>
 
@@ -138,7 +138,7 @@
 <table class="docs-table">
   <thead><tr><th>Device</th><th>Accepts connections from</th><th>Can connect to</th></tr></thead>
   <tbody>
-    <tr><td>Personal</td><td>Nobody</td><td>The pen's DNS, home page and CA; every server, on HTTPS (443) only</td></tr>
+    <tr><td>Personal</td><td>Nobody</td><td>The pen's DNS and home page; every server, on HTTPS (443) only</td></tr>
     <tr><td>Server</td><td>Any active member's device, on 443 only</td><td>The pen's services; other servers, on 443</td></tr>
     <tr><td>Anything else</td><td>Nobody</td><td>Nothing</td></tr>
   </tbody>
@@ -154,43 +154,51 @@
 
 <h2 class="docs-h2" id="names">Names</h2>
 <ul>
-  <li>Each pen has its own zone, <code>yourpen.hogman</code>. The registrar is the only DNS
-    server for it, and answers only inside the mesh.</li>
-  <li>Members claim names first come, first served, up to 50 each: <code>blog.smith.hogman</code>,
-    and anything under a name they own (<code>photos.blog.smith.hogman</code>). A name points
-    at one of that member's servers.</li>
-  <li>Reserved: <code>home</code>, <code>ca</code>, <code>ns</code>, <code>registrar</code>,
+  <li>Each pen has its own zone, <code>yourpen.pens.hogman.network</code>. The registrar is the
+    only DNS server resolving site addresses in it, and answers only inside the mesh. Public pen
+    names are used once and never recycled (<code>D-21</code>).</li>
+  <li>Members claim names first come, first served, up to 50 each:
+    <code>blog.yourpen.pens.hogman.network</code>. Each name points at one server.</li>
+  <li>Reserved: <code>home</code>, <code>ns</code>, <code>ns[0-9]*</code>, <code>registrar</code>,
     <code>search</code>, <code>nodes</code>, <code>www</code>, <code>join</code>,
-    <code>admin</code>. Devices also get automatic names under <code>nodes.yourpen.hogman</code>.</li>
+    <code>admin</code>, <code>_acme-challenge</code>. Devices also get automatic names under
+    <code>nodes.yourpen.pens.hogman.network</code>.</li>
   <li>Your browsing outside the pen never touches the pen's DNS.</li>
 </ul>
 
 <h2 class="docs-h2" id="certs">Certificates</h2>
 <ul>
-  <li>When a pen is raised it makes its own root certificate. The root carries X.509 <strong>name
-    constraints</strong>: it may sign only names ending in the pen's zone, and no IP addresses.
-    Browsers and operating systems enforce that, so installing it can't be used to intercept your
-    other traffic. Hogman's tests try to make the CA sign <code>www.google.com</code> and check
-    that it fails.</li>
-  <li>Day-to-day signing uses an intermediate certificate valid for five years. The root key is
-    taken off the server and kept offline, encrypted.</li>
-  <li>The CA speaks ACME at <code>ca.yourpen.hogman:9000</code>, inside the mesh only.
-    Certificates last 7 days and renew automatically; the short life is the revocation
-    mechanism.</li>
-  <li>A server proves it owns a name the usual ACME way, over HTTPS on port 443 (the TLS-ALPN
-    challenge) at the address the pen's DNS gives for it. Since the registrar controls DNS,
-    <strong>owning a name in the pen is what entitles you to a certificate for it.</strong> The
-    CA refuses certificates for IP addresses and wildcard names.</li>
+  <li><strong>No custom root certificates (D-18, D-22):</strong> Hogman uses standard web
+    certificates trusted by every browser and operating system out of the box. Nothing is
+    installed into your computer's trust store. (Running <code>hogman-join update</code> on a
+    public pen removes any leftover private Hogman roots from earlier releases; pre-switchover
+    pens must be recreated.)</li>
+  <li><strong>Split-horizon ACME DNS-01:</strong> Shares and portals generate their own local TLS
+    keypairs with <a href="https://github.com/caddyserver/certmagic">CertMagic</a> and prove
+    name ownership by placing a temporary TXT record under
+    <code>_acme-challenge.&lt;site&gt;.&lt;pen&gt;.pens.hogman.network</code> via the
+    registrar's mesh API (<code>/api/acme/txt</code>) and the host's authoritative
+    <code>challenge-dns</code> server.</li>
+  <li><strong>Primary + fallback CAs:</strong> Let's Encrypt is primary (with ARI support);
+    on CA rate limits or outages, CertMagic fails over automatically to Google Trust Services
+    via single-use EAB credentials (<code>/api/acme/eab</code>), governed by strict CAA rules on
+    <code>pens.hogman.network</code>.</li>
+  <li><strong>Public trade-offs:</strong> Every issued certificate appears in public Certificate
+    Transparency logs (hostnames only, never site contents, <code>D-21</code>). Also, hosted
+    pens share <code>pens.hogman.network</code> until it is listed on the Public Suffix List,
+    so use a separate browser profile for any pen you don't fully trust (<code>D-19</code>). See
+    <a href="/docs/security.html#crypto">Architecture &amp; security</a> for details.</li>
 </ul>
 
 <h2 class="docs-h2" id="share">Shares</h2>
 <p><code>hogman-join share blog 3000</code> creates a small device of its own, a server, using
   Tailscale's <code>tsnet</code> inside the join tool. It names itself <code>blog</code>, gets a
-  certificate from the pen's CA, and passes visitors to port 3000 on your computer (or serves a
-  folder). Because the share is its own device, your laptop stays a personal device that accepts
+  public HTTPS certificate via CertMagic DNS-01 (key held locally on your machine), and passes
+  visitors to port 3000 on your computer (or serves a folder through Go's <code>os.Root</code>).
+  Because the share is its own device, your laptop stays a personal device that accepts
   no connections, and nothing needs administrator rights or an open port. A server may only name
-  itself, and only with a free name or one that already points at it. Guide:
-  <a href="/docs/share.html">Sharing a folder or a website</a>.</p>
+  itself, and write challenge TXT records only for names it owns. Guide:
+  <a href="/docs/share.html">Putting things in your pen</a>.</p>
 
 <h2 class="docs-h2" id="boot">Removing people</h2>
 <p>Three levels, from lightest:</p>
@@ -208,27 +216,27 @@
   own accounts.</p>
 
 <h2 class="docs-h2" id="hosted">Hosted pens</h2>
-<p>On our server, every pen is its own set of the five containers above, with its own folder,
-  database, keys and relay port, using about 75 MB of memory. A shared front door
-  (Caddy) holds ports 80 and 443, has a public Let's Encrypt certificate for each pen's control
-  address, and passes each pen's traffic only to that pen. Pens never share a network with each
-  other. A pen's folder is the whole pen: copy it to another server running Hogman and it
-  carries on there.</p>
+<p>On our server, every pen is its own set of the four containers above, with its own folder,
+  database, keys, isolated Docker network (<code>pen-&lt;name&gt;-core</code>), and UDP relay
+  port, using about 75 MB of memory. A shared front door (Caddy) holds ports 80 and 443 under a
+  wildcard <code>*.gate.hogman.network</code> certificate, enforces a strict route allowlist, and
+  passes each pen's control traffic only to that pen. Pens never share a network with each
+  other.</p>
 
 <h2 class="docs-h2" id="trust">Who sees what</h2>
 <table class="docs-table">
-  <thead><tr><th></th><th>The keeper</th><th>Us, if we host the pen</th></tr></thead>
+  <thead><tr><th></th><th>The keeper</th><th>Us (host control plane)</th></tr></thead>
   <tbody>
     <tr><td>Who is in the pen, their devices, when they're online</td><td>Yes</td><td>Yes</td></tr>
     <tr><td>Which pen names devices look up</td><td>Yes</td><td>Yes</td></tr>
-    <tr><td>What members send each other</td><td>No (end to end encrypted)</td><td>No</td></tr>
+    <tr><td>What members send each other (WireGuard + TLS payloads)</td><td>No (end to end encrypted)</td><td>No</td></tr>
     <tr><td>Your browsing outside the pen</td><td>No</td><td>No</td></tr>
-    <tr><td>Could add a device or vouch for a name</td><td>Yes</td><td>Yes, in principle</td></tr>
+    <tr><td>Could add a device or write a DNS-01 challenge</td><td>Via UI/invites</td><td>Yes, in principle (rogue certs appear in CT)</td></tr>
   </tbody>
 </table>
-<p>Joining a pen means trusting its keeper, the same as joining anyone's Tailscale network
-  means trusting its admin. If you'd rather trust nobody upstream,
-  <a href="/docs/self-host.html">raise your own pen</a>.</p>
+<p>Hogman runs hosted pens only (<code>D-24</code>); joining a pen means trusting both its
+  keeper and the host control plane not to mint rogue devices or DNS-01 challenges (which would
+  be exposed in public Certificate Transparency logs).</p>
 
 <h2 class="docs-h2" id="releases">Releases</h2>
 <p>Every compiled part of a release is built by GitHub from a public commit, never on someone's
@@ -246,15 +254,16 @@
     high-stakes in a pen yet. Our own audit against the standard checklists (OWASP ASVS, CIS,
     SLSA), and what we fixed, is
     <a href="https://github.com/celtiberi/hogman/blob/main/docs/security/audit-2026-11.md">public</a>.</li>
+  <li><strong>Certificate Transparency logs (D-21):</strong> Pen and share hostnames appear in
+    public CT logs when certificates are issued (never site contents).</li>
+  <li><strong>Public Suffix List (D-19):</strong> <code>pens.hogman.network</code> is not on the
+    PSL yet; use separate browser profiles across mutually untrusted pens.</li>
   <li><strong>Phones</strong> can't join yet; the app is in the works.</li>
   <li><strong>Windows</strong> is built but untested.</li>
   <li>One control server per pen: if it's down, new connections, joins, DNS for the pen and
     certificate renewals stop. Existing direct connections keep working for a while.</li>
-  <li>Some programs keep their own certificate list (Java, Node, Python). They need to be
-    pointed at the pen's root; see the <a href="/docs/faq.html#own-certs">FAQ</a>.</li>
 </ul>
-<p>The full design, with the reasoning, is in
-  <a href="https://github.com/celtiberi/hogman/blob/main/DESIGN.md">DESIGN.md</a>.</p>
+<p>Deep technical walkthrough: <a href="/docs/security.html">Architecture &amp; security</a>.</p>
 
 <p class="docs-edit fine">Something wrong or unclear on this page? Its source is in
   <a href="https://github.com/celtiberi/hogman/tree/main/site/docs-src">site/docs-src</a>; issues and fixes welcome.</p>

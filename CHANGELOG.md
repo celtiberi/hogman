@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation & Website
+- Updated documentation, website, and sign-up disclosures for public certificates (`D-18`, `D-22`) and hosted pens only (`D-24`, Phase B item 6):
+  - Added `/docs/security.html` (packet flow, client isolation, DNS-01 architecture, threat model, host hardening, and known limits) and overhauled the homepage `#tech` section (`site/public/index.html`, `site/docs-src/`).
+  - Removed obsolete `step-ca`, private root CA, offline root key, `fp=`, `--no-trust`, and self-hosted pen server steps across `README.md`, `deploy/README.md` (reframed as the operator guide), `core/README.md`, `DESIGN.md` (marked initial spec with superseded decision links), and `site/`.
+  - Added Certificate Transparency hostname visibility (`D-21`), permanent pen name reservation (`D-21`), and multi-pen `pens.hogman.network` browser-profile isolation (`D-19`) disclosures on the sign-up page (`deploy/signup/web/index.html`), FAQ, and keeper docs, plus noted that pre-switchover `.hogman` pens must be recreated.
+
 ### Removed
 - Retired the per-pen private certificate authority (`step-ca`, D-22):
   - Removed `step-ca`, CA templates (`ca.json`, `root_ca.tpl`, `intermediate_ca.tpl`), `ca.<zone>` DNS records, Headscale ACL port `9000`, `CERT_MODE`, `ROOT_CA`, `compose.public.yaml`, `portal.public.Caddyfile`, and `step-resolv.conf`. All pens now run public ACME certificates via DNS-01 (`home.<zone>` managed by `registrar`, member sites/shares managed by `hogman-join share`).

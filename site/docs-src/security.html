@@ -1,0 +1,240 @@
+<h1 class="docs-h1">Architecture and security</h1>
+<p class="lede">What runs on your machine, how encryption and certificates work, who can see what,
+  and the limits we haven't closed yet.</p>
+
+<nav class="toc" aria-label="On this page">
+  <a href="#diagram">Packet flow</a> · <a href="#client">Client isolation</a> ·
+  <a href="#crypto">Encryption and DNS-01 HTTPS</a> · <a href="#threat-model">Threat model</a> ·
+  <a href="#host">Host isolation and supply chain</a> · <a href="#limits">Known limits</a>
+</nav>
+
+<h2 class="docs-h2" id="diagram">Packet flow and trust boundaries</h2>
+<p>Hogman separates the <strong>data plane</strong> (traffic between members and shares) from the
+  <strong>control plane</strong> (device keys, ACL policy, and pen DNS). Only the control plane's
+  front door listens on the public internet.</p>
+
+<pre class="term" aria-label="Hogman data plane and control plane packet flow"><span class="b">Data plane (member browser to a share — control server sees ciphertext only)</span>
+
+  Browser
+    │  PAC sends *.&lt;pen&gt;.pens.hogman.network to 127.0.0.1:&lt;port&gt;;
+    │  all other traffic goes directly to the internet as usual
+    ▼
+  hogman-join  (unprivileged Go binary, userspace tsnet — blind TCP :443 CONNECT tunnel)
+    │  1. Queries pen DNS (port 53 inside mesh) -&gt; random CGNAT 100.x / fd7a:: address
+    │  2. Verifies resolved IP is an enrolled peer via tsnet WhoIs (never dials LAN/127.0.0.1)
+    │  3. Enforces :443 only (D-11)
+    ▼
+  [ WireGuard E2E encrypted tunnel + inner TLS 1.3 ]   (direct UDP, or DERP relay ciphertext)
+    ▼
+  hogman-join share  (separate tsnet server node, local CertMagic keypair)
+    │  Serves local folder via Go os.Root (symlink escape refused) or reverse-proxies localhost:&lt;port&gt;
+    ▼
+  Your app or folder
+
+<span class="b">Control plane &amp; certificate issuance (metadata visible; no application payloads)</span>
+
+  *.gate.hogman.network  --&gt;  Shared Caddy front door (strict path allowlist + TLS wildcard)
+                                │
+                                ▼
+                        Per-pen container network (pen-&lt;name&gt;-core, 4 containers)
+                          ├── Headscale   (random 100.64.0.0/10 IPs, WireGuard keys, ACL grants)
+                          ├── core-mesh   (Tailscale node terminating mesh DNS &amp; portal IP)
+                          ├── Registrar   (Go ledger, pen DNS :53, Unix socket API to portal)
+                          └── Portal      (home.&lt;zone&gt; Caddy + CertMagic local key)
+
+  ns1.hogman.network     --&gt;  Authoritative miekg/dns server (:53 UDP/TCP)
+                                Serves ONLY _acme-challenge.* TXT, SOA, NS, CAA (no A/AAAA under pens.)</pre>
+
+<p>The local proxy inside <code>hogman-join</code> is a <strong>blind TCP <code>CONNECT</code>
+  tunnel</strong>. It forwards encrypted TLS bytes straight between your browser and the share
+  without terminating, inspecting, or re-signing TLS.</p>
+
+<h2 class="docs-h2" id="client">What runs on your computer (and what it refuses to touch)</h2>
+<p>Joining a pen downloads and runs one unprivileged static Go binary (<code>hogman-join</code>)
+  embedding Tailscale's userspace <code>tsnet</code> networking stack.</p>
+<ul>
+  <li><strong>No kernel interface, no daemon as root:</strong> <code>hogman-join</code> creates no
+    <code>TUN</code> device, edits no <code>/etc/hosts</code> or system DNS resolvers, never asks
+    for <code>sudo</code>, and leaves any existing Tailscale installation untouched.</li>
+  <li><strong>No OS root CA (D-18):</strong> Your computer validates pen certificates with its
+    normal operating system and browser trust store. Nothing is injected into your root store,
+    so a pen cannot mint certificates for any site outside its zone.</li>
+  <li><strong>PAC-scoped loopback proxy:</strong> <code>hogman-join</code> binds to
+    <code>127.0.0.1:&lt;port&gt;</code> and serves a <code>/proxy.pac</code> rule matching only
+    the pen zones you joined. <code>/status</code> and <code>/proxy.pac</code> reject requests
+    whose <code>Host</code> header is not loopback, preventing DNS-rebinding reads from random
+    web pages. Plain <code>http://</code> requests to pen names receive an immediate local
+    <code>308</code> redirect before crossing the mesh.</li>
+  <li><strong><code>WhoIs</code>-pinned dialing (red-team fix):</strong> Left unguarded,
+    <code>tsnet.Dial</code> falls back to the host OS network when given a non-peer IP. Regardless
+    of what the pen's DNS returns, <code>hogman-join</code> only dials addresses inside
+    <code>100.64.0.0/10</code> or <code>fd7a:115c:a1e0::/48</code> that <code>lc.WhoIs</code>
+    confirms belong to an enrolled node in that pen. A hostile pen can never pivot your browser
+    to <code>127.0.0.1</code>, LAN routers, or another tailnet.</li>
+  <li><strong>Personal devices stay unreachable:</strong> Member devices accept zero inbound
+    connections. Putting a site or folder into the pen with <code>hogman-join share</code> spins
+    up a separate <code>server</code> device (<code>tag:server</code>). Folder shares open targets
+    through Go's <code>os.Root</code> (refusing symlinks pointing outside the shared directory).
+    Share nodes use separate single-use invite tokens marked <code>for=share</code>, which personal
+    joins reject.</li>
+</ul>
+
+<h2 class="docs-h2" id="crypto">Transport, encryption, and public HTTPS on private IPs (D-18)</h2>
+<p>Every request to a share is encrypted twice, with keys held by the two endpoints:</p>
+<ol class="docs-steps">
+  <li><strong>Outer WireGuard tunnel:</strong> Direct peer-to-peer WireGuard encrypted end to end
+    between devices. When NAT traversal cannot establish a direct UDP path, traffic flows over
+    the pen's DERP relay as WireGuard ciphertext.</li>
+  <li><strong>Inner TLS 1.3 with standard web certificates:</strong> Each share generates its own
+    keypair and obtains its own certificate directly using embedded
+    <a href="https://github.com/caddyserver/certmagic">CertMagic</a>. TLS private keys never
+    leave the sharer's computer, and traffic stays inside the WireGuard tunnel (so browsers never
+    connect directly without WireGuard).</li>
+</ol>
+
+<p>Obtaining publicly trusted certificates without exposing pen servers to the public internet
+  works via <strong>split-horizon DNS-01</strong>:</p>
+<ul>
+  <li><strong>No public addresses:</strong> <code>ns1.hogman.network</code> (an authoritative server
+    built on <code>miekg/dns</code>) is delegated for <code>pens.hogman.network</code> and
+    <code>_acme-challenge.gate.hogman.network</code>. It serves only <code>SOA</code>,
+    <code>NS</code>, <code>CAA</code>, and short-lived <code>_acme-challenge.*</code>
+    <code>TXT</code> records (10-minute expiry, capped at 2 live records per name). Every other
+    query under <code>pens.hogman.network</code> returns empty <code>NODATA</code>: pen and share
+    names never resolve on the open internet.</li>
+  <li><strong>Strict ownership + weekly caps:</strong> When a share requests a certificate, it
+    calls the pen's registrar over the mesh (<code>POST /api/acme/txt</code>). The registrar verifies
+    the caller's mesh identity against live Headscale nodes, enforces <code>serverMayUse</code>
+    (a share can only write challenges for names pointing solely to itself, never
+    <code>home</code>, <code>nodes</code>, or another share's name), and calls
+    <code>challenge-dns</code> with that pen's hashed per-pen API token (capped at 10 distinct new
+    names per pen per week).</li>
+  <li><strong>CAA + CA failover:</strong> <code>pens.hogman.network</code> publishes
+    <code>0 issue "letsencrypt.org; validationmethods=dns-01"</code>,
+    <code>0 issue "pki.goog; validationmethods=dns-01"</code>, and <code>0 issuewild ";"</code>.
+    Primary issuance uses Let's Encrypt with ACME Renewal Information (ARI, RFC 9773). If a CA
+    returns rate limits (429), 5xx errors, or transport failures — never on DNS or ownership
+    errors — CertMagic fails over to Google Trust Services using single-use External Account
+    Binding (EAB) credentials minted lazily over the mesh. Persistent retry backoff
+    (up to 1 hour) survives service restarts so failing shares do not hammer CAs.</li>
+  <li><strong>Wildcard front doors:</strong> Hosted pens share <code>*.gate.hogman.network</code>
+    (<code>0 issue ";"</code> plus account-pinned <code>issuewild</code> CAA) so pen names stay out
+    of front-door Certificate Transparency entries.</li>
+</ul>
+
+<p><strong>Two public-certificate trade-offs to know before joining:</strong></p>
+<ul class="status">
+  <li class="notyet"><strong>Certificate Transparency (RFC 6962):</strong> Every issued
+    certificate — meaning pen names and share hostnames such as
+    <code>photos.yourpen.pens.hogman.network</code> — appears in public CT logs by design. Site
+    contents and traffic are never exposed, only the names.</li>
+  <li class="notyet"><strong>Cookie/same-site scope until PSL listing (D-19):</strong> Every
+    hosted pen lives under <code>pens.hogman.network</code>. Until <code>pens.hogman.network</code>
+    is on the Public Suffix List (after launch eligibility), browsers treat pens as sibling
+    subdomains for cookies and same-site requests. Use a separate browser profile if you join a pen
+    you do not fully trust.</li>
+</ul>
+
+<h2 class="docs-h2" id="threat-model">Threat model and trust boundaries</h2>
+<p>Hogman is private, not anonymous. Here is what each party can see or do, and what stops them:</p>
+<table class="docs-table">
+  <thead>
+    <tr><th>Adversary</th><th>What they can see or do</th><th>What stops them</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Passive ISP, Wi-Fi, or internet scanner</td>
+      <td>Sees UDP WireGuard or HTTPS DERP ciphertext to the relay IP, plus public CT names. Cannot
+        resolve pen <code>A</code>/<code>AAAA</code> records or probe mesh ports.</td>
+      <td>Zero public addresses under <code>pens.</code>, strict front-door allowlist on control
+        hosts, end-to-end WireGuard + inner TLS 1.3.</td>
+    </tr>
+    <tr>
+      <td>Compromised DERP relay or front-door proxy</td>
+      <td>Sees WireGuard node keys, packet timing/sizes, and front-door HTTP traffic to the
+        control endpoint.</td>
+      <td>Relay never holds WireGuard private keys or share TLS private keys. Control traffic is
+        only coordination and join pages.</td>
+    </tr>
+    <tr>
+      <td>Malicious member inside your pen</td>
+      <td>Has a valid mesh identity and can resolve share names in the pen.</td>
+      <td>Headscale ACL grants <code>:443</code> toward <code>tag:server</code> devices only
+        (D-11: no <code>:22</code>, no member-to-member connections, no exit nodes or subnet routes).
+        Registrar enforces <code>serverMayUse</code> so shares cannot steal names or mint certs
+        for another share. Keepers can suspend or kick in ~2 s; kicked names stay held for 90 days.</td>
+    </tr>
+    <tr>
+      <td>Hostile pen targeting your laptop</td>
+      <td>Controls the pen's DNS responses, Headscale map, and invite payload.</td>
+      <td>Unprivileged binary (no root/<code>TUN</code>), no OS root CA, client-side zone validation,
+        loopback <code>Host</code> check, <code>WhoIs</code> dial pin (blocks <code>127.0.0.1</code>
+        / LAN / cross-tailnet DNS tricks), and <code>:443</code>-only proxy gate.</td>
+    </tr>
+    <tr>
+      <td>Compromised keeper or hosting server (control plane)</td>
+      <td><strong>Sees:</strong> member list, enrolled device keys/IPs, online times, and mesh DNS
+        lookups. <strong>Could in principle:</strong> add a rogue device, rewrite ACLs, or mint a
+        DNS-01 challenge TXT record for a pen name.</td>
+      <td>Cannot passively read direct WireGuard traffic or share TLS private keys. Any rogue
+        certificate forged via DNS-01 control must be logged in public CT logs, making silent MITM
+        detectable. Honest account keys cannot be recovered by support (D-16).</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 class="docs-h2" id="host">Host isolation and supply chain</h2>
+<ul>
+  <li><strong>Hosted control plane (D-24), open source (AGPL):</strong> Every pen runs in its
+    own isolated Docker network (<code>pen-&lt;name&gt;-core</code>) with its own SQLite database,
+    Headscale instance, keys, and UDP relay port — pens share no container network with one another.
+    Software versions are pinned in
+    <a href="https://github.com/celtiberi/hogman/blob/main/core/compose.yaml">core/compose.yaml</a>.</li>
+  <li><strong>Container &amp; host hardening:</strong> Pen containers and the shared Caddy front
+    door run non-root (<code>uid 65532</code>), read-only (<code>tmpfs</code> for <code>/tmp</code>),
+    with <code>cap_drop: [ALL]</code> and <code>no-new-privileges</code>. The front door replaces
+    Headscale catch-all routing with an explicit path allowlist (<code>/ts2021</code>,
+    <code>/key</code>, <code>/derp*</code>, <code>/bootstrap-dns</code>,
+    <code>/machine/ping-response</code>, <code>/health</code>; <code>404</code> otherwise) plus
+    HSTS, <code>X-Frame-Options: DENY</code>, CSP, <code>nosniff</code>, and
+    <code>Origin-Agent-Cluster: ?1</code>.</li>
+  <li><strong>Registrar &amp; host service isolation:</strong> The registrar's mesh/admin HTTP
+    API listens only on a kernel-enforced Unix domain socket shared between registrar and portal
+    (no loopback TCP), matches <code>X-Forwarded-For</code> IPs against live Headscale nodes, and
+    enforces CSRF checks (<code>Origin</code> / <code>Sec-Fetch-Site</code> +
+    <code>Content-Type: application/json</code>). Host services (<code>challenge-dns</code> and
+    <code>gate-cert</code>) run as dedicated unprivileged users under strict systemd sandboxing
+    (<code>ProtectSystem=strict</code>, syscall filters, <code>LoadCredential</code> secrets,
+    <code>UMask=0077</code>). Used public pen names are burned permanently (D-21).</li>
+  <li><strong>No account recovery (D-16):</strong> Losing every device means starting a new account
+    with a new invite. There is no password reset or operator backdoor to talk your way past.
+    (Pen owners should appoint a second owner.)</li>
+  <li><strong>Infrastructure as code &amp; verifiable builds:</strong> Public DNS changes only via
+    reviewed PRs with <code>dnscontrol preview</code> + locked approval (D-23). Release binaries
+    are built exclusively in GitHub Actions with SLSA build provenance and verified by
+    <code>deploy/release.sh</code> before publishing; anyone can verify a downloaded binary:</li>
+</ul>
+
+<pre class="term"><span class="p">$</span> gh attestation verify hogman-join --repo celtiberi/hogman</pre>
+
+<p>Our full self-audit against OWASP ASVS, CIS Docker/Linux, and SLSA (plus every fix shipped)
+  is in <a href="https://github.com/celtiberi/hogman/blob/main/docs/security/audit-2026-11.md">docs/security/audit-2026-11.md</a>,
+  and the full PKI architecture note is in
+  <a href="https://github.com/celtiberi/hogman/blob/main/docs/security/public-certificates.md">docs/security/public-certificates.md</a>.</p>
+
+<h2 class="docs-h2" id="limits">Known limits and deliberate omissions</h2>
+<ul class="status">
+  <li class="notyet"><strong>Not independently audited yet:</strong> Reviewed internally against
+    standard checklists, not yet tested by an external security firm.</li>
+  <li class="notyet"><strong>Device keys on disk:</strong> A member's pen identity currently lives
+    in user-readable state files rather than hardware/TPM/Keychain binding; copying those files
+    lets someone use that device slot until revoked.</li>
+  <li class="notyet"><strong>Auto-update verification:</strong> <code>hogman-join update</code>
+    checks HTTPS transport and published <code>SHA256SUMS</code> rather than a key pinned inside
+    the binary (signed updates planned).</li>
+  <li class="notyet"><strong>Public Suffix List (D-19):</strong> <code>pens.hogman.network</code>
+    is not yet listed on the PSL, so use separate browser profiles across mutually untrusted pens.</li>
+  <li class="notyet"><strong>HTTPS to servers only (D-11):</strong> No SSH, arbitrary UDP/TCP,
+    member-to-member connections, exit nodes, or LAN subnet routing — omitted by design to minimize
+    client and lateral attack surface.</li>
+</ul>

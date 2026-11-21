@@ -5,10 +5,10 @@
 
 <pre class="term"><span class="p">$</span> ./hogman-join share photos ~/holiday
 
-<span class="b">•</span> Adding a server for photos.smith.hogman to your devices (alice)
-<span class="b">•</span> Sharing the folder ~/holiday as https://photos.smith.hogman
+<span class="b">•</span> Adding a server for photos.smith.pens.hogman.network to your devices (alice)
+<span class="b">•</span> Sharing the folder ~/holiday as https://photos.smith.pens.hogman.network
 
-<span class="ok">✓ https://photos.smith.hogman is up.</span>
+<span class="ok">✓ https://photos.smith.pens.hogman.network is up.</span>
   Everyone in the pen can open it.
   It shows the folder ~/holiday.
   Take it down and give the name back: hogman-join share stop photos</pre>
@@ -49,12 +49,12 @@
 
 <h2 class="docs-h2" id="manage">Listing and taking down</h2>
 <pre class="term"><span class="p">$</span> ./hogman-join share list
-https://blog.smith.hogman                http://127.0.0.1:3000  (running in the background)
+https://blog.smith.pens.hogman.network   http://127.0.0.1:3000  (running in the background)
 
 <span class="p">$</span> ./hogman-join share stop blog
-<span class="ok">✓ https://blog.smith.hogman is down, and the name is free again.</span></pre>
+<span class="ok">✓ https://blog.smith.pens.hogman.network is down, and the name is free again.</span></pre>
 <p><code>share stop</code> takes it down and gives the name back. Leaving the pen takes all of
-  this computer's shares down first. In more than one pen? Add <code>--pen smith.hogman</code>.</p>
+  this computer's shares down first. In more than one pen? Add <code>--pen smith.pens.hogman.network</code>.</p>
 
 <h2 class="docs-h2" id="always-on">On an always-on computer</h2>
 <p>For something that should stay up, like a family forum, run it on a computer that's always on
@@ -65,17 +65,19 @@ https://blog.smith.hogman                http://127.0.0.1:3000  (running in the 
     once, for an hour.</li>
   <li>On the always-on computer, download <code>hogman-join</code> the same way you did when you
     joined, and add the link to the end of the share command:
-<pre class="term"><span class="p">$</span> ./hogman-join share forum 8080 'https://smith.pens.hogman.network/join#k=…&amp;fp=…' --background</pre></li>
+<pre class="term"><span class="p">$</span> ./hogman-join share forum 8080 'https://smith.gate.hogman.network/join#k=…' --background</pre></li>
 </ol>
 <p>Use a server link, not an invite: an invite makes a new member.</p>
 
 <h2 class="docs-h2" id="names">Names</h2>
 <ul>
-  <li>The name becomes <code>https://NAME.yourpen.hogman</code>: lowercase letters, digits and
-    dashes.</li>
+  <li>The name becomes <code>https://NAME.yourpen.pens.hogman.network</code>: lowercase letters,
+    digits and dashes.</li>
   <li>First come, first served. If it's taken you're told, nothing is left behind, and you pick
     another. Each member can hold up to 50.</li>
-  <li>Share names are one word, like <code>blog</code> or <code>my-notes</code>.</li>
+  <li>Share names are one word, like <code>blog</code> or <code>my-notes</code>. When issued a
+    certificate, the hostname appears in public Certificate Transparency logs (contents stay
+    private, <code>D-21</code>).</li>
 </ul>
 
 <h2 class="docs-h2" id="limits">Limits</h2>
@@ -88,9 +90,12 @@ https://blog.smith.hogman                http://127.0.0.1:3000  (running in the 
 <h2 class="docs-h2" id="how">How it works</h2>
 <p>Each share is a small device of its own, a server, run inside <code>hogman-join</code> with
   Tailscale's <code>tsnet</code>. It joins the pen (with a one-time key the tool asks for in your
-  name, or the server link), claims its name, gets a 7-day certificate from the pen's own CA and
-  renews it, and listens on port 443 inside the mesh. Your laptop itself still accepts no
-  connections; nothing opens a port on your computer, and nothing needs administrator rights.</p>
+  name, or the server link), claims its name, generates a local keypair and obtains a standard
+  public certificate via embedded CertMagic DNS-01 (calling the registrar's <code>/api/acme/txt</code>
+  mesh endpoint against <code>ns1.hogman.network</code>, with Google Trust Services fallback),
+  and listens on port 443 inside the mesh. Your laptop itself still accepts no connections;
+  folder shares are confined inside Go's <code>os.Root</code> (symlink escape refused), nothing
+  opens a port on your computer, and nothing needs administrator rights.</p>
 <p>For developers: requests are passed to your app with <code>X-Forwarded-For</code>,
   <code>-Host</code> and <code>-Proto</code>, and with the app's own Host header, so dev servers
   that check it still work. WebSockets work.</p>
