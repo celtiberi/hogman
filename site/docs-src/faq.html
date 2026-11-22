@@ -88,6 +88,16 @@
     reload proxy settings (or switch to a remaining pen's URL when leaving a pen). For
     command-line tools, see <a href="/docs/join.html#side">joining, in practice</a>.</dd>
 
+  <dt>Pen sites say "DNS address could not be found" while my VPN is on</dt>
+  <dd>On macOS, Network Extension VPNs (ProtonVPN, Mullvad, WireGuard, corporate VPNs) replace the
+    system automatic proxy setting while connected, so browsers fall back to public DNS — where pen
+    names intentionally do not exist. Your <code>hogman-join</code> connection is still up. Either
+    pause your VPN while visiting pen sites, or configure Firefox's built-in <em>Automatic proxy
+    configuration URL</em> to the address printed by <code>hogman-join</code> so pen names route
+    straight to <code>hogman-join</code> while ordinary browsing stays on your VPN. (A companion
+    browser extension for Chrome, Brave, Edge, and Firefox is available in <code>browser-ext/</code>
+    for manual developer install while store listings are prepared.)</dd>
+
   <dt>"This computer cannot find the network's names yet"</dt>
   <dd>Run the same join command again. Your invite was already used to add this device, so the rerun
     sees the device is in, skips the invite, and goes on to check your home page. (The link

@@ -98,8 +98,10 @@
   embedding Tailscale's userspace <code>tsnet</code> networking stack.</p>
 <ul>
   <li><strong>No kernel interface, no daemon as root:</strong> <code>hogman-join</code> creates no
-    <code>TUN</code> device, edits no <code>/etc/hosts</code> or system DNS resolvers, never asks
-    for <code>sudo</code>, and leaves any existing Tailscale installation untouched.</li>
+    <code>TUN</code> device, edits no <code>/etc/hosts</code> or system DNS resolvers, runs no root
+    daemon, and leaves any existing Tailscale installation untouched. On macOS it asks for your
+    password once only if configuring the system automatic proxy setting (not needed when using the
+    browser extension or setting the proxy URL manually).</li>
   <li><strong>No OS root CA (D-18):</strong> Your computer validates pen certificates with its
     normal operating system and browser trust store. Nothing is injected into your root store,
     so a pen cannot mint certificates for any site outside its zone.</li>
@@ -277,7 +279,20 @@
     checks HTTPS transport and published <code>SHA256SUMS</code> rather than a key pinned inside
     the binary (signed updates planned).</li>
   <li class="notyet"><strong>Public Suffix List (D-19):</strong> <code>pens.hogman.network</code>
-    is not yet listed on the PSL, so use separate browser profiles across mutually untrusted pens.</li>
+    is not yet listed on the PSL, so use separate browser profiles across mutually untrusted pens.
+    The optional Hogman browser extension enforces allowlist-by-default per browser profile (every
+    pen starts blocked in a new profile until enabled there).</li>
+  <li class="notyet"><strong>Optional browser extension (developer preview):</strong> The companion
+    extension in <code>browser-ext/</code> (for VPN coexistence on Chrome, Brave, Edge, and Firefox)
+    is not yet published to the Chrome Web Store or Mozilla Add-ons. Once published, users who
+    install it from a store will trust that store's auto-updates and our publisher account for
+    browser proxy rules. To minimize blast radius, the extension has zero third-party dependencies,
+    requests no <code>&lt;all_urls&gt;</code> or page-reading permissions, fails closed for
+    <code>*.pens.hogman.network</code> (except when another non-Hogman OS proxy is active and not
+    overridden, in which case the extension steps aside so your OS proxy keeps working and pen names
+    follow that OS proxy until overridden), builds reproducibly from <code>browser-ext/</code>, and
+    speaks to a read-only native host (<code>hogman-native-host</code>) that returns only verified
+    pen zones and loopback ports.</li>
   <li class="notyet"><strong>HTTPS to servers only (D-11):</strong> No SSH, arbitrary UDP/TCP,
     member-to-member connections, exit nodes, or LAN subnet routing — omitted by design to minimize
     client and lateral attack surface.</li>

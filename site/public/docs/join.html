@@ -78,9 +78,9 @@
     </table></li>
   <li><strong>Pick your name</strong> when asked: lowercase letters, digits and dashes, 2 to 32
     characters. It's how the pen knows you.</li>
-  <li><strong>You're in.</strong> No root certificate is installed: <code>hogman-join</code>
-    verifies the gate over your OS's normal HTTPS trust store, checks that your pen's home page
-    loads over HTTPS, sets up your browser proxy, and opens it.
+  <li><strong>You're in.</strong> <code>hogman-join</code> verifies the gate using your OS's
+    built-in HTTPS trust store, checks that your pen's home page loads over HTTPS, sets up your
+    browser proxy, and opens it.
     Keep the <code>hogman-join</code> file: you'll use it to update, share things, and leave.</li>
 </ol>
 <p><strong>On a Mac, two things may pop up. Both are expected.</strong></p>
@@ -92,6 +92,23 @@
   <li><strong>Your Mac's password</strong>, once, so your browsers can find the pen's sites. It
     changes only the automatic proxy setting. If you skip it, <code>hogman-join</code> prints the
     one setting to change by hand.</li>
+</ul>
+<p><strong>Using a VPN (ProtonVPN, Mullvad, or a work VPN)?</strong> On macOS, VPN apps override
+  the system automatic proxy setting while connected, so browsers stop seeing pen names even though
+  <code>hogman-join</code> stays connected.</p>
+<ul>
+  <li><strong>Firefox (works today with no extension):</strong> set Firefox's built-in
+    <em>Settings → Network Settings → Automatic proxy configuration URL</em> to the
+    <code>http://127.0.0.1:&lt;port&gt;/proxy.pac</code> URL printed by <code>hogman-join</code>.
+    Pen names go straight to <code>hogman-join</code> while ordinary browsing stays on your VPN.</li>
+  <li><strong>Chrome, Brave, Edge, and Firefox extension (developer preview):</strong> the
+    companion extension in <code>browser-ext/</code> is not yet published on the Chrome Web Store
+    or Mozilla Add-ons. Developers can load it manually from <code>browser-ext/dist/</code> (see
+    <code>browser-ext/README.md</code>; note that Firefox removes temporary add-ons on restart, and
+    Firefox Private Windows send pen names to public DNS unless <em>Run in Private Windows</em> is
+    enabled for the extension).</li>
+  <li><strong>Safari:</strong> Apple does not expose proxy APIs to Safari extensions, so pause your
+    VPN while visiting pen sites in Safari.</li>
 </ul>
 <p><strong>If it stops part way</strong> (DNS not ready, offline), fix what it says and run the
   same command again. If the stop came before your device joined, the invite is still unused; if
