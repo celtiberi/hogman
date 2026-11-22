@@ -9,8 +9,9 @@ import (
 	"time"
 )
 
-// pacMarker starts every rules file a Hogman agent serves (renderPAC).
-const pacMarker = "// Hogman: only pen names use their pen's proxy."
+// pacMarker starts every rules file a Hogman agent serves, whatever its
+// number of pens (renderPAC's headers all begin this way).
+const pacMarker = "// Hogman: "
 
 // staleHogmanPAC reports whether an automatic-proxy address is Hogman's own,
 // left behind by a pen this computer no longer runs: http://127.0.0.1:<port>/proxy.pac
@@ -21,7 +22,13 @@ var staleHogmanPAC = func(raw string) bool {
 	if !hogmanShapedPACURL(raw) {
 		return false
 	}
-	c := &http.Client{Timeout: 1500 * time.Millisecond, Transport: &http.Transport{Proxy: nil}}
+	c := &http.Client{
+		Timeout:   1500 * time.Millisecond,
+		Transport: &http.Transport{Proxy: nil},
+		// Judge only what answers at that address: an unrelated local server
+		// mustn't be able to point the check somewhere else.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	resp, err := c.Get(raw)
 	if err != nil {
 		return true // nothing listens there any more: a dead Hogman setting

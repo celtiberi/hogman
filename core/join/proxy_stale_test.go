@@ -50,8 +50,21 @@ func TestStaleHogmanPAC(t *testing.T) {
 		t.Cleanup(srv.Close)
 		return srv.URL + "/proxy.pac"
 	}
-	if !realStaleHogmanPAC(serve(pacMarker + " Everything else is untouched.\nfunction FindProxyForURL(u,h){return \"DIRECT\"}")) {
-		t.Error("a live Hogman agent's PAC should count as ours")
+	// Every header renderPAC writes, for 0, 1 and 2 pens.
+	p1 := &agentConfig{Zone: "farm2.pens.hogman.network", ProxyAddr: "127.0.0.1:17464"}
+	p2 := &agentConfig{Zone: "qa-piggy5.pens.hogman.network", ProxyAddr: "127.0.0.1:25148"}
+	for _, pens := range [][]*agentConfig{nil, {p1}, {p1, p2}} {
+		if !realStaleHogmanPAC(serve(renderPAC(pens))) {
+			t.Errorf("a live Hogman agent's PAC for %d pen(s) should count as ours", len(pens))
+		}
+	}
+	// A redirect is judged as it stands, never followed.
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, serve(renderPAC([]*agentConfig{p1})), http.StatusFound)
+	}))
+	t.Cleanup(redir.Close)
+	if realStaleHogmanPAC(redir.URL + "/proxy.pac") {
+		t.Error("a redirect to a Hogman PAC must not count as ours")
 	}
 	if realStaleHogmanPAC(serve("function FindProxyForURL(u,h){return \"PROXY corp:8080\"}")) {
 		t.Error("another local tool's PAC must be left alone")

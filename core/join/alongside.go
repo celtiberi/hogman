@@ -286,9 +286,8 @@ func pollPortal(c *http.Client, portal string, d time.Duration) (string, error) 
 }
 
 // removeOwnDevice asks the pen, as this computer, to remove this computer's
-// device. Best effort: leaving still works if the pen can't be reached.
-// removeOwnDevice removes this computer's device from the pen through its
-// running connection. It reports whether the pen accepted that.
+// device. Best effort: leaving still works if the pen can't be reached. It
+// reports whether the pen accepted that.
 func removeOwnDevice(zone string) bool {
 	cfg, err := loadAgentConfig(stateDir(zone))
 	if err != nil {
@@ -319,10 +318,9 @@ func removeOwnDevice(zone string) bool {
 	return true
 }
 
-// leaveAlongside undoes side-by-side mode for a pen. Reports whether there was anything to undo.
-// leaveAlongside stops and forgets this computer's connection to the pen.
-// deviceGone: the pen already removed this device, so logging it out (a fresh
-// connection that can only time out) is skipped.
+// leaveAlongside undoes side-by-side mode for a pen. Reports whether there was
+// anything to undo. deviceGone: the pen already removed this device, so logging
+// it out (a fresh connection that can only time out) is skipped.
 func leaveAlongside(zone string, deviceGone bool) bool {
 	dir := stateDir(zone)
 	cfg, err := loadAgentConfig(dir)
