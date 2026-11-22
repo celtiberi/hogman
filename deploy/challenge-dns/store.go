@@ -323,7 +323,7 @@ func (s *Store) PutTXT(c Cred, fqdn, value string) error {
 }
 
 // countLocked applies the weekly cap: a name already counted in the window is
-// free; a new one counts, up to capNames.
+// free; a new one counts, up to s.weeklyCap().
 func (s *Store) countLocked(c Cred, fqdn string, now time.Time) error {
 	seen := s.st.Seen[c.ID]
 	if seen == nil {

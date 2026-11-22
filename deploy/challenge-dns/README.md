@@ -13,8 +13,11 @@ It never serves an address. Names under its zones that have nothing are answered
 
 **Who may write what.** Each pen's registrar has a credential for that pen alone: it can write
 `_acme-challenge.<site>.<its pen name>.pens.hogman.network` and nothing else, and at most
-5 new names a week by default (configurable via `CDNS_WEEKLY_CAP`). The host's front door has one credential, for its `*.gate` wildcard
-only. Tokens are stored as SHA-256 hashes.
+5 new names a week by default (configurable via `CDNS_WEEKLY_CAP`). `home.<pen>` uses one of those
+slots (leaving 4 shares in a new pen's first week), a failed-then-undone share still counts once its
+challenge name was written, and lowering `CDNS_WEEKLY_CAP` takes effect immediately on restart for
+pens that already have 5+ names in the current 7-day window. The host's front door has one
+credential, for its `*.gate` wildcard only. Tokens are stored as SHA-256 hashes.
 
 **What it keeps, and nothing more:** token hashes; for the weekly cap, which names each pen wrote
 in the last 7 days; recent fallback-key mints (a day); and the names of pens ever given a
