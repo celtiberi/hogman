@@ -99,6 +99,7 @@ jobs:
           full="$(git rev-parse "${short}^{commit}")"
 
           tar --no-same-owner --no-same-permissions -xzf "$out/$tarball" -C "$tmp/fetched-src"
+          # Keep this path list in sync with deploy/release.sh's git archive command.
           git archive --format=tar "$full" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md deploy/signup deploy/challenge-dns LICENSE README.md \
             | tar -xf - -C "$tmp/git-src"
           diff -rq "$tmp/fetched-src" "$tmp/git-src"
@@ -132,6 +133,14 @@ jobs:
             echo "Create an app-scoped deploy token: fly tokens create deploy -a hogman" >&2
             exit 1
           fi
+          # Re-check /dl/latest right before deploying so an overlapping deploy/release.sh
+          # run can never be rolled back to an older /dl/ bundle.
+          want="$(tr -d '\r\n' < public/dl/latest)"
+          live_now="$(curl -fsSL https://hogman.network/dl/latest | tr -d '\r\n')"
+          [ "$live_now" = "$want" ] || {
+            echo "live /dl/latest changed from '$want' to '$live_now' during this run; aborting to avoid rolling back /dl/ (re-run site-deploy)" >&2
+            exit 1
+          }
           flyctl deploy --ha=false
 
       - name: Smoke test live site and /dl/latest
