@@ -1,144 +1,127 @@
 <h1 class="docs-h1">Joining a pen</h1>
-<p class="lede">You need an invite link from someone in the pen and a Mac or Linux computer.
-  It takes about a minute.</p>
-
-<nav class="toc" aria-label="On this page">
-  <a href="#first">Your first computer</a> · <a href="#how">How it connects</a> ·
-  <a href="#side">In practice</a> · <a href="#more">More devices</a> ·
-  <a href="#update">Updating</a> · <a href="#leave">Leaving</a> · <a href="#options">Options</a>
-</nav>
+<p class="lede">You need a single-use invite link from a pen's keeper and a Mac or Linux computer.</p>
 
 <h2 class="docs-h2" id="first">Your first computer</h2>
 <ol class="docs-steps">
-  <li><strong>Open your invite link</strong> on the computer you want to join. Invites work
-    once and expire after 7 days.</li>
-  <li><strong>Paste the command it shows</strong> into Terminal. It's the same short command for
+  <li><strong>Open your invite link</strong> on the computer you want to join. Invites work once and
+    expire after 7 days.</li>
+  <li><strong>Paste the command it shows</strong> into Terminal — it's the same short command for
     everyone in the pen:
-<pre class="term"><span class="p">$</span> curl -fsSL https://smith.gate.hogman.network/start | sh</pre>
-    It asks for your invite link (the page has a button to copy it), downloads
-    <code>hogman-join</code> for your computer, checks it against its published SHA-256, saves it
-    as <code>~/hogman-join</code>, and runs it. Your link never goes into the command.
-    <a href="https://github.com/celtiberi/hogman/blob/main/core/join-page/start.sh">The script</a> is short enough to read
-    first; the page also shows the same steps by hand.</li>
-  <li>The page picks the right download for your computer. If you'd rather fetch it yourself,
-    the files are on the same host under <code>/join/dl/</code>, with checksums in
-    <code>SHA256SUMS</code>:
-    <table class="docs-table">
-      <tbody>
-        <tr><td>Mac, Apple silicon</td><td><code>hogman-join-Darwin-arm64</code></td></tr>
-        <tr><td>Mac, Intel</td><td><code>hogman-join-Darwin-x86_64</code></td></tr>
-        <tr><td>Linux, x86-64</td><td><code>hogman-join-Linux-x86_64</code></td></tr>
-        <tr><td>Linux, ARM (Raspberry Pi 4/5, ARM servers)</td><td><code>hogman-join-Linux-aarch64</code></td></tr>
-        <tr><td>Windows (untested)</td><td><code>hogman-join-windows-amd64.exe</code></td></tr>
-      </tbody>
-    </table></li>
-  <li><strong>Pick your name</strong> when asked: lowercase letters, digits and dashes, 2 to 32
-    characters. It's how the pen knows you.</li>
+<pre class="term"><span class="p">$</span> curl -fsSL https://john-mcafee.gate.hogman.network/start | sh</pre>
+    It asks for your invite link (the page has a <em>Copy my invite link</em> button), downloads
+    <code>hogman-join</code> for your platform, verifies its published SHA-256 checksum, saves it as
+    <code>~/hogman-join</code>, and runs it. Your invite token never appears in your shell command
+    or history. <a href="https://github.com/celtiberi/hogman/blob/main/core/join-page/start.sh">Read the script</a>
+    first, or expand the manual download steps on the join page.</li>
+  <li><strong>Pick your handle</strong> when asked (lowercase letters, digits, and dashes, 2–32
+    characters).</li>
   <li><strong>You're in.</strong> <code>hogman-join</code> verifies the gate using your OS's
-    built-in HTTPS trust store, checks that your pen's home page loads over HTTPS, sets up your
-    browser proxy, and opens it.
-    Keep the <code>hogman-join</code> file: you'll use it to update, share things, and leave.</li>
+    built-in HTTPS trust store, confirms your pen's home page loads over HTTPS, configures your
+    browser proxy, and opens it. Keep <code>~/hogman-join</code> — you'll use it to host servers,
+    update, and leave.</li>
 </ol>
-<p><strong>On a Mac, two things may pop up. Both are expected.</strong></p>
-<ul>
-  <li><strong>"Allow hogman-join to find devices on local networks?"</strong> Either answer works.
-    <em>Allow</em> lets your devices in the same home or office reach each other directly, which is
-    faster. <em>Don't Allow</em> sends that traffic over the internet instead. Nothing on your
-    network is shared with the pen either way.</li>
-  <li><strong>Your Mac's password</strong>, once, so your browsers can find the pen's sites. It
-    changes only the automatic proxy setting. If you skip it, <code>hogman-join</code> prints the
-    one setting to change by hand.</li>
-</ul>
-<p><strong>Using a VPN (ProtonVPN, Mullvad, or a work VPN)?</strong> On macOS, VPN apps override
+
+<div class="callout">
+  <p><strong>On a Mac, two prompts may pop up — both are expected:</strong></p>
+  <ul>
+    <li><strong>"Allow hogman-join to find devices on local networks?"</strong> Either answer works.
+      <em>Allow</em> lets devices on the same LAN talk directly (faster); <em>Don't Allow</em> routes
+      encrypted traffic over the internet instead. Nothing on your LAN is exposed either way.</li>
+    <li><strong>Your Mac's password</strong>, once, to set the system automatic proxy URL so
+      browsers find pen names. If you skip it, <code>hogman-join</code> prints the URL to set by
+      hand.</li>
+  </ul>
+</div>
+
+<p><strong>If setup stops part way</strong> (offline, DNS still propagating), fix the cause and run
+  the same command again. If it stopped before redeeming the invite, the link is still unused; if
+  after, the rerun detects the enrolled device and finishes setup.</p>
+
+<h2 class="docs-h2" id="downloads">Manual downloads</h2>
+<p>If you'd rather fetch the binary yourself, downloads and <code>SHA256SUMS</code> live under
+  <code>/join/dl/</code> on your pen's gate host:</p>
+<table class="docs-table">
+  <thead><tr><th>Platform</th><th>Binary</th></tr></thead>
+  <tbody>
+    <tr><td>macOS, Apple silicon</td><td><code>hogman-join-Darwin-arm64</code></td></tr>
+    <tr><td>macOS, Intel</td><td><code>hogman-join-Darwin-x86_64</code></td></tr>
+    <tr><td>Linux, x86-64</td><td><code>hogman-join-Linux-x86_64</code></td></tr>
+    <tr><td>Linux, ARM64 (Raspberry Pi 4/5, ARM servers)</td><td><code>hogman-join-Linux-aarch64</code></td></tr>
+    <tr><td>Windows (untested)</td><td><code>hogman-join-windows-amd64.exe</code></td></tr>
+  </tbody>
+</table>
+
+<h2 class="docs-h2" id="vpn">Using a VPN</h2>
+<p>On macOS, Network Extension VPN apps (ProtonVPN, Mullvad, WireGuard, corporate VPNs) override
   the system automatic proxy setting while connected, so browsers stop seeing pen names even though
   <code>hogman-join</code> stays connected.</p>
 <ul>
-  <li><strong>Firefox (works today with no extension):</strong> set Firefox's built-in
-    <em>Settings → Network Settings → Automatic proxy configuration URL</em> to the
+  <li><strong>Firefox (works today, no extension needed):</strong> set Firefox's built-in
+    <em>Settings &rarr; Network Settings &rarr; Automatic proxy configuration URL</em> to the
     <code>http://127.0.0.1:&lt;port&gt;/proxy.pac</code> URL printed by <code>hogman-join</code>.
-    Pen names go straight to <code>hogman-join</code> while ordinary browsing stays on your VPN.</li>
-  <li><strong>Chrome, Brave, Edge, and Firefox extension (developer preview):</strong> the
-    companion extension in <code>browser-ext/</code> is not yet published on the Chrome Web Store
-    or Mozilla Add-ons. Developers can load it manually from <code>browser-ext/dist/</code> (see
+    Pen names route to <code>hogman-join</code> while ordinary browsing stays on your VPN.</li>
+  <li><strong>Chrome, Brave, Edge, and Firefox extension (developer preview):</strong> the companion
+    extension in <code>browser-ext/</code> is not yet published on the Chrome Web Store or Mozilla
+    Add-ons. Developers can load it manually from <code>browser-ext/dist/</code> (see
     <code>browser-ext/README.md</code>; note that Firefox removes temporary add-ons on restart, and
     Firefox Private Windows send pen names to public DNS unless <em>Run in Private Windows</em> is
     enabled for the extension).</li>
   <li><strong>Safari:</strong> Apple does not expose proxy APIs to Safari extensions, so pause your
     VPN while visiting pen sites in Safari.</li>
 </ul>
-<p><strong>If it stops part way</strong> (DNS not ready, offline), fix what it says and run the
-  same command again. If the stop came before your device joined, the invite is still unused; if
-  after, the rerun sees the device is already in and skips the invite. Either way the link only
-  ever adds this one computer.</p>
-<p>Links from before public certificates (carrying <code>fp=</code>) are refused — ask whoever
-  sent the link for a fresh one. Pens created before that release must be recreated.</p>
 
 <h2 class="docs-h2" id="how">How it connects</h2>
-<p>One way, on every computer: a small background connection of its own, running as you (never
-  as administrator), that starts by itself when you log in. It carries <strong>HTTPS to the pen's
-  names, and nothing else</strong> (if you type an <code>http://</code> address, the connection itself sends you to HTTPS). Your other
-  networks, your own Tailscale if you have one, and everything else on the computer are left
-  alone.</p>
-<p>That's deliberate: a pen is for websites, and anything more is more for an attacker to use.
-  There's no setting for more: see <a href="/docs/faq.html#not">what Hogman deliberately
-  doesn't do</a>.</p>
+<p><code>hogman-join</code> runs a small userspace background process as your user (no
+  <code>TUN</code> interface, no root daemon) that starts at login. It carries <strong>HTTPS
+  (port 443) to pen names and nothing else</strong> (plain <code>http://</code> requests redirect
+  locally to HTTPS). Your regular internet, LAN, and any existing Tailscale setup stay untouched.
+  See <a href="/docs/faq.html#not">what Hogman deliberately doesn't do</a>.</p>
 
-<h2 class="docs-h2" id="side">In practice</h2>
-<p>Only programs that use the proxy reach the pen. The join tool prints your proxy address
-  (something like <code>http://127.0.0.1:21234</code>) and sets things up:</p>
+<h2 class="docs-h2" id="side">Browsers &amp; CLI tools</h2>
+<p>Only programs using the pen's local proxy (e.g. <code>http://127.0.0.1:21234</code>) reach pen
+  sites:</p>
 <ul>
-  <li><strong>Browsers:</strong> on a Mac, the tool sets the automatic proxy setting for you
-    (it never replaces a non-Hogman setting). If you join more than one pen, any pen's
-    <code>proxy.pac</code> routes each pen's own names automatically and updates the Mac
-    setting when you join or leave. On Linux and Windows, set your browser's or desktop's
-    automatic proxy configuration URL to the <code>proxy.pac</code> address it prints (one URL
-    covers every pen you join, though you may need to reload browser proxy settings when adding
-    or leaving a pen). The rules file sends only pen names through their pens.</li>
-  <li><strong>curl and most command-line tools</strong>, per command:
-<pre class="term"><span class="p">$</span> https_proxy=http://127.0.0.1:21234 curl https://blog.smith.pens.hogman.network</pre>
-    Don't export it for the whole shell: the proxy refuses everything outside the pen.</li>
-  <li><strong>git</strong>, per site:
-<pre class="term"><span class="p">$</span> git config --global http.https://git.smith.pens.hogman.network/.proxy http://127.0.0.1:21234</pre></li>
+  <li><strong>Browsers:</strong> on macOS, <code>hogman-join</code> sets the automatic proxy URL
+    (never replacing a non-Hogman proxy). Joining multiple pens updates the combined
+    <code>proxy.pac</code> automatically. On Linux, point your browser or desktop automatic proxy
+    setting to the printed <code>proxy.pac</code> URL (one URL covers all joined pens; reload proxy
+    settings after joining or leaving a pen).</li>
+  <li><strong>curl (per command):</strong>
+<pre class="term"><span class="p">$</span> https_proxy=http://127.0.0.1:21234 curl https://deadmans-switch.john-mcafee.pens.hogman.network</pre>
+    Don't export <code>https_proxy</code> for your whole shell — the proxy refuses every non-pen
+    hostname.</li>
+  <li><strong>git (per host):</strong>
+<pre class="term"><span class="p">$</span> git config --global http.https://git.john-mcafee.pens.hogman.network/.proxy http://127.0.0.1:21234</pre></li>
 </ul>
 
-<h2 class="docs-h2" id="more">More devices</h2>
-<p>On your pen's home page, press <strong>Add a device</strong>. You get a one-time link (and a
-  QR code) that works once and expires in an hour. Open it on the other computer and copy the
-  command, as before; the device joins as you. Phones can't join yet; the app is in the works.</p>
-<p>To put something in the pen, you don't need another device: see
-  <a href="/docs/share.html">Putting things in your pen</a>.</p>
+<h2 class="docs-h2" id="more">Adding more devices</h2>
+<p>On your pen's home page, press <strong>Add a device</strong> for a single-use link and QR code
+  (valid for 1 hour). Open it on the second computer and run the command; it joins under your
+  handle. Phone support is in progress.</p>
+<p>To host a web server in the pen, you don't need a personal device link — see
+  <a href="/docs/share.html">Hosting HTTPS servers</a>.</p>
 
-<h2 class="docs-h2" id="update">Updating</h2>
-<pre class="term"><span class="p">$</span> ./hogman-join update</pre>
-<p>This downloads the latest <code>hogman-join</code> from your pen's server (or from a host or
-  link you pass: <code>./hogman-join update 'https://your-pen.gate.hogman.network'</code>), updates this
-  program, updates your pen's installed agent copy and restarts it if it is running, refreshes
-  any cached <code>share</code> binaries on disk from that server (restarting background
-  service-managed shares cleanly while leaving foreground or unmanaged shares running until you
-  restart them), and removes any leftover old Hogman private root certificates from your computer's
-  trust store. On more than one pen? Pick one with <code>--pen ZONE</code>. Use
-  <code>--dry-run</code> to see what would change without touching files.</p>
-<p>Before replacing anything on disk, <code>update</code> checks the download's SHA-256 checksum
-  against <code>SHA256SUMS</code> on the same server over the same HTTPS connection. That
-  catches truncated or corrupted downloads and mismatched CDN copies — not a tampered server,
-  which is the same trust model as the first download.</p>
+<h2 class="docs-h2" id="update">Updating &amp; leaving</h2>
+<pre class="term"><span class="p">$</span> ~/hogman-join update</pre>
+<p>Downloads the latest binary from your pen's gate (or a host you pass), verifies its SHA-256
+  against <code>SHA256SUMS</code> over HTTPS, restarts your pen's background agent and
+  service-managed shares, and cleans up any legacy state. Use <code>--pen ZONE</code> if you're in
+  more than one pen, or <code>--dry-run</code> to preview.</p>
+<pre class="term"><span class="p">$</span> ~/hogman-join leave '&lt;your pen link or zone&gt;'</pre>
+<p>Stops any shares on this computer, shuts down the background connection, and clears its proxy
+  config. Your membership stays active — keepers remove members.</p>
 
-<h2 class="docs-h2" id="leave">Leaving</h2>
-<pre class="term"><span class="p">$</span> ./hogman-join leave '&lt;your link&gt;'</pre>
-<p>This takes down anything you share from this computer, removes any leftover old Hogman root
-  certificate if present, stops the pen's background connection and removes its settings.
-  Your membership stays; the keeper removes members.</p>
-
-<h2 class="docs-h2" id="options">Options</h2>
+<h2 class="docs-h2" id="options">CLI options</h2>
 <table class="docs-table">
+  <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
   <tbody>
-    <tr><td><code>--handle NAME</code></td><td>Your name in the pen, instead of being asked.</td></tr>
-    <tr><td><code>--hostname NAME</code></td><td>What this device is called (default: the computer's name).</td></tr>
-    <tr><td><code>--no-service</code></td><td>Run in the background without starting at login.</td></tr>
-    <tr><td><code>--no-system-proxy</code></td><td>Don't change the Mac's proxy setting.</td></tr>
-    <tr><td><code>--dry-run</code></td><td>Check the link and the pen, change nothing.</td></tr>
-    <tr><td><code>--no-open</code></td><td>Don't open the home page at the end.</td></tr>
-    <tr><td><code>--pen ZONE</code></td><td>Which pen to use with <code>share</code> or <code>update</code>, when on more than one.</td></tr>
+    <tr><td><code>--handle NAME</code></td><td>Set your handle without prompting.</td></tr>
+    <tr><td><code>--hostname NAME</code></td><td>Override this device's name (default: computer hostname).</td></tr>
+    <tr><td><code>--no-service</code></td><td>Run in the background without installing a login service.</td></tr>
+    <tr><td><code>--no-system-proxy</code></td><td>Skip changing the macOS system proxy setting.</td></tr>
+    <tr><td><code>--dry-run</code></td><td>Validate the link and pen without changing anything.</td></tr>
+    <tr><td><code>--no-open</code></td><td>Don't open the pen home page in a browser when done.</td></tr>
+    <tr><td><code>--pen ZONE</code></td><td>Target a specific pen for <code>share</code> or <code>update</code>.</td></tr>
   </tbody>
 </table>
-<p>Run <code>./hogman-join --help</code> for the full list.</p>
+<p>Run <code>~/hogman-join --help</code> for the full flag list.</p>

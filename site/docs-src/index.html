@@ -1,50 +1,50 @@
-<h1 class="docs-h1">Hogman docs</h1>
-<p class="lede">Most people need three things: get in, put something in, and run the pen. Start
-  there. The technical pages are further down, for when you want to know more.</p>
+<h1 class="docs-h1">Quickstart</h1>
+<p class="lede">Go from zero to a private HTTPS server reachable from anywhere by your guest list —
+  and invisible to everyone else on Earth.</p>
 
-<h2 class="docs-h2">Start here</h2>
-<div class="cards three docs-cards">
-  <a class="feature docs-card" href="/docs/join.html">
-    <h3>1. Joining a pen</h3>
-    <p>Open your invite link, copy one command, and you're in. Then add your other computers.</p>
-  </a>
-  <a class="feature docs-card" href="/docs/share.html">
-    <h3>2. Putting things in your pen</h3>
-    <p>One command puts a folder, an app or a website in the pen with its own name and the
-      padlock: <code>hogman-join share photos ~/holiday</code>.</p>
-  </a>
-  <a class="feature docs-card" href="/docs/keeper.html">
-    <h3>3. Running your pen</h3>
-    <p>For keepers: invites, the herd, suspend and the boot, names and roles.</p>
-  </a>
-</div>
-<div class="cards two docs-cards">
-  <a class="feature docs-card" href="/docs/use-cases.html">
-    <h3>Use cases, worked through</h3>
-    <p>A family photo site, a club forum, a company wiki, a customer portal, a side project:
-      what to do, step by step.</p>
-  </a>
-  <a class="feature docs-card" href="/docs/faq.html">
-    <h3>FAQ and troubleshooting</h3>
-    <p>Common questions, and fixes for what people actually run into.</p>
-  </a>
-</div>
+<h2 class="docs-h2" id="create">1. Create a pen</h2>
+<p>Sign up at <a href="https://get.hogman.network/">get.hogman.network</a> and claim a name for
+  your network (for example, <code>john-mcafee</code>). Hogman spins up an isolated private DNS zone
+  (<code>john-mcafee.pens.hogman.network</code>) and a keeper page where you control the guest
+  list.</p>
+<p>Once your pen is ready, the sign-up page gives you your first single-use join link.</p>
 
-<h2 class="docs-h2">Going deeper</h2>
-<p>For the technically curious. You don't need any of this to use a pen.</p>
-<div class="cards three docs-cards">
-  <a class="feature docs-card" href="/docs/how-it-works.html">
-    <h3>How it works</h3>
-    <p>WireGuard and Headscale, the pen's own DNS and public web certificates, the access rules, and what
-      the keeper can and can't see.</p>
+<h2 class="docs-h2" id="join">2. Join from your computer</h2>
+<p>Open your join link on a Mac or Linux computer and run the short command it shows in Terminal:</p>
+<pre class="term"><span class="p">$</span> curl -fsSL https://john-mcafee.gate.hogman.network/start | sh</pre>
+<p>The script asks for your invite link, verifies <code>hogman-join</code> against its published
+  SHA-256 checksum, saves it to <code>~/hogman-join</code>, and connects your browser to the pen.
+  Your normal internet browsing stays untouched.</p>
+<p>Full details (macOS prompts, VPNs, Linux browsers, extra devices, leaving):
+  <a href="/docs/join.html">Joining a pen</a>.</p>
+
+<h2 class="docs-h2" id="host">3. Put an HTTPS server inside it</h2>
+<p>Anything that speaks HTTPS (port 443) works inside a pen. Share a local web server by port — or a
+  directory of static files — with one command:</p>
+<pre class="term"><span class="p">$</span> ~/hogman-join share deadmans-switch 3000
+
+<span class="ok">✓ https://deadmans-switch.john-mcafee.pens.hogman.network is up.</span>
+  Everyone in the pen can open it.</pre>
+<p>Your server gets a real name and a standard Let's Encrypt padlock in any ordinary browser, with
+  zero open router ports and zero public IP addresses. Add <code>--background</code> to keep it
+  running after reboot.</p>
+<p>Full details (always-on servers, LAN targets, dev servers, stopping):
+  <a href="/docs/share.html">Hosting HTTPS servers</a>.</p>
+
+<h2 class="docs-h2" id="invite">4. Invite your people (or kick them out)</h2>
+<p>Open your pen's keeper page (<code>https://home.&lt;yourpen&gt;.pens.hogman.network</code>) to
+  mint single-use invite links, appoint admins or a backup owner, suspend someone temporarily, or
+  kick a member off every device in ~2 seconds.</p>
+<p>Full details: <a href="/docs/keeper.html">Running a pen</a>.</p>
+
+<h2 class="docs-h2" id="reference">Going deeper</h2>
+<div class="docs-links">
+  <a class="docs-mini-card" href="/docs/security.html">
+    <strong>Architecture &amp; security</strong>
+    <span>Packet flow, WireGuard + TLS 1.3, split-horizon DNS-01, threat model, and SLSA verification.</span>
   </a>
-  <a class="feature docs-card" href="/docs/security.html">
-    <h3>Architecture &amp; security</h3>
-    <p>Packet flow, blind <code>CONNECT</code> + <code>WhoIs</code> dialing, DNS-01 certs,
-      threat model, host hardening, and honest limits.</p>
-  </a>
-  <a class="feature docs-card" href="/docs/self-host.html">
-    <h3>Self-hosting</h3>
-    <p>Hogman runs hosted pens only (D-24); the open-source code is public to read and check.</p>
+  <a class="docs-mini-card" href="/docs/faq.html">
+    <strong>FAQ &amp; troubleshooting</strong>
+    <span>Tailscale comparison, self-hosting policy, VPN coexistence, and fixes for common errors.</span>
   </a>
 </div>

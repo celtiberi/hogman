@@ -15,15 +15,16 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="theme-color" content="#0e080c">
 <link rel="icon" href="/favicon.svg?v=metal5" type="image/svg+xml">
-<link rel="stylesheet" href="/styles.css?v=metal24">
+<link rel="stylesheet" href="/styles.css?v=metal25">
 </head>
 <body>
 <header class="top">
-  <a class="brand" href="/" aria-label="Hogman home">H&Ouml;GMAN</a>
+  <a class="brand" href="/" aria-label="Hogman home"><img class="brand-icon" src="/hogman-icon.webp" width="28" height="28" alt=""><span>H&Ouml;GMAN</span></a>
   <nav>
     <a href="#why">Why a pen?</a>
     <a href="#tech">Under the hood</a>
     <a href="/docs/">Docs</a>
+    <a href="https://github.com/celtiberi/hogman">Source</a>
     <a href="https://get.hogman.network/">Get a pen</a>
   </nav>
 </header>
@@ -324,8 +325,8 @@
       <div>
         <h3>Read the receipts</h3>
         <p class="cta">
-          <a class="btn primary" href="/docs/security.html">Architecture &amp; threat model</a>
-          <a class="btn" href="/docs/how-it-works.html">Full packet walkthrough</a>
+          <a class="btn primary" href="/docs/security.html">Architecture &amp; security</a>
+          <a class="btn" href="/docs/security.html#diagram">Full packet walkthrough</a>
         </p>
         <p class="fine">Pinned versions in
           <a href="https://github.com/celtiberi/hogman/blob/main/core/compose.yaml">core/compose.yaml</a> ·
@@ -359,7 +360,7 @@
         <li class="notyet">PSL listing for <code>pens.hogman.network</code></li>
         <li class="notyet">Independent security audit. Until then, don't trust it with anything that matters.</li>
       </ul>
-      <p class="fine">All code is AGPL-3.0 (<a href="/docs/self-host.html">open-source model</a>).
+      <p class="fine">All code is AGPL-3.0 (<a href="/docs/faq.html#self-host">open-source model</a>).
         Forged from Headscale, Tailscale <code>tsnet</code>, CertMagic, <code>miekg/dns</code>, and Caddy.</p>
     </div>
   </div>
@@ -393,7 +394,6 @@
   <img class="foot-logo" src="/logo.webp" width="2000" height="900" alt="HÖGMAN" loading="lazy">
   <p>Keep a clean pen.</p>
   <p class="foot-links"><a href="/docs/">Docs</a> · <a href="/docs/security.html">Security</a> ·
-    <a href="/docs/how-it-works.html">How it works</a> ·
     <a href="/docs/faq.html">FAQ</a> · <a href="https://get.hogman.network/">Get a pen</a> ·
     <a href="https://github.com/celtiberi/hogman">Source</a></p>
   <p class="fine">No pigs were excluded in the making of this website, except the filthy ones.</p>

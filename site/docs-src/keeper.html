@@ -1,60 +1,58 @@
-<h1 class="docs-h1">Running your pen</h1>
-<p class="lede">For the keeper (the pen's owner) and anyone they make an admin. Everything here
-  is on your pen's home page, <code>https://home.yourpen.pens.hogman.network</code>.</p>
+<h1 class="docs-h1">Running a pen</h1>
+<p class="lede">For keepers (owners) and admins. Everything here lives on your pen's home page at
+  <code>https://home.&lt;yourpen&gt;.pens.hogman.network</code>.</p>
 
-<h2 class="docs-h2">Roles</h2>
+<h2 class="docs-h2" id="roles">Roles</h2>
 <table class="docs-table">
-  <thead><tr><th>Role</th><th>Can</th></tr></thead>
+  <thead><tr><th>Role</th><th>Permissions</th></tr></thead>
   <tbody>
-    <tr><td>Owner (the keeper)</td><td>Everything. Can't be suspended or removed. A pen can have
-      more than one owner, and should: an owner who loses every device needs another owner to
-      invite them back. Owners can demote each other, so make owners only of people you trust
+    <tr><td><strong>Owner (keeper)</strong></td><td>Full control. Cannot be suspended or kicked. A
+      pen can — and should — have more than one owner: if an owner loses every device, only another
+      owner can invite them back. Owners can demote each other, so appoint only people you trust
       completely.</td></tr>
-    <tr><td>Admin</td><td>Make and revoke invites, suspend, resume and remove members. Can't
-      act on the owner or other admins.</td></tr>
-    <tr><td>Member</td><td>Join devices, claim names, run servers and shares. Inviting is
-      keepers-only unless the pen allows members to invite.</td></tr>
+    <tr><td><strong>Admin</strong></td><td>Create and revoke invites; suspend, resume, and kick
+      regular members. Cannot act on owners or other admins.</td></tr>
+    <tr><td><strong>Member</strong></td><td>Enroll personal devices and host HTTPS servers. Creating
+      invites is keepers-only unless enabled for members.</td></tr>
   </tbody>
 </table>
 
-<h2 class="docs-h2">Inviting people</h2>
-<p>Under <strong>Invite someone</strong>, add a note for yourself ("Alice, from the climbing
-  club") and press <strong>Make an invite</strong>. You get a link and a QR code. Each invite
-  works for one person, once, and expires after 7 days. Send it however you like: the link is
-  the only way in, so treat it like a key.</p>
-<p><strong>Open invites</strong> lists the ones nobody has used yet; revoke any of them. (Invite
-  links from before public certificates — carrying <code>fp=</code> — no longer work; old pens
-  created on <code>.hogman</code> zones must be recreated.)</p>
+<h2 class="docs-h2" id="invites">Inviting people</h2>
+<p>Under <strong>Invite someone</strong>, add a short note for yourself (e.g. <em>"Gary, from the
+  climbing club"</em>) and press <strong>Make an invite</strong>. You get a single-use link and QR
+  code valid for 7 days. Treat the link like a key — anyone who opens it first gets in.</p>
+<p><strong>Open invites</strong> lists unused links so you can revoke any before they're redeemed.</p>
 
-<h2 class="docs-h2">The herd</h2>
-<p><strong>The herd</strong> lists everyone in the pen with their role, status and number of
-  devices, 20 at a time, with a search box, so it stays quick in a pen of thousands. For each
-  member:</p>
+<h2 class="docs-h2" id="herd">The herd: suspend &amp; kick</h2>
+<p><strong>The herd</strong> lists every member with their role, status, and device count (paginated
+  with search):</p>
 <ul>
-  <li><strong>Suspend</strong>: all their devices are cut off within seconds. Their membership,
-    devices and names are kept. Use it when you're not sure yet.</li>
-  <li><strong>Resume</strong>: back in, in under a second.</li>
-  <li><strong>Kick</strong> (the boot): the membership ends, every device is deleted, unused
-    keys and invites they made are revoked, and their site names are retired permanently so nobody
-    can pretend to be them. Coming back takes a new invite.</li>
-  <li><strong>Make admin</strong> or back to member, and <strong>Make owner</strong> for an
-    admin (owner only).</li>
-  <li><strong>Someone lost every device?</strong> There is no account recovery. Invite them
-    again, give the new account the old one's role, and kick the old account (make an old owner
-    an admin first).</li>
+  <li><strong>Suspend (~2 s):</strong> cuts off all of a member's devices while keeping their
+    account, devices, and site names intact. Use when you want a reversible timeout.</li>
+  <li><strong>Resume (&lt;1 s):</strong> restores access immediately.</li>
+  <li><strong>Kick / the boot (~2 s):</strong> ends membership, deletes every device from the mesh,
+    revokes their unused keys and invites, rewrites ACLs, and <strong>permanently retires their
+    handle and site names</strong> so nobody can impersonate them. Coming back requires a fresh
+    invite.</li>
+  <li><strong>Promote / demote:</strong> make a member an admin (or back to member), or promote an
+    admin to owner (owner-only).</li>
 </ul>
 
-<h2 class="docs-h2">Devices and names</h2>
-<p>Every member manages their own devices on the home page: <strong>Add a device</strong> for a
-  one-time join link, and <strong>Get a share link</strong> to put something in the pen from a
-  computer that isn't in it. Names belong to <a href="/docs/share.html">shares</a>, which name
-  themselves. Every site hostname gets a standard web certificate, so its hostname appears in
-  public Certificate Transparency logs (contents stay private).</p>
+<div class="callout">
+  <p><strong>No account recovery:</strong> if a member loses every device, invite them again,
+    restore their role, and kick the old account (demote an old owner to admin first). Appoint a
+    second owner so your pen can never be locked out.</p>
+</div>
 
-<h2 class="docs-h2">What to tell your members</h2>
-<p>As keeper you can see who is in the pen, their devices, when they're online and which pen
-  names they look up. You can't see what members send each other, or anything they do outside the
-  pen. Let members know that pen and shared-site names are public in CT logs, and that if they
-  join other hosted pens under <code>pens.hogman.network</code>, they should use a separate
-  browser profile for pens they don't fully trust (<code>D-19</code>). See
-  <a href="/docs/how-it-works.html#trust">who sees what</a>.</p>
+<h2 class="docs-h2" id="devices">Devices &amp; site names</h2>
+<p>Every member manages their own devices from the home page: <strong>Add a device</strong> creates
+  a 1-hour personal join link, and <strong>Get a share link</strong> creates a 1-hour server link for
+  hosting from an always-on machine (<a href="/docs/share.html">Hosting HTTPS servers</a>). Active
+  sites appear under <strong>Sites in this pen</strong> with their owner and optional note.</p>
+
+<h2 class="docs-h2" id="visibility">What keepers can (and can't) see</h2>
+<p>As keeper, you can see who is in the pen, their devices, online status, and which pen names are
+  queried. You cannot passively read what members send each other (WireGuard + TLS 1.3 end to end)
+  or any browsing outside the pen. Let members know that site hostnames appear in public Certificate
+  Transparency logs and to use a separate browser profile for pens they don't fully trust. See the
+  full <a href="/docs/security.html#threat-model">threat model</a>.</p>
