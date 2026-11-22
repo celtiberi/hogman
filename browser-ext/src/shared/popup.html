@@ -8,7 +8,10 @@
 </head>
 <body>
 <header class="hdr">
-  <h1>Hogman</h1>
+  <div class="hdr-brand">
+    <img src="icons/hogman-32.png" alt="" width="20" height="20" class="brand-icon">
+    <h1>Hogman</h1>
+  </div>
   <div class="hdr-actions">
     <button id="refresh" type="button">Refresh</button>
     <button id="pause" type="button">Pause</button>
@@ -21,7 +24,7 @@
   <button id="perm-btn" type="button">Grant host permission</button>
 </div>
 <div id="paused-row" class="banner warn" hidden>
-  Paused: pen sites (<code>*.pens.hogman.network</code>) are blocked (fail-closed) until resumed. Ordinary browsing is unaffected.
+  Paused: pen sites (<code>*.pens.hogman.network</code>) are blocked until resumed. Ordinary browsing is unaffected.
 </div>
 <div id="override-row" class="banner warn" hidden>
   <p id="override-text"></p>
@@ -41,7 +44,7 @@
 </section>
 
 <footer class="ftr muted">
-  Routes enabled <code>*.pens.hogman.network</code> pens to your local <code>hogman-join</code> proxy; disabled pens fail closed, and everything else goes direct (through your VPN if active).
+  Routes enabled <code>*.pens.hogman.network</code> pens to your local <code>hogman-join</code> proxy; disabled pens stay blocked, and everything else goes direct (through your VPN if active).
 </footer>
 
 <script type="module" src="popup.js"></script>

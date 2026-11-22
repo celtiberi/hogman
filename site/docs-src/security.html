@@ -244,7 +244,9 @@
     install it from a store will trust that store's auto-updates and our publisher account for
     browser proxy rules. To minimize blast radius, the extension has zero third-party dependencies,
     requests no <code>&lt;all_urls&gt;</code> or page-reading permissions, fails closed for
-    <code>*.pens.hogman.network</code>, builds reproducibly from <code>browser-ext/</code>, and
+    <code>*.pens.hogman.network</code> (except when another non-Hogman OS proxy is active and not
+    overridden, in which case the extension steps aside so your OS proxy keeps working and pen names
+    follow that OS proxy until overridden), builds reproducibly from <code>browser-ext/</code>, and
     speaks to a read-only native host (<code>hogman-native-host</code>) that returns only verified
     pen zones and loopback ports.</li>
   <li class="notyet"><strong>HTTPS to servers only (D-11):</strong> No SSH, arbitrary UDP/TCP,

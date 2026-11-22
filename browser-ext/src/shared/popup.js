@@ -61,7 +61,7 @@ function render(st) {
     banner.textContent = st.conflictDetail;
     banner.hidden = false;
   } else if (st.conflict === "os_proxy") {
-    overrideText.textContent = `A non-Hogman system proxy is active (${st.conflictDetail}). Hogman stepped aside so your OS proxy keeps working — pen sites are not routed or blocked by this extension. Overriding sends non-Hogman browsing DIRECT in this Chrome profile.`;
+    overrideText.textContent = `A non-Hogman system proxy is active (${st.conflictDetail}). Hogman stepped aside so your OS proxy keeps working; pen names follow that OS proxy until you override it. Overriding bypasses your OS proxy for non-Hogman browsing in this browser profile.`;
     overrideRow.hidden = false;
   }
 

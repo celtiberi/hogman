@@ -16,6 +16,15 @@ body {
   justify-content: space-between;
   margin-bottom: 10px;
 }
+.hdr-brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.brand-icon {
+  display: block;
+  border-radius: 4px;
+}
 h1 { font-size: 15px; margin: 0; }
 h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #52525b; margin: 0; }
 .hdr-actions { display: flex; gap: 6px; }
