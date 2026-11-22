@@ -52,8 +52,9 @@
     await navigator.clipboard.writeText(cleanLink);
     document.getElementById('copied-link').textContent = 'Copied. Paste it into Terminal when it asks.';
   };
-  // Sharing doesn't touch the browser proxy, so no password note there.
+  // Sharing doesn't touch the browser proxy, so no password or VPN proxy note there.
   document.getElementById('pw-note').hidden = forShare;
+  document.getElementById('vpn-note').hidden = forShare;
   if (forShare) {
     document.getElementById('lead').textContent =
       'Copy this into a terminal on the computer hosting your app or folder. It downloads hogman-join (no other software needed):';

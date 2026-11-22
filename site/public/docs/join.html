@@ -93,6 +93,19 @@
     changes only the automatic proxy setting. If you skip it, <code>hogman-join</code> prints the
     one setting to change by hand.</li>
 </ul>
+<p><strong>Using a VPN (ProtonVPN, Mullvad, or a work VPN)?</strong> On macOS, VPN apps override
+  the system automatic proxy setting while connected, so browsers stop seeing pen names even though
+  <code>hogman-join</code> stays connected.</p>
+<ul>
+  <li><strong>Chrome, Brave, Edge, and Firefox:</strong> install the Hogman browser extension
+    (<code>browser-ext/</code>). It routes only <code>*.pens.hogman.network</code> to your local
+    <code>hogman-join</code> proxy while leaving ordinary browsing on your VPN. (Firefox's built-in
+    <em>Automatic proxy configuration URL</em> setting also works alongside a VPN with no
+    extension.)</li>
+  <li><strong>Safari:</strong> Apple does not expose proxy APIs to Safari extensions, so pause your
+    VPN while visiting pen sites in Safari, or open pen sites in Chrome, Brave, Edge, or Firefox
+    with the Hogman extension.</li>
+</ul>
 <p><strong>If it stops part way</strong> (DNS not ready, offline), fix what it says and run the
   same command again. If the stop came before your device joined, the invite is still unused; if
   after, the rerun sees the device is already in and skips the invite. Either way the link only

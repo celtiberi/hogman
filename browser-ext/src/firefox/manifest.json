@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Hogman",
+  "version": "0.1.0",
+  "description": "Routes your Hogman pen sites (*.pens.hogman.network) to your local hogman-join proxy alongside any OS VPN.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "hogman-browser@hogman.network",
+      "strict_min_version": "109.0"
+    }
+  },
+  "permissions": [
+    "proxy",
+    "nativeMessaging",
+    "storage"
+  ],
+  "host_permissions": [
+    "*://*.pens.hogman.network/*"
+  ],
+  "background": {
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Hogman",
+    "default_popup": "popup.html"
+  }
+}

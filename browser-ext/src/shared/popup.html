@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hogman</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<header class="hdr">
+  <h1>Hogman</h1>
+  <div class="hdr-actions">
+    <button id="refresh" type="button">Refresh</button>
+    <button id="pause" type="button">Pause</button>
+  </div>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+<div id="override-row" class="banner warn" hidden>
+  <p id="override-text"></p>
+  <button id="override-btn" type="button">Override OS proxy in this profile</button>
+</div>
+<div id="incognito-row" class="banner warn" hidden>
+  Private Windows do not route pen sites unless you enable "Run in Private Windows" for Hogman in Add-ons.
+</div>
+
+<section>
+  <div class="row-hdr">
+    <h2>Pens in this profile</h2>
+    <label class="lock-toggle" title="When locked, newly joined pens stay disabled in this browser profile until enabled here (D-19 isolation).">
+      <input id="lock-profile" type="checkbox">
+      Lock profile
+    </label>
+  </div>
+  <ul id="pen-list" class="pens"></ul>
+  <p id="empty" class="muted" hidden>No pens found. Run <code>hogman-join</code> to join a pen, or <code>hogman-join browser-setup</code> to register this browser.</p>
+</section>
+
+<footer class="ftr muted">
+  Routes <code>*.pens.hogman.network</code> to your local <code>hogman-join</code> proxy; everything else goes direct (through your VPN if active).
+</footer>
+
+<script type="module" src="popup.js"></script>
+</body>
+</html>
