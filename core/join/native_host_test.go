@@ -361,8 +361,8 @@ func TestRenderNativeManifestsAndFirefoxIDValidation(t *testing.T) {
 	if len(defaultChromeExtIDs) != 1 || !validChromeExtID(defaultChromeExtIDs[0]) {
 		t.Fatalf("defaultChromeExtIDs = %v, want 1 valid Chrome Web Store ID", defaultChromeExtIDs)
 	}
-	if len(defaultFirefoxExtIDs) != 0 {
-		t.Fatalf("defaultFirefoxExtIDs should stay empty until AMO ID is claimed, got %v", defaultFirefoxExtIDs)
+	if len(defaultFirefoxExtIDs) != 1 || !validFirefoxExtID(defaultFirefoxExtIDs[0]) {
+		t.Fatalf("defaultFirefoxExtIDs = %v, want 1 valid Firefox AMO ID", defaultFirefoxExtIDs)
 	}
 }
 

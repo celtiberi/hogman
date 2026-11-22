@@ -47,7 +47,9 @@ var (
 	defaultChromeExtIDs = []string{
 		"mgokdogedagoejnjmjpmbcmicbmhplkk", // Chrome Web Store (Chrome, Brave, Edge, Arc, Vivaldi, Chromium)
 	}
-	defaultFirefoxExtIDs = []string{} // populated once claimed on Mozilla AMO
+	defaultFirefoxExtIDs = []string{
+		"hogman-browser@hogman.network", // Mozilla Add-ons (Firefox, LibreWolf)
+	}
 )
 
 var (
