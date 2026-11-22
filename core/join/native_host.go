@@ -41,12 +41,13 @@ const (
 )
 
 // Published browser extension IDs authorized to speak to the native messaging
-// host. Both stay empty until the extensions are claimed/published on Chrome
-// Web Store and Mozilla AMO; developer/unpacked IDs can be registered
-// explicitly via `hogman-join browser-setup --chrome-id <id> --firefox-id <id>`.
+// host. Additional developer/unpacked IDs can be registered explicitly via
+// `hogman-join browser-setup --chrome-id <id> --firefox-id <id>`.
 var (
-	defaultChromeExtIDs  = []string{}
-	defaultFirefoxExtIDs = []string{}
+	defaultChromeExtIDs = []string{
+		"mgokdogedagoejnjmjpmbcmicbmhplkk", // Chrome Web Store (Chrome, Brave, Edge, Arc, Vivaldi, Chromium)
+	}
+	defaultFirefoxExtIDs = []string{} // populated once claimed on Mozilla AMO
 )
 
 var (

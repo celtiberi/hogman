@@ -358,6 +358,9 @@ func TestRenderNativeManifestsAndFirefoxIDValidation(t *testing.T) {
 	if validFirefoxExtID("bad id with spaces") || validFirefoxExtID("") {
 		t.Fatal("expected invalid Gecko ID to be rejected")
 	}
+	if len(defaultChromeExtIDs) != 1 || !validChromeExtID(defaultChromeExtIDs[0]) {
+		t.Fatalf("defaultChromeExtIDs = %v, want 1 valid Chrome Web Store ID", defaultChromeExtIDs)
+	}
 	if len(defaultFirefoxExtIDs) != 0 {
 		t.Fatalf("defaultFirefoxExtIDs should stay empty until AMO ID is claimed, got %v", defaultFirefoxExtIDs)
 	}
