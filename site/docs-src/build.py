@@ -15,7 +15,7 @@ SRC = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(SRC, "..", "public", "docs")
 
 PAGES = [  # (file, nav title, page title, description, sidebar group)
-    ("index", "Quickstart", "Hogman docs — Quickstart", "Create a pen, join with one command, and put an HTTPS server on your private network.", "Guides"),
+    ("index", "Quickstart", "Docs — Quickstart", "Create a pen, join with one command, and put an HTTPS server on your private network.", "Guides"),
     ("join", "Joining a pen", "Joining a pen", "Join a pen on Mac or Linux, handle VPNs and browsers, add devices, update, and leave.", "Guides"),
     ("share", "Hosting HTTPS servers", "Hosting HTTPS servers", "Put any web app, local port, or static directory inside your pen over HTTPS (port 443).", "Guides"),
     ("keeper", "Running a pen", "Running a pen", "Roles, invites, the herd, suspend and kick, and what keepers can and can't see.", "Guides"),
