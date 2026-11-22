@@ -4,8 +4,9 @@
 name: e2e
 
 # These checks are required on main, so they must always report. A change that
-# touches only the website, docs or Markdown runs the small "changes" job and
-# skips the suites (a skipped job counts as passed).
+# touches only the website, docs, Markdown, DNS records (infra/) or the DNS and
+# site-deploy workflows runs the small "changes" job and skips the suites (a
+# skipped job counts as passed).
 on:
   pull_request:
   push:
@@ -35,7 +36,7 @@ jobs:
         run: |
           code=true
           if [ -n "$BASE" ] && files="$(git diff --name-only "$BASE" HEAD 2>/dev/null)"; then
-            if ! grep -qvE '^(site/|docs/)|\.md$' <<<"$files"; then code=false; fi
+            if ! grep -qvE '^(site/|docs/|infra/)|^\.github/workflows/(dns|site-deploy)\.yml$|\.md$' <<<"$files"; then code=false; fi
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "code changed: $code"

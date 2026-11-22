@@ -136,8 +136,11 @@ used pen names), encrypted with `age` to a key the server cannot decrypt:
 ## Knowing when it breaks
 
 Run `deploy/hogman-watch.sh` every 5 minutes on another machine. It checks `/health`,
-`/hogman/v1/network`, TLS certificate expiry (14 days remaining), backup freshness (36 hours), and
-optional `WATCH_URLS`, pushing alerts via [ntfy](https://ntfy.sh):
+`/hogman/v1/network`, TLS certificate expiry (on a gate host, the `*.gate` wildcard; it alerts with a
+quarter of the certificate's life left, at most 30 days, while renewal starts at a third), the
+challenge DNS for the pens zone on pens with public certificates (every name server answers for it
+with authority; needs `dig`), backup freshness (36 hours), and optional `WATCH_URLS`, pushing alerts
+via [ntfy](https://ntfy.sh):
 
 ```bash
 echo hogman-$(openssl rand -hex 12)
