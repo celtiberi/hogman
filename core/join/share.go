@@ -234,7 +234,7 @@ func shareStart(name, what, rawLink string, o options) error {
 	step("Sharing %s as %s", cfg.showing(), cfg.url())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serveShare(ctx, dir, true, func(c *shareConfig) {
+	return serveShare(ctx, dir, func(c *shareConfig) {
 		shareReady(c, false, false)
 		say("  Stop: Ctrl-C. The name stays yours: run the same command to bring it back.")
 	})
@@ -551,9 +551,7 @@ func untilOK(ctx context.Context, d time.Duration, fn func() (retry bool, err er
 
 // serveShare runs a share until ctx ends. ready is called once its name and
 // certificate are in place.
-// serveShare runs a share until ctx ends. foreground: someone is watching this
-// terminal (not the background service, which keeps retrying instead).
-func serveShare(ctx context.Context, dir string, foreground bool, ready func(*shareConfig)) error {
+func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error {
 	c, err := loadShare(dir)
 	if err != nil {
 		writeShareStatus(dir, "error", err.Error())
@@ -624,11 +622,13 @@ func serveShare(ctx context.Context, dir string, foreground bool, ready func(*sh
 		_ = ln443.Close()
 		permanent := isNonRetryableShareCertErr(err) && ctx.Err() == nil
 		out := errorf("no certificate for %s: %v", c.fqdn(), err)
-		// A brand-new share that never got a certificate leaves nothing behind
-		// when someone is watching it fail (or it can never succeed): its name
-		// goes back, so it isn't listed as a site that doesn't answer, and its
-		// server leaves the pen. The background service keeps retrying instead.
-		if fresh && (foreground || permanent) {
+		// A brand-new share that never got a certificate leaves nothing behind:
+		// its name goes back, so it isn't listed as a site that doesn't answer,
+		// and its server leaves the pen. Foreground or --background alike: the
+		// first start of a background share is stopped on its first error
+		// anyway (waitShareBackground). Shares that have had a certificate keep
+		// retrying with the persistent backoff instead.
+		if fresh {
 			cm.Close()
 			undoFreshShare(hc, node, dir, c)
 			out = errorf("no certificate for %s: %v\n  Nothing was left behind: the name %s is free again. Fix the problem above,\n  then share again with a fresh share link (this one is used up).", c.fqdn(), err, c.Name)
@@ -762,7 +762,7 @@ func waitShareBackground(dir string, c *shareConfig, managed bool, pid int, time
 func runShareProcess(dir string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serveShare(ctx, dir, false, func(c *shareConfig) { log.Printf("%s is up, showing %s", c.url(), c.showing()) })
+	return serveShare(ctx, dir, func(c *shareConfig) { log.Printf("%s is up, showing %s", c.url(), c.showing()) })
 }
 
 func stopShare(dir string, c *shareConfig) {
