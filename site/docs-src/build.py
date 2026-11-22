@@ -1,27 +1,71 @@
 #!/usr/bin/env python3
 """Build hogman.network/docs: wrap each page in site/docs-src in the shared layout
-(header, sidebar, footer) and write it to site/public/docs/.
+(header, left sidebar, right on-this-page TOC, prev/next pager, footer) and write
+it to site/public/docs/.
 
     python3 site/docs-src/build.py
 
 Edit the page fragments here, not the generated files. To add a page, add its
 fragment and a line to PAGES."""
+import html as html_mod
 import os
+import re
 
 SRC = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(SRC, "..", "public", "docs")
 
 PAGES = [  # (file, nav title, page title, description, sidebar group)
-    ("index", "Docs home", "Hogman docs", "Guides, use cases and how Hogman works, in detail.", "Start here"),
-    ("join", "Joining a pen", "Joining a pen", "Getting your computer into a pen, adding more devices, and leaving.", "Start here"),
-    ("share", "Putting things in your pen", "Putting things in your pen", "One command puts a folder, an app or a website in your pen with its own name and HTTPS.", "Start here"),
-    ("keeper", "Running your pen", "Running your pen", "Invites, the herd, suspend and the boot, names and roles, from your pen's home page.", "Start here"),
-    ("use-cases", "Use cases", "Use cases, worked through", "Families, clubs, small companies, customer portals and side projects, set up step by step.", "Start here"),
-    ("faq", "FAQ and troubleshooting", "FAQ and troubleshooting", "Common questions, and fixes for the problems people actually hit.", "Start here"),
-    ("how-it-works", "How it works", "How Hogman works", "The parts of a pen, what happens on the wire, and what the keeper can and can't see.", "Going deeper"),
-    ("security", "Architecture & security", "Architecture and security", "Packet flow, client isolation, DNS-01 certificates, threat model, host hardening, and known limits.", "Going deeper"),
-    ("self-host", "Self-hosting", "Self-hosting", "Hogman is hosted-only (D-24); the code is open source to read and check.", "Going deeper"),
+    ("index", "Quickstart", "Hogman docs — Quickstart", "Create a pen, join with one command, and put an HTTPS server on your private network.", "Guides"),
+    ("join", "Joining a pen", "Joining a pen", "Join a pen on Mac or Linux, handle VPNs and browsers, add devices, update, and leave.", "Guides"),
+    ("share", "Hosting HTTPS servers", "Hosting HTTPS servers", "Put any web app, local port, or static directory inside your pen over HTTPS (port 443).", "Guides"),
+    ("keeper", "Running a pen", "Running a pen", "Roles, invites, the herd, suspend and kick, and what keepers can and can't see.", "Guides"),
+    ("security", "Architecture & security", "Architecture and security", "Packet flow, components, client isolation, DNS-01 HTTPS, threat model, host isolation, and known limits.", "Reference"),
+    ("faq", "FAQ & troubleshooting", "FAQ and troubleshooting", "Common questions (Tailscale, self-hosting, VPNs, limits) and fixes for common errors.", "Reference"),
 ]
+
+H2_RE = re.compile(r'<h2\b[^>]*\bid="([^"]+)"[^>]*>(.*?)</h2>', re.DOTALL)
+TAG_RE = re.compile(r"<[^>]+>")
+
+
+def page_href(slug: str) -> str:
+    return "/docs/" if slug == "index" else f"/docs/{slug}.html"
+
+
+def build_toc(body: str) -> str:
+    items = []
+    for hid, raw_title in H2_RE.findall(body):
+        label = html_mod.unescape(TAG_RE.sub("", raw_title)).strip()
+        items.append(f'<li><a href="#{hid}">{html_mod.escape(label)}</a></li>')
+    if not items:
+        return ""
+    return (
+        '<aside class="docs-toc" aria-label="On this page">\n'
+        '  <p class="docs-nav-h">On this page</p>\n'
+        '  <ul>\n'
+        + "\n".join(f"    {li}" for li in items)
+        + "\n  </ul>\n</aside>"
+    )
+
+
+def build_pager(idx: int) -> str:
+    prev_html = '<span class="pager-slot"></span>'
+    next_html = '<span class="pager-slot"></span>'
+    if idx > 0:
+        slug, navt, *_ = PAGES[idx - 1]
+        prev_html = (
+            f'<a class="pager-link prev" href="{page_href(slug)}">'
+            f'<span class="pager-dir">&larr; Previous</span>'
+            f'<span class="pager-title">{html_mod.escape(navt)}</span></a>'
+        )
+    if idx + 1 < len(PAGES):
+        slug, navt, *_ = PAGES[idx + 1]
+        next_html = (
+            f'<a class="pager-link next" href="{page_href(slug)}">'
+            f'<span class="pager-dir">Next &rarr;</span>'
+            f'<span class="pager-title">{html_mod.escape(navt)}</span></a>'
+        )
+    return f'<nav class="docs-pager" aria-label="Adjacent pages">\n  {prev_html}\n  {next_html}\n</nav>'
+
 
 HEAD = """<!doctype html>
 <html lang="en">
@@ -32,19 +76,18 @@ HEAD = """<!doctype html>
 <meta name="description" content="{desc}">
 <meta name="theme-color" content="#0e080c">
 <link rel="icon" href="/favicon.svg?v=metal5" type="image/svg+xml">
-<link rel="stylesheet" href="/styles.css?v=metal10">
+<link rel="stylesheet" href="/styles.css?v=metal25">
 </head>
 <!-- Generated by site/docs-src/build.py from site/docs-src. Edit there. -->
 <body class="docs-page">
 <header class="top">
-  <a class="brand" href="/" aria-label="Hogman home">H&Ouml;GMAN</a>
+  <a class="brand" href="/" aria-label="Hogman home"><img class="brand-icon" src="/hogman-icon.webp" width="28" height="28" alt=""><span>H&Ouml;GMAN</span></a>
   <nav>
-    <a href="/">Home</a>
-    <a href="/docs/">Docs</a>
-    <a href="/docs/how-it-works.html">How it works</a>
-    <a href="/docs/security.html">Security</a>
-    <a href="https://get.hogman.network/">Get a pen</a>
+    <a href="/#why">Why a pen?</a>
+    <a href="/#tech">Under the hood</a>
+    <a href="/docs/" aria-current="true">Docs</a>
     <a href="https://github.com/celtiberi/hogman">Source</a>
+    <a href="https://get.hogman.network/">Get a pen</a>
   </nav>
 </header>
 <div class="studs" aria-hidden="true"></div>
@@ -56,34 +99,43 @@ HEAD = """<!doctype html>
 """
 
 FOOT = """
-<p class="docs-edit fine">Something wrong or unclear on this page? Its source is in
-  <a href="https://github.com/celtiberi/hogman/tree/main/site/docs-src">site/docs-src</a>; issues and fixes welcome.</p>
+{pager}
+<p class="docs-edit fine">Spot something wrong or unclear? Edit the source in
+  <a href="https://github.com/celtiberi/hogman/tree/main/site/docs-src">site/docs-src</a> on GitHub.</p>
 </main>
+{toc}
 </div>
 <footer>
   <p>Keep a clean pen.</p>
-  <p class="fine">Hogman is open source (AGPL) and not audited yet.</p>
+  <p class="foot-links"><a href="/">Home</a> · <a href="/docs/">Docs</a> ·
+    <a href="/docs/security.html">Security</a> · <a href="/docs/faq.html">FAQ</a> ·
+    <a href="https://get.hogman.network/">Get a pen</a> ·
+    <a href="https://github.com/celtiberi/hogman">Source</a></p>
 </footer>
+<script src="/docs.js?v=1" defer></script>
 </body>
 </html>
 """
 
 os.makedirs(OUT, exist_ok=True)
-for f, navt, title, desc, _ in PAGES:
-    body = open(os.path.join(SRC, f + ".html")).read()
+for idx, (f, navt, title, desc, _) in enumerate(PAGES):
+    body = open(os.path.join(SRC, f + ".html")).read().strip()
     nav, group = [], None
     for g, n, _, _, grp in PAGES:
         if grp != group:
             if group is not None:
                 nav.append("</ul>")
-            nav.append('<p class="docs-nav-h">{}</p>\n<ul>'.format(grp))
+            nav.append(f'<p class="docs-nav-h">{grp}</p>\n<ul>')
             group = grp
-        nav.append('<li><a href="/docs/{}"{}>{}</a></li>'.format(
-            "" if g == "index" else g + ".html",
-            ' aria-current="page"' if g == f else "",
-            n,
-        ))
+        current = ' aria-current="page"' if g == f else ""
+        nav.append(f'<li><a href="{page_href(g)}"{current}>{n}</a></li>')
     nav.append("</ul>")
-    html = HEAD.format(title=title, desc=desc, nav="\n".join(nav)) + body.strip() + "\n" + FOOT
-    open(os.path.join(OUT, f + ".html"), "w").write(html)
+
+    out_html = (
+        HEAD.format(title=title, desc=desc, nav="\n".join(nav))
+        + body
+        + "\n"
+        + FOOT.format(pager=build_pager(idx), toc=build_toc(body))
+    )
+    open(os.path.join(OUT, f + ".html"), "w").write(out_html)
     print("wrote", f)
