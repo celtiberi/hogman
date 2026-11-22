@@ -7,7 +7,8 @@ import (
 
 type systemProxyState struct {
 	OSProxyConflict bool
-	OSProxyDetail   string
+	OSProxyKind     string // privacy-safe category list sent over Native Messaging ("pac", "http", "https", "socks")
+	OSProxyDetail   string // detailed description for local CLI `status` output only (never sent to extensions)
 	VPNOverride     bool
 	VPNInterface    string
 }
@@ -70,20 +71,26 @@ func isTunnelInterface(iface string) bool {
 func evaluateDarwinProxyState(proxy scutilProxyInfo, primaryIface string, serviceHasHogmanPAC bool, known []*agentConfig) systemProxyState {
 	var st systemProxyState
 	var conflicts []string
+	var kinds []string
 	if proxy.HTTPOn {
 		conflicts = append(conflicts, "HTTP proxy")
+		kinds = append(kinds, "http")
 	}
 	if proxy.HTTPSOn {
 		conflicts = append(conflicts, "HTTPS proxy")
+		kinds = append(kinds, "https")
 	}
 	if proxy.SOCKSOn {
 		conflicts = append(conflicts, "SOCKS proxy")
+		kinds = append(kinds, "socks")
 	}
 	if proxy.PACOn && proxy.PACURL != "" && !isHogmanPACURL(proxy.PACURL, known) {
 		conflicts = append(conflicts, fmt.Sprintf("PAC (%s)", proxy.PACURL))
+		kinds = append(kinds, "pac")
 	}
 	if len(conflicts) > 0 {
 		st.OSProxyConflict = true
+		st.OSProxyKind = strings.Join(kinds, ",")
 		st.OSProxyDetail = strings.Join(conflicts, ", ")
 	}
 	hogmanPACActive := proxy.PACOn && isHogmanPACURL(proxy.PACURL, known)

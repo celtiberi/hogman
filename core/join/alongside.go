@@ -219,7 +219,7 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	retireLegacySameServerPens(oldSameServer, defaultLegacyRetireOps())
 
 	pens := normalizePenConfigs(loadInstalledPenConfigs(hogmanConfigBase()), cfg)
-	if _, _, err := installNativeHost(hogmanConfigBase(), nil); err != nil {
+	if _, _, err := installNativeHost(hogmanConfigBase(), nil, nil); err != nil {
 		note("could not register browser extension host: %v", err)
 	}
 	browsers := "set your browser's automatic proxy configuration to " + cfg.pacURL()

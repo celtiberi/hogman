@@ -72,6 +72,7 @@ type options struct {
 	note                        string // share: one-line note for the pen directory
 	noteSet                     bool
 	chromeID                    string // browser-setup: optional unpacked Chrome extension ID
+	firefoxID                   string // browser-setup: optional Firefox Gecko extension ID
 }
 
 func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err error) {
@@ -102,6 +103,7 @@ func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err 
 	fs.BoolVar(&o.background, "background", false, "")
 	fs.StringVar(&o.note, "note", "", "")
 	fs.StringVar(&o.chromeID, "chrome-id", "", "")
+	fs.StringVar(&o.firefoxID, "firefox-id", "", "")
 	ver := fs.Bool("version", false, "")
 
 	// Allow options before or after the link / share target.

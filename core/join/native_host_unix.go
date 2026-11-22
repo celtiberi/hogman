@@ -17,7 +17,7 @@ func isolateNativeStdout() (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Dup2(int(os.Stderr.Fd()), int(os.Stdout.Fd())); err != nil {
+	if err := dup2FD(int(os.Stderr.Fd()), int(os.Stdout.Fd())); err != nil {
 		_ = syscall.Close(fd)
 		return nil, err
 	}
@@ -26,9 +26,10 @@ func isolateNativeStdout() (*os.File, error) {
 }
 
 type nativeManifestTarget struct {
-	browser string
-	kind    string // "chrome" or "firefox"
-	dir     string
+	browser   string
+	kind      string // "chrome" or "firefox"
+	detectDir string // existing browser data dir required before creating manifest dir
+	dir       string
 }
 
 func browserNativeManifestTargets(goos, home string) []nativeManifestTarget {
@@ -39,31 +40,36 @@ func browserNativeManifestTargets(goos, home string) []nativeManifestTarget {
 	case "darwin":
 		appSupport := filepath.Join(home, "Library", "Application Support")
 		return []nativeManifestTarget{
-			{browser: "Chrome", kind: "chrome", dir: filepath.Join(appSupport, "Google", "Chrome", "NativeMessagingHosts")},
-			{browser: "Chrome Beta", kind: "chrome", dir: filepath.Join(appSupport, "Google", "Chrome Beta", "NativeMessagingHosts")},
-			{browser: "Chrome Canary", kind: "chrome", dir: filepath.Join(appSupport, "Google", "Chrome Canary", "NativeMessagingHosts")},
-			{browser: "Brave", kind: "chrome", dir: filepath.Join(appSupport, "BraveSoftware", "Brave-Browser", "NativeMessagingHosts")},
-			{browser: "Edge", kind: "chrome", dir: filepath.Join(appSupport, "Microsoft Edge", "NativeMessagingHosts")},
-			{browser: "Arc", kind: "chrome", dir: filepath.Join(appSupport, "Arc", "User Data", "NativeMessagingHosts")},
-			{browser: "Vivaldi", kind: "chrome", dir: filepath.Join(appSupport, "Vivaldi", "NativeMessagingHosts")},
-			{browser: "Chromium", kind: "chrome", dir: filepath.Join(appSupport, "Chromium", "NativeMessagingHosts")},
-			{browser: "Firefox", kind: "firefox", dir: filepath.Join(appSupport, "Mozilla", "NativeMessagingHosts")},
-			{browser: "LibreWolf", kind: "firefox", dir: filepath.Join(appSupport, "LibreWolf", "NativeMessagingHosts")},
+			{browser: "Chrome", kind: "chrome", detectDir: filepath.Join(appSupport, "Google", "Chrome"), dir: filepath.Join(appSupport, "Google", "Chrome", "NativeMessagingHosts")},
+			{browser: "Chrome Beta", kind: "chrome", detectDir: filepath.Join(appSupport, "Google", "Chrome Beta"), dir: filepath.Join(appSupport, "Google", "Chrome Beta", "NativeMessagingHosts")},
+			{browser: "Chrome Canary", kind: "chrome", detectDir: filepath.Join(appSupport, "Google", "Chrome Canary"), dir: filepath.Join(appSupport, "Google", "Chrome Canary", "NativeMessagingHosts")},
+			{browser: "Brave", kind: "chrome", detectDir: filepath.Join(appSupport, "BraveSoftware", "Brave-Browser"), dir: filepath.Join(appSupport, "BraveSoftware", "Brave-Browser", "NativeMessagingHosts")},
+			{browser: "Edge", kind: "chrome", detectDir: filepath.Join(appSupport, "Microsoft Edge"), dir: filepath.Join(appSupport, "Microsoft Edge", "NativeMessagingHosts")},
+			{browser: "Arc", kind: "chrome", detectDir: filepath.Join(appSupport, "Arc", "User Data"), dir: filepath.Join(appSupport, "Arc", "User Data", "NativeMessagingHosts")},
+			{browser: "Vivaldi", kind: "chrome", detectDir: filepath.Join(appSupport, "Vivaldi"), dir: filepath.Join(appSupport, "Vivaldi", "NativeMessagingHosts")},
+			{browser: "Chromium", kind: "chrome", detectDir: filepath.Join(appSupport, "Chromium"), dir: filepath.Join(appSupport, "Chromium", "NativeMessagingHosts")},
+			{browser: "Firefox", kind: "firefox", detectDir: filepath.Join(appSupport, "Firefox"), dir: filepath.Join(appSupport, "Mozilla", "NativeMessagingHosts")},
+			{browser: "LibreWolf", kind: "firefox", detectDir: filepath.Join(appSupport, "LibreWolf"), dir: filepath.Join(appSupport, "LibreWolf", "NativeMessagingHosts")},
 		}
 	case "linux":
 		cfg := filepath.Join(home, ".config")
 		return []nativeManifestTarget{
-			{browser: "Chrome", kind: "chrome", dir: filepath.Join(cfg, "google-chrome", "NativeMessagingHosts")},
-			{browser: "Brave", kind: "chrome", dir: filepath.Join(cfg, "BraveSoftware", "Brave-Browser", "NativeMessagingHosts")},
-			{browser: "Edge", kind: "chrome", dir: filepath.Join(cfg, "microsoft-edge", "NativeMessagingHosts")},
-			{browser: "Chromium", kind: "chrome", dir: filepath.Join(cfg, "chromium", "NativeMessagingHosts")},
-			{browser: "Vivaldi", kind: "chrome", dir: filepath.Join(cfg, "vivaldi", "NativeMessagingHosts")},
-			{browser: "Firefox", kind: "firefox", dir: filepath.Join(home, ".mozilla", "native-messaging-hosts")},
-			{browser: "LibreWolf", kind: "firefox", dir: filepath.Join(home, ".librewolf", "native-messaging-hosts")},
+			{browser: "Chrome", kind: "chrome", detectDir: filepath.Join(cfg, "google-chrome"), dir: filepath.Join(cfg, "google-chrome", "NativeMessagingHosts")},
+			{browser: "Brave", kind: "chrome", detectDir: filepath.Join(cfg, "BraveSoftware", "Brave-Browser"), dir: filepath.Join(cfg, "BraveSoftware", "Brave-Browser", "NativeMessagingHosts")},
+			{browser: "Edge", kind: "chrome", detectDir: filepath.Join(cfg, "microsoft-edge"), dir: filepath.Join(cfg, "microsoft-edge", "NativeMessagingHosts")},
+			{browser: "Chromium", kind: "chrome", detectDir: filepath.Join(cfg, "chromium"), dir: filepath.Join(cfg, "chromium", "NativeMessagingHosts")},
+			{browser: "Vivaldi", kind: "chrome", detectDir: filepath.Join(cfg, "vivaldi"), dir: filepath.Join(cfg, "vivaldi", "NativeMessagingHosts")},
+			{browser: "Firefox", kind: "firefox", detectDir: filepath.Join(home, ".mozilla"), dir: filepath.Join(home, ".mozilla", "native-messaging-hosts")},
+			{browser: "LibreWolf", kind: "firefox", detectDir: filepath.Join(home, ".librewolf"), dir: filepath.Join(home, ".librewolf", "native-messaging-hosts")},
 		}
 	default:
 		return nil
 	}
+}
+
+func dirExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
 }
 
 func registerNativeManifests(_ string, hostPath string, chromeIDs, firefoxIDs []string) (int, error) {
@@ -99,6 +105,10 @@ func writeUnixNativeManifests(goos, home, hostPath string, chromeIDs, firefoxIDs
 			data = firefoxJSON
 		}
 		if len(data) == 0 {
+			continue
+		}
+		// Only register for browsers that are already present on this machine.
+		if t.detectDir != "" && !dirExists(t.detectDir) && !dirExists(t.dir) {
 			continue
 		}
 		if err := os.MkdirAll(t.dir, 0o755); err != nil {

@@ -32,21 +32,27 @@ const (
 	maxNativeFrameBytes    = 64 * 1024
 	statusTokenFilename    = "status.token"
 	extensionHeartbeatFile = "extension-seen.json"
+	browserIDsFile         = "browser-ids.json"
 	hogmanPortMin          = 17000
 	hogmanPortMax          = 26999
 
-	defaultFirefoxExtID = "hogman-browser@hogman.network"
+	proxyStateRefreshInterval = 30 * time.Second
+	heartbeatWriteInterval    = 60 * time.Second
 )
 
-// defaultChromeExtIDs holds published Chromium extension IDs (32 chars a-p)
-// authorized to speak to the native messaging host. Populated when the
-// extension's key/store ID is published; additional dev IDs can be registered
-// explicitly via `hogman-join browser-setup --chrome-id <id>`.
-var defaultChromeExtIDs = []string{}
+// Published browser extension IDs authorized to speak to the native messaging
+// host. Both stay empty until the extensions are claimed/published on Chrome
+// Web Store and Mozilla AMO; developer/unpacked IDs can be registered
+// explicitly via `hogman-join browser-setup --chrome-id <id> --firefox-id <id>`.
+var (
+	defaultChromeExtIDs  = []string{}
+	defaultFirefoxExtIDs = []string{}
+)
 
 var (
 	hostedPenZoneRE = regexp.MustCompile(`^[a-z][a-z0-9-]{1,28}[a-z0-9]\.pens\.hogman\.network$`)
 	chromeExtIDRE   = regexp.MustCompile(`^[a-p]{32}$`)
+	firefoxExtIDRE  = regexp.MustCompile(`^(?:[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+|\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\})$`)
 )
 
 func isNativeHostBinary(arg0 string) bool {
@@ -72,6 +78,10 @@ func isHostedPenZone(zone string) bool {
 
 func validChromeExtID(id string) bool {
 	return chromeExtIDRE.MatchString(id)
+}
+
+func validFirefoxExtID(id string) bool {
+	return firefoxExtIDRE.MatchString(id)
 }
 
 // parseStrictHogmanPort enforces 127.0.0.1 and the Hogman local proxy port range
@@ -116,6 +126,7 @@ type nativePenEntry struct {
 	Port     int    `json:"port"`
 	Up       bool   `json:"up"`
 	Hosted   bool   `json:"hosted"`
+	Legacy   bool   `json:"legacy,omitempty"`
 	Squatted bool   `json:"squatted,omitempty"`
 }
 
@@ -124,7 +135,7 @@ type nativeResponse struct {
 	Version         string           `json:"version"`
 	Pens            []nativePenEntry `json:"pens,omitempty"`
 	OSProxyConflict bool             `json:"os_proxy_conflict"`
-	OSProxyDetail   string           `json:"os_proxy_detail,omitempty"`
+	OSProxyKind     string           `json:"os_proxy_kind,omitempty"`
 	VPNOverride     bool             `json:"vpn_override"`
 	VPNInterface    string           `json:"vpn_interface,omitempty"`
 	Error           string           `json:"error,omitempty"`
@@ -165,6 +176,8 @@ func writeNativeFrame(w io.Writer, v any) error {
 
 // runNativeHostMain is the browser Native Messaging entrypoint. It isolates fd 1
 // immediately so no stray log or stdout write can corrupt length-prefixed frames.
+// The host never mutates pen state or system proxies; its only local write is a
+// throttled extension-seen.json timestamp used to suppress CLI VPN notices.
 func runNativeHostMain() {
 	out, err := isolateNativeStdout()
 	if err != nil {
@@ -178,7 +191,55 @@ func runNativeHostMain() {
 	}
 }
 
+type nativeHostSession struct {
+	configBase    string
+	detectProxy   func([]*agentConfig) systemProxyState
+	now           func() time.Time
+	cachedSys     systemProxyState
+	lastSysCheck  time.Time
+	lastHeartbeat time.Time
+}
+
+func newNativeHostSession(configBase string) *nativeHostSession {
+	return &nativeHostSession{
+		configBase:  configBase,
+		detectProxy: detectSystemProxyState,
+		now:         time.Now,
+	}
+}
+
+func (s *nativeHostSession) maybeRecordHeartbeat() {
+	now := s.now()
+	if !s.lastHeartbeat.IsZero() && now.Sub(s.lastHeartbeat) < heartbeatWriteInterval {
+		return
+	}
+	recordExtensionHeartbeat(s.configBase)
+	s.lastHeartbeat = now
+}
+
+func (s *nativeHostSession) snapshot(allowSysRefresh bool) nativeResponse {
+	pens, configs := collectNativePens(s.configBase)
+	now := s.now()
+	if s.lastSysCheck.IsZero() || (allowSysRefresh && now.Sub(s.lastSysCheck) >= proxyStateRefreshInterval) {
+		s.cachedSys = s.detectProxy(configs)
+		s.lastSysCheck = now
+	}
+	return nativeResponse{
+		OK:              true,
+		Version:         nativeHostProtocolVer,
+		Pens:            pens,
+		OSProxyConflict: s.cachedSys.OSProxyConflict,
+		OSProxyKind:     s.cachedSys.OSProxyKind,
+		VPNOverride:     s.cachedSys.VPNOverride,
+		VPNInterface:    s.cachedSys.VPNInterface,
+	}
+}
+
 func serveNativeHost(in io.Reader, out io.Writer, configBase string, pollInterval time.Duration) error {
+	return serveNativeHostWithSession(in, out, newNativeHostSession(configBase), pollInterval)
+}
+
+func serveNativeHostWithSession(in io.Reader, out io.Writer, sess *nativeHostSession, pollInterval time.Duration) error {
 	if pollInterval <= 0 {
 		pollInterval = time.Second
 	}
@@ -199,14 +260,14 @@ func serveNativeHost(in io.Reader, out io.Writer, configBase string, pollInterva
 		}
 		switch req.Op {
 		case "list_pens":
-			recordExtensionHeartbeat(configBase)
-			resp := buildNativeSnapshot(configBase)
+			sess.maybeRecordHeartbeat()
+			resp := sess.snapshot(true)
 			if err := writeNativeFrame(out, resp); err != nil {
 				return err
 			}
 		case "watch":
-			recordExtensionHeartbeat(configBase)
-			return serveNativeWatch(in, out, configBase, pollInterval)
+			sess.maybeRecordHeartbeat()
+			return serveNativeWatch(in, out, sess, pollInterval)
 		default:
 			if err := writeNativeFrame(out, nativeResponse{OK: false, Version: nativeHostProtocolVer, Error: "unsupported op"}); err != nil {
 				return err
@@ -215,8 +276,8 @@ func serveNativeHost(in io.Reader, out io.Writer, configBase string, pollInterva
 	}
 }
 
-func serveNativeWatch(in io.Reader, out io.Writer, configBase string, pollInterval time.Duration) error {
-	lastResp := buildNativeSnapshot(configBase)
+func serveNativeWatch(in io.Reader, out io.Writer, sess *nativeHostSession, pollInterval time.Duration) error {
+	lastResp := sess.snapshot(true)
 	lastBytes, _ := json.Marshal(lastResp)
 	if err := writeNativeFrame(out, lastResp); err != nil {
 		return err
@@ -258,8 +319,8 @@ func serveNativeWatch(in io.Reader, out io.Writer, configBase string, pollInterv
 			}
 			switch req.Op {
 			case "list_pens", "watch":
-				recordExtensionHeartbeat(configBase)
-				cur := buildNativeSnapshot(configBase)
+				sess.maybeRecordHeartbeat()
+				cur := sess.snapshot(true)
 				lastBytes, _ = json.Marshal(cur)
 				if err := writeNativeFrame(out, cur); err != nil {
 					return err
@@ -270,7 +331,9 @@ func serveNativeWatch(in io.Reader, out io.Writer, configBase string, pollInterv
 				}
 			}
 		case <-ticker.C:
-			cur := buildNativeSnapshot(configBase)
+			// Refresh system proxy/VPN state at most once per proxyStateRefreshInterval (30s)
+			// so the 1s pen-liveness tick never spawns scutil/networksetup repeatedly.
+			cur := sess.snapshot(true)
 			curBytes, _ := json.Marshal(cur)
 			if !bytes.Equal(curBytes, lastBytes) {
 				lastBytes = curBytes
@@ -279,20 +342,6 @@ func serveNativeWatch(in io.Reader, out io.Writer, configBase string, pollInterv
 				}
 			}
 		}
-	}
-}
-
-func buildNativeSnapshot(configBase string) nativeResponse {
-	pens, configs := collectNativePens(configBase)
-	sys := detectSystemProxyState(configs)
-	return nativeResponse{
-		OK:              true,
-		Version:         nativeHostProtocolVer,
-		Pens:            pens,
-		OSProxyConflict: sys.OSProxyConflict,
-		OSProxyDetail:   sys.OSProxyDetail,
-		VPNOverride:     sys.VPNOverride,
-		VPNInterface:    sys.VPNInterface,
 	}
 }
 
@@ -334,8 +383,9 @@ func collectNativePens(configBase string) ([]nativePenEntry, []*agentConfig) {
 		entry := nativePenEntry{
 			Zone:   cfg.Zone,
 			Port:   port,
-			Up:     state == agentEndpointUp,
+			Up:     state == agentEndpointUp || state == agentEndpointLegacyUp,
 			Hosted: isHostedPenZone(cfg.Zone),
+			Legacy: state == agentEndpointLegacyUp,
 		}
 		if state == agentEndpointSquatted {
 			// Never advertise a port answered by a non-Hogman / unverified listener.
@@ -358,12 +408,14 @@ type agentEndpointState int
 const (
 	agentEndpointDown agentEndpointState = iota
 	agentEndpointUp
+	agentEndpointLegacyUp
 	agentEndpointSquatted
 )
 
 func verifyAgentEndpoint(dir string, cfg *agentConfig) agentEndpointState {
 	tokBytes, tokErr := os.ReadFile(filepath.Join(dir, statusTokenFilename))
 	token := strings.TrimSpace(string(tokBytes))
+	noTokenFile := errors.Is(tokErr, os.ErrNotExist)
 
 	nonce, err := generateHexToken(16)
 	if err != nil {
@@ -381,6 +433,7 @@ func verifyAgentEndpoint(dir string, cfg *agentConfig) agentEndpointState {
 		Transport: &http.Transport{
 			Proxy: nil, // always hit loopback directly
 		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -388,21 +441,35 @@ func verifyAgentEndpoint(dir string, cfg *agentConfig) agentEndpointState {
 	}
 	defer resp.Body.Close()
 
-	// Something answered on this port. Unless it proves knowledge of this user's
-	// per-run status.token AND matches zone, treat it as squatted.
+	if resp.StatusCode != http.StatusOK {
+		return agentEndpointSquatted
+	}
+
+	var st agentStatus
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16*1024)).Decode(&st); err != nil {
+		return agentEndpointSquatted
+	}
+	if st.Zone != cfg.Zone {
+		return agentEndpointSquatted
+	}
+
+	// Agents started before status.token was introduced have no token file on disk.
+	// Treat a valid matching /status JSON from such an agent as legacy/unverified
+	// rather than falsely reporting a healthy pen as squatted right after update.
+	if noTokenFile {
+		if !st.Up {
+			return agentEndpointDown
+		}
+		return agentEndpointLegacyUp
+	}
+
+	// Token file is present (or unreadable): require valid HMAC proof.
 	if tokErr != nil || token == "" {
 		return agentEndpointSquatted
 	}
 	gotProof := strings.TrimSpace(resp.Header.Get("X-Hogman-Proof"))
 	wantProof := computeStatusProof(token, nonce, cfg.Zone)
 	if gotProof == "" || !hmac.Equal([]byte(gotProof), []byte(wantProof)) {
-		return agentEndpointSquatted
-	}
-	var st agentStatus
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 16*1024)).Decode(&st); err != nil {
-		return agentEndpointSquatted
-	}
-	if st.Zone != cfg.Zone {
 		return agentEndpointSquatted
 	}
 	if !st.Up {
@@ -433,6 +500,52 @@ func extensionRecentlySeen(configBase string, maxAge time.Duration) bool {
 		return false
 	}
 	return time.Since(time.Unix(hb.LastSeen, 0)) <= maxAge
+}
+
+// ------------------------------------------------ persisted extension IDs --
+
+type savedBrowserIDs struct {
+	ChromeIDs  []string `json:"chrome_ids,omitempty"`
+	FirefoxIDs []string `json:"firefox_ids,omitempty"`
+}
+
+func loadSavedBrowserIDs(configBase string) savedBrowserIDs {
+	b, err := os.ReadFile(filepath.Join(configBase, browserIDsFile))
+	if err != nil {
+		return savedBrowserIDs{}
+	}
+	var saved savedBrowserIDs
+	if err := json.Unmarshal(b, &saved); err != nil {
+		return savedBrowserIDs{}
+	}
+	return saved
+}
+
+func saveBrowserIDs(configBase string, ids savedBrowserIDs) error {
+	if err := os.MkdirAll(configBase, 0o700); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(ids, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(configBase, browserIDsFile), append(b, '\n'), 0o600)
+}
+
+func mergeUniqueIDs(groups ...[]string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, g := range groups {
+		for _, id := range g {
+			id = strings.TrimSpace(id)
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // --------------------------------------------------------- manifest install --
@@ -495,7 +608,10 @@ func renderFirefoxNativeManifest(hostPath string, firefoxIDs []string) ([]byte, 
 	seen := map[string]bool{}
 	for _, id := range firefoxIDs {
 		id = strings.TrimSpace(id)
-		if id == "" || seen[id] {
+		if !validFirefoxExtID(id) {
+			return nil, fmt.Errorf("invalid Firefox extension ID %q", id)
+		}
+		if seen[id] {
 			continue
 		}
 		seen[id] = true
@@ -520,8 +636,8 @@ func renderFirefoxNativeManifest(hostPath string, firefoxIDs []string) ([]byte, 
 
 // installNativeHost copies the current hogman-join binary to the pen-independent
 // <configBase>/bin/hogman-native-host path and writes browser Native Messaging
-// manifests. Always user-space (no sudo).
-func installNativeHost(configBase string, extraChromeIDs []string) (string, int, error) {
+// manifests for installed browsers. Always user-space (no sudo).
+func installNativeHost(configBase string, extraChromeIDs, extraFirefoxIDs []string) (string, int, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return "", 0, err
@@ -536,9 +652,18 @@ func installNativeHost(configBase string, extraChromeIDs []string) (string, int,
 			return "", 0, err
 		}
 	}
-	chromeIDs := append([]string{}, defaultChromeExtIDs...)
-	chromeIDs = append(chromeIDs, extraChromeIDs...)
-	firefoxIDs := []string{defaultFirefoxExtID}
+
+	saved := loadSavedBrowserIDs(configBase)
+	if len(extraChromeIDs) > 0 || len(extraFirefoxIDs) > 0 {
+		saved.ChromeIDs = mergeUniqueIDs(saved.ChromeIDs, extraChromeIDs)
+		saved.FirefoxIDs = mergeUniqueIDs(saved.FirefoxIDs, extraFirefoxIDs)
+		if err := saveBrowserIDs(configBase, saved); err != nil {
+			return hostPath, 0, err
+		}
+	}
+
+	chromeIDs := mergeUniqueIDs(defaultChromeExtIDs, saved.ChromeIDs)
+	firefoxIDs := mergeUniqueIDs(defaultFirefoxExtIDs, saved.FirefoxIDs)
 
 	count, err := registerNativeManifests(configBase, hostPath, chromeIDs, firefoxIDs)
 	return hostPath, count, err
@@ -580,29 +705,42 @@ func removeNativeHost(configBase string) {
 	unregisterNativeManifests(configBase)
 	_ = os.Remove(nativeHostBinaryPath(configBase))
 	_ = os.Remove(filepath.Join(configBase, extensionHeartbeatFile))
+	_ = os.Remove(filepath.Join(configBase, browserIDsFile))
 	_ = os.Remove(filepath.Join(configBase, "bin"))
 }
 
 // --------------------------------------------------------------- CLI cmds --
 
 func browserSetupCmd(args []string, o options) error {
-	var extra []string
+	var extraChrome, extraFirefox []string
 	if o.chromeID != "" {
-		if !validChromeExtID(strings.ToLower(strings.TrimSpace(o.chromeID))) {
+		id := strings.ToLower(strings.TrimSpace(o.chromeID))
+		if !validChromeExtID(id) {
 			return errorf("invalid --chrome-id %q (expected 32 lowercase letters a-p)", o.chromeID)
 		}
-		extra = append(extra, o.chromeID)
+		extraChrome = append(extraChrome, id)
+	}
+	if o.firefoxID != "" {
+		id := strings.TrimSpace(o.firefoxID)
+		if !validFirefoxExtID(id) {
+			return errorf("invalid --firefox-id %q (expected Gecko add-on ID like name@domain or {uuid})", o.firefoxID)
+		}
+		extraFirefox = append(extraFirefox, id)
 	}
 	if len(args) > 0 {
-		return errorf("usage: hogman-join browser-setup [--chrome-id <32-char-id>]")
+		return errorf("usage: hogman-join browser-setup [--chrome-id <32-char-id>] [--firefox-id <gecko-id>]")
 	}
-	hostPath, n, err := installNativeHost(hogmanConfigBase(), extra)
+	base := hogmanConfigBase()
+	hostPath, n, err := installNativeHost(base, extraChrome, extraFirefox)
 	if err != nil {
 		return errorf("could not set up browser extension host: %v", err)
 	}
 	say("✓ Installed Hogman browser native host at %s (%d browser manifest(s) written).", hostPath, n)
-	if len(defaultChromeExtIDs) == 0 && len(extra) == 0 {
-		note("Firefox manifest registered (%s). For an unpacked Chrome/Brave/Edge extension, pass --chrome-id <id>.", defaultFirefoxExtID)
+	saved := loadSavedBrowserIDs(base)
+	if len(defaultChromeExtIDs) == 0 && len(saved.ChromeIDs) == 0 && len(defaultFirefoxExtIDs) == 0 && len(saved.FirefoxIDs) == 0 {
+		note("No published extension IDs are built in yet. For developer testing, pass --chrome-id <32-char-id> and/or --firefox-id <gecko-id>.")
+	} else if n == 0 {
+		note("No supported browser profile directories were found yet; re-run hogman-join browser-setup after launching your browser.")
 	}
 	return nil
 }
@@ -618,6 +756,8 @@ func statusCmd() error {
 			state := "down"
 			if p.Squatted {
 				state = "port squatted by another process"
+			} else if p.Legacy {
+				state = "up (older agent; run hogman-join update to enable status verification)"
 			} else if p.Up {
 				state = "up"
 			}
@@ -644,7 +784,7 @@ func statusCmd() error {
 	if sys.VPNOverride {
 		say("\n! VPN override detected (%s): macOS system PAC is hidden while this VPN is connected.", sys.VPNInterface)
 		if !extensionRecentlySeen(base, 7*24*time.Hour) {
-			say("  To browse pen sites with your VPN on, install the Hogman extension in Chrome, Brave, Edge, or Firefox (Safari requires pausing the VPN).")
+			say("  To browse pen sites with your VPN on, use the Hogman browser extension (Chrome, Brave, Edge, or Firefox) or pause the VPN (Safari requires pausing the VPN).")
 		}
 	}
 	if sys.OSProxyConflict {

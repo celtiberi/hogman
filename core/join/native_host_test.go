@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -98,7 +99,7 @@ func TestNativeFrameLimits(t *testing.T) {
 	}
 }
 
-func TestCollectNativePensStrictValidationAndSquatDetection(t *testing.T) {
+func TestCollectNativePensStrictValidationLegacyAndSquatDetection(t *testing.T) {
 	base := t.TempDir()
 
 	// 1. Legitimate running Hogman agent with matching status.token HMAC proof.
@@ -123,7 +124,7 @@ func TestCollectNativePensStrictValidationAndSquatDetection(t *testing.T) {
 	srv1.Start()
 	defer srv1.Close()
 
-	// 2. Squatted port: foreign listener pretends to be a Hogman agent without status.token.
+	// 2. Squatted port: status.token exists, foreign listener fails HMAC proof.
 	ln2, port2 := listenInHogmanRange(t)
 	zone2 := "squat2.pens.hogman.network"
 	dir2 := filepath.Join(base, zone2)
@@ -147,7 +148,25 @@ func TestCollectNativePensStrictValidationAndSquatDetection(t *testing.T) {
 	fakeSrv.Start()
 	defer fakeSrv.Close()
 
-	// 3. Stopped agent (no listener on port) + custom non-hosted zone.
+	// 3. Legacy agent: started before status.token existed (no token file on disk),
+	// answers /status with valid matching zone JSON -> reported as Up + Legacy, NOT Squatted.
+	lnLeg, portLeg := listenInHogmanRange(t)
+	zoneLeg := "legacy2.pens.hogman.network"
+	dirLeg := filepath.Join(base, zoneLeg)
+	if err := os.MkdirAll(dirLeg, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgLeg := &agentConfig{Zone: zoneLeg, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", portLeg)}
+	if err := cfgLeg.save(dirLeg); err != nil {
+		t.Fatal(err)
+	}
+	legAgent := newAgent(cfgLeg, nil)
+	legAgent.up = true
+	legSrv := &httptest.Server{Listener: lnLeg, Config: &http.Server{Handler: legAgent}}
+	legSrv.Start()
+	defer legSrv.Close()
+
+	// 4. Stopped agent (no listener on port) + custom non-hosted zone.
 	ln3, port3 := listenInHogmanRange(t)
 	_ = ln3.Close()
 	zone3 := "club.example.org"
@@ -159,7 +178,7 @@ func TestCollectNativePensStrictValidationAndSquatDetection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 4. Spoofed directory name mismatch (must be ignored).
+	// 5. Spoofed directory name mismatch (must be ignored).
 	spoofDir := filepath.Join(base, "zzz-spoof")
 	if err := os.MkdirAll(spoofDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -168,7 +187,7 @@ func TestCollectNativePensStrictValidationAndSquatDetection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 5. Out-of-range port (must be ignored).
+	// 6. Out-of-range port (must be ignored).
 	badPortDir := filepath.Join(base, "badport.pens.hogman.network")
 	if err := os.MkdirAll(badPortDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -182,36 +201,55 @@ func TestCollectNativePensStrictValidationAndSquatDetection(t *testing.T) {
 	for _, p := range pens {
 		byZone[p.Zone] = p
 	}
-	if len(byZone) != 3 {
-		t.Fatalf("got %d pens (%+v), want 3", len(byZone), pens)
+	if len(byZone) != 4 {
+		t.Fatalf("got %d pens (%+v), want 4", len(byZone), pens)
 	}
-	if p := byZone[zone1]; !p.Up || p.Port != port1 || !p.Hosted || p.Squatted {
-		t.Fatalf("zone1 entry = %+v, want Up=true Port=%d Hosted=true Squatted=false", p, port1)
+	if p := byZone[zone1]; !p.Up || p.Port != port1 || !p.Hosted || p.Squatted || p.Legacy {
+		t.Fatalf("zone1 entry = %+v, want Up=true Port=%d Hosted=true Squatted=false Legacy=false", p, port1)
 	}
 	if p := byZone[zone2]; p.Up || p.Port != 0 || !p.Squatted {
 		t.Fatalf("zone2 squatted entry = %+v, want Up=false Port=0 Squatted=true", p)
 	}
-	if p := byZone[zone3]; p.Up || p.Port != port3 || p.Hosted || p.Squatted {
+	if p := byZone[zoneLeg]; !p.Up || p.Port != portLeg || !p.Hosted || !p.Legacy || p.Squatted {
+		t.Fatalf("zoneLeg entry = %+v, want Up=true Port=%d Hosted=true Legacy=true Squatted=false", p, portLeg)
+	}
+	if p := byZone[zone3]; p.Up || p.Port != port3 || p.Hosted || p.Squatted || p.Legacy {
 		t.Fatalf("zone3 stopped entry = %+v, want Up=false Port=%d Hosted=false Squatted=false", p, port3)
 	}
 }
 
-func TestServeNativeHostListWatchAndRejectUnknownOp(t *testing.T) {
+func TestServeNativeHostListWatchCachingAndPrivacy(t *testing.T) {
 	base := t.TempDir()
 
-	// 1. list_pens + unknown op.
+	// 1. list_pens + unknown op; verify PAC URL is NEVER sent over Native Messaging.
+	var proxyCalls atomic.Int32
+	sess := &nativeHostSession{
+		configBase: base,
+		now:        time.Now,
+		detectProxy: func(_ []*agentConfig) systemProxyState {
+			proxyCalls.Add(1)
+			return systemProxyState{
+				OSProxyConflict: true,
+				OSProxyKind:     "http,pac",
+				OSProxyDetail:   "HTTP proxy, PAC (http://secret-corp.example/wpad.dat?token=xyz)",
+			}
+		},
+	}
 	var inBuf, outBuf bytes.Buffer
 	_ = writeNativeFrame(&inBuf, nativeRequest{Op: "list_pens"})
 	_ = writeNativeFrame(&inBuf, nativeRequest{Op: "exec"})
-	if err := serveNativeHost(&inBuf, &outBuf, base, 50*time.Millisecond); err != nil {
-		t.Fatalf("serveNativeHost: %v", err)
+	if err := serveNativeHostWithSession(&inBuf, &outBuf, sess, 25*time.Millisecond); err != nil {
+		t.Fatalf("serveNativeHostWithSession: %v", err)
 	}
 	raw1, err := readNativeFrame(&outBuf)
 	if err != nil {
 		t.Fatalf("read first frame: %v", err)
 	}
+	if strings.Contains(string(raw1), "secret-corp.example") || strings.Contains(string(raw1), "wpad.dat") {
+		t.Fatalf("native response leaked OS PAC URL: %s", raw1)
+	}
 	var resp1 nativeResponse
-	if err := json.Unmarshal(raw1, &resp1); err != nil || !resp1.OK || resp1.Version != nativeHostProtocolVer {
+	if err := json.Unmarshal(raw1, &resp1); err != nil || !resp1.OK || !resp1.OSProxyConflict || resp1.OSProxyKind != "http,pac" {
 		t.Fatalf("resp1 = %+v (err=%v)", resp1, err)
 	}
 	if !extensionRecentlySeen(base, time.Minute) {
@@ -226,12 +264,21 @@ func TestServeNativeHostListWatchAndRejectUnknownOp(t *testing.T) {
 		t.Fatalf("resp2 = %+v (err=%v), want unsupported op", resp2, err)
 	}
 
-	// 2. watch mode pushes automatically when a new pen appears and exits on EOF.
+	// 2. watch mode pushes automatically when a new pen appears, caches detectProxy across 1s ticks, and exits on EOF.
+	var watchProxyCalls atomic.Int32
+	watchSess := &nativeHostSession{
+		configBase: base,
+		now:        time.Now,
+		detectProxy: func(_ []*agentConfig) systemProxyState {
+			watchProxyCalls.Add(1)
+			return systemProxyState{}
+		},
+	}
 	pr, pw := io.Pipe()
 	or, ow := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		done <- serveNativeHost(pr, ow, base, 30*time.Millisecond)
+		done <- serveNativeHostWithSession(pr, ow, watchSess, 20*time.Millisecond)
 		_ = ow.Close()
 	}()
 	if err := writeNativeFrame(pw, nativeRequest{Op: "watch"}); err != nil {
@@ -246,7 +293,8 @@ func TestServeNativeHostListWatchAndRejectUnknownOp(t *testing.T) {
 		t.Fatalf("initial watch = %+v (err=%v), want 0 pens", initResp, err)
 	}
 
-	// Add a pen directory while watch is active.
+	// Let several poll ticks elapse, then add a pen directory.
+	time.Sleep(100 * time.Millisecond)
 	ln, port := listenInHogmanRange(t)
 	_ = ln.Close()
 	newZone := "newpen.pens.hogman.network"
@@ -266,6 +314,9 @@ func TestServeNativeHostListWatchAndRejectUnknownOp(t *testing.T) {
 	if err := json.Unmarshal(updRaw, &updResp); err != nil || len(updResp.Pens) != 1 || updResp.Pens[0].Zone != newZone {
 		t.Fatalf("updated watch = %+v (err=%v), want %s", updResp, err, newZone)
 	}
+	if got := watchProxyCalls.Load(); got != 1 {
+		t.Fatalf("detectProxy called %d times across multiple watch ticks, want 1 (cached for 30s)", got)
+	}
 	_ = pw.Close()
 	select {
 	case err := <-done:
@@ -277,7 +328,7 @@ func TestServeNativeHostListWatchAndRejectUnknownOp(t *testing.T) {
 	}
 }
 
-func TestRenderNativeManifests(t *testing.T) {
+func TestRenderNativeManifestsAndFirefoxIDValidation(t *testing.T) {
 	id := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	cb, err := renderChromeNativeManifest("/abs/path/hogman-native-host", []string{id})
 	if err != nil {
@@ -293,12 +344,37 @@ func TestRenderNativeManifests(t *testing.T) {
 		t.Fatal("expected invalid chrome ID rejection")
 	}
 
-	fb, err := renderFirefoxNativeManifest("/abs/path/hogman-native-host", []string{defaultFirefoxExtID})
+	ffID := "hogman-browser@hogman.network"
+	fb, err := renderFirefoxNativeManifest("/abs/path/hogman-native-host", []string{ffID})
 	if err != nil {
 		t.Fatalf("renderFirefoxNativeManifest: %v", err)
 	}
-	if strings.Contains(string(fb), "allowed_origins") || !strings.Contains(string(fb), defaultFirefoxExtID) {
+	if strings.Contains(string(fb), "allowed_origins") || !strings.Contains(string(fb), ffID) {
 		t.Fatalf("unexpected firefox manifest:\n%s", fb)
+	}
+	if !validFirefoxExtID("{12345678-1234-1234-1234-1234567890ab}") {
+		t.Fatal("expected UUID Gecko ID to be valid")
+	}
+	if validFirefoxExtID("bad id with spaces") || validFirefoxExtID("") {
+		t.Fatal("expected invalid Gecko ID to be rejected")
+	}
+	if len(defaultFirefoxExtIDs) != 0 {
+		t.Fatalf("defaultFirefoxExtIDs should stay empty until AMO ID is claimed, got %v", defaultFirefoxExtIDs)
+	}
+}
+
+func TestSavedBrowserIDsPersistence(t *testing.T) {
+	base := t.TempDir()
+	want := savedBrowserIDs{
+		ChromeIDs:  []string{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		FirefoxIDs: []string{"hogman-browser@hogman.network"},
+	}
+	if err := saveBrowserIDs(base, want); err != nil {
+		t.Fatalf("saveBrowserIDs: %v", err)
+	}
+	got := loadSavedBrowserIDs(base)
+	if len(got.ChromeIDs) != 1 || got.ChromeIDs[0] != want.ChromeIDs[0] || len(got.FirefoxIDs) != 1 || got.FirefoxIDs[0] != want.FirefoxIDs[0] {
+		t.Fatalf("loadSavedBrowserIDs = %+v, want %+v", got, want)
 	}
 }
 
@@ -326,10 +402,10 @@ func TestEvaluateDarwinProxyState(t *testing.T) {
 		t.Fatalf("active Hogman PAC case: got %+v, want clean", stOK)
 	}
 
-	// Corporate HTTP proxy + non-Hogman PAC: OSProxyConflict reported.
+	// Corporate HTTP proxy + non-Hogman PAC: OSProxyConflict reported, kind has no URL.
 	pCorp := parseScutilProxy("<dictionary> {\n  HTTPEnable : 1\n  ProxyAutoConfigEnable : 1\n  ProxyAutoConfigURLString : http://proxy.corp.example/wpad.dat\n}\n")
 	stCorp := evaluateDarwinProxyState(pCorp, "en0", false, known)
-	if !stCorp.OSProxyConflict || !strings.Contains(stCorp.OSProxyDetail, "HTTP proxy") || !strings.Contains(stCorp.OSProxyDetail, "wpad.dat") {
+	if !stCorp.OSProxyConflict || stCorp.OSProxyKind != "http,pac" || !strings.Contains(stCorp.OSProxyDetail, "wpad.dat") {
 		t.Fatalf("corporate proxy case: got %+v", stCorp)
 	}
 }

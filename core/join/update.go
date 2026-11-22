@@ -812,7 +812,8 @@ func updateCmd(args []string, o options) error {
 		}
 		if u.nativeHost {
 			if err := stageAndVerify(verifiedSrc, u.path, wantHex); err != nil {
-				return errorf("could not update %s: %v", u.path, err)
+				note("could not update %s: %v", u.path, err)
+				continue
 			}
 			note("updated %s", u.path)
 		}
