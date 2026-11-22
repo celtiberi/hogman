@@ -22,7 +22,7 @@
 		Content-Security-Policy "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'"
 		-Server
 	}
-	@assets path *.css *.js *.svg *.webp
+	@assets path *.css *.js *.svg *.webp *.jpg *.png
 	header @assets Cache-Control "public, max-age=3600"
 	# The installer and the release pointer must never be stale.
 	@fresh path /install.sh /dl/latest /dl/SHA256SUMS
