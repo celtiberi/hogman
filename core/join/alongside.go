@@ -219,6 +219,9 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	retireLegacySameServerPens(oldSameServer, defaultLegacyRetireOps())
 
 	pens := normalizePenConfigs(loadInstalledPenConfigs(hogmanConfigBase()), cfg)
+	if _, _, err := installNativeHost(hogmanConfigBase(), nil, nil); err != nil {
+		note("could not register browser extension host: %v", err)
+	}
 	browsers := "set your browser's automatic proxy configuration to " + cfg.pacURL()
 	if !o.noSystemProxy {
 		if msg, err := setSystemProxy(cfg, pens); err != nil {
@@ -231,6 +234,12 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	say("  Start at %s", n.Portal)
 	say("")
 	say("  Browsers: %s", browsers)
+	if !o.noSystemProxy && !extensionRecentlySeen(hogmanConfigBase(), 7*24*time.Hour) {
+		if sys := detectSystemProxyState(pens); sys.VPNOverride {
+			say("  ! VPN active (%s): macOS hides automatic proxy settings while a VPN is connected.", sys.VPNInterface)
+			say("    Install the Hogman extension in Chrome, Brave, Edge, or Firefox to browse pen sites with your VPN on (Safari requires pausing the VPN).")
+		}
+	}
 	say("  Other tools reach the pen through its proxy, %s", cfg.proxyURL())
 	// Per command, not exported: the proxy only serves the pen, so a global
 	// https_proxy would break everything else in that shell.
@@ -329,6 +338,9 @@ func leaveAlongside(zone string) bool {
 	}
 	_ = os.RemoveAll(dir)
 	remaining := loadInstalledPenConfigs(hogmanConfigBase())
+	if len(remaining) == 0 {
+		removeNativeHost(hogmanConfigBase())
+	}
 	if msg := clearSystemProxy(cfg, remaining); msg != "" {
 		note("%s", msg)
 	}

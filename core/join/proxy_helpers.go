@@ -92,7 +92,7 @@ func renderPAC(pens []*agentConfig) string {
 	if len(pens) == 1 {
 		return fmt.Sprintf(`// Hogman: only names in %[1]s use the pen. Everything else is untouched.
 function FindProxyForURL(url, host) {
-  host = host.toLowerCase();
+  host = host.toLowerCase().replace(/\.+$/, "");
   if (host === "%[1]s" || dnsDomainIs(host, ".%[1]s")) return "PROXY %[2]s";
   return "DIRECT";
 }
@@ -101,7 +101,7 @@ function FindProxyForURL(url, host) {
 	var b strings.Builder
 	b.WriteString("// Hogman: only pen names use their pen's proxy. Everything else is untouched.\n")
 	b.WriteString("function FindProxyForURL(url, host) {\n")
-	b.WriteString("  host = host.toLowerCase();\n")
+	b.WriteString("  host = host.toLowerCase().replace(/\\.+$/, \"\");\n")
 	for _, p := range pens {
 		fmt.Fprintf(&b, "  if (host === %q || dnsDomainIs(host, %q)) return %q;\n", p.Zone, "."+p.Zone, "PROXY "+p.ProxyAddr)
 	}

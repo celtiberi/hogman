@@ -143,6 +143,16 @@ func runAgent(dir string) error {
 	_ = os.WriteFile(filepath.Join(dir, "agent.pid"), []byte(strconv.Itoa(os.Getpid())), 0o600)
 	defer os.Remove(filepath.Join(dir, "agent.pid"))
 
+	statusTok, err := generateHexToken(16)
+	if err != nil {
+		return fmt.Errorf("status token: %w", err)
+	}
+	statusTokPath := filepath.Join(dir, statusTokenFilename)
+	if err := os.WriteFile(statusTokPath, []byte(statusTok), 0o600); err != nil {
+		return fmt.Errorf("status token: %w", err)
+	}
+	defer os.Remove(statusTokPath)
+
 	keyFile := filepath.Join(dir, "authkey")
 	key, _ := os.ReadFile(keyFile)
 	node := newNode(dir, c, strings.TrimSpace(string(key)))
@@ -150,6 +160,7 @@ func runAgent(dir string) error {
 
 	a := newAgent(c, node)
 	a.configBase = filepath.Dir(dir)
+	a.statusToken = statusTok
 
 	// Serve the proxy straight away, so the setup step can watch us come up.
 	ln, err := net.Listen("tcp", c.ProxyAddr)
@@ -199,9 +210,10 @@ func runAgent(dir string) error {
 }
 
 type agent struct {
-	cfg        *agentConfig
-	configBase string
-	node       *tsnet.Server
+	cfg         *agentConfig
+	configBase  string
+	statusToken string
+	node        *tsnet.Server
 	resolver   *net.Resolver
 	dialMesh   func(ctx context.Context, network, addr string) (net.Conn, error)
 	lookupDNS  func(ctx context.Context, host string) ([]string, error)
@@ -407,6 +419,11 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		st := agentStatus{Zone: a.cfg.Zone, Up: a.up, Error: a.err, IPs: a.ips, Server: a.server}
 		a.mu.Unlock()
+		if a.statusToken != "" {
+			if nonce := strings.TrimSpace(r.Header.Get("X-Hogman-Challenge")); nonce != "" && len(nonce) <= 128 {
+				w.Header().Set("X-Hogman-Proof", computeStatusProof(a.statusToken, nonce, a.cfg.Zone))
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(st)
 	default:

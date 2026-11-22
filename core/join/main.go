@@ -43,6 +43,8 @@ usage:
   hogman-join [options] '<link>'      join, using an invite or device link
   hogman-join update ['<link|host>']  update hogman-join from a pen's server (verifies SHA-256)
   hogman-join leave '<link>'          log out and remove this computer from the pen
+  hogman-join status                  show installed pens, browser extension host, and VPN proxy state
+  hogman-join browser-setup           register the browser extension native messaging host (no sudo)
   hogman-join share NAME WHAT         put a port or a folder on the pen over HTTPS
                                       (hogman-join share --help for more)
 
@@ -69,6 +71,8 @@ type options struct {
 	background                  bool   // share: keep running after the window closes
 	note                        string // share: one-line note for the pen directory
 	noteSet                     bool
+	chromeID                    string // browser-setup: optional unpacked Chrome extension ID
+	firefoxID                   string // browser-setup: optional Firefox Gecko extension ID
 }
 
 func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err error) {
@@ -98,6 +102,8 @@ func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err 
 	gone := fs.Bool("tailscale", false, "") // removed (D-11); kept only to explain
 	fs.BoolVar(&o.background, "background", false, "")
 	fs.StringVar(&o.note, "note", "", "")
+	fs.StringVar(&o.chromeID, "chrome-id", "", "")
+	fs.StringVar(&o.firefoxID, "firefox-id", "", "")
 	ver := fs.Bool("version", false, "")
 
 	// Allow options before or after the link / share target.
@@ -126,6 +132,10 @@ func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err 
 }
 
 func main() {
+	if isNativeHostBinary(os.Args[0]) {
+		runNativeHostMain()
+		return
+	}
 	pos, o, showVersion, err := parseCLIArgs(os.Args[1:])
 	if err != nil {
 		var u *userError
@@ -166,6 +176,10 @@ func main() {
 		err = updateCmd(pos[1:], o)
 	case len(pos) >= 1 && pos[0] == "share":
 		err = shareCmd(pos[1:], o)
+	case len(pos) == 1 && pos[0] == "status":
+		err = statusCmd()
+	case len(pos) >= 1 && pos[0] == "browser-setup":
+		err = browserSetupCmd(pos[1:], o)
 	case len(pos) == 1:
 		err = join(pos[0], o)
 	case len(pos) == 2 && pos[0] == "leave":

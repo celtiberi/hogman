@@ -690,10 +690,11 @@ func updateCmd(args []string, o options) error {
 
 	instName := installedBinaryName(runtime.GOOS)
 	type copyStatus struct {
-		path      string
-		needsCopy bool
-		pen       *penTarget
-		share     *shareTargetDir
+		path       string
+		needsCopy  bool
+		pen        *penTarget
+		share      *shareTargetDir
+		nativeHost bool
 	}
 	var updates []copyStatus
 
@@ -717,6 +718,12 @@ func updateCmd(args []string, o options) error {
 		}
 		h, _ := fileSHA256(sBin)
 		updates = append(updates, copyStatus{path: sBin, needsCopy: !digestEqualHex(h, wantHex), share: s})
+	}
+	if nhBin := nativeHostBinaryPath(hogmanConfigBase()); !sameFilePath(selfPath, nhBin) {
+		if _, err := os.Stat(nhBin); err == nil {
+			h, _ := fileSHA256(nhBin)
+			updates = append(updates, copyStatus{path: nhBin, needsCopy: !digestEqualHex(h, wantHex), nativeHost: true})
+		}
 	}
 
 	anyUpdate := selfNeedsUpdate
@@ -801,6 +808,14 @@ func updateCmd(args []string, o options) error {
 			if err := updateShareBinary(u.share, u.path, verifiedSrc, wantHex, o, shareOps); err != nil {
 				return err
 			}
+			continue
+		}
+		if u.nativeHost {
+			if err := stageAndVerify(verifiedSrc, u.path, wantHex); err != nil {
+				note("could not update %s: %v", u.path, err)
+				continue
+			}
+			note("updated %s", u.path)
 		}
 	}
 

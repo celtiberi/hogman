@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
              windows-amd64.exe:windows/amd64; do \
       name=${t%%:*}; plat=${t#*:}; \
       GOOS=${plat%/*} GOARCH=${plat#*/} CGO_ENABLED=0 \
-        go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /out/hogman-join-$name . ; \
+        go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /out/hogman-join-$name . || exit 1; \
     done && cd /out && sha256sum hogman-join-* > SHA256SUMS
 
 FROM scratch AS dist
