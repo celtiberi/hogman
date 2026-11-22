@@ -1,43 +1,37 @@
-// "Give Gary the boot": the painting sits dim and grey until the kick lands,
-// then a clock runs to 2.1 seconds, which is how long the real thing took.
+// "Under the hood" audience switcher: pick Stacy or Tech nerd, collapse the picker
+// into a compact switch button showing both, click it to pick again.
 (() => {
-  const btn = document.getElementById('kick');
-  const note = document.getElementById('kick-note');
-  const art = document.getElementById('boot-art');
-  const clock = document.getElementById('clock');
-  if (!btn || !art || !clock) return;
-  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const TOTAL = 2100;
-  let out = false;
+  const pick = document.getElementById('hood-pick');
+  const reset = document.getElementById('hood-reset');
+  const tabs = Array.from(document.querySelectorAll('[data-hood]'));
+  const panels = Array.from(document.querySelectorAll('[data-hood-panel]'));
+  if (!pick || !reset || !tabs.length || !panels.length) return;
 
-  const finish = () => {
-    clock.textContent = '2.1';
-    art.classList.add('done');
-    out = true;
-    btn.disabled = false;
-    btn.textContent = 'Let Gary back in';
-    note.textContent = 'Gary is outside. That took 2.1 seconds, same as the real thing.';
+  const showPicker = () => {
+    pick.hidden = false;
+    reset.hidden = true;
+    panels.forEach((p) => { p.hidden = true; });
+    tabs.forEach((t) => {
+      t.setAttribute('aria-pressed', 'false');
+      t.classList.remove('active');
+    });
   };
 
-  btn.addEventListener('click', () => {
-    if (out) {
-      art.classList.remove('kicked', 'done');
-      clock.textContent = '0.0';
-      btn.textContent = 'Give Gary the boot';
-      note.textContent = 'Fine. One more chance, Gary.';
-      out = false;
-      return;
-    }
-    art.classList.add('kicked');
-    btn.disabled = true;
-    note.textContent = '';
-    if (reduced) return finish();
-    const start = performance.now();
-    const tick = (now) => {
-      const t = Math.min(now - start, TOTAL);
-      clock.textContent = (t / 1000).toFixed(1);
-      if (t < TOTAL) requestAnimationFrame(tick); else finish();
-    };
-    requestAnimationFrame(tick);
+  const select = (mode) => {
+    pick.hidden = true;
+    reset.hidden = false;
+    tabs.forEach((t) => {
+      const on = t.dataset.hood === mode;
+      t.setAttribute('aria-pressed', on ? 'true' : 'false');
+      t.classList.toggle('active', on);
+    });
+    panels.forEach((p) => {
+      p.hidden = p.dataset.hoodPanel !== mode;
+    });
+  };
+
+  tabs.forEach((tab) => {
+    tab.addEventListener('click', () => select(tab.dataset.hood));
   });
+  reset.addEventListener('click', showPicker);
 })();

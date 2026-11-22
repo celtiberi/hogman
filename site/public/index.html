@@ -9,28 +9,22 @@
 <meta property="og:description" content="You hold the gate. Clean pigs get in. The filthy horde stays outside the fence.">
 <meta property="og:type" content="website">
 <meta property="og:image" content="https://hogman.network/hero.webp">
-<meta property="og:image:alt" content="The Top Hog Farmer on the fence: clean pigs in sunglasses inside, a filthy horde outside.">
+<meta property="og:image:alt" content="Hogman at the fence: clean pigs in sunglasses inside, a filthy horde outside.">
 <meta property="og:url" content="https://hogman.network/">
 <meta property="og:site_name" content="Hogman">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="theme-color" content="#0e080c">
 <link rel="icon" href="/favicon.svg?v=metal5" type="image/svg+xml">
-<link rel="stylesheet" href="/styles.css?v=metal10">
+<link rel="stylesheet" href="/styles.css?v=metal24">
 </head>
 <body>
 <header class="top">
   <a class="brand" href="/" aria-label="Hogman home">H&Ouml;GMAN</a>
   <nav>
-    <a href="#what">What is it?</a>
-    <a href="#how">How it works</a>
+    <a href="#why">Why a pen?</a>
     <a href="#tech">Under the hood</a>
-    <a href="/docs/security.html">Security</a>
     <a href="/docs/">Docs</a>
-    <a href="#ai">AI &amp; data</a>
-    <a href="#inside">Inside the fence</a>
-    <a href="#boot">The boot</a>
-    <a href="#run">Get a pen</a>
-    <a href="#hosted">We'll keep it</a>
+    <a href="https://get.hogman.network/">Get a pen</a>
   </nav>
 </header>
 
@@ -41,440 +35,296 @@
   <img class="logo" src="/logo.webp" width="2000" height="900" alt="HÖGMAN">
   <p class="eyebrow">A private internet &middot; By invitation &middot; No mercy</p>
   <figure class="poster">
-    <img src="/hero.webp" width="1168" height="784"
-         alt="A heavy metal painting. The Top Hog Farmer, in studded black leather, a trucker cap and goggles, plants a boot on a wooden fence under a burning sunset. Behind her, clean pink pigs in sunglasses stand calmly by a red barn. In front of the fence a horde of filthy, snarling pigs claws at the rails. A sign on the fence reads: Clean Pigs Only!">
+    <img src="/hero.webp?v=2" width="1168" height="784"
+         alt="A heavy metal painting. Hogman, a boar-headed farmer in a yellow HÖGMAN trucker cap, aviators, red flannel, denim overalls and work boots, plants a boot on a wooden fence under a burning sunset. Behind him, clean pink pigs in sunglasses stand calmly by a red barn reading Happy Hog Acres. In front of the fence a horde of filthy, snarling pigs claws at the rails. A sign on the fence reads: Clean Pigs Only!">
   </figure>
   <div class="hero-text">
     <h1>Your pen. Your rules. <em>Clean pigs only.</em></h1>
-    <p class="lede"><strong>Websites, chat and photos that only your people can open.</strong>
-      Hogman gives you your own private internet: you invite who you want, and everyone else
-      on Earth can't even find it. Get one on our server in about a minute.
-      The filthy horde stays outside the fence, howling.</p>
+    <p class="lede"><strong>Your own private web — keep the dirty mob out and let your friends in.</strong>
+      Hogman gives you a private network that works just like the open web: real names,
+      real HTTPS, any ordinary browser. Invite who you want and run whatever web servers
+      you like inside it — sites, chat, photo galleries, conspiracy theory forums. To everyone else on Earth,
+      none of it exists.</p>
     <p class="cta">
-      <a class="btn primary" href="#run">Get a pen</a>
-      <a class="btn" href="#what">What is it?</a>
+      <a class="btn primary" href="https://get.hogman.network/">Get a pen</a>
+      <a class="btn" href="#tech">Under the hood</a>
       <a class="btn" href="/docs/">Read the docs</a>
     </p>
-    <p class="fine">Free while we test. Sign-ups take an invitation code for now;
-      no code? <a href="https://get.hogman.network/#wait">Join the waiting list</a>.</p>
+    <p class="fine">Free while we test.</p>
   </div>
+  <ol class="hero-steps" aria-label="Setting up a pen in three steps">
+    <li class="hero-step">
+      <div class="hero-step-body">
+        <div class="hero-step-head">
+          <span class="hero-step-n" aria-hidden="true">1</span>
+          <h3>Create a pen</h3>
+        </div>
+        <p>Claim a name for your network. You get an isolated private DNS zone and a gate page
+          where you control the guest list — and can kick anyone out in seconds.</p>
+        <div class="hero-result" aria-label="Result">
+          <span class="res-tag">PEN</span>
+          <code>john-mcafee.pens.hogman.network</code>
+        </div>
+      </div>
+      <div class="crop sign" role="img" aria-label="Clean Pigs Only sign on the fence"></div>
+    </li>
+    <li class="hero-step">
+      <div class="hero-step-body">
+        <div class="hero-step-head">
+          <span class="hero-step-n" aria-hidden="true">2</span>
+          <h3>Invite your people</h3>
+        </div>
+        <p>Send each person a single-use link. They run one command, pick a name, and their
+          ordinary browser reaches your pen. Everyone without a link sees nothing.</p>
+        <div class="hero-result" aria-label="Result">
+          <span class="res-ok">&#10003;</span>
+          <code>gary &middot; john-mcafee.pens.hogman.network</code>
+        </div>
+      </div>
+      <div class="crop clean" role="img" aria-label="Clean pigs in sunglasses inside the pen"></div>
+    </li>
+    <li class="hero-step">
+      <div class="hero-step-body">
+        <div class="hero-step-head">
+          <span class="hero-step-n" aria-hidden="true">3</span>
+          <h3>Put web servers inside it</h3>
+        </div>
+        <p>Add a server to your pen — anything that runs over HTTPS (port 443) works.
+          It gets a real name and a real padlock that only your pen can open.</p>
+        <div class="hero-result" aria-label="Result">
+          <span class="res-ok" aria-label="HTTPS"><svg width="11" height="12" viewBox="0 0 12 14" fill="none" aria-hidden="true"><rect x="1.5" y="6" width="9" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/><path d="M3.5 6V4.2a2.5 2.5 0 0 1 5 0V6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+          <code>https://deadmans-switch.john-mcafee.pens.hogman.network</code>
+        </div>
+      </div>
+      <div class="crop barn" role="img" aria-label="Happy Hog Acres red barn inside the pen"></div>
+    </li>
+  </ol>
+  <p class="how-contrast"><strong>A normal website</strong> sits on the open internet, where bots
+    hammer its login page all day. <strong>A site in your pen</strong> has no public address at all:
+    to everyone you didn't invite, it doesn't exist.</p>
 </section>
 
 <div class="studs" aria-hidden="true"></div>
 
-<!-- ============================== IN PLAIN WORDS ============================== -->
-<section id="what">
-  <h2>What is it, in plain words?</h2>
-  <div class="plainwords">
-    <p><strong>Your own little internet, with a guest list.</strong> You make a private network
-      and invite the people you want. Inside it you can have websites, message boards, photo
-      pages, anything you'd normally use in a browser, and they work just like the sites you
-      already visit. The difference: only the people you let in can reach them.</p>
-    <p><strong>From the outside, there is nothing there.</strong> Your sites don't have public
-      addresses, so strangers, scrapers and attackers can't find them, can't load them and can't
-      try to break in. There's no login page for them to guess at.</p>
-    <p><strong>You stay in charge.</strong> You hand out invitations, everyone gets a proper
-      name, and if someone misbehaves you remove them, every device at once, in about two
-      seconds.</p>
+<!-- ============================== WHY A PEN ============================== -->
+<section id="why">
+  <h2>The open internet is a trap. Use a Hogman pen instead.</h2>
+  <p class="sub">Facebook, Instagram, Discord, public login pages — you're not the customer, you're
+    the exhibit. Run your own HTTPS servers in a private pen, reachable anywhere by your guest list
+    and invisible to everyone else.</p>
+  <div class="cards three">
+    <article class="feature">
+      <h3>HR is watching</h3>
+      <p>One sarcastic meme in a "private" Facebook group or Instagram story and you're in a Monday
+        morning Zoom with HR. <strong>In a pen:</strong> run your own chat or photo site for your
+        actual friends — no platform logging every word, no ad profile, no public archive.</p>
+    </article>
+    <article class="feature">
+      <h3>Campus admins &amp; power-tripping mods</h3>
+      <p>University admins watch student groups, Discord nukes whole communities overnight, and
+        every platform hands over logs the second somebody complains. <strong>In a pen:</strong> your
+        crew runs its own corner with a real bouncer — members vouch for members, and strangers can't
+        even find the door.</p>
+    </article>
+    <article class="feature">
+      <h3>Three-letter agencies &amp; honeypots</h3>
+      <p>Big tech stores every message, photo, and file on their servers forever — one breach, one
+        subpoena, or one sideways look from the FBI and the whole archive is open.
+        <strong>In a pen:</strong> payloads stay encrypted end to end between your devices and never
+        sit on a tech giant's cloud.</p>
+    </article>
+    <article class="feature">
+      <h3>Bots hammering your login page</h3>
+      <p>Put a team wiki, client portal, or half-built side project on the open web and bots bang
+        on it 24/7. <strong>In a pen:</strong> there's no public IP or DNS — attackers can't
+        brute-force a door they can't even resolve, and kicking someone cuts them off in two
+        seconds.</p>
+    </article>
+    <article class="feature">
+      <h3>Port-forwarding roulette</h3>
+      <p>Exposing a home server to the open internet means punching holes in your router and
+        praying you didn't miss a patch. <strong>In a pen:</strong> keep your personal sites, notes,
+        and experiments reachable in any browser from anywhere in the world — real HTTPS, zero open
+        router ports.</p>
+    </article>
+    <article class="feature stamped">
+      <span class="card-stamp" aria-hidden="true">Too late!</span>
+      <h3>Your life's work</h3>
+      <p>Anything with a public URL gets hoovered into AI training sets and data brokers before
+        you're done writing. <strong>In a pen:</strong> thirty years on the Riemann Hypothesis stays
+        online for trusted colleagues — no scraper, search engine, or AI lab gets a look before you
+        publish.</p>
+    </article>
   </div>
-</section>
-
-<div class="studs" aria-hidden="true"></div>
-
-<!-- ============================== HOW IT WORKS ============================== -->
-<section id="how">
-  <h2>How it works</h2>
-  <p class="sub">A private corner of the internet for you and your people.</p>
-  <div class="cards three how">
-    <article class="feature how-step">
-      <p class="how-n" aria-hidden="true">1</p>
-      <h3>Make a pen</h3>
-      <p>Sign up and about a minute later you have your pen: your own walled-off space on the internet.
-        It's yours: you make the rules.</p>
-    </article>
-    <article class="feature how-step">
-      <p class="how-n" aria-hidden="true">2</p>
-      <h3>Invite your people</h3>
-      <p>Send each person a link. They open it, copy the one command it shows, and they're in. Nobody else
-        can get in without a link from you.</p>
-    </article>
-    <article class="feature how-step">
-      <p class="how-n" aria-hidden="true">3</p>
-      <h3>Private inside, invisible outside</h3>
-      <p>Inside: your photos, your chat, your own websites, in any ordinary browser.
-        Outside: strangers and bots find nothing at all. Not even a door to knock on.</p>
-    </article>
-  </div>
-  <p class="how-contrast"><strong>A normal website</strong> is open to the whole internet, and bots
-    try its login page all day. <strong>A site in your pen</strong> can't be found from
-    the open internet: to everyone you didn't invite, it doesn't exist.</p>
 </section>
 
 <div class="studs" aria-hidden="true"></div>
 
 <!-- ============================== UNDER THE HOOD ============================== -->
 <section id="tech">
-  <h2>Under the hood</h2>
-  <p class="sub">What actually runs on your machine, on the wire, and on our host. Everything is
-    open source (AGPL): <a href="https://github.com/celtiberi/hogman">github.com/celtiberi/hogman</a>.</p>
-  <div class="split tech">
+  <div class="hood-header">
     <div>
-      <dl class="parts">
-        <dt>Unprivileged client: userspace WireGuard + blind CONNECT proxy</dt>
-        <dd><code>hogman-join</code> embeds Tailscale's userspace <code>tsnet</code> stack as you —
-          no <code>TUN</code> interface, no <code>sudo</code>, no <code>/etc/hosts</code> edits, and
-          zero interference with system Tailscale. A PAC-scoped loopback proxy hands pen hostnames
-          into a blind TCP <code>CONNECT</code> tunnel (never terminating TLS), verifies every
-          target IP against <code>tsnet</code> <code>WhoIs</code> (so malicious pen DNS can never
-          pivot your browser to <code>127.0.0.1</code> or your LAN), and rejects anything except
-          <code>:443</code>.</dd>
-        <dt>Split-horizon DNS-01: real TLS on private 100.x IPs</dt>
-        <dd>No OS root CA is ever installed. Shares run embedded
-          <a href="https://github.com/caddyserver/certmagic">CertMagic</a> locally (private keys
-          never leave the sharer's computer) and validate Let's Encrypt certificates (Google Trust
-          Services fallback) via our authoritative <code>ns1.hogman.network</code> challenge server,
-          which serves <em>only</em> <code>_acme-challenge.*</code> <code>TXT</code>,
-          <code>SOA</code>, <code>NS</code>, and <code>CAA</code> — zero public <code>A</code>/<code>AAAA</code>
-          records exist. Catch: hostnames appear in CT logs, and until <code>pens.hogman.network</code>
-          joins the Public Suffix List, use a separate browser profile for pens you don't fully
-          trust.</dd>
-        <dt>Default-deny ACLs, share sandboxing, 2s revocation</dt>
-        <dd>Personal devices accept zero inbound connections. Headscale ACLs grant enrolled nodes
-          <code>:443</code> toward <code>tag:server</code> shares only (no SSH, no UDP, no lateral
-          client traffic, no exit nodes). Folder shares confine reads inside Go's
-          <code>os.Root</code> (symlink escape refused), <code>serverMayUse</code> locks shares to
-          their own names, and kicking a member drops their devices and ACLs in ~2 s.</dd>
-        <dt>Host isolation &amp; verifiable builds</dt>
-        <dd>Hosted pens (D-24) run in separate container bridges with non-root (<code>uid 65532</code>),
-          read-only containers (<code>cap_drop: [ALL]</code>), Unix-socket registrar isolation, and
-          GitHub Actions-only releases attested with SLSA provenance
-          (<code>gh attestation verify hogman-join --repo celtiberi/hogman</code>).</dd>
-      </dl>
-      <p class="cta" style="justify-content:flex-start">
-        <a class="btn primary" href="/docs/security.html">Architecture &amp; threat model</a>
-        <a class="btn" href="/docs/how-it-works.html">Full packet walkthrough</a>
-      </p>
+      <h2>Under the hood</h2>
+      <p class="sub">Pick how deep you want to go. Everything is open source under AGPL-3.0:
+        <a href="https://github.com/celtiberi/hogman">github.com/celtiberi/hogman</a>.</p>
     </div>
-    <div>
-      <h3>One request on the wire</h3>
-      <pre class="term" aria-label="What happens when a member opens a site in the pen"><span class="c"># bob opens https://photos.smith.pens.hogman.network</span>
+    <button type="button" id="hood-reset" class="hood-switch-btn" hidden>
+      <img src="/hood-both.webp" width="320" height="477" alt="Stacy and Tech Nerd">
+      <span class="hood-switch-text">
+        <strong>Switch view</strong>
+      </span>
+    </button>
+  </div>
 
-<span class="b">1</span> PAC     127.0.0.1:&lt;port&gt; catches *.smith.pens.hogman.network;
+  <div id="hood-pick" class="hood-pick" role="group" aria-label="Choose Under the hood view">
+    <button type="button" class="hood-opt" id="tab-hood-plain"
+            aria-pressed="false" aria-controls="panel-hood-plain" data-hood="plain">
+      <span class="hood-art">
+        <img src="/hood-stacy.webp?v=2" width="600" height="895" loading="lazy"
+             alt="Stacy in sunglasses and a black leather jacket with a gold Stacy necklace, in front of clean pigs and a Clean Pigs Only sign">
+      </span>
+      <span class="hood-opt-body">
+        <span class="hood-opt-head">
+          <span class="hood-opt-title">Plain English</span>
+          <span class="hood-badge">Stacy mode</span>
+        </span>
+        <span class="hood-opt-sub">How a pen keeps strangers out — no networking degree required.</span>
+      </span>
+    </button>
+
+    <button type="button" class="hood-opt" id="tab-hood-nerd"
+            aria-pressed="false" aria-controls="panel-hood-nerd" data-hood="nerd">
+      <span class="hood-art">
+        <img src="/hood-nerd.webp" width="600" height="895" loading="lazy"
+             alt="A scruffy tech nerd in round glasses and a pixel-pig hoodie holding a laptop, in front of clean pigs and a Clean Pigs Only sign">
+      </span>
+      <span class="hood-opt-body">
+        <span class="hood-opt-head">
+          <span class="hood-opt-title">Tech &amp; security nerd</span>
+          <span class="hood-badge">Deep dive</span>
+        </span>
+        <span class="hood-opt-sub">WireGuard, split-horizon DNS-01, <code>tsnet WhoIs</code>, ACLs, and SLSA receipts.</span>
+      </span>
+    </button>
+  </div>
+
+  <div id="panel-hood-plain" data-hood-panel="plain" hidden>
+    <div class="tech-grid">
+      <article class="tech-card">
+        <h3>Reachable anywhere, invisible to everyone else</h3>
+        <ul class="tech-list">
+          <li>Anyone on your guest list can open your pen's sites from anywhere in the world — home, a coffee shop, or across the planet.</li>
+          <li>To everyone else, your pen isn't even on the map: no public address, and not even a login page for bots, creepers, or AI scrapers to bang on.</li>
+        </ul>
+      </article>
+
+      <article class="tech-card">
+        <h3>Your normal browser, zero drama</h3>
+        <ul class="tech-list">
+          <li>Open Chrome, Safari, or Firefox like usual — your regular internet stays untouched, and nobody is routing your browsing through a VPN.</li>
+          <li>One tiny helper handles the pen's private addresses in the background, so every site inside loads with a real HTTPS padlock.</li>
+        </ul>
+      </article>
+
+      <article class="tech-card">
+        <h3>Locked between your devices</h3>
+        <ul class="tech-list">
+          <li>Everything inside your pen is encrypted straight from one device to the other.</li>
+          <li>Hogman runs the front gate and hands out the map — even we can't read your chats, photos, or conspiracy theories.</li>
+        </ul>
+      </article>
+
+      <article class="tech-card">
+        <h3>Tight leash, fast boot</h3>
+        <ul class="tech-list">
+          <li>Joining a pen never opens your laptop to anyone — personal devices take zero visitors, only the web servers you deliberately add.</li>
+          <li>If someone goes weird and starts pitching crypto, one click kicks every device they own off the property in about two seconds.</li>
+        </ul>
+      </article>
+    </div>
+    <p class="hood-plain-foot">Want the packet trace, DNS-01 mechanics, and container isolation?
+      Hit <strong>Switch view</strong> above, or read the
+      <a href="/docs/security.html">Architecture &amp; threat model</a>.</p>
+  </div>
+
+  <div id="panel-hood-nerd" data-hood-panel="nerd" hidden>
+    <div class="tech-wire">
+      <h3>One request on the wire</h3>
+      <pre class="term" aria-label="What happens when a member opens a site in the pen"><span class="c"># gary opens https://deadmans-switch.john-mcafee.pens.hogman.network</span>
+
+<span class="b">1</span> PAC     127.0.0.1:&lt;port&gt; catches *.john-mcafee.pens.hogman.network;
           all non-pen traffic bypasses Hogman completely
 <span class="b">2</span> DNS     pen registrar (mesh :53) -&gt; 100.80.12.7 (random CGNAT)
           verified peer via tsnet WhoIs (never LAN/127.0.0.1)
-<span class="b">3</span> policy  Headscale ACL: bob -&gt; server tag :443 ONLY
+<span class="b">3</span> policy  Headscale ACL: gary -&gt; tag:server :443 ONLY
 <span class="b">4</span> tunnel  WireGuard E2E encrypted (direct UDP or DERP ciphertext)
           hogman-join forwards blind TCP CONNECT bytes
-<span class="b">5</span> TLS 1.3 leaf cert served by alice's share (CertMagic local key)
-          verified by Bob's stock OS trust store — no custom root CA
+<span class="b">5</span> TLS 1.3 leaf cert served by the share (CertMagic local key)
+          verified by Gary's stock OS trust store
 <span class="ok">✓ page loads, zero public IP, relay/host see only ciphertext</span>
 
 <span class="c"># stranger or scanner resolves the same hostname</span>
 <span class="p">✗</span> DNS     ns1 returns NODATA (zero A/AAAA records exist publicly)</pre>
-      <h3>What it's built from</h3>
-      <ul class="status">
-        <li class="yes">Headscale + Tailscale <code>tsnet</code> (WireGuard mesh, random CGNAT IPs)</li>
-        <li class="yes">CertMagic + Caddy + authoritative <code>miekg/dns</code> DNS-01 server</li>
-        <li class="yes">Go registrar (ACLs, DNS, Unix-socket API), <code>hogman-join</code>, sign-up broker</li>
-      </ul>
-      <p class="fine">Pinned versions in
-        <a href="https://github.com/celtiberi/hogman/blob/main/core/compose.yaml">core/compose.yaml</a> ·
-        <a href="https://github.com/celtiberi/hogman/blob/main/docs/security/audit-2026-11.md">Public self-audit</a> ·
-        Not yet independently audited; host control plane sees membership &amp; mesh DNS lookups, never WireGuard/TLS payloads.</p>
     </div>
-  </div>
-</section>
 
-<div class="studs" aria-hidden="true"></div>
+    <div class="tech-grid">
+      <article class="tech-card">
+        <h3>Unprivileged client (<code>hogman-join</code>)</h3>
+        <ul class="tech-list">
+          <li>Embeds Tailscale's userspace <code>tsnet</code> as your user — no <code>TUN</code> interface, no <code>sudo</code>, no <code>/etc/hosts</code> edits, and zero conflict with system Tailscale.</li>
+          <li>A PAC-scoped loopback proxy hands pen hostnames into a blind TCP <code>CONNECT</code> tunnel and never terminates TLS.</li>
+          <li>Pins every target IP against <code>tsnet</code> <code>WhoIs</code> (prevents DNS rebinding to <code>127.0.0.1</code> or your LAN) and rejects every port except <code>:443</code>.</li>
+        </ul>
+      </article>
 
-<!-- ============================== USES ============================== -->
-<section id="uses">
-  <h2>What people use it for</h2>
-  <p class="sub">Anything you'd put on a website, for people you actually know. You bring the
-    apps (a photo gallery, a forum, a wiki: there are good free ones), put them in your pen with
-    one command, and Hogman makes them private.</p>
-  <div class="cards three">
-    <article class="feature">
-      <h3>A family</h3>
-      <p>Photo albums, a shared calendar, recipes, the family group chat. Only the family can see
-        any of it. No ads, nothing public, nobody else's servers reading along.</p>
-    </article>
-    <article class="feature">
-      <h3>Friends, clubs and teams</h3>
-      <p>Your own private Facebook: a message board, events, a members page. The fantasy league,
-        the band, the climbing club, the old school crew.</p>
-    </article>
-    <article class="feature">
-      <h3>A business and its customers</h3>
-      <p>A customer portal that only invited customers can even reach, so attackers never see
-        a login page to attack. (Hogman isn't audited yet, so wait for that before putting
-        anything high-stakes behind it.)</p>
-    </article>
-    <article class="feature">
-      <h3>A small company</h3>
-      <p>Internal tools, a wiki and dashboards for the team, reachable from anywhere by
-        employees and invisible to everyone else. When someone leaves, they're out in seconds.</p>
-    </article>
-    <article class="feature">
-      <h3>A community</h3>
-      <p>A forum, a newsletter, a shared archive for a group that wants its own space, away from
-        bots, trolls and drive-by strangers. Members vouch for new members.</p>
-    </article>
-    <article class="feature">
-      <h3>Your own projects</h3>
-      <p>The home server, the media library, the side project you're not ready to show the
-        world. Reach it from your laptop wherever you are (phones are coming), with real HTTPS.</p>
-    </article>
-    <article class="feature">
-      <h3>Your life's work</h3>
-      <p>Thirty years on the Riemann Hypothesis, kept online so it's handy wherever you are, and
-        shared only with the colleagues you trust. No scraper, search engine or AI lab gets a look
-        before you publish.</p>
-    </article>
-  </div>
-</section>
+      <article class="tech-card">
+        <h3>Split-horizon DNS-01 (real TLS, zero public IPs)</h3>
+        <ul class="tech-list">
+          <li>Shares run embedded <a href="https://github.com/caddyserver/certmagic">CertMagic</a> locally — private TLS keys never leave the server, and browsers verify certs with your stock OS trust store.</li>
+          <li>Validates Let's Encrypt certs (Google Trust Services fallback) via <code>ns1.hogman.network</code>, which serves <em>only</em> <code>_acme-challenge.*</code> <code>TXT</code>, <code>SOA</code>, <code>NS</code>, and <code>CAA</code> — zero public <code>A</code>/<code>AAAA</code> records exist.</li>
+          <li><strong>Catch:</strong> hostnames appear in public CT logs, and until <code>pens.hogman.network</code> joins the Public Suffix List, use a separate browser profile for pens you don't fully trust.</li>
+        </ul>
+      </article>
 
-<div class="studs" aria-hidden="true"></div>
+      <article class="tech-card">
+        <h3>Default-deny ACLs &amp; 2 s revocation</h3>
+        <ul class="tech-list">
+          <li>Personal devices accept zero inbound connections. Headscale ACLs grant enrolled nodes <code>:443</code> toward <code>tag:server</code> shares only — no SSH, no UDP, no lateral client traffic, no exit nodes.</li>
+          <li>Static folder shares confine reads inside Go's <code>os.Root</code> (symlink escape refused), and <code>serverMayUse</code> locks shares to their own names.</li>
+          <li>Kicking a member drops their devices, keys, and ACLs in ~2 s and permanently retires their handle and site names.</li>
+        </ul>
+      </article>
 
-<!-- ============================== INSTEAD OF ============================== -->
-<section id="instead">
-  <h2>Instead of…</h2>
-  <p class="sub">Things you probably use today, and what changes with a pen.</p>
-  <div class="cards three">
-    <article class="feature plain">
-      <h3>A Facebook or WhatsApp group</h3>
-      <p>Same idea, a place for your people, but it's yours: no ads, no company reading along,
-        no algorithm, and nobody gets in without your invitation. You can have a forum, a
-        chat, photo albums, whatever you like.</p>
-    </article>
-    <article class="feature plain">
-      <h3>A shared Google Drive or Dropbox</h3>
-      <p>Your files live on a server in your pen instead of someone else's cloud. Only invited
-        people can open them, and there's no public link that can leak.</p>
-    </article>
-    <article class="feature plain">
-      <h3>A website with a password</h3>
-      <p>A password page still sits on the open internet, where bots hammer it all day. A site in
-        your pen has no public address at all: strangers can't even find the login page.</p>
-    </article>
-    <article class="feature plain">
-      <h3>A VPN</h3>
-      <p>A VPN hides your browsing. A pen is different: it's a private place with its own
-        websites and its own guest list. Your normal internet keeps working as usual.</p>
-    </article>
-  </div>
-</section>
+      <article class="tech-card">
+        <h3>Host isolation &amp; verifiable builds</h3>
+        <ul class="tech-list">
+          <li>Every pen runs in its own isolated container bridge with non-root (<code>uid 65532</code>), read-only containers (<code>cap_drop: [ALL]</code>), and Unix-socket registrar isolation.</li>
+          <li>Release binaries are built exclusively in GitHub Actions with SLSA provenance — verify before running:</li>
+        </ul>
+        <pre class="tech-cmd">gh attestation verify hogman-join --repo celtiberi/hogman</pre>
+      </article>
+    </div>
 
-<div class="studs" aria-hidden="true"></div>
-
-<!-- ============================== AI AND DATA BROKERS ============================== -->
-<section id="ai">
-  <h2>Out of reach of AI and data brokers</h2>
-  <p class="sub">Most of what you put online ends up somewhere you didn't choose. A pen keeps it with the people you picked.</p>
-  <div class="cards three">
-    <article class="feature plain">
-      <h3>No crawler gets in</h3>
-      <p>AI companies train their models on whatever their crawlers can reach on the public web. A
-        pen's sites have no public address, so there's nothing for a crawler to find: your photos,
-        posts and files aren't scraped into someone's training data.</p>
-    </article>
-    <article class="feature plain">
-      <h3>Nothing to sell</h3>
-      <p>Data brokers build profiles from ads, trackers and the data apps quietly sell. Hogman has
-        none of that: no ads, no trackers, no analytics, not even on this website. We don't sell or
-        share anything, and we keep as little as we can, so there's little to lose.</p>
-    </article>
-    <article class="feature plain">
-      <h3>Your stuff stays on your computers</h3>
-      <p>When you share something, it's served straight from your own computer, encrypted all the
-        way to the person opening it. If we host your pen, our server only coordinates connections,
-        and relays encrypted traffic when two devices can't reach each other directly. It never
-        stores your files, and it can't read what passes between your devices.</p>
-    </article>
-  </div>
-  <h3 style="margin-top:2.2rem">What a pen does and doesn't keep out</h3>
-  <ul class="status">
-    <li class="yes"><strong>Crawlers, scrapers and search engines</strong>: they can't reach anything in the pen.</li>
-    <li class="yes"><strong>Ad networks and trackers</strong>: Hogman adds none, anywhere.</li>
-    <li class="yes"><strong>Whoever runs the server</strong>, us included: can't read what's said or shared. (Whoever runs the gate could still let a device in; <a href="#hosted">more on that</a>.)</li>
-    <li class="notyet"><strong>The people you invite.</strong> Anyone in your pen can screenshot something, or paste it into a chatbot. A pen keeps out strangers, not your own members.</li>
-    <li class="notyet"><strong>The apps you run.</strong> A photo gallery or chat app in your pen is its own software. Some phone home; pick ones that don't.</li>
-    <li class="notyet"><strong>The names.</strong> Pen and site hostnames, such as <em>photos.smith.pens.hogman.network</em>, appear in public Certificate Transparency logs when certificates are issued (contents never leave the pen).</li>
-    <li class="notyet"><strong>Who's in it.</strong> The keeper, and we because we run the control plane, can see who's in the pen, their devices, and which pen names get looked up. <a href="#hosted">More on that</a>.</li>
-  </ul>
-</section>
-
-<div class="studs" aria-hidden="true"></div>
-
-<!-- ============================== QUESTIONS ============================== -->
-<section id="faq">
-  <h2>Questions people ask</h2>
-  <div class="plainwords">
-    <p><strong>Do I need to be technical?</strong> To get a pen and invite people, no: you sign
-      up on a web page, and your guests click a link and paste one command. Putting a folder
-      or a website in the pen is one command too: <code>hogman-join share photos ~/holiday</code>.
-      Bigger apps (a forum, a photo gallery) you install on an always-on computer the usual way,
-      then share with the same one command.</p>
-    <p><strong>Do my people need to install anything?</strong> A small program, once. The
-      invitation link walks them through it on a Mac or Linux (Windows is coming, and a phone app).</p>
-    <p><strong>Can strangers find my pen?</strong> No. Nothing inside it has a public address.
-      From the outside there is nothing there to find.</p>
-    <p><strong>What if I invite the wrong person?</strong> Remove them from your pen's home page.
-      All their devices are cut off at once, in about two seconds.</p>
-    <p><strong>Why not just use Tailscale?</strong> If you're technical and only want your own
-      devices connected, do: Hogman is built on Tailscale's open-source pieces and runs happily
-      alongside it. Hogman is for running a private place for a <em>group of people</em>: guests
-      join from a link, the keeper runs the guest list from a web page, and every pen gets its
-      own names and standard HTTPS without exposing any site IPs (hostnames appear in public
-      certificate logs; contents stay private).</p>
-    <p><strong>What does it cost?</strong> Free while we test it. Hogman runs hosted pens on
-      <code>hogman.network</code>, with the whole codebase open source (AGPL-3.0).</p>
-    <p><strong>Can you see what we do?</strong> No. What your people send each other is
-      encrypted end to end (WireGuard + TLS 1.3). We run the pen's control plane so we can see
-      who is in it and which pen names are queried, never what anyone says or sends.</p>
-  </div>
-  <p><a class="btn" href="/docs/faq.html">More questions and troubleshooting</a>
-    <a class="btn" href="/docs/use-cases.html">Use cases, worked through</a></p>
-</section>
-
-<div class="studs" aria-hidden="true"></div>
-
-<!-- ============================== THE FARM ============================== -->
-<section id="farm">
-  <h2>Meet the farm</h2>
-  <p class="sub">Four things to know. That's the whole idea.</p>
-  <div class="cards four">
-    <article class="card">
-      <div class="crop keeper" role="img" aria-label="The Top Hog Farmer"></div>
-      <h3>The Top Hog</h3>
-      <p class="means">That's you</p>
-      <p>The keeper. Your pen lives on our server; you decide who gets in, what they're called, and who gets the boot.</p>
-    </article>
-    <article class="card">
-      <div class="crop sign" role="img" aria-label="The fence, with its sign: Clean Pigs Only"></div>
-      <h3>The fence</h3>
-      <p class="means">The network</p>
-      <p>An encrypted mesh that only exists for those inside it. From outside there is nothing to see, nothing to knock on and no way in but the gate.</p>
-    </article>
-    <article class="card">
-      <div class="crop clean" role="img" aria-label="Clean pigs in sunglasses"></div>
-      <h3>The clean pigs</h3>
-      <p class="means">Your people and their devices</p>
-      <p>Everyone you invited, each one known by name. They browse, they host sites, they visit each other. It works like the internet, minus the internet.</p>
-    </article>
-    <article class="card">
-      <div class="crop horde" role="img" aria-label="The filthy horde"></div>
-      <h3>The horde</h3>
-      <p class="means">Everything else</p>
-      <p>Strangers, scrapers, bots, anything you didn't invite. They can scream at the fence all night. Nothing inside can hear them.</p>
-    </article>
-  </div>
-</section>
-
-<div class="studs" aria-hidden="true"></div>
-
-<!-- ============================== INSIDE ============================== -->
-<section id="inside">
-  <h2>What your swine get inside the fence</h2>
-  <p class="sub">Stock browsers. Stock tools. Nothing special to learn.</p>
-  <div class="cards three">
-    <article class="feature">
-      <h3>Proper names</h3>
-      <p>Every pen has its own name, and so does everything in it: <code>alice.yourpen.pens.hogman.network</code>, <code>blog.alice.yourpen.pens.hogman.network</code>. First come, first served. Nobody outside can resolve an IP for them.</p>
-    </article>
-    <article class="feature">
-      <h3>The padlock, without the paperwork</h3>
-      <p>Sites get real Let's Encrypt HTTPS certificates automatically over split-horizon DNS-01, so stock browsers show the padlock with no custom root certificate installed.</p>
-    </article>
-    <article class="feature">
-      <h3>Invitation only</h3>
-      <p>You hand out single-use invite links. No link, no entry. How someone earns a link is up to you: a form, a vouch, trial by combat.</p>
-    </article>
-    <article class="feature">
-      <h3>Laptops mind their own business</h3>
-      <p>Personal devices accept no visitors at all. Only servers can be reached, and sharing something from your laptop makes a small server just for that, so nothing else on your laptop is ever on show by accident.</p>
-    </article>
-    <article class="feature">
-      <h3>Walled off from everyone else</h3>
-      <p>Every pen has its own control server, DNS zone, database, and container network; pens share only the front door and the server they run on. Traffic inside is end-to-end encrypted; separate browser profiles keep cross-pen cookies isolated.</p>
-    </article>
-    <article class="feature">
-      <h3>Sneaking in gets you nowhere</h3>
-      <p>A device that wriggles under the fence without an invite isn't on the list, so it can't reach a single thing. It just stands there, looking guilty.</p>
-    </article>
-  </div>
-</section>
-
-<div class="studs" aria-hidden="true"></div>
-
-<!-- ============================== THE BOOT ============================== -->
-<section id="boot" class="boot">
-  <div class="boot-text">
-    <h2>The boot</h2>
-    <p class="lede">Sometimes a clean pig goes bad. Rolls in something. Starts selling crypto.
-      One command and they're back outside the fence, with their sites gone and their names
-      held so nobody can pretend to be them.</p>
-    <dl class="stats">
-      <div><dt>Suspend</dt><dd>2.0<small>s</small></dd></div>
-      <div><dt>Let back in</dt><dd>0.8<small>s</small></dd></div>
-      <div><dt>The boot</dt><dd>2.1<small>s</small></dd></div>
-    </dl>
-    <p class="fine">Measured on a real Mac over an ordinary home network, from pressing enter to the door closing.</p>
-    <p><button class="btn primary" id="kick" type="button">Give Gary the boot</button>
-       <span id="kick-note" class="fine" role="status" aria-live="polite"></span></p>
-  </div>
-  <figure class="boot-art" id="boot-art">
-    <img src="/boot.webp" width="1168" height="784" loading="lazy"
-         alt="A heavy metal painting. The Top Hog Farmer, in studded black leather, kicks a pig in sunglasses clean over the fence with a spiked boot, mud flying. Behind her, clean pigs watch from the pen, smiling. Outside the fence, under a sign reading Clean Pigs Only, a pack of filthy boars waits with open jaws.">
-    <span class="stamp before" aria-hidden="true">Gary is on thin ice</span>
-    <span class="stamp oink" aria-hidden="true">OINK!</span>
-    <span class="clock" aria-hidden="true"><b id="clock">0.0</b>s</span>
-  </figure>
-</section>
-
-<div class="studs" aria-hidden="true"></div>
-
-<!-- ============================== JOINING ============================== -->
-<section id="join">
-  <h2>Getting in, if you're on the list</h2>
-  <p class="sub">One link, one command, about a minute.</p>
-  <div class="split">
-    <ol class="steps">
-      <li><strong>You get a link.</strong> It carries your single-use invitation to your pen's gate on <code>gate.hogman.network</code>.</li>
-      <li><strong>You run one command.</strong> It verifies the gate over your OS's built-in HTTPS trust store, asks what you'd like to be called, and starts an unprivileged userspace connection — no custom root CA. On a Mac it may ask for your password once, only to point your browsers at the pen.</li>
-      <li><strong>Bring your other devices.</strong> In your pen's home page, press <em>Add a device</em> for a one-time link and QR code. The new device joins as you, under your name.</li>
-      <li><strong>You're in.</strong> Open your ordinary browser and go. Nothing else to install. Already use Tailscale for something else? Hogman leaves it alone: its own small connection carries only HTTPS to the pen.</li>
-    </ol>
-    <pre class="term" aria-label="Example of joining a pen"><span class="c"># the command your invite page gives you: copy, paste, enter</span>
-<span class="p">$</span> curl -fsSLo hogman-join https://smith.gate.hogman.network/join/dl/hogman-join-Darwin-arm64 \
-    &amp;&amp; chmod +x hogman-join \
-    &amp;&amp; ./hogman-join 'https://smith.gate.hogman.network/join#t=<span class="c">(your invite)</span>'
-
-<span class="b">•</span> Checking the network at smith.gate.hogman.network
-  network: smith.pens.hogman.network
-
-<span class="b">•</span> Redeeming the invite
-  Choose your name on the network: alice
-  welcome, alice
-
-<span class="ok">✓ You're in. You are alice on smith.pens.hogman.network.</span></pre>
-  </div>
-  <h3 class="after-join">Then put something in</h3>
-  <div class="split">
-    <p>Once you're in, one more command puts a folder or a website you're building into the pen,
-      with its own name and standard HTTPS. Only people in the pen can open it, and your laptop
-      itself still takes no visitors. A spare computer that isn't in the pen can do it too:
-      press <em>Get a share link</em> on your pen's home page and add the link to the command.
-      <a href="/docs/share.html">All the options</a> · <a href="/docs/join.html">Joining in detail</a></p>
-    <pre class="term" aria-label="Example of sharing a folder in a pen"><span class="c"># a folder, served as a website</span>
-<span class="p">$</span> ./hogman-join share photos ~/holiday
-
-<span class="ok">✓ https://photos.smith.pens.hogman.network is up.</span>
-  Everyone in the pen can open it.
-
-<span class="c"># or a site you're building, by its port</span>
-<span class="p">$</span> ./hogman-join share blog 3000</pre>
+    <div class="tech-foot">
+      <div>
+        <h3>What it's built from</h3>
+        <ul class="status">
+          <li class="yes">Headscale + Tailscale <code>tsnet</code> (WireGuard mesh, random CGNAT IPs)</li>
+          <li class="yes">CertMagic + Caddy + authoritative <code>miekg/dns</code> DNS-01 server</li>
+          <li class="yes">Go registrar (ACLs, DNS, Unix-socket API), <code>hogman-join</code>, sign-up broker</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Read the receipts</h3>
+        <p class="cta">
+          <a class="btn primary" href="/docs/security.html">Architecture &amp; threat model</a>
+          <a class="btn" href="/docs/how-it-works.html">Full packet walkthrough</a>
+        </p>
+        <p class="fine">Pinned versions in
+          <a href="https://github.com/celtiberi/hogman/blob/main/core/compose.yaml">core/compose.yaml</a> ·
+          <a href="https://github.com/celtiberi/hogman/blob/main/docs/security/audit-2026-11.md">Public self-audit</a>.</p>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -483,35 +333,22 @@
 <!-- ============================== GET A PEN ============================== -->
 <section id="run">
   <h2>Get a pen</h2>
-  <p class="sub">Your own private internet, on our server. Free while we test it.</p>
+  <p class="sub">Your own private web on Mac and Linux. Free while we test it.</p>
   <div class="split">
     <div>
-      <ol class="steps">
-        <li><strong>Sign up.</strong> Name your pen and yourself. About a minute later it's up, with its own isolated gate and DNS zone. While we test, you need a sign-up code from someone already in. No code, or the farm is full? <a href="https://get.hogman.network/#wait">Join the waiting list</a>.</li>
-        <li><strong>Get your laptop in.</strong> Open the link you're given on your laptop and copy one command. That's it.</li>
-        <li><strong>Let your people in.</strong> Your pen's home page makes invite links and QR codes, and shows the herd: suspend anyone, or give them the boot.</li>
-      </ol>
-      <p><a class="btn primary" href="https://get.hogman.network/">Get a pen</a></p>
-      <p class="fine">Hosted pens only (D-24), with all code open under AGPL-3.0:
-        <a href="/docs/self-host.html">read about our open-source model</a>.</p>
-      <p class="fine">Invited to someone else's pen? Nothing to install up front. Open your invite
-        link and copy the one command it gives you.</p>
+      <p class="cta" style="justify-content:flex-start;margin-top:0">
+        <a class="btn primary" href="https://get.hogman.network/">Get a pen</a>
+      </p>
+      <p class="fine">Already invited to someone's pen? Open your invite link, or read the
+        <a href="/docs/join.html">join</a> and <a href="/docs/share.html">share</a> docs.</p>
+      <h3 style="margin-top:1.4rem">Why not just use Tailscale?</h3>
+      <p style="margin-top:0.3rem;color:var(--ash)">If you only want your own devices connected, do —
+        Hogman is built on Tailscale's open-source <code>tsnet</code> and runs cleanly alongside it.
+        Hogman is for running a private web for a <em>group of people</em>: guests join from a
+        single-use link, you manage the herd from a web page, and every site gets real names and
+        standard HTTPS with zero public IPs. <a href="/docs/faq.html" style="color:var(--gold)">More FAQ &rarr;</a></p>
     </div>
     <div>
-      <h3>On tour now</h3>
-      <ul class="status">
-        <li class="yes">Hosted pens: isolated control plane, mesh DNS, public DNS-01 certs, invites, the boot</li>
-        <li class="yes">Joining from Linux and from a Mac</li>
-        <li class="yes">HTTPS only: one small connection that never runs as administrator and never touches your own Tailscale</li>
-        <li class="yes">Isolated pens on a shared host behind <code>*.gate.hogman.network</code></li>
-        <li class="yes">GitHub Actions releases with verifiable SLSA build provenance</li>
-        <li class="yes">Pens on our server: sign up by invitation while we test, or join the waiting list</li>
-        <li class="yes">Run your pen from its home page: invites, the herd, the boot</li>
-        <li class="yes">Put a folder or a website in your pen with one command</li>
-        <li class="yes">Nightly encrypted backups, pulled home to a machine you own</li>
-        <li class="yes">Alerts on your phone if the server, certs, or backups fail</li>
-        <li class="yes">Automated Docker e2e suites covering pens, ACME DNS-01, and shared hosts</li>
-      </ul>
       <h3>Not on the bill yet</h3>
       <ul class="status">
         <li class="notyet">Windows: built, never tried</li>
@@ -520,58 +357,30 @@
         <li class="notyet">PSL listing for <code>pens.hogman.network</code></li>
         <li class="notyet">Independent security audit. Until then, don't trust it with anything that matters.</li>
       </ul>
-      <p class="fine">Forged from good open-source steel: Headscale, Tailscale <code>tsnet</code>, CertMagic, <code>miekg/dns</code>, and Caddy.</p>
+      <p class="fine">All code is AGPL-3.0 (<a href="/docs/self-host.html">open-source model</a>).
+        Forged from Headscale, Tailscale <code>tsnet</code>, CertMagic, <code>miekg/dns</code>, and Caddy.</p>
     </div>
   </div>
 </section>
 
 <div class="studs" aria-hidden="true"></div>
 
-<!-- ============================== HOSTED ============================== -->
-<section id="hosted">
-  <h2>Hosted pens, open source</h2>
-  <p class="sub">We run the control plane; your sites stay on your machines.</p>
-  <div class="cards three">
-    <article class="feature">
-      <h3>Hosted control plane (D-24)</h3>
-      <p>We run the front door, DNS-01 challenge server, and isolated per-pen containers on <code>hogman.network</code> so you never manage TLS infra, renewals, or a VPS.</p>
-    </article>
-    <article class="feature">
-      <h3>Your sites run on your hardware</h3>
-      <p>Your photos, forums, and apps run straight from your own computers via <code>hogman-join share</code>, with private TLS keys that never leave your machine.</p>
-    </article>
-    <article class="feature">
-      <h3>Open source to read and verify</h3>
-      <p>Every line is AGPL-3.0 on GitHub, with SLSA-attested release binaries and a published self-audit so you don't have to take our word on anything verifiable.</p>
-    </article>
-  </div>
-  <h3 style="margin-top:2.2rem">What hosting your pen lets us do</h3>
-  <ul class="status">
-    <li class="notyet"><strong>Our server only carries encrypted traffic: it can't read what your swine say.</strong> WireGuard and inner TLS 1.3 stay encrypted between endpoints; a compromised server could try to slip in a device or get a certificate for your pen's names, and every certificate shows up in public CT logs, so it can't happen silently (<a href="/docs/security.html#threat-model">threat model</a>).</li>
-    <li class="yes"><strong>We can see who's in your pen</strong>, their devices, and which pen names get looked up. The same as any keeper sees.</li>
-    <li class="yes"><strong>The gate and <code>ns1</code> hold admission and DNS-01 control</strong> because we host the control plane; see every adversarial path in the <a href="/docs/security.html#threat-model">threat model</a>.</li>
-    <li class="notyet"><strong>We never let anyone back into a pen on request</strong>, not even its keeper, and not even when we host it. There's no support route to talk your way in, so nobody can try. There's no account recovery either: lose every device and you start a new account, so make a friend a second owner who can let you back in.</li>
-  </ul>
-  <p class="fine">Sign-ups are by invitation while we test. Got a code? <a href="https://get.hogman.network/">get.hogman.network</a></p>
-</section>
-
-<div class="studs" aria-hidden="true"></div>
-
-<!-- ============================== HONEST ============================== -->
+<!-- ============================== THE HONEST BIT ============================== -->
 <section id="honest" class="honest">
   <h2>The honest bit</h2>
+  <p class="sub">We run the pen's control plane. Everything is AGPL-3.0 so you can check our work — and here is exactly what trusting us means.</p>
   <div class="cards three">
     <article class="feature plain">
-      <h3>A pen is not a hiding place</h3>
-      <p>Hogman is private, not anonymous. The keeper knows who is in the pen, what devices they have, and which pen names get looked up.</p>
+      <h3>Private, not anonymous</h3>
+      <p>The keeper — and we, because we host the control plane — can see who is in the pen, their devices, and which pen names get looked up. Payloads stay encrypted end to end over WireGuard and TLS 1.3, and your normal browsing never touches the pen.</p>
     </article>
     <article class="feature plain">
-      <h3>What the keeper can't see</h3>
-      <p>Payloads between devices stay encrypted end to end over WireGuard and TLS 1.3, and your ordinary browsing never touches the pen. Any rogue certificate minted via gate control still shows up in public CT logs.</p>
+      <h3>Admission &amp; CT logs</h3>
+      <p>Because our gate and <code>ns1</code> control admission and DNS-01 challenges, a compromised host could try to slip in a device or mint a cert — and every cert appears in public CT logs, so it can't happen silently (<a href="/docs/security.html#threat-model">threat model</a>).</p>
     </article>
     <article class="feature plain">
-      <h3>Choose your Top Hog</h3>
-      <p>The keeper holds the gate and the name book. Joining a pen means trusting the person who runs it. Pick a good one, or be one.</p>
+      <h3>No backdoors, no recovery</h3>
+      <p>We never let anyone back into a pen on request, not even its keeper. Lose every device and you start over — so make a friend a second owner. Joining a pen means trusting its Top Hog: pick a good one, or be one.</p>
     </article>
   </div>
 </section>
@@ -588,6 +397,6 @@
   <p class="fine">No pigs were excluded in the making of this website, except the filthy ones.</p>
 </footer>
 
-<script src="/boot.js?v=metal5" defer></script>
+<script src="/boot.js?v=metal9" defer></script>
 </body>
 </html>
