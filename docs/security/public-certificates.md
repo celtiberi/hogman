@@ -192,7 +192,7 @@ The docs say, in one sentence, that pens created before this change need to be r
 | One pen exhausts the shared quota | The per-pen weekly cap, the LE override, the GTS fallback |
 | Pen and site names exposed in CT | Disclosed up front (D-21); bring-your-own-domain for those who mind |
 | Cross-pen cookie risk before the PSL | D-19 disclosure; PSL application; bring-your-own-domain |
-| The challenge DNS service is down | Existing certificates keep working for up to about 60 days, and ARI starts renewing early. Monitor it with `hogman-watch`. |
+| The challenge DNS service is down | Existing certificates keep working for up to about 60 days, and ARI starts renewing early. `hogman-watch` alerts when it stops answering. |
 | The pen's server reads members' traffic | Not possible: TLS ends at each share, never at the server (wildcard termination at the server was rejected) |
 
 ## Red-team resolutions (revision 2)

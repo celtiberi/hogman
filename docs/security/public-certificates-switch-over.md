@@ -51,7 +51,7 @@ Everything here only adds names. No live pen is touched.
 
 4. **DNS PR 2:** add `accounturi=<the host's Let's Encrypt account URL>` to the `issuewild` CAA. The URL is in `/var/lib/hogman-gate/acme`. The GTS line gets added when the host has a GTS account (Phase E).
 
-   Check: `systemctl restart hogman-gate-cert` loads the existing certificate without a new order. The first real renewal under the tighter CAA happens about 60 days in; `hogman-watch` alerts if the certificate gets within 20 days of expiry (Phase D).
+   Check: `systemctl restart hogman-gate-cert` loads the existing certificate without a new order. The first real renewal under the tighter CAA happens about 60 days in; `hogman-watch` alerts if a quarter of the certificate's life is left (about 22 days for a 90-day certificate) and it hasn't renewed.
 
 ## Phase B: the code that has to land before the switch
 
@@ -138,10 +138,10 @@ Any pen names created during the failed attempt stay burned (D-21).
 
 That's a few minutes of DNS plus a restore, and it's acceptable because only test pens exist. Once real people have pens, there's no going back, which is why this happens now.
 
-## Phase D: tidy up
+## Phase D: tidy up (done)
 
-- Make DNS-only PRs skip the e2e suites (`infra/**` in the changes filter).
-- Add `hogman-challenge-dns` and the gate certificate's expiry to `hogman-watch`.
+- DNS-only PRs skip the e2e suites (`infra/**` in the changes filter).
+- `hogman-watch` checks `hogman-challenge-dns` (every name server for the pens zone answers with authority) and the gate certificate's expiry.
 
 ## Phase E: when the outside pieces arrive
 
