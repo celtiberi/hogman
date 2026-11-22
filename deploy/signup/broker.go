@@ -271,7 +271,7 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 		return
 	default:
 		log.Printf("provision %s for %s failed (exit %d): %s", in.Pen, in.Owner, code, strings.TrimSpace(stderr))
-		jsonOut(w, 500, map[string]string{"error": "raising your pen failed. Your code still works; try again later."})
+		jsonOut(w, 500, map[string]string{"error": "raising your pen failed. Your code still works — pick another pen name and try again."})
 		return
 	}
 	var res map[string]string

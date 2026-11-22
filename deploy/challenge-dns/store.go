@@ -22,13 +22,13 @@ import (
 )
 
 const (
-	txtTTL       = 10 * time.Minute // a challenge record lives this long unless refreshed
-	maxLivePer   = 2                // live values per name (ACME may ask for two at once)
-	capWindow    = 7 * 24 * time.Hour
-	capNames     = 10 // distinct new names per pen per capWindow
-	eabPerDay    = 5  // GTS account keys per credential per day
-	acmePrefix   = "_acme-challenge."
-	maxSiteDepth = 4 // labels before the pen name, as site names allow
+	txtTTL          = 10 * time.Minute // a challenge record lives this long unless refreshed
+	maxLivePer      = 2                // live values per name (ACME may ask for two at once)
+	capWindow       = 7 * 24 * time.Hour
+	defaultCapNames = 5 // distinct new names per pen per capWindow (overridable via CDNS_WEEKLY_CAP)
+	eabPerDay       = 5 // GTS account keys per credential per day
+	acmePrefix      = "_acme-challenge."
+	maxSiteDepth    = 4 // labels before the pen name, as site names allow
 )
 
 var (
@@ -75,12 +75,20 @@ type txtValue struct {
 
 // Store holds the state (persisted) and the live challenge records (not).
 type Store struct {
-	mu    sync.Mutex
-	path  string
-	zones Zones
-	st    state
-	txt   map[string][]txtValue // fqdn -> live values
-	now   func() time.Time
+	mu       sync.Mutex
+	path     string
+	zones    Zones
+	st       state
+	txt      map[string][]txtValue // fqdn -> live values
+	now      func() time.Time
+	capNames int // 0 uses defaultCapNames
+}
+
+func (s *Store) weeklyCap() int {
+	if s.capNames > 0 {
+		return s.capNames
+	}
+	return defaultCapNames
 }
 
 // Zones are the names this server answers for.
@@ -315,7 +323,7 @@ func (s *Store) PutTXT(c Cred, fqdn, value string) error {
 }
 
 // countLocked applies the weekly cap: a name already counted in the window is
-// free; a new one counts, up to capNames.
+// free; a new one counts, up to s.weeklyCap().
 func (s *Store) countLocked(c Cred, fqdn string, now time.Time) error {
 	seen := s.st.Seen[c.ID]
 	if seen == nil {
@@ -327,7 +335,7 @@ func (s *Store) countLocked(c Cred, fqdn string, now time.Time) error {
 		}
 	}
 	if _, ok := seen[fqdn]; !ok {
-		if len(seen) >= capNames {
+		if len(seen) >= s.weeklyCap() {
 			s.st.Seen[c.ID] = seen
 			return errCap
 		}

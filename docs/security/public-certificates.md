@@ -64,7 +64,7 @@ We follow two existing models rather than invent our own:
     - The two CAs give the host two different account URIs, and they exist only after the host registers, so these CAA records are added after that.
 - **Each pen gets its own API credential, scoped to that pen.** It can write TXT records under `_acme-challenge.*.<its pen name>.pens.hogman.network`, and nothing else: no other pen, no other record type, nothing under `gate.`.
   - It allows at most 2 live TXT records per name.
-  - Its **weekly cap** (10) counts distinct names whose challenge was written this week, not raw TXT writes. A renewal touches its name about once every 60 days, so renewals barely count.
+  - Its **weekly cap** (5 by default, configurable via `CDNS_WEEKLY_CAP`) counts distinct names whose challenge was written this week, not raw TXT writes. `home.<pen>` uses one slot (so a new pen gets `home` plus 4 sites in its first week), and a renewal touches its name about once every 60 days, so renewals barely count.
   - The host has one separate credential, which only the front door uses, for the `*.gate.hogman.network` wildcard.
   - The registrar reaches the server's HTTP API over a host-only Docker network, documented in `hogman-host`. The API never faces the internet.
 - **Self-hosted pens:** the registrar uses a DNS provider library (libdns) with the operator's DNS API token. The docs recommend the narrowest token the provider allows. They also show the standard trick for making it narrower: delegate `_acme-challenge` with a CNAME to a zone used only for challenges.
@@ -203,7 +203,7 @@ The docs say, in one sentence, that pens created before this change need to be r
 | acme-dns or our own | Our own small server on `miekg/dns`. |
 | certmagic | Yes, with public resolvers for propagation checks and its cache kept across updates. |
 | `get_certificate` | Dropped. Atomic files in a mount-isolated folder, and a reload over Caddy's admin Unix socket. |
-| Weekly cap | 10, counting distinct new names, not TXT writes. |
+| Weekly cap | 5 by default (`CDNS_WEEKLY_CAP`), counting distinct new names, not TXT writes. |
 | Pen ID length | 12 characters at rev 2; replaced by readable pen names in D-21. |
 
 Also fixed:
@@ -219,7 +219,7 @@ Also fixed:
 2. Should the challenge DNS service be acme-dns itself (joohoi/acme-dns, extended with pen scopes and the cap), or our own small server on `miekg/dns`, which the registrar already uses?
 3. certmagic in shares: the dependency weight is acceptable, it already brings libdns and ARI, and keeps `CGO_ENABLED=0`. Better alternatives?
 4. Should `get_certificate http` for the home page and front door replace a custom Caddy build?
-5. Is a per-pen cap of 10 new certificates a week right for the trial?
+5. Is a per-pen cap of 10 new certificates a week right for the trial? *(Answered: lowered to 5 by default via `CDNS_WEEKLY_CAP` — `home.<pen>` plus 4 sites in week 1.)*
 6. Keep 8-character pen IDs, or longer?
 
 ## What the operator needs to set up (before code reaches production)

@@ -111,8 +111,13 @@ func TestBrokerProvisionUsesCodeOnce(t *testing.T) {
 func TestBrokerFailureKeepsCode(t *testing.T) {
 	b, home := newTestBroker(t, "PIG-AAAA-BBBB x\n")
 	j := `{"code":"PIG-AAAA-BBBB","pen":"explode","owner":"alice"}`
-	if code, _ := call(b.handler(), "POST", "/provision", j, auth); code != 500 {
+	code, out := call(b.handler(), "POST", "/provision", j, auth)
+	if code != 500 {
 		t.Fatalf("a failed provision: %d", code)
+	}
+	errMsg, _ := out["error"].(string)
+	if !strings.Contains(errMsg, "pick another pen name") {
+		t.Fatalf("failed provision error = %q, want guidance to pick another pen name", errMsg)
 	}
 	codes, _ := os.ReadFile(filepath.Join(home, "signup", "codes"))
 	if !strings.Contains(string(codes), "PIG-AAAA-BBBB") {

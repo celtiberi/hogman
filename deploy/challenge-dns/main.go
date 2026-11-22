@@ -54,6 +54,7 @@ Settings (environment):
   CDNS_ADMIN_SOCK    default /run/challenge-dns/admin.sock (root only)
   CDNS_HTTP_ADDR     optional TCP address for the API (tests and development only)
   CDNS_GCP_KEY       optional Google service-account key file (fallback CA)
+  CDNS_WEEKLY_CAP    distinct new certificate names per pen per 7 days, default 5
 `
 
 func main() {
@@ -87,10 +88,25 @@ func zonesFromEnv() Zones {
 	}
 }
 
+func parseWeeklyCap(raw string) (int, error) {
+	if raw == "" {
+		return defaultCapNames, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > 1000 {
+		return 0, fmt.Errorf("CDNS_WEEKLY_CAP must be an integer between 1 and 1000 (got %q)", raw)
+	}
+	return n, nil
+}
+
 func serve() error {
 	listen := os.Getenv("CDNS_LISTEN")
 	if listen == "" {
 		return errors.New("set CDNS_LISTEN to the public address to answer on, e.g. 203.0.113.10:53 (not 127.0.0.53, where systemd-resolved sits)")
+	}
+	weeklyCap, err := parseWeeklyCap(os.Getenv("CDNS_WEEKLY_CAP"))
+	if err != nil {
+		return err
 	}
 	zones := zonesFromEnv()
 	statePath := env("CDNS_STATE", "/var/lib/challenge-dns/state.json")
@@ -101,6 +117,8 @@ func serve() error {
 	if err != nil {
 		return err
 	}
+	store.capNames = weeklyCap
+	log.Printf("per-pen weekly certificate cap: %d distinct names / 7d", store.weeklyCap())
 	d := &DNS{store: store, zones: zones, ns: env("CDNS_NS", "ns1.hogman.network"),
 		mbox: env("CDNS_MBOX", "hostmaster.hogman.network"), caa: defaultCAA()}
 

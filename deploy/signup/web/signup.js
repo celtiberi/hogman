@@ -50,7 +50,8 @@
   $('handle').addEventListener('input', setNames);
   for (const f of ['pen', 'handle']) $(f).addEventListener('change', setNames);   // autofill, paste, scripts
 
-  const show = id => { for (const s of ['form', 'wait', 'waited', 'working', 'done']) $(s).hidden = s !== id; };
+  let activeView = 'form';
+  const show = id => { activeView = id; for (const s of ['form', 'wait', 'waited', 'working', 'done']) $(s).hidden = s !== id; };
 
   // The waiting list: for when the farm is full, or there's no code.
   $('to-wait').addEventListener('click', ev => { ev.preventDefault(); show('wait'); $('w-email').focus(); });
@@ -84,9 +85,11 @@
   });
 
   // Raising a pen is a job on the server: start it, then check on it. The job's
-  // id is kept for this tab, so a reload carries on instead of losing the link.
+  // id is kept for this tab, so a reload carries on instead of losing the link
+  // (including while on the final setup-link screen during the 5-minute window).
   const JOB = 'hogman-signup-job';
-  const stages = [[0, 'Building the fence'], [8, 'Minting your certificate authority'],
+  const JOB_DONE = 'hogman-signup-job-done';
+  const stages = [[0, 'Building the fence'], [8, 'Getting your HTTPS certificate'],
                   [20, 'Opening the gate'], [35, 'Raking the last of the straw'], [90, 'Taking longer than usual; hang on']];
   const showDone = r => {
     $('done-zone').textContent = r.zone;
@@ -94,18 +97,20 @@
     $('done-home').textContent = homeURL;
     $('done-home-step').textContent = homeURL;
     $('link').textContent = r.join_link;
-    if (r.join_qr_svg) $('qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(r.join_qr_svg);
+    if (r.join_qr_svg) { $('qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(r.join_qr_svg); $('qr').closest('.qr').hidden = false; }
     else $('qr').closest('.qr').hidden = true;
     $('copy').onclick = async () => { await navigator.clipboard.writeText(r.join_link); $('copy').textContent = 'Copied'; };
-    sessionStorage.removeItem(JOB);
+    sessionStorage.setItem(JOB_DONE, '1');
     history.replaceState(null, '', location.pathname);   // the code is used up
     show('done');
   };
   const fail = msg => {
     sessionStorage.removeItem(JOB);
+    sessionStorage.removeItem(JOB_DONE);
     show('form');
     $('err').textContent = msg; $('err').hidden = false;
     $('go').disabled = false;
+    if ($('pen').value.trim()) $('pen').dispatchEvent(new Event('input'));
   };
   const follow = async id => {
     show('working');
@@ -113,7 +118,17 @@
     for (;;) {
       let j = null;
       try { j = await api('GET', '/job?id=' + encodeURIComponent(id)); }
-      catch (e) { if (e.status === 404) return fail(e.message); }   // otherwise a blip: keep checking
+      catch (e) {
+        if (e.status === 404) {
+          if (sessionStorage.getItem(JOB_DONE) === '1') {
+            sessionStorage.removeItem(JOB);
+            sessionStorage.removeItem(JOB_DONE);
+            show('form');
+            return;
+          }
+          return fail(e.message);
+        }
+      }   // otherwise a blip: keep checking
       if (j && j.state === 'done') return showDone(j.result);
       if (j && j.state === 'failed') return fail(j.error);
       const secs = j ? j.seconds : Math.round((Date.now() - t0) / 1000);
@@ -133,6 +148,7 @@
       $('err').textContent = 'Fill in all three.'; $('err').hidden = false; return;
     }
     $('go').disabled = true;
+    sessionStorage.removeItem(JOB_DONE);
     try {
       const r = await api('POST', '/create', body);
       sessionStorage.setItem(JOB, r.job);
@@ -140,11 +156,17 @@
     } catch (e) { fail(e.message); }
   });
   const pending = sessionStorage.getItem(JOB);
-  if (pending) follow(pending);
-
-  if (location.hash === '#wait') show('wait');   // a link straight to the waiting list
+  if (pending) {
+    follow(pending);
+  } else if (location.hash === '#wait') {
+    show('wait');   // a link straight to the waiting list
+  }
   api('GET', '/status').then(s => {
-    if (!s.open) { $('closed').hidden = false; $('go').disabled = true; show('wait'); }
+    if (!s.open) {
+      $('closed').hidden = false;
+      $('go').disabled = true;
+      if (activeView !== 'working' && activeView !== 'done') show('wait');
+    }
   }).catch(() => { $('down').hidden = false; });
   setNames();
 })();

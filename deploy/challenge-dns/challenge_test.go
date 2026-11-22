@@ -130,13 +130,13 @@ func TestTXTLifecycleAndLimits(t *testing.T) {
 func TestWeeklyCapCountsDistinctNames(t *testing.T) {
 	s, now := newTestStore(t)
 	a, _ := mustCred(t, s, "pen", penA)
-	for i := 0; i < capNames; i++ {
+	for i := 0; i < defaultCapNames; i++ {
 		if err := s.PutTXT(a, ch(fmt.Sprintf("site%d", i), penA), val1); err != nil {
 			t.Fatalf("name %d: %v", i, err)
 		}
 	}
 	if err := s.PutTXT(a, ch("one-more", penA), val1); err != errCap {
-		t.Fatalf("11th new name: %v, want errCap", err)
+		t.Fatalf("%dth new name: %v, want errCap", defaultCapNames+1, err)
 	}
 	// A name already counted is free (a retry, or two values for one order).
 	*now = now.Add(txtTTL + time.Second)
@@ -156,6 +156,31 @@ func TestWeeklyCapCountsDistinctNames(t *testing.T) {
 	*now = now.Add(capWindow)
 	if err := s2.PutTXT(a, ch("one-more", penA), val1); err != nil {
 		t.Fatalf("a week later: %v", err)
+	}
+}
+
+func TestWeeklyCapOverrideAndParse(t *testing.T) {
+	if got, err := parseWeeklyCap(""); err != nil || got != defaultCapNames {
+		t.Fatalf("parseWeeklyCap empty = (%d, %v), want (%d, nil)", got, err, defaultCapNames)
+	}
+	if got, err := parseWeeklyCap("12"); err != nil || got != 12 {
+		t.Fatalf("parseWeeklyCap 12 = (%d, %v), want (12, nil)", got, err)
+	}
+	for _, bad := range []string{"0", "-1", "1001", "abc"} {
+		if _, err := parseWeeklyCap(bad); err == nil {
+			t.Fatalf("parseWeeklyCap(%q) succeeded, want error", bad)
+		}
+	}
+	s, _ := newTestStore(t)
+	s.capNames = 2
+	a, _ := mustCred(t, s, "pen", penA)
+	for i := 0; i < 2; i++ {
+		if err := s.PutTXT(a, ch(fmt.Sprintf("custom%d", i), penA), val1); err != nil {
+			t.Fatalf("name %d: %v", i, err)
+		}
+	}
+	if err := s.PutTXT(a, ch("custom-third", penA), val1); err != errCap {
+		t.Fatalf("3rd name with cap=2: %v, want errCap", err)
 	}
 }
 
