@@ -16,28 +16,32 @@
 </header>
 
 <div id="banner" class="banner" hidden></div>
+<div id="perm-row" class="banner" hidden>
+  <p>Firefox has not granted access to <code>*.pens.hogman.network</code>. Pen sites cannot be routed or blocked until permission is granted.</p>
+  <button id="perm-btn" type="button">Grant host permission</button>
+</div>
+<div id="paused-row" class="banner warn" hidden>
+  Paused: pen sites (<code>*.pens.hogman.network</code>) are blocked (fail-closed) until resumed. Ordinary browsing is unaffected.
+</div>
 <div id="override-row" class="banner warn" hidden>
   <p id="override-text"></p>
   <button id="override-btn" type="button">Override OS proxy in this profile</button>
 </div>
 <div id="incognito-row" class="banner warn" hidden>
-  Private Windows do not route pen sites unless you enable "Run in Private Windows" for Hogman in Add-ons.
+  Private Windows send pen names to public DNS unless you enable "Run in Private Windows" for Hogman in Add-ons.
 </div>
 
 <section>
   <div class="row-hdr">
     <h2>Pens in this profile</h2>
-    <label class="lock-toggle" title="When locked, newly joined pens stay disabled in this browser profile until enabled here (D-19 isolation).">
-      <input id="lock-profile" type="checkbox">
-      Lock profile
-    </label>
   </div>
+  <p class="muted hint">Blocked by default in each browser profile. Enable only the pens you want to use in this profile.</p>
   <ul id="pen-list" class="pens"></ul>
   <p id="empty" class="muted" hidden>No pens found. Run <code>hogman-join</code> to join a pen, or <code>hogman-join browser-setup</code> to register this browser.</p>
 </section>
 
 <footer class="ftr muted">
-  Routes <code>*.pens.hogman.network</code> to your local <code>hogman-join</code> proxy; everything else goes direct (through your VPN if active).
+  Routes enabled <code>*.pens.hogman.network</code> pens to your local <code>hogman-join</code> proxy; disabled pens fail closed, and everything else goes direct (through your VPN if active).
 </footer>
 
 <script type="module" src="popup.js"></script>

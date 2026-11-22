@@ -97,14 +97,18 @@
   the system automatic proxy setting while connected, so browsers stop seeing pen names even though
   <code>hogman-join</code> stays connected.</p>
 <ul>
-  <li><strong>Chrome, Brave, Edge, and Firefox:</strong> install the Hogman browser extension
-    (<code>browser-ext/</code>). It routes only <code>*.pens.hogman.network</code> to your local
-    <code>hogman-join</code> proxy while leaving ordinary browsing on your VPN. (Firefox's built-in
-    <em>Automatic proxy configuration URL</em> setting also works alongside a VPN with no
-    extension.)</li>
+  <li><strong>Firefox (works today with no extension):</strong> set Firefox's built-in
+    <em>Settings → Network Settings → Automatic proxy configuration URL</em> to the
+    <code>http://127.0.0.1:&lt;port&gt;/proxy.pac</code> URL printed by <code>hogman-join</code>.
+    Pen names go straight to <code>hogman-join</code> while ordinary browsing stays on your VPN.</li>
+  <li><strong>Chrome, Brave, Edge, and Firefox extension (developer preview):</strong> the
+    companion extension in <code>browser-ext/</code> is not yet published on the Chrome Web Store
+    or Mozilla Add-ons. Developers can load it manually from <code>browser-ext/dist/</code> (see
+    <code>browser-ext/README.md</code>; note that Firefox removes temporary add-ons on restart, and
+    Firefox Private Windows send pen names to public DNS unless <em>Run in Private Windows</em> is
+    enabled for the extension).</li>
   <li><strong>Safari:</strong> Apple does not expose proxy APIs to Safari extensions, so pause your
-    VPN while visiting pen sites in Safari, or open pen sites in Chrome, Brave, Edge, or Firefox
-    with the Hogman extension.</li>
+    VPN while visiting pen sites in Safari.</li>
 </ul>
 <p><strong>If it stops part way</strong> (DNS not ready, offline), fix what it says and run the
   same command again. If the stop came before your device joined, the invite is still unused; if

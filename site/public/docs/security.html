@@ -280,14 +280,17 @@
     the binary (signed updates planned).</li>
   <li class="notyet"><strong>Public Suffix List (D-19):</strong> <code>pens.hogman.network</code>
     is not yet listed on the PSL, so use separate browser profiles across mutually untrusted pens.
-    The optional Hogman browser extension supports per-profile pen allowlists to enforce this.</li>
-  <li class="notyet"><strong>Optional browser extension store trust:</strong> Users who install the
-    Hogman extension (for VPN coexistence on Chrome/Brave/Edge/Firefox) trust Chrome Web Store /
-    Firefox AMO auto-updates and our publisher account for browser proxy rules. To minimize blast
-    radius, the extension has zero third-party dependencies, requests no <code>&lt;all_urls&gt;</code>
-    or page-reading permissions, builds reproducibly from <code>browser-ext/</code>, and speaks to a
-    strictly read-only native host (<code>hogman-native-host</code>) that returns only verified pen
-    zones and loopback ports.</li>
+    The optional Hogman browser extension enforces allowlist-by-default per browser profile (every
+    pen starts blocked in a new profile until enabled there).</li>
+  <li class="notyet"><strong>Optional browser extension (developer preview):</strong> The companion
+    extension in <code>browser-ext/</code> (for VPN coexistence on Chrome, Brave, Edge, and Firefox)
+    is not yet published to the Chrome Web Store or Mozilla Add-ons. Once published, users who
+    install it from a store will trust that store's auto-updates and our publisher account for
+    browser proxy rules. To minimize blast radius, the extension has zero third-party dependencies,
+    requests no <code>&lt;all_urls&gt;</code> or page-reading permissions, fails closed for
+    <code>*.pens.hogman.network</code>, builds reproducibly from <code>browser-ext/</code>, and
+    speaks to a read-only native host (<code>hogman-native-host</code>) that returns only verified
+    pen zones and loopback ports.</li>
   <li class="notyet"><strong>HTTPS to servers only (D-11):</strong> No SSH, arbitrary UDP/TCP,
     member-to-member connections, exit nodes, or LAN subnet routing — omitted by design to minimize
     client and lateral attack surface.</li>

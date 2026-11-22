@@ -49,15 +49,12 @@ button:hover { filter: brightness(0.96); }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
-.lock-toggle {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  color: #52525b;
-  cursor: pointer;
+.hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.4;
 }
 .pens {
   list-style: none;
@@ -105,7 +102,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 
 @media (prefers-color-scheme: dark) {
   body { background: #18181b; color: #f4f4f5; }
-  h2, .lock-toggle, .pen-meta, .muted { color: #a1a1aa; }
+  h2, .pen-meta, .muted { color: #a1a1aa; }
   button { background: #27272a; border-color: #3f3f46; }
   .pen-item, .ftr { border-color: #27272a; }
   .banner { background: #450a0a; color: #fecaca; border-color: #991b1b; }

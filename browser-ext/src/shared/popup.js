@@ -1,5 +1,10 @@
 const api = typeof browser !== "undefined" ? browser : chrome;
 
+const HOST_PERMISSION_ORIGINS = [
+  "*://*.pens.hogman.network/*",
+  "*://pens.hogman.network/*",
+];
+
 function sendMessage(msg) {
   return new Promise((resolve) => {
     const maybe = api.runtime.sendMessage(msg, (resp) => resolve(resp || {}));
@@ -32,18 +37,20 @@ let currentState = null;
 function render(st) {
   currentState = st;
   const banner = document.getElementById("banner");
+  const permRow = document.getElementById("perm-row");
+  const pausedRow = document.getElementById("paused-row");
   const overrideRow = document.getElementById("override-row");
   const overrideText = document.getElementById("override-text");
   const incognitoRow = document.getElementById("incognito-row");
   const pauseBtn = document.getElementById("pause");
-  const lockBox = document.getElementById("lock-profile");
   const list = document.getElementById("pen-list");
   const empty = document.getElementById("empty");
 
   pauseBtn.textContent = st.paused ? "Resume" : "Pause";
-  lockBox.checked = Boolean(st.lockProfile);
 
   banner.hidden = true;
+  permRow.hidden = !(st.browser === "firefox" && st.missingHostPermission);
+  pausedRow.hidden = !st.paused;
   overrideRow.hidden = true;
   incognitoRow.hidden = !(st.browser === "firefox" && !st.incognitoAllowed);
 
@@ -54,7 +61,7 @@ function render(st) {
     banner.textContent = st.conflictDetail;
     banner.hidden = false;
   } else if (st.conflict === "os_proxy") {
-    overrideText.textContent = `A non-Hogman system proxy is active (${st.conflictDetail}). Overriding sends non-Hogman browsing DIRECT in this Chrome profile.`;
+    overrideText.textContent = `A non-Hogman system proxy is active (${st.conflictDetail}). Hogman stepped aside so your OS proxy keeps working — pen sites are not routed or blocked by this extension. Overriding sends non-Hogman browsing DIRECT in this Chrome profile.`;
     overrideRow.hidden = false;
   }
 
@@ -86,6 +93,8 @@ function render(st) {
       detail.textContent = "blocked (unverified port listener)";
     } else if (!e.allowedByProfile) {
       detail.textContent = "blocked in this profile";
+    } else if (e.port && e.legacy) {
+      detail.textContent = `127.0.0.1:${e.port} · older agent (run hogman-join update)`;
     } else if (e.port) {
       detail.textContent = `127.0.0.1:${e.port}`;
     } else {
@@ -102,17 +111,11 @@ function render(st) {
     toggle.disabled = Boolean(e.squatted);
     toggle.title = `Allow ${e.zone} in this browser profile`;
     toggle.onchange = async () => {
-      const prefs = await storageGet(["disabledZones", "enabledZones", "lockProfile"]);
-      const disabled = { ...(prefs.disabledZones || {}) };
+      const prefs = await storageGet(["enabledZones"]);
       const enabled = { ...(prefs.enabledZones || {}) };
-      if (prefs.lockProfile) {
-        if (toggle.checked) enabled[e.zone] = true;
-        else delete enabled[e.zone];
-      } else {
-        if (toggle.checked) delete disabled[e.zone];
-        else disabled[e.zone] = true;
-      }
-      await storageSet({ disabledZones: disabled, enabledZones: enabled });
+      if (toggle.checked) enabled[e.zone] = true;
+      else delete enabled[e.zone];
+      await storageSet({ enabledZones: enabled });
       await load();
     };
 
@@ -143,17 +146,13 @@ document.getElementById("override-btn").onclick = async () => {
   await load();
 };
 
-document.getElementById("lock-profile").onchange = async (ev) => {
-  const lockProfile = Boolean(ev.target.checked);
-  if (lockProfile && currentState) {
-    // Snapshot currently enabled pens when locking this profile.
-    const enabled = {};
-    for (const e of currentState.entries || []) {
-      if (e.allowedByProfile) enabled[e.zone] = true;
+document.getElementById("perm-btn").onclick = async () => {
+  if (api.permissions && typeof api.permissions.request === "function") {
+    try {
+      await api.permissions.request({ origins: HOST_PERMISSION_ORIGINS });
+    } catch (_) {
+      // ignore rejection; load() will reflect current permission state
     }
-    await storageSet({ lockProfile: true, enabledZones: enabled });
-  } else {
-    await storageSet({ lockProfile: false });
   }
   await load();
 };

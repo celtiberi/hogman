@@ -1,6 +1,7 @@
 import {
   FAIL_CLOSED_FIREFOX,
   computeEffectiveRoutes,
+  isKnownPenHost,
   normalizeHost,
   resolveFirefoxProxy,
   sanitizeNativeSnapshot,
@@ -8,10 +9,16 @@ import {
 
 const NATIVE_HOST = "network.hogman.browser";
 const REFRESH_TTL_MS = 10000;
+const UNKNOWN_REFRESH_COOLDOWN_MS = 15000;
+const HOST_PERMISSION_ORIGINS = [
+  "*://*.pens.hogman.network/*",
+  "*://pens.hogman.network/*",
+];
 
 let cachedSnapshot = null;
 let cachedRoutes = {};
 let lastFetchAt = 0;
+let lastUnknownRefreshAt = 0;
 let inFlightRefresh = null;
 
 let state = {
@@ -22,30 +29,35 @@ let state = {
   conflict: "",
   conflictDetail: "",
   osProxyConflict: false,
-  osProxyDetail: "",
+  osProxyKind: "",
   vpnOverride: false,
   vpnInterface: "",
   allowOSProxyOverride: false,
-  lockProfile: false,
   entries: [],
   incognitoAllowed: false,
+  missingHostPermission: false,
 };
 
 async function loadPrefs() {
   const stored = await browser.storage.local.get([
     "paused",
-    "disabledZones",
     "enabledZones",
-    "lockProfile",
-    "approvedCustomZones",
   ]);
   return {
     paused: Boolean(stored.paused),
-    disabledZones: stored.disabledZones || {},
     enabledZones: stored.enabledZones || {},
-    lockProfile: Boolean(stored.lockProfile),
-    approvedCustomZones: stored.approvedCustomZones || {},
   };
+}
+
+async function checkHostPermission() {
+  if (typeof browser.permissions?.contains !== "function") {
+    return true;
+  }
+  try {
+    return await browser.permissions.contains({ origins: HOST_PERMISSION_ORIGINS });
+  } catch (_) {
+    return false;
+  }
 }
 
 function updateBadge() {
@@ -54,7 +66,7 @@ function updateBadge() {
     browser.action.setBadgeBackgroundColor({ color: "#666666" });
     return;
   }
-  if (state.nativeError) {
+  if (state.missingHostPermission || state.nativeError) {
     browser.action.setBadgeText({ text: "!" });
     browser.action.setBadgeBackgroundColor({ color: "#b91c1c" });
     return;
@@ -67,7 +79,7 @@ function updateBadge() {
 async function rebuildRoutesFromCache() {
   const prefs = await loadPrefs();
   state.paused = prefs.paused;
-  state.lockProfile = prefs.lockProfile;
+  state.missingHostPermission = !(await checkHostPermission());
   if (typeof browser.extension?.isAllowedIncognitoAccess === "function") {
     try {
       state.incognitoAllowed = await browser.extension.isAllowedIncognitoAccess();
@@ -81,9 +93,9 @@ async function rebuildRoutesFromCache() {
     updateBadge();
     return;
   }
-  const snap = sanitizeNativeSnapshot(cachedSnapshot, prefs.approvedCustomZones);
+  const snap = sanitizeNativeSnapshot(cachedSnapshot);
   state.osProxyConflict = snap.osProxyConflict;
-  state.osProxyDetail = snap.osProxyDetail;
+  state.osProxyKind = snap.osProxyKind;
   state.vpnOverride = snap.vpnOverride;
   state.vpnInterface = snap.vpnInterface;
 
@@ -131,7 +143,9 @@ function refreshSnapshot(force = false) {
 async function handleProxyRequest(details) {
   const prefs = await loadPrefs();
   if (prefs.paused) {
-    return undefined;
+    // Fail closed when paused: this listener fires only for pen URLs, so
+    // non-pen browsing stays untouched while pen names never leak to public DNS.
+    return FAIL_CLOSED_FIREFOX;
   }
   let host = "";
   try {
@@ -144,8 +158,14 @@ async function handleProxyRequest(details) {
     await refreshSnapshot(false);
   }
   let resolved = resolveFirefoxProxy(host, cachedRoutes);
-  if (resolved === FAIL_CLOSED_FIREFOX && Date.now() - lastFetchAt > 1500) {
-    // Unknown or newly joined pen: refresh once inside the request promise.
+  // Only refresh for a genuinely unknown pen zone (never respawn the native
+  // host on every request to a pen that is already known disabled/squatted/down).
+  if (
+    resolved === FAIL_CLOSED_FIREFOX &&
+    !isKnownPenHost(host, cachedRoutes) &&
+    Date.now() - lastUnknownRefreshAt >= UNKNOWN_REFRESH_COOLDOWN_MS
+  ) {
+    lastUnknownRefreshAt = Date.now();
     await refreshSnapshot(true);
     resolved = resolveFirefoxProxy(host, cachedRoutes);
   }
@@ -153,8 +173,15 @@ async function handleProxyRequest(details) {
 }
 
 browser.proxy.onRequest.addListener(handleProxyRequest, {
-  urls: ["*://*.pens.hogman.network/*"],
+  urls: HOST_PERMISSION_ORIGINS,
 });
+
+if (browser.permissions?.onAdded) {
+  browser.permissions.onAdded.addListener(() => rebuildRoutesFromCache().catch(() => {}));
+}
+if (browser.permissions?.onRemoved) {
+  browser.permissions.onRemoved.addListener(() => rebuildRoutesFromCache().catch(() => {}));
+}
 
 browser.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && !changes.cachedSnapshot) {

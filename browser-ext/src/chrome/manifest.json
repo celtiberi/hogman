@@ -3,6 +3,12 @@
   "name": "Hogman",
   "version": "0.1.0",
   "description": "Routes your Hogman pen sites (*.pens.hogman.network) to your local hogman-join proxy alongside any OS VPN.",
+  "icons": {
+    "16": "icons/hogman-16.png",
+    "32": "icons/hogman-32.png",
+    "48": "icons/hogman-48.png",
+    "128": "icons/hogman-128.png"
+  },
   "permissions": [
     "proxy",
     "nativeMessaging",
@@ -14,6 +20,12 @@
   },
   "action": {
     "default_title": "Hogman",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/hogman-16.png",
+      "32": "icons/hogman-32.png",
+      "48": "icons/hogman-48.png",
+      "128": "icons/hogman-128.png"
+    }
   }
 }
