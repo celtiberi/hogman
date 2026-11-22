@@ -1,0 +1,81 @@
+package main
+
+import (
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"testing"
+)
+
+// Other tests reason about pure rules; keep them off the network. Tests here
+// put the real check back where they need it.
+var realStaleHogmanPAC = staleHogmanPAC
+
+func init() { staleHogmanPAC = func(string) bool { return false } }
+
+func TestHogmanShapedPACURL(t *testing.T) {
+	for u, want := range map[string]bool{
+		"http://127.0.0.1:20441/proxy.pac":            true,
+		"http://127.0.0.1:20441/proxy.pac?v=49a9aa23": true,
+		"http://127.0.0.1:20441/proxy.pac?x=1":        false,
+		"https://127.0.0.1:20441/proxy.pac":           false,
+		"http://localhost:20441/proxy.pac":            false,
+		"http://10.0.0.1:20441/proxy.pac":             false,
+		"http://corp.example/proxy.pac":               false,
+		"http://127.0.0.1:20441/other.pac":            false,
+		"http://127.0.0.1:80/proxy.pac":               false,
+		"http://user@127.0.0.1:20441/proxy.pac":       false,
+	} {
+		if got := hogmanShapedPACURL(u); got != want {
+			t.Errorf("hogmanShapedPACURL(%q) = %v, want %v", u, got, want)
+		}
+	}
+}
+
+func TestStaleHogmanPAC(t *testing.T) {
+	// Nothing listens: a dead setting a removed pen left behind.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	if !realStaleHogmanPAC("http://127.0.0.1:" + strconv.Itoa(dead) + "/proxy.pac?v=1") {
+		t.Error("a dead Hogman-shaped PAC should count as ours")
+	}
+
+	serve := func(body string) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
+		t.Cleanup(srv.Close)
+		return srv.URL + "/proxy.pac"
+	}
+	if !realStaleHogmanPAC(serve(pacMarker + " Everything else is untouched.\nfunction FindProxyForURL(u,h){return \"DIRECT\"}")) {
+		t.Error("a live Hogman agent's PAC should count as ours")
+	}
+	if realStaleHogmanPAC(serve("function FindProxyForURL(u,h){return \"PROXY corp:8080\"}")) {
+		t.Error("another local tool's PAC must be left alone")
+	}
+	if realStaleHogmanPAC("http://corp.example/proxy.pac") {
+		t.Error("a company PAC must never count as ours")
+	}
+}
+
+// The case from the operator's laptop: Thunderbolt Bridge and ProtonVPN still
+// pointed at a removed pen's dead port, so a new join left every connection
+// alone and leaving never cleared them.
+func TestStalePACIsReplacedAndCleared(t *testing.T) {
+	staleHogmanPAC = func(u string) bool { return u == "http://127.0.0.1:20441/proxy.pac" }
+	t.Cleanup(func() { staleHogmanPAC = func(string) bool { return false } })
+	p := &agentConfig{Zone: "qa-piggy5.pens.hogman.network", ProxyAddr: "127.0.0.1:25148"}
+	want := pacURLWithVersion(p, []*agentConfig{p})
+	if got := planAutoProxyAction("http://127.0.0.1:20441/proxy.pac", true, []*agentConfig{p}, want); got != "set" {
+		t.Errorf("join over a stale Hogman PAC: got %q, want set", got)
+	}
+	if got := planClearAutoProxyAction("http://127.0.0.1:20441/proxy.pac", true, nil, ""); got != "off" {
+		t.Errorf("leave with a stale Hogman PAC: got %q, want off", got)
+	}
+	if got := planAutoProxyAction("http://corp.example/proxy.pac", true, []*agentConfig{p}, want); got != "leave" {
+		t.Errorf("join over a company PAC: got %q, want leave", got)
+	}
+}

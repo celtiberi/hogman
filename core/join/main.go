@@ -503,8 +503,8 @@ func leave(raw string, o options) error {
 	}
 	// This computer's own device, through its connection while it's still up,
 	// so old devices don't pile up in "Your devices".
-	removeOwnDevice(n.Zone)
-	leaveAlongside(n.Zone)
+	gone := removeOwnDevice(n.Zone)
+	leaveAlongside(n.Zone, gone)
 	if ts, err := findTailscale(); err == nil {
 		if st, err := ts.Status(); err == nil && st.OnNetwork(n.Zone) {
 			if err := ts.Logout(); err != nil {

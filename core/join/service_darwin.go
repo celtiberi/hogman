@@ -148,12 +148,14 @@ func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, error) {
 	known := normalizePenConfigs(pens, c)
 	want := pacURLWithVersion(c, known)
 	manual := "set System Settings → Network → (your network) → Proxies → Automatic proxy configuration to " + c.pacURL()
-	var done []string
+	var done, left []string
 	for _, svc := range networkServices() {
 		cur, enabled := autoProxyState(svc)
 		switch planAutoProxyAction(cur, enabled, known, want) {
 		case "leave":
-			return "this Mac already uses an automatic proxy (" + cur + "), so it was left alone. To use the pen in browsers, " + manual, nil
+			// Someone else's setting (a company PAC, another tool): leave this
+			// connection alone, but still set the others.
+			left = append(left, svc+" ("+cur+")")
 		case "noop":
 			done = append(done, svc)
 		case "set":
@@ -164,7 +166,13 @@ func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, error) {
 		}
 	}
 	if len(done) == 0 {
+		if len(left) > 0 {
+			return "this Mac already uses another automatic proxy (" + strings.Join(left, ", ") + "), so it was left alone. To use the pen in browsers, " + manual, nil
+		}
 		return manual, nil
+	}
+	if len(left) > 0 {
+		note("left alone (another automatic proxy is set): %s", strings.Join(left, ", "))
 	}
 	if len(known) > 1 {
 		return fmt.Sprintf("Safari, Chrome and others now find all %d pens (%s) by themselves (set on: %s)",

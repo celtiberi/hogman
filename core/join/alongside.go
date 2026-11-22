@@ -199,7 +199,7 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	if st.Server {
 		// An old server link without the for=share mark: never expose a whole
 		// computer to the pen. Undo the join.
-		leaveAlongside(n.Zone)
+		leaveAlongside(n.Zone, false)
 		return errorf("that's a server link: it's for putting something in the pen, not for joining a computer.\n" +
 			"  Use a new one with share, for example: hogman-join share blog 8080 '<server link>'")
 	}
@@ -209,7 +209,7 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	who, err := checkPortalVia(n.Portal, cfg.proxyURL())
 	if err != nil {
 		if existing == nil {
-			leaveAlongside(n.Zone)
+			leaveAlongside(n.Zone, false)
 		}
 		return err
 	}
@@ -287,45 +287,53 @@ func pollPortal(c *http.Client, portal string, d time.Duration) (string, error) 
 
 // removeOwnDevice asks the pen, as this computer, to remove this computer's
 // device. Best effort: leaving still works if the pen can't be reached.
-func removeOwnDevice(zone string) {
+// removeOwnDevice removes this computer's device from the pen through its
+// running connection. It reports whether the pen accepted that.
+func removeOwnDevice(zone string) bool {
 	cfg, err := loadAgentConfig(stateDir(zone))
 	if err != nil {
-		return
+		return false
 	}
 	pool, err := testACMECAPool()
 	if err != nil {
 		note("could not read HOGMAN_ACME_CA_ROOT while leaving: %v", err)
-		return
+		return false
 	}
 	pu, err := url.Parse(cfg.proxyURL())
 	if err != nil {
-		return
+		return false
 	}
 	c := &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{
 		Proxy: http.ProxyURL(pu), TLSClientConfig: &tls.Config{RootCAs: pool}}}
 	var me meView
 	if _, err := homeAPI(c, zone, "GET", "/me", nil, &me); err != nil || me.ThisDevice.ID == 0 {
 		note("could not remove this computer from your devices (the keeper can, on the home page)")
-		return
+		return false
 	}
 	// The pen drops this device as it answers, so the answer may not arrive.
 	if code, err := homeAPI(c, zone, "DELETE", "/devices/"+strconv.FormatInt(me.ThisDevice.ID, 10), nil, nil); err != nil && code != 0 && code != 404 {
 		note("could not remove this computer from your devices: %v", firstLine(err.Error()))
-		return
+		return false
 	}
 	note("removed this computer from your devices")
+	return true
 }
 
 // leaveAlongside undoes side-by-side mode for a pen. Reports whether there was anything to undo.
-func leaveAlongside(zone string) bool {
+// leaveAlongside stops and forgets this computer's connection to the pen.
+// deviceGone: the pen already removed this device, so logging it out (a fresh
+// connection that can only time out) is skipped.
+func leaveAlongside(zone string, deviceGone bool) bool {
 	dir := stateDir(zone)
 	cfg, err := loadAgentConfig(dir)
 	if err != nil {
 		return false
 	}
 	stopAgent(dir, cfg)
-	if self, err := os.Executable(); err == nil {
-		_, _ = run(false, self, "__agent-logout", dir)
+	if !deviceGone {
+		if self, err := os.Executable(); err == nil {
+			_, _ = run(false, self, "__agent-logout", dir)
+		}
 	}
 	_ = os.RemoveAll(dir)
 	remaining := loadInstalledPenConfigs(hogmanConfigBase())

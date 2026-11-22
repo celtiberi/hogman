@@ -135,12 +135,17 @@ func isHogmanPACURL(rawURL string, known []*agentConfig) bool {
 // shouldLeaveAutoProxy reports whether an existing system PAC setting should be
 // left untouched so corporate proxies or unknown local proxies are not overwritten.
 func shouldLeaveAutoProxy(curURL string, enabled bool, known []*agentConfig) bool {
-	return enabled && curURL != "" && !isHogmanPACURL(curURL, known)
+	return enabled && curURL != "" && !isOurPAC(curURL, known)
+}
+
+// isOurPAC: a running pen's rules file, or one a removed pen left behind.
+func isOurPAC(curURL string, known []*agentConfig) bool {
+	return isHogmanPACURL(curURL, known) || staleHogmanPAC(curURL)
 }
 
 func planAutoProxyAction(curURL string, enabled bool, known []*agentConfig, wantURL string) string {
 	if wantURL == "" {
-		if enabled && isHogmanPACURL(curURL, known) {
+		if enabled && isOurPAC(curURL, known) {
 			return "off"
 		}
 		return "noop"
@@ -155,7 +160,7 @@ func planAutoProxyAction(curURL string, enabled bool, known []*agentConfig, want
 }
 
 func planClearAutoProxyAction(curURL string, enabled bool, known []*agentConfig, nextURL string) string {
-	if !enabled || !isHogmanPACURL(curURL, known) {
+	if !enabled || !isOurPAC(curURL, known) {
 		return "noop"
 	}
 	if nextURL == "" {
