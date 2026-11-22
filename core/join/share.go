@@ -620,10 +620,24 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 	defer cm.Close()
 	if err := cm.EnsureWithBackoff(ctx); err != nil {
 		_ = ln443.Close()
-		if isNonRetryableShareCertErr(err) && ctx.Err() == nil {
-			return fail(permanentShare(errorf("no certificate for %s: %v", c.fqdn(), err)))
+		permanent := isNonRetryableShareCertErr(err) && ctx.Err() == nil
+		out := errorf("no certificate for %s: %v", c.fqdn(), err)
+		// A brand-new share that never got a certificate leaves nothing behind:
+		// its name goes back, so it isn't listed as a site that doesn't answer,
+		// and its server leaves the pen. Foreground or --background alike: the
+		// first start of a background share is stopped on its first error
+		// anyway (waitShareBackground). Shares that have had a certificate keep
+		// retrying with the persistent backoff instead.
+		if fresh {
+			cm.Close()
+			undoFreshShare(hc, node, dir, c)
+			out = errorf("no certificate for %s: %v\n  Nothing was left behind: the name %s is free again. Fix the problem above,\n  then share again with a fresh share link (this one is used up).", c.fqdn(), err, c.Name)
+			return fail(permanentShare(out))
 		}
-		return fail(errorf("no certificate for %s: %v", c.fqdn(), err))
+		if permanent {
+			return fail(permanentShare(out))
+		}
+		return fail(out)
 	}
 	go cm.RunFailoverLoop(ctx)
 	tlsSrv := &http.Server{Handler: h, TLSConfig: cm.TLSConfig(), ReadHeaderTimeout: 20 * time.Second, ErrorLog: quiet}
@@ -881,6 +895,24 @@ func giveBack(ctx context.Context, hc *http.Client, c *shareConfig) error {
 	}
 	note("removed its server from your devices")
 	return nil
+}
+
+// undoFreshShare gives a brand-new share's name back and takes its server out
+// of the pen, then forgets it here. Best effort, on its own short clock: it
+// also runs after Ctrl-C.
+func undoFreshShare(hc *http.Client, node io.Closer, dir string, c *shareConfig) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code, err := homeAPI(hc, c.Zone, "DELETE", "/names/"+url.PathEscape(c.Name), nil, nil); err != nil && code != 404 {
+		log.Printf("share %s: could not give the name back: %v", c.fqdn(), err)
+	}
+	if err := giveBackDevice(ctx, hc, c); err != nil {
+		log.Printf("share %s: %v", c.fqdn(), err)
+	}
+	_ = node.Close()
+	for _, f := range []string{"node", "acme", "share.json", "authkey"} {
+		_ = os.RemoveAll(filepath.Join(dir, f))
+	}
 }
 
 // giveBackDevice removes the share's own device from the pen.
