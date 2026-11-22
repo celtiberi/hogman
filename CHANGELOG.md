@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Retired private-CA `hogman-host add <pen> <public-host>`, `escrow_root`, `pki/offline/`, and `step/db/` handling in `deploy/hogman-host`; `hogman-host add <pen>` now always creates a public-certificate pen using `challenge-dns`. Updated `core/test/run.sh`, `core/test/compose.test.yaml`, and `deploy/test-host.sh` to run public-certificate e2e suites against `challenge-dns` + Pebble.
 
 ### Fixed
+- `core/join` browser extension native messaging host, VPN proxy diagnostics, and PAC trailing-dot fix:
+  - Added a read-only user-space Native Messaging host (`hogman-native-host`, `network.hogman.browser`, installed at `<configBase>/bin/` and kept current by `hogman-join update`) with `list_pens` and `watch` ops, `stdout` fd isolation, strict `127.0.0.1:17000–26999` + canonical directory/zone checks, and per-run `status.token` HMAC-SHA256 challenge-response verification to detect loopback port squatting.
+  - Added `hogman-join status` and `hogman-join browser-setup` subcommands, plus macOS `scutil --proxy` / tunnel-interface VPN override and non-Hogman OS proxy conflict detection.
+  - Normalized trailing dots in generated `proxy.pac` scripts (`host.toLowerCase().replace(/\.+$/, "")`) so trailing-dot pen URLs cannot fall through to `DIRECT`.
 - Permanently retire kicked members' site/share names in `core/registrar` instead of expiring them after 90 days (`NAME_HOLD` removed). Retired names can no longer be reclaimed or manually released by anyone (including owners and share servers), matching member handles and pen names (`D-21`); active members releasing their own shares is unchanged.
 - `core/join` public-certificate cleanup and ACME cap handling (D-22 prep):
   - Persist `root_fp` in side-by-side `agentConfig` on private joins, remove legacy Hogman root certificates (matching either stored `root_fp` or the exact `<zone> Root CA` + critical NameConstraints shape for pre-`root_fp` installs) during `hogman-join update` on public pens, and retire old same-server zone folders and roots when re-joining a renamed public zone.
