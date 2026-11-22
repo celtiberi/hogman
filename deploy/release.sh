@@ -56,6 +56,7 @@ done < <(find "$work/prebuilt" -type f -print0)
 echo "provenance checked: $checked files, each built by build.yml from $sha on GitHub's runners"
 
 # Only now that the compiled parts check out, write anything to the website.
+# Keep this path list in sync with .github/workflows/site-deploy.yml.
 git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md deploy/signup deploy/challenge-dns LICENSE README.md \
   | gzip -9n > "$out/$tarball"
 # No macOS file metadata in the bundle (Linux tar warns about it).
