@@ -234,7 +234,7 @@ func shareStart(name, what, rawLink string, o options) error {
 	step("Sharing %s as %s", cfg.showing(), cfg.url())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serveShare(ctx, dir, func(c *shareConfig) {
+	return serveShare(ctx, dir, true, func(c *shareConfig) {
 		shareReady(c, false, false)
 		say("  Stop: Ctrl-C. The name stays yours: run the same command to bring it back.")
 	})
@@ -551,7 +551,9 @@ func untilOK(ctx context.Context, d time.Duration, fn func() (retry bool, err er
 
 // serveShare runs a share until ctx ends. ready is called once its name and
 // certificate are in place.
-func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error {
+// serveShare runs a share until ctx ends. foreground: someone is watching this
+// terminal (not the background service, which keeps retrying instead).
+func serveShare(ctx context.Context, dir string, foreground bool, ready func(*shareConfig)) error {
 	c, err := loadShare(dir)
 	if err != nil {
 		writeShareStatus(dir, "error", err.Error())
@@ -620,10 +622,22 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 	defer cm.Close()
 	if err := cm.EnsureWithBackoff(ctx); err != nil {
 		_ = ln443.Close()
-		if isNonRetryableShareCertErr(err) && ctx.Err() == nil {
-			return fail(permanentShare(errorf("no certificate for %s: %v", c.fqdn(), err)))
+		permanent := isNonRetryableShareCertErr(err) && ctx.Err() == nil
+		out := errorf("no certificate for %s: %v", c.fqdn(), err)
+		// A brand-new share that never got a certificate leaves nothing behind
+		// when someone is watching it fail (or it can never succeed): its name
+		// goes back, so it isn't listed as a site that doesn't answer, and its
+		// server leaves the pen. The background service keeps retrying instead.
+		if fresh && (foreground || permanent) {
+			cm.Close()
+			undoFreshShare(hc, node, dir, c)
+			out = errorf("no certificate for %s: %v\n  Nothing was left behind: the name %s is free again. Fix the problem above,\n  then share again with a fresh share link (this one is used up).", c.fqdn(), err, c.Name)
+			return fail(permanentShare(out))
 		}
-		return fail(errorf("no certificate for %s: %v", c.fqdn(), err))
+		if permanent {
+			return fail(permanentShare(out))
+		}
+		return fail(out)
 	}
 	go cm.RunFailoverLoop(ctx)
 	tlsSrv := &http.Server{Handler: h, TLSConfig: cm.TLSConfig(), ReadHeaderTimeout: 20 * time.Second, ErrorLog: quiet}
@@ -748,7 +762,7 @@ func waitShareBackground(dir string, c *shareConfig, managed bool, pid int, time
 func runShareProcess(dir string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serveShare(ctx, dir, func(c *shareConfig) { log.Printf("%s is up, showing %s", c.url(), c.showing()) })
+	return serveShare(ctx, dir, false, func(c *shareConfig) { log.Printf("%s is up, showing %s", c.url(), c.showing()) })
 }
 
 func stopShare(dir string, c *shareConfig) {
@@ -881,6 +895,24 @@ func giveBack(ctx context.Context, hc *http.Client, c *shareConfig) error {
 	}
 	note("removed its server from your devices")
 	return nil
+}
+
+// undoFreshShare gives a brand-new share's name back and takes its server out
+// of the pen, then forgets it here. Best effort, on its own short clock: it
+// also runs after Ctrl-C.
+func undoFreshShare(hc *http.Client, node io.Closer, dir string, c *shareConfig) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code, err := homeAPI(hc, c.Zone, "DELETE", "/names/"+url.PathEscape(c.Name), nil, nil); err != nil && code != 404 {
+		log.Printf("share %s: could not give the name back: %v", c.fqdn(), err)
+	}
+	if err := giveBackDevice(ctx, hc, c); err != nil {
+		log.Printf("share %s: %v", c.fqdn(), err)
+	}
+	_ = node.Close()
+	for _, f := range []string{"node", "acme", "share.json", "authkey"} {
+		_ = os.RemoveAll(filepath.Join(dir, f))
+	}
 }
 
 // giveBackDevice removes the share's own device from the pen.
