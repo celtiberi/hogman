@@ -230,7 +230,7 @@
         <h3>Locked between your devices</h3>
         <ul class="tech-list">
           <li>Everything inside your pen is encrypted straight from one device to the other.</li>
-          <li>Hogman runs the front gate and hands out the map — even we can't read your chats, photos, or conspiracy theories.</li>
+          <li>Hogman runs the front gate and hands out the map — we can't passively read your chats, photos, or conspiracy theories (<a href="/docs/security.html#threat-model">threat model</a> for what a compromised host could try).</li>
         </ul>
       </article>
 
@@ -271,7 +271,7 @@
       <article class="tech-card">
         <h3>Unprivileged client (<code>hogman-join</code>)</h3>
         <ul class="tech-list">
-          <li>Embeds Tailscale's userspace <code>tsnet</code> as your user — no <code>TUN</code> interface, no <code>sudo</code>, no <code>/etc/hosts</code> edits, and zero conflict with system Tailscale.</li>
+          <li>Embeds Tailscale's userspace <code>tsnet</code> as your user — no <code>TUN</code> interface, no root daemon, no <code>/etc/hosts</code> edits, and zero conflict with system Tailscale (macOS asks for your password once, only to set the browser proxy).</li>
           <li>A PAC-scoped loopback proxy hands pen hostnames into a blind TCP <code>CONNECT</code> tunnel and never terminates TLS.</li>
           <li>Pins every target IP against <code>tsnet</code> <code>WhoIs</code> (prevents DNS rebinding to <code>127.0.0.1</code> or your LAN) and rejects every port except <code>:443</code>.</li>
         </ul>
@@ -307,6 +307,13 @@
 
     <div class="tech-foot">
       <div>
+        <h3>Why not just use Tailscale?</h3>
+        <p style="margin:0 0 1.2rem;color:var(--ash);font-size:0.94rem">If you only want your own
+          devices connected, do — Hogman is built on Tailscale's open-source <code>tsnet</code> and
+          runs cleanly alongside it. Hogman is for running a private web for a <em>group of
+          people</em>: guests join from a single-use link, you manage the herd from a web page, and
+          every site gets real names and standard HTTPS with zero public IPs.
+          <a href="/docs/faq.html">More FAQ &rarr;</a></p>
         <h3>What it's built from</h3>
         <ul class="status">
           <li class="yes">Headscale + Tailscale <code>tsnet</code> (WireGuard mesh, random CGNAT IPs)</li>
@@ -340,13 +347,8 @@
         <a class="btn primary" href="https://get.hogman.network/">Get a pen</a>
       </p>
       <p class="fine">Already invited to someone's pen? Open your invite link, or read the
-        <a href="/docs/join.html">join</a> and <a href="/docs/share.html">share</a> docs.</p>
-      <h3 style="margin-top:1.4rem">Why not just use Tailscale?</h3>
-      <p style="margin-top:0.3rem;color:var(--ash)">If you only want your own devices connected, do —
-        Hogman is built on Tailscale's open-source <code>tsnet</code> and runs cleanly alongside it.
-        Hogman is for running a private web for a <em>group of people</em>: guests join from a
-        single-use link, you manage the herd from a web page, and every site gets real names and
-        standard HTTPS with zero public IPs. <a href="/docs/faq.html" style="color:var(--gold)">More FAQ &rarr;</a></p>
+        <a href="/docs/join.html">join</a>, <a href="/docs/share.html">share</a>, and
+        <a href="/docs/faq.html">FAQ</a> docs.</p>
     </div>
     <div>
       <h3>Not on the bill yet</h3>
