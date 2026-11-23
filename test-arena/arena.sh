@@ -370,7 +370,7 @@ cmd_up() {
   chmod 0700 "$acme/ca-priv"
   chgrp 65532 "$acme/sock" && chmod 0750 "$acme/sock"
 
-  log "Creating --internal ACME network (${ACME_NET}) and starting challenge-dns (CDNS_WEEKLY_CAP=5)"
+  log "Creating --internal ACME network (${ACME_NET}) and starting challenge-dns (CDNS_HOURLY_CAP=5, CDNS_WEEKLY_CAP=20, CDNS_GLOBAL_HOURLY_CAP=40)"
   docker network create --internal "$ACME_NET" >/dev/null
 
   docker run --rm \
@@ -395,7 +395,9 @@ cmd_up() {
     -e CDNS_LISTEN=0.0.0.0:53 \
     -e CDNS_PENS_ZONE=pens.hogman.test \
     -e CDNS_GATE_NAME=_acme-challenge.gate.hogman.test \
-    -e CDNS_WEEKLY_CAP=5 \
+    -e CDNS_HOURLY_CAP=5 \
+    -e CDNS_WEEKLY_CAP=20 \
+    -e CDNS_GLOBAL_HOURLY_CAP=40 \
     -e CDNS_STATE=/cdns/state.json \
     -e CDNS_API_SOCK=/run/hogman-acme/api.sock \
     -e CDNS_ADMIN_SOCK=/cdns/admin.sock \

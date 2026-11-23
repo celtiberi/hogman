@@ -596,26 +596,37 @@ class TestDeterministicJudge(unittest.TestCase):
                 },
             },
         }
-        res = judge.evaluate_cdns_state(clean_state, "pena", "pena.pens.hogman.test", "penb", "penb.pens.hogman.test", weekly_cap=5)
+        res = judge.evaluate_cdns_state(clean_state, "pena", "pena.pens.hogman.test", "penb", "penb.pens.hogman.test", hourly_cap=5, weekly_cap=20, global_hourly_cap=40)
         self.assertTrue(all(c.passed for c in res))
 
-        # Exceeding weekly cap (6 > 5) must fail as breach.
-        over_cap = json.loads(json.dumps(clean_state))
-        over_cap["seen"]["ca"]["_acme-challenge.spam3.pena.pens.hogman.test"] = "2026-11-23T00:00:05Z"
-        res_over = {c.name: c for c in judge.evaluate_cdns_state(over_cap, "pena", "pena.pens.hogman.test", "penb", "penb.pens.hogman.test", weekly_cap=5)}
+        # Exceeding hourly burst cap (6 > 5 in same hour) must fail as breach.
+        over_hourly = json.loads(json.dumps(clean_state))
+        over_hourly["seen"]["ca"]["_acme-challenge.spam3.pena.pens.hogman.test"] = "2026-11-23T00:00:05Z"
+        res_over = {c.name: c for c in judge.evaluate_cdns_state(over_hourly, "pena", "pena.pens.hogman.test", "penb", "penb.pens.hogman.test", hourly_cap=5, weekly_cap=20, global_hourly_cap=40)}
         self.assertFalse(res_over["acme_weekly_cap_enforced_pena"].passed)
         self.assertEqual(res_over["acme_weekly_cap_enforced_pena"].severity, "breach")
+
+        # 6th cert in a later hour (outside 1h rolling window) passes hourly=5, weekly=20.
+        later_hour = json.loads(json.dumps(clean_state))
+        later_hour["seen"]["ca"]["_acme-challenge.spam3.pena.pens.hogman.test"] = "2026-11-23T02:00:00Z"
+        res_later = judge.evaluate_cdns_state(later_hour, "pena", "pena.pens.hogman.test", "penb", "penb.pens.hogman.test", hourly_cap=5, weekly_cap=20, global_hourly_cap=40)
+        self.assertTrue(all(c.passed for c in res_later))
+
+        # Exceeding global hourly cap (5 Pen A + 2 Pen B = 7 > 6) must fail as breach.
+        res_global = {c.name: c for c in judge.evaluate_cdns_state(clean_state, "pena", "pena.pens.hogman.test", "penb", "penb.pens.hogman.test", hourly_cap=5, weekly_cap=20, global_hourly_cap=6)}
+        self.assertFalse(res_global["acme_weekly_cap_enforced_pena"].passed)
+        self.assertEqual(res_global["acme_weekly_cap_enforced_pena"].severity, "breach")
 
         # Cross-pen TXT write under Pen A cred must fail as breach.
         cross = json.loads(json.dumps(clean_state))
         cross["seen"]["ca"] = {"_acme-challenge.vault.penb.pens.hogman.test": "2026-11-23T00:00:05Z"}
-        res_cross = {c.name: c for c in judge.evaluate_cdns_state(cross, "pena", "pena.pens.hogman.test", "penb", "penb.pens.hogman.test", weekly_cap=5)}
+        res_cross = {c.name: c for c in judge.evaluate_cdns_state(cross, "pena", "pena.pens.hogman.test", "penb", "penb.pens.hogman.test", hourly_cap=5, weekly_cap=20, global_hourly_cap=40)}
         self.assertFalse(res_cross["acme_weekly_cap_enforced_pena"].passed)
 
         # Extra Pen B cert must fail isolation check.
         polluted_b = json.loads(json.dumps(clean_state))
         polluted_b["seen"]["cb"]["_acme-challenge.evil.penb.pens.hogman.test"] = "2026-11-23T00:00:05Z"
-        res_b = {c.name: c for c in judge.evaluate_cdns_state(polluted_b, "pena", "pena.pens.hogman.test", "penb", "penb.pens.hogman.test", weekly_cap=5)}
+        res_b = {c.name: c for c in judge.evaluate_cdns_state(polluted_b, "pena", "pena.pens.hogman.test", "penb", "penb.pens.hogman.test", hourly_cap=5, weekly_cap=20, global_hourly_cap=40)}
         self.assertFalse(res_b["acme_weekly_cap_isolated_penb"].passed)
 
     def test_evaluate_pena_directory_integrity(self) -> None:

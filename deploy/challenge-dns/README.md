@@ -12,21 +12,25 @@ It never serves an address. Names under its zones that have nothing are answered
 (NODATA), never "doesn't exist" (NXDOMAIN, RFC 8020). Anything outside its zones is refused.
 
 **Who may write what.** Each pen's registrar has a credential for that pen alone: it can write
-`_acme-challenge.<site>.<its pen name>.pens.hogman.network` and nothing else, and at most
-5 new names a week by default (configurable via `CDNS_WEEKLY_CAP`). `home.<pen>` uses one of those
-slots (leaving 4 shares in a new pen's first week), a failed-then-undone share still counts once its
-challenge name was written, and lowering `CDNS_WEEKLY_CAP` takes effect immediately on restart for
-pens that already have 5+ names in the current 7-day window. The host's front door has one
-credential, for its `*.gate` wildcard only. Tokens are stored as SHA-256 hashes.
+`_acme-challenge.<site>.<its pen name>.pens.hogman.network` and nothing else, subject to a
+two-window cap on distinct new names: by default **5 per rolling hour** (`CDNS_HOURLY_CAP`) and
+**20 per rolling 7 days** (`CDNS_WEEKLY_CAP`) per pen, plus a **40 per rolling hour** global
+ceiling across all pens (`CDNS_GLOBAL_HOURLY_CAP`) to protect the shared CA quotas. `home.<pen>`
+uses one slot, **attempts count rather than issued certs** (a failed-then-undone share still uses a
+slot for 1 hour and 7 days once its challenge TXT was written), and retries or renewals of names
+already in the 7-day window are free. Lowering caps takes effect immediately on restart, and `429`
+responses carry a `Retry-After` header in seconds. The host's front door has one credential, for
+its `*.gate` wildcard only. Tokens are stored as SHA-256 hashes.
 
-**What it keeps, and nothing more:** token hashes; for the weekly cap, which names each pen wrote
-in the last 7 days; recent fallback-key mints (a day); and the names of pens ever given a
-credential, so a deleted pen's name is never handed out again (`challenge-dns name used <name>`).
-That last list holds only names, which are public in the certificate logs anyway.
+**What it keeps, and nothing more:** token hashes; for the hourly and weekly caps, which names each
+pen wrote in the last 7 days (timestamped); recent fallback-key mints (7 days); and the names of
+pens ever given a credential, so a deleted pen's name is never handed out again (`challenge-dns name
+used <name>`). That last list holds only names, which are public in the certificate logs anyway.
 
 **The fallback CA.** With `CDNS_GCP_KEY` set to a Google service-account key that holds
 only `roles/publicca.externalAccountKeyCreator`, `POST /v1/eab` mints one single-use
-Google account key on request, at most 5 a day per credential, within Google's quota.
+Google account key on request, gated by the same per-pen hourly and weekly caps (`CDNS_HOURLY_CAP`,
+`CDNS_WEEKLY_CAP`) within Google's project quota.
 The service-account key never leaves this server. Google refuses an account without a
 contact, so a key is handed out only with `CDNS_GTS_CONTACT` set (`hogman-host
 fallback-contact <email>`), and the response carries that operator address for the account.

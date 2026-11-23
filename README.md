@@ -166,8 +166,9 @@ Read the full breakdown in [Architecture & security](https://hogman.network/docs
   Public Suffix List, use a separate browser profile for any pen you don't fully trust so cookies
   stay isolated.
 - **Current limits & platforms:** macOS and Linux work today; Windows is built but untested; a
-  mobile app is in the works. Pens default to 5 new certificate names per 7 days (`home.<pen>` uses
-  one slot). Pen names, member handles, and kicked site names are permanently retired.
+  mobile app is in the works. Pens default to 5 new certificate names per rolling hour and 20 per
+  rolling 7 days (`home.<pen>` uses one slot; attempts count, not issued certs, and renewals are
+  exempt). Pen names, member handles, and kicked site names are permanently retired.
 
 **Found a security vulnerability?** Don't open a public issue — report it privately using GitHub's
 **Security → Report a vulnerability** button on this repository.

@@ -364,7 +364,7 @@ Every request to a share is encrypted twice, with keys held by the two endpoints
 Publicly trusted certificates on private `100.x` IPs work via **split-horizon DNS-01**:
 
 - **Zero public addresses:** `ns1.hogman.network` (authoritative `miekg/dns`) serves only `SOA`, `NS`, `CAA`, and 10-minute `_acme-challenge.*` `TXT` records (max 2 live per name). Every other query under `pens.hogman.network` returns empty `NODATA`.
-- **Ownership enforcement & caps:** shares call the registrar over the mesh (`POST /api/acme/txt`). The registrar checks live mesh identity, enforces `serverMayUse` (a share can only certify names pointing solely to itself), and writes challenges using the pen's scoped hashed API token (capped at 10 distinct new names/pen/week).
+- **Ownership enforcement & caps:** shares call the registrar over the mesh (`POST /api/acme/txt`). The registrar checks live mesh identity, enforces `serverMayUse` (a share can only certify names pointing solely to itself), and writes challenges using the pen's scoped hashed API token (capped at 5 distinct new names/hour and 20/7 days per pen, plus a 40/hour global ceiling across all pens; attempts count, not issued certs, and renewals are exempt).
 - **CAA + CA failover:** `pens.hogman.network` publishes strict `dns-01` CAA rules for `letsencrypt.org` (primary, with ARI) and `pki.goog` (Google Trust Services failover via single-use mesh EAB on 429/5xx, with persistent backoff up to 1 h). Hosted gates share a wildcard `*.gate.hogman.network` cert so pen names stay out of gate CT entries.
 
 **Public-certificate trade-offs:**

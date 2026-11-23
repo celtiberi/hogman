@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,8 +32,9 @@ import (
 const defaultFallbackACMECA = "https://dv.acme-v02.api.pki.goog/directory"
 
 type meshAPIError struct {
-	Status int
-	Msg    string
+	Status     int
+	Msg        string
+	RetryAfter time.Duration
 }
 
 func (e *meshAPIError) Error() string { return e.Msg }
@@ -74,7 +76,13 @@ func meshJSON(ctx context.Context, hc *http.Client, zone, method, path string, i
 		if msg == "" {
 			msg = http.StatusText(resp.StatusCode)
 		}
-		return &meshAPIError{Status: resp.StatusCode, Msg: msg}
+		var retryAfter time.Duration
+		if raw := strings.TrimSpace(resp.Header.Get("Retry-After")); raw != "" {
+			if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+				retryAfter = time.Duration(secs) * time.Second
+			}
+		}
+		return &meshAPIError{Status: resp.StatusCode, Msg: msg, RetryAfter: retryAfter}
 	}
 	if out != nil && len(bytes.TrimSpace(data)) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
@@ -194,7 +202,7 @@ func (s dns01GateSolver) CleanUp(ctx context.Context, ch acme.Challenge) error {
 
 // shouldFailoverACME returns true only for CA rate limits, CA 5xx responses,
 // or CA transport/outage failures, never for DNS-side failures (including the
-// registrar's 429 weekly cap) or caller cancellations.
+// registrar's 429 rate limits) or caller cancellations.
 func shouldFailoverACME(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return false
@@ -792,7 +800,7 @@ func (m *shareCertManager) EnsureWithBackoff(ctx context.Context) error {
 			state.Failures++
 			state.NextAttempt = m.currentTime().UTC().Add(delay)
 			m.saveRetryState(state)
-			log.Printf("acme: registrar weekly certificate limit reached for %s (%v); next retry after %s", m.host, last, delay)
+			log.Printf("acme: registrar certificate limit reached for %s (%v); next retry after %s", m.host, last, delay)
 			return last
 		}
 		if isNonRetryableShareCertErr(last) {

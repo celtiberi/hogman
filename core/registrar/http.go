@@ -30,7 +30,7 @@ func PublicHandlerWithRateLimit(s *Service, redeemLimit int, window time.Duratio
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /hogman/v1/redeem", func(w http.ResponseWriter, r *http.Request) {
 		if !lim.allow(rateLimitKey(clientIP(r)), time.Now()) {
-			fail(w, &Problem{http.StatusTooManyRequests, "too many requests; try again shortly"})
+			fail(w, &Problem{Status: http.StatusTooManyRequests, Msg: "too many requests; try again shortly"})
 			return
 		}
 		var in struct {
@@ -522,7 +522,7 @@ func requireSameOriginAndJSON(zone string, next http.Handler) http.Handler {
 			if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
 				mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 				if err != nil || mt != "application/json" {
-					fail(w, &Problem{http.StatusUnsupportedMediaType, "Content-Type must be application/json"})
+					fail(w, &Problem{Status: http.StatusUnsupportedMediaType, Msg: "Content-Type must be application/json"})
 					return
 				}
 			}
@@ -629,6 +629,9 @@ func done(w http.ResponseWriter, err error) {
 func fail(w http.ResponseWriter, err error) {
 	var p *Problem
 	if errors.As(err, &p) {
+		if p.RetryAfter > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(p.RetryAfter))
+		}
 		writeJSON(w, p.Status, map[string]string{"error": p.Msg})
 		return
 	}

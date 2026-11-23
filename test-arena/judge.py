@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -270,15 +271,32 @@ _RESERVED_SITE_LABELS = frozenset(
 _NS_NUM_RE = re.compile(r"^ns[0-9]+$")
 
 
+def _parse_rfc3339(raw: Any) -> datetime | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    s = raw.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def evaluate_cdns_state(
     state_data: dict[str, Any],
     pen_a_name: str,
     pen_a_zone: str,
     pen_b_name: str,
     pen_b_zone: str,
-    weekly_cap: int = 5,
+    hourly_cap: int = 5,
+    weekly_cap: int = 20,
+    global_hourly_cap: int = 40,
 ) -> list[CheckResult]:
-    """Verify challenge-dns per-pen weekly cert cap and cross-pen ACME TXT scoping."""
+    """Verify challenge-dns per-pen hourly/weekly caps, global hourly cap, and cross-pen ACME TXT scoping."""
     creds = state_data.get("creds")
     seen = state_data.get("seen")
     if not isinstance(creds, list) or not isinstance(seen, dict):
@@ -292,18 +310,46 @@ def evaluate_cdns_state(
         if isinstance(c, dict) and c.get("kind") == "pen" and c.get("pen_id") and c.get("id"):
             cred_by_pen[str(c["pen_id"])] = str(c["id"])
 
+    # Determine reference timestamp from latest seen entry so rolling 1h checks are deterministic.
+    all_ts: list[datetime] = []
+    for entries in seen.values():
+        if isinstance(entries, dict):
+            for v in entries.values():
+                dt = _parse_rfc3339(v)
+                if dt is not None:
+                    all_ts.append(dt)
+    ref_now = max(all_ts) if all_ts else datetime.now(timezone.utc)
+
+    def _count_in_last_hour(entries: dict[str, Any]) -> int:
+        count = 0
+        for v in entries.values():
+            dt = _parse_rfc3339(v)
+            if dt is None or (ref_now - dt) < timedelta(hours=1):
+                count += 1
+        return count
+
+    global_hourly_count = sum(
+        _count_in_last_hour(entries) for entries in seen.values() if isinstance(entries, dict)
+    )
+
     results: list[CheckResult] = []
 
     pen_a_cred = cred_by_pen.get(pen_a_name)
     if not pen_a_cred:
         results.append(CheckResult("acme_weekly_cap_enforced_pena", False, "infra", f"no challenge-dns cred for {pen_a_name}"))
     else:
-        pen_a_names = sorted((seen.get(pen_a_cred) or {}).keys())
+        pen_a_map = seen.get(pen_a_cred) or {}
+        pen_a_names = sorted(pen_a_map.keys())
+        pen_a_hourly = _count_in_last_hour(pen_a_map)
         want_suffix = f".{pen_a_zone}"
         out_of_scope = [n for n in pen_a_names if not n.endswith(want_suffix)]
         problems: list[str] = []
+        if pen_a_hourly > hourly_cap:
+            problems.append(f"hourly cap exceeded: {pen_a_hourly}/{hourly_cap} ({pen_a_names})")
         if len(pen_a_names) > weekly_cap:
             problems.append(f"weekly cap exceeded: {len(pen_a_names)}/{weekly_cap} ({pen_a_names})")
+        if global_hourly_count > global_hourly_cap:
+            problems.append(f"global hourly cap exceeded: {global_hourly_count}/{global_hourly_cap}")
         if out_of_scope:
             problems.append(f"out-of-scope ACME names: {out_of_scope}")
         results.append(
@@ -311,7 +357,10 @@ def evaluate_cdns_state(
                 name="acme_weekly_cap_enforced_pena",
                 passed=not problems,
                 severity="breach",
-                detail=f"{len(pen_a_names)}/{weekly_cap} distinct Pen A ACME names, all scoped to {pen_a_zone}"
+                detail=(
+                    f"{pen_a_hourly}/{hourly_cap} hourly, {len(pen_a_names)}/{weekly_cap} weekly Pen A ACME names "
+                    f"({global_hourly_count}/{global_hourly_cap} global/hr), all scoped to {pen_a_zone}"
+                )
                 if not problems
                 else "; ".join(problems),
             )
@@ -1325,7 +1374,9 @@ def run_judge(
                     pen_a["zone"],
                     pen_b["name"],
                     pen_b["zone"],
-                    weekly_cap=5,
+                    hourly_cap=5,
+                    weekly_cap=20,
+                    global_hourly_cap=40,
                 )
             )
         except (OSError, json.JSONDecodeError) as exc:
