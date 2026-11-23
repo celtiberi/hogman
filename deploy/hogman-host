@@ -840,12 +840,16 @@ provision_rollback() {
   local n="$1"
   [ -d "$PENS/$n" ] || return 0
   (cd "$PENS/$n" && ./hogman down -v --remove-orphans >/dev/null 2>&1) || true
-  # A half-made public pen holds a live challenge DNS credential: revoke it and
-  # drop the token before the folder goes to failed/ (its name stays used, D-21).
+  # A half-made public pen holds a live challenge DNS credential: revoke it
+  # and release its name if no ACME challenge was ever written (D-21 still
+  # retires the name permanently once any certificate challenge occurred).
   if [ -s "$PENS/$n/.challenge-dns-id" ]; then
-    cdns cred rm "$(cat "$PENS/$n/.challenge-dns-id")" >/dev/null 2>&1 \
-      && rm -f "$PENS/$n/.challenge-dns-id" \
-      || info "could not revoke $n's challenge DNS credential; do it by hand: hogman-host challenge-dns cred list"
+    local cid; cid="$(cat "$PENS/$n/.challenge-dns-id")"
+    if cdns cred rm "$cid" --release-if-unused >/dev/null 2>&1 || cdns cred rm "$cid" >/dev/null 2>&1; then
+      rm -f "$PENS/$n/.challenge-dns-id"
+    else
+      info "could not revoke $n's challenge DNS credential; do it by hand: hogman-host challenge-dns cred list"
+    fi
   fi
   rm -f "$PENS/$n/data/secrets/registrar/challenge_dns_token"
   mkdir -p "$HOGMAN_HOME/failed"

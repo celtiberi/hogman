@@ -47,7 +47,7 @@ challenge-dns serve                      # CDNS_LISTEN=203.0.113.10:53, see `cha
 challenge-dns cred add pen <penname>     # prints the token once
 challenge-dns cred add host
 challenge-dns cred list
-challenge-dns cred rm <id>
+challenge-dns cred rm <id> [--release-if-unused]   # --release-if-unused: only for failed-provision rollback before any TXT/EAB occurred
 challenge-dns name used <penname>        # sign-up asks before raising a pen
 ```
 

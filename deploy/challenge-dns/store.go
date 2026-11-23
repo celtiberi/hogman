@@ -88,12 +88,13 @@ func retryAfterFromOldest(oldest, now time.Time, window time.Duration) time.Dura
 // (only the front door's wildcard challenge). Only the token's hash is kept.
 // Plan is "" (personal) or "work" (higher per-pen certificate caps, D-30).
 type Cred struct {
-	ID      string    `json:"id"`
-	Kind    string    `json:"kind"`
-	PenID   string    `json:"pen_id,omitempty"`
-	Plan    string    `json:"plan,omitempty"`
-	Hash    string    `json:"hash"`
-	Created time.Time `json:"created"`
+	ID             string    `json:"id"`
+	Kind           string    `json:"kind"`
+	PenID          string    `json:"pen_id,omitempty"`
+	Plan           string    `json:"plan,omitempty"`
+	Hash           string    `json:"hash"`
+	Created        time.Time `json:"created"`
+	EverChallenged bool      `json:"ever_challenged,omitempty"`
 }
 
 // state is what survives a restart, and deliberately little of it:
@@ -367,18 +368,68 @@ func (s *Store) NameUsed(name string) bool {
 	return s.usedLocked(normalize(name))
 }
 
+// RemoveCred revokes a credential while keeping its pen name permanently
+// retired (D-21).
 func (s *Store) RemoveCred(id string) error {
+	_, err := s.RemoveCredWithOptions(id, false)
+	return err
+}
+
+// RemoveCredWithOptions revokes a credential. When releaseIfUnused is true
+// (used only by failed-provision rollback) and the pen credential never wrote
+// an ACME TXT challenge or minted a fallback EAB key, its pen name is released
+// from Used so a host-side provisioning failure does not burn the buyer's
+// chosen name. Once any challenge or EAB mint occurred, the name stays retired
+// forever (D-21).
+func (s *Store) RemoveCredWithOptions(id string, releaseIfUnused bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, c := range s.st.Creds {
-		if c.ID == id {
-			s.st.Creds = append(s.st.Creds[:i], s.st.Creds[i+1:]...)
-			delete(s.st.Seen, id)
-			delete(s.st.EAB, id)
-			return s.saveLocked()
+		if c.ID != id {
+			continue
+		}
+		canRelease := releaseIfUnused && c.Kind == "pen" && !c.EverChallenged &&
+			len(s.st.Seen[id]) == 0 && len(s.st.EAB[id]) == 0
+		prevCreds := append([]Cred(nil), s.st.Creds...)
+		prevSeen := s.st.Seen[id]
+		prevEAB := s.st.EAB[id]
+		prevUsed := append([]string(nil), s.st.Used...)
+
+		s.st.Creds = append(s.st.Creds[:i], s.st.Creds[i+1:]...)
+		delete(s.st.Seen, id)
+		delete(s.st.EAB, id)
+		if canRelease {
+			kept := make([]string, 0, len(s.st.Used))
+			for _, n := range s.st.Used {
+				if n != c.PenID {
+					kept = append(kept, n)
+				}
+			}
+			s.st.Used = kept
+		}
+		if err := s.saveLocked(); err != nil {
+			s.st.Creds = prevCreds
+			if prevSeen != nil {
+				s.st.Seen[id] = prevSeen
+			}
+			if prevEAB != nil {
+				s.st.EAB[id] = prevEAB
+			}
+			s.st.Used = prevUsed
+			return false, err
+		}
+		return canRelease, nil
+	}
+	return false, fmt.Errorf("no credential %q", id)
+}
+
+func (s *Store) markChallengedLocked(id string) {
+	for i := range s.st.Creds {
+		if s.st.Creds[i].ID == id {
+			s.st.Creds[i].EverChallenged = true
+			return
 		}
 	}
-	return fmt.Errorf("no credential %q", id)
 }
 
 func (s *Store) Creds() []Cred {
@@ -540,6 +591,7 @@ func (s *Store) countLocked(c Cred, fqdn string, now time.Time) error {
 		seen[fqdn] = now
 	}
 	s.st.Seen[c.ID] = seen
+	s.markChallengedLocked(c.ID)
 	return s.saveLocked()
 }
 
@@ -641,5 +693,6 @@ func (s *Store) AllowEAB(c Cred) error {
 		return &rateLimitError{cause: errEABHourlyCap, retryAfter: retryAfterFromOldest(oldestHourly, now, hourlyWindow)}
 	}
 	s.st.EAB[c.ID] = append(recent, now)
+	s.markChallengedLocked(c.ID)
 	return s.saveLocked()
 }
