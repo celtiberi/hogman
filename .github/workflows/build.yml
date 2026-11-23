@@ -15,8 +15,25 @@ permissions:
   contents: read
 
 jobs:
+  # Pull requests run in a separate read-only job with no OIDC or attestation
+  # permissions so unmerged PR changes never hold signing capabilities.
+  check-pr:
+    name: check build (pull request)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Compile
+        run: deploy/build-bins.sh . prebuilt
+      - name: List
+        run: find prebuilt -type f | sort
+
   bins:
     name: compile (join tool, registrar, sign-up page)
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -32,7 +49,6 @@ jobs:
       # SLSA build provenance: which workflow, commit and runner made each file.
       # Anyone can check it with `gh attestation verify FILE --repo celtiberi/hogman`.
       - name: Attest provenance
-        if: github.event_name != 'pull_request'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: "prebuilt/**/*"

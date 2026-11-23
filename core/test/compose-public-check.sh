@@ -61,13 +61,10 @@ expected_all="$(
 )"
 [ -n "$expected_all" ] || fail "found no shipped container images"
 while IFS= read -r img; do
-  case "$img" in
-    *@sha256:*) ;;
-    *:latest|*:edge|*:stable|*:main) fail "floating tag on shipped image: $img" ;;
-    *:*) ;;
-    *) fail "unpinned shipped image (missing tag): $img" ;;
-  esac
+  [[ "$img" =~ @sha256:[0-9a-f]{64}$ ]] || fail "shipped image is not pinned by immutable @sha256 digest: $img"
 done <<< "$expected_all"
+build_go_img="$(grep -m1 '^GO_IMAGE=' "$REPO/deploy/build-bins.sh" | cut -d'"' -f2)"
+[[ "$build_go_img" =~ @sha256:[0-9a-f]{64}$ ]] || fail "deploy/build-bins.sh GO_IMAGE is not pinned by immutable @sha256 digest: $build_go_img"
 
 tmp_home="$(mktemp -d)"
 trap 'rm -rf "$tmp_home"' EXIT

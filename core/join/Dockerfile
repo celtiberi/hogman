@@ -3,7 +3,7 @@
 #   docker build --output type=local,dest=../data/join-dl join
 # File names match `uname -s`-`uname -m`, so a one-line shell command can
 # fetch the right one.
-FROM golang:1.27-alpine AS build
+FROM golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
