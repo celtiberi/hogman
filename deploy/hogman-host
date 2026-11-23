@@ -157,7 +157,9 @@ write_front() {
     chown -R "$fuid:$fgid" "$FRONT/data" "$FRONT/config"
   fi
 
-  local caddy="$FRONT/Caddyfile.new" compose="$FRONT/compose.yaml.new" aliases="" n host
+  local caddy compose aliases="" n host
+  caddy="$(mktemp "$FRONT/.Caddyfile.XXXXXX")"
+  compose="$(mktemp "$FRONT/.compose.yaml.XXXXXX")"
   {
     echo "# Written by hogman-host. Edit pens, not this file."
     echo "{"
@@ -200,9 +202,15 @@ write_front() {
 		file_server
 	}
 	handle_path /join/assets/* {
-		root * /srv/join-page
-		header X-Content-Type-Options nosniff
-		file_server
+		@asset path /join.css /join.js /hogman-32.png /hogman-48.png /hogman-icon.webp /work-favicon.svg
+		handle @asset {
+			root * /srv/join-page
+			header X-Content-Type-Options nosniff
+			file_server
+		}
+		handle {
+			respond 404
+		}
 	}
 	handle_path /join/dl/* {
 		root * /srv/join-dl
@@ -317,9 +325,10 @@ networks:
 EOF
   # Rewritten in place, not renamed over: the front door mounts this one file,
   # and a mounted file that is replaced stays the old one inside the container.
-  cat "$caddy" > "$FRONT/Caddyfile"; rm -f "$caddy"
-  chmod 644 "$FRONT/Caddyfile"
-  mv "$compose" "$FRONT/compose.yaml"
+  # Serialised under $FRONT/.lock so concurrent provision/gate-reload runs
+  # cannot interleave Caddyfile writes and reloads.
+  with_lock "$FRONT/.lock" sh -c 'cat "$1" > "$2" && rm -f "$1" && chmod 644 "$2" && mv "$3" "$4"' \
+    _ "$caddy" "$FRONT/Caddyfile" "$compose" "$FRONT/compose.yaml"
 }
 
 # front_join: attach the running front door to each live pen's network (with
@@ -344,8 +353,13 @@ front_join() {
 }
 
 reload_front() {
+  local rc=0
   (
     cd "$FRONT"
+    if command -v flock >/dev/null; then
+      exec 9>"$FRONT/.lock"
+      flock 9
+    fi
     # `compose up` only when the front door is down or its compose file changed.
     # Run on every reload, newer Compose sees the pen networks front_join
     # attached as drift and recreates the front door, cutting every pen.
@@ -362,7 +376,8 @@ reload_front() {
       sleep 1
     done
     exit 1
-  ) || die "the front door did not reload; see: cd $FRONT && docker compose logs front"
+  ) || rc=$?
+  [ "$rc" -eq 0 ] || die "the front door did not reload; see: cd $FRONT && docker compose logs front"
 }
 
 # ------------------------------------------------------------- commands ----
@@ -372,7 +387,7 @@ cmd_init() {
   [ "${1:-}" = --test ] && tls="local_certs"
   command -v docker >/dev/null || die "Docker is not installed"
   mkdir -p "$SRC" "$FRONT/data" "$FRONT/config" "$PENS"
-  chmod 700 "$FRONT/data"
+  chmod 700 "$FRONT/data" "$PENS"
   [ -f "$SRC/hogman" ] || die "copy the core/ code into $SRC first (deploy/README.md explains)"
   local ip4=""
   if [ -z "$tls" ]; then
@@ -632,6 +647,7 @@ cmd_backup_setup() {
 #!/bin/sh
 # Forced command for the hogman-backup account: list or fetch one backup file.
 set -eu
+set -f
 dir=/var/backups/hogman
 set -- ${SSH_ORIGINAL_COMMAND:-}
 case "${1:-}" in
@@ -671,14 +687,19 @@ UNIT
 
 cmd_backup_allow() {
   local pub="${1:-}"
-  [[ "$pub" =~ ^(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa)\ [A-Za-z0-9+/=]+(\ [^\"]*)?$ ]] || die "usage: hogman-host backup-allow '<ssh public key>'"
+  # Reject newlines/CR/control chars so a multiline comment cannot inject an
+  # unrestricted second line into authorized_keys.
+  [[ "$pub" != *$'\n'* && "$pub" != *$'\r'* ]] \
+    && [[ "$pub" =~ ^(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa)\ [A-Za-z0-9+/=]+(\ [!-~]+(\ [!-~]+)*)?$ ]] \
+    && [[ "$pub" != *\"* ]] \
+    || die "usage: hogman-host backup-allow '<ssh public key>'"
   id hogman-backup >/dev/null 2>&1 || die "run hogman-host backup-setup first"
   local home; home="$(getent passwd hogman-backup | cut -d: -f6)"
-  install -d -m 0700 -o hogman-backup -g hogman-backup "$home/.ssh"
+  install -d -m 0750 -o root -g hogman-backup "$home/.ssh"
   local line="command=\"$SERVE\",restrict $pub"
   touch "$home/.ssh/authorized_keys"
   grep -qxF "$line" "$home/.ssh/authorized_keys" || echo "$line" >> "$home/.ssh/authorized_keys"
-  chown hogman-backup:hogman-backup "$home/.ssh/authorized_keys"; chmod 0600 "$home/.ssh/authorized_keys"
+  chown root:hogman-backup "$home/.ssh/authorized_keys"; chmod 0640 "$home/.ssh/authorized_keys"
   info "That key can now list and download encrypted backups as hogman-backup@$(hostname), and nothing else."
 }
 
@@ -700,8 +721,10 @@ backup_pen() {  # backup_pen <name>
   tar -C "$stage" -czf - . | age -r "$(cat "$RECIPIENT")" > "$out.part"
   rm -rf "$stage"
   chown root:hogman-backup "$out.part"; chmod 0640 "$out.part"; mv "$out.part" "$out"
-  # Keep the newest few here; the machine that downloads them keeps the history.
-  ls -1t "$BACKUPS/$n"-*.tar.gz.age 2>/dev/null | tail -n +$((KEEP_LOCAL + 1)) | xargs -r rm -f
+  # Keep the newest few here; anchor to the exact timestamp suffix so pen "foo"
+  # never matches and prunes backups of "foo-bar".
+  ls -1t "$BACKUPS/$n"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.tar.gz.age 2>/dev/null \
+    | tail -n +$((KEEP_LOCAL + 1)) | xargs -r rm -f
   info "$n: $(basename "$out") ($(du -h "$out" | cut -f1))"
 }
 
@@ -719,7 +742,7 @@ cmd_backup() {
     local ts out; ts="$(date -u +%Y%m%dT%H%M%SZ)"; out="$BACKUPS/challenge-dns-$ts.tar.gz.age"
     tar -C "$(dirname "$CDNS_STATE")" -czf - "$(basename "$CDNS_STATE")" | age -r "$(cat "$RECIPIENT")" > "$out.part" \
       && chown root:hogman-backup "$out.part" && chmod 0640 "$out.part" && mv "$out.part" "$out"
-    ls -1t "$BACKUPS"/challenge-dns-*.tar.gz.age 2>/dev/null | tail -n +$((KEEP_LOCAL + 1)) | xargs -r rm -f
+    ls -1t "$BACKUPS"/challenge-dns-[0-9]*.tar.gz.age 2>/dev/null | tail -n +$((KEEP_LOCAL + 1)) | xargs -r rm -f
   fi
 }
 
@@ -852,7 +875,7 @@ provision_rollback() {
     fi
   fi
   rm -f "$PENS/$n/data/secrets/registrar/challenge_dns_token"
-  mkdir -p "$HOGMAN_HOME/failed"
+  install -d -m 0700 "$HOGMAN_HOME/failed"
   mv "$PENS/$n" "$HOGMAN_HOME/failed/$n-$(date -u +%Y%m%dT%H%M%SZ)"
   write_front; reload_front
   docker network rm "pen-$n-core" >/dev/null 2>&1 || true
@@ -874,12 +897,14 @@ cmd_signup_setup() {
   set_host_var SIGNUP_HOST "$host"
   set_host_var MAX_PENS "$max"
   load_host
-  mkdir -p "$SIGNUP"; chmod 700 "$SIGNUP"
+  install -d -m 0700 "$SIGNUP"
   [ -f "$SIGNUP/codes" ] || install -m 0600 /dev/null "$SIGNUP/codes"
-  # Readable inside the page's container (it runs as nobody); the folder
-  # around it keeps everyone else on this server out.
-  [ -s "$SIGNUP/token" ] || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$SIGNUP/token"
-  chmod 0644 "$SIGNUP/token"
+  # Readable by root (broker) and group 65534 (unprivileged web container) only.
+  if [ ! -s "$SIGNUP/token" ]; then
+    ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$SIGNUP/token" )
+  fi
+  chown 0:65534 "$SIGNUP/token" 2>/dev/null || true
+  chmod 0440 "$SIGNUP/token"
   rsync -a --delete "$HOGMAN_HOME/signup-src/" "$SIGNUP/build/"
   local arch dockerfile=Dockerfile
   case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) arch="" ;; esac
@@ -905,7 +930,10 @@ cmd_signup_setup() {
       STRIPE_WORK_PRICE: \"${SIGNUP_STRIPE_WORK_PRICE:-}\"
       STRIPE_AUTOMATIC_TAX: \"${SIGNUP_STRIPE_TAX:-}\"
       PUBLIC_URL: https://$SIGNUP_HOST"
-    broker_stripe="      STRIPE_WEBHOOK_SECRET_FILE: $SIGNUP/stripe_webhook_secret"
+    local expect_live="0"
+    case "$(cat "$SIGNUP/stripe_key" 2>/dev/null)" in *_live_*) expect_live="1" ;; esac
+    broker_stripe="      STRIPE_WEBHOOK_SECRET_FILE: $SIGNUP/stripe_webhook_secret
+      STRIPE_EXPECT_LIVEMODE: \"$expect_live\""
   fi
   local cf_env=""
   if [ "${SIGNUP_CLOUDFLARE:-}" = 1 ]; then
@@ -934,6 +962,7 @@ services:
     restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     user: "65534:65534"
     mem_limit: 64m
     pids_limit: 64
@@ -960,6 +989,7 @@ $web_extra_vols
     build: { context: ./build, dockerfile: $dockerfile, target: broker }
     image: hogman/signup-broker:local
     restart: unless-stopped
+    security_opt: [no-new-privileges:true]
     mem_limit: 128m
     pids_limit: 256
     environment:
@@ -1154,10 +1184,12 @@ send_invite_mail() {  # send_invite_mail <to> <code> <link> <pen>
 
 resend_send() {  # resend_send <to> <subject> <json-escaped text>
   # <to> passed the page's email check (no quotes or backslashes), and the
-  # rest is ours, so plain printf is enough to build the JSON.
+  # rest is ours, so plain printf is enough to build the JSON. Pass the API
+  # key via a curl config fd so it never appears in /proc/<pid>/cmdline.
   printf '{"from":"%s","to":["%s"],"subject":"%s","text":"%s"}' "$SIGNUP_FROM" "$1" "$2" "$3" \
     | curl -fsS -m 20 -o /dev/null https://api.resend.com/emails \
-        -H "Authorization: Bearer $(cat "$SIGNUP/resend_key")" -H "Content-Type: application/json" --data-binary @-
+        -K <(printf 'header = "Authorization: Bearer %s"\n' "$(cat "$SIGNUP/resend_key")") \
+        -H "Content-Type: application/json" --data-binary @-
 }
 
 # signup-mail "<from>" < key: email codes to the waiting list through Resend
@@ -1440,6 +1472,7 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
+InaccessiblePaths=-$HOGMAN_HOME -/var/lib/hogman-gate -/var/backups
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -1709,6 +1742,7 @@ ReadWritePaths=/run/hogman-acme
 CapabilityBoundingSet=
 NoNewPrivileges=yes
 ProtectSystem=strict
+InaccessiblePaths=-$HOGMAN_HOME -/etc/hogman -/var/backups -/var/lib/challenge-dns
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // The waiting list: people who'd like a pen when there's room, or who have no
@@ -25,7 +26,10 @@ import (
 
 const waitlistMax = 5000
 
-var emailRE = regexp.MustCompile(`^[^\s@<>"',;:\\]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$`)
+// Strict printable-ASCII local-part allowlist: blocks NUL, ESC/ANSI, C1, and
+// whitespace/quote/backslash characters so stored emails are safe in terminal
+// output, bash fields, and Resend JSON payloads.
+var emailRE = regexp.MustCompile("^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+$")
 
 type waitEntry struct {
 	ID     int
@@ -38,11 +42,15 @@ type waitEntry struct {
 
 func validEmail(e string) bool { return len(e) <= 254 && emailRE.MatchString(e) }
 
-// cleanField keeps a field to one line with no tabs, so the file stays parseable.
+// cleanField keeps a field to one line with no tabs or control/BiDi characters,
+// so the file stays parseable and safe to display in operator terminals.
 func cleanField(s string, max int) string {
 	s = strings.Map(func(r rune) rune {
-		if r == '\t' || r == '\n' || r == '\r' || r < 0x20 || r == 0x7f {
+		if r == '\t' || r == '\n' || r == '\r' || r == '\u2028' || r == '\u2029' {
 			return ' '
+		}
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return -1
 		}
 		return r
 	}, strings.TrimSpace(s))

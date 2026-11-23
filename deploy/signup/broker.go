@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,19 +23,26 @@ import (
 // broker raises pens. One at a time: a small server should not build two
 // pens at once, and it makes a sign-up code impossible to use twice.
 type broker struct {
-	home          string // HOGMAN_HOME
-	tool          string // hogman-host
-	token         string
-	ntfy          string // optional: ntfy topic URL for the operator's pushes
-	mu            sync.Mutex
-	limitMu       sync.Mutex
-	waitJoins     *limiter
-	waitNotify    *limiter
-	raiseNotify   *limiter
-	healthNotify  *limiter
-	ntfySem       chan struct{}
-	suffixFn      func() (string, error) // nil uses randomPenSuffix (tests override)
-	webhookSecret string                 // Stripe's webhook signing secret; empty: payments off
+	home             string // HOGMAN_HOME
+	tool             string // hogman-host
+	token            string
+	ntfy             string // optional: ntfy topic URL for the operator's pushes
+	mu               sync.Mutex
+	limitMu          sync.Mutex
+	waitJoins        *limiter
+	waitNotify       *limiter
+	raiseNotify      *limiter
+	healthNotify     *limiter
+	ntfySem          chan struct{}
+	runSem           chan struct{} // bounds concurrent non-provision hogman-host forks
+	capMu            sync.Mutex
+	capCache         *capacity
+	capCachedAt      time.Time
+	suffixFn         func() (string, error) // nil uses randomPenSuffix (tests override)
+	webhookSecret    string                 // Stripe's webhook signing secret; empty: payments off
+	minPersonalCents int64                  // optional minimum cents for personal Stripe checkout
+	minWorkCents     int64                  // optional minimum cents for work Stripe checkout
+	expectLivemode   *bool                  // optional Stripe ev.Livemode guard
 }
 
 func (b *broker) nextSuffix() (string, error) {
@@ -52,9 +60,25 @@ func runBroker() {
 		ntfy:  env("NTFY_URL", ""),
 	}
 	b.webhookSecret = readWebhookSecret("STRIPE_WEBHOOK_SECRET_FILE")
+	b.minPersonalCents, _ = strconv.ParseInt(strings.TrimSpace(os.Getenv("STRIPE_MIN_PERSONAL_CENTS")), 10, 64)
+	b.minWorkCents, _ = strconv.ParseInt(strings.TrimSpace(os.Getenv("STRIPE_MIN_WORK_CENTS")), 10, 64)
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("STRIPE_EXPECT_LIVEMODE"))) {
+	case "1", "true":
+		v := true
+		b.expectLivemode = &v
+	case "0", "false":
+		v := false
+		b.expectLivemode = &v
+	}
 	addr := env("BROKER_ADDR", ":9090")
 	log.Printf("broker on %s", addr)
-	srv := &http.Server{Addr: addr, Handler: b.handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           b.handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	log.Fatal(srv.ListenAndServe())
 }
 
@@ -75,6 +99,9 @@ func (b *broker) ensureLimits() {
 	}
 	if b.ntfySem == nil {
 		b.ntfySem = make(chan struct{}, 4)
+	}
+	if b.runSem == nil {
+		b.runSem = make(chan struct{}, 6)
 	}
 }
 
@@ -107,8 +134,8 @@ func (b *broker) handler() http.Handler {
 	mux.HandleFunc("POST /stripe/event", b.stripeEvent)
 	mux.HandleFunc("GET /paid-code", b.paidCode)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(b.token)) != 1 {
+		got, hasBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !hasBearer || subtle.ConstantTimeCompare([]byte(got), []byte(b.token)) != 1 {
 			jsonOut(w, 401, map[string]string{"error": "unauthorized"})
 			return
 		}
@@ -122,7 +149,22 @@ type capacity struct {
 	Open bool `json:"open"`
 }
 
+// run executes hogman-host gated by a small concurrency semaphore so bursts of
+// /capacity or /check requests cannot saturate the broker's pids_limit.
 func (b *broker) run(ctx context.Context, args ...string) (stdout []byte, code int, stderr string) {
+	b.ensureLimits()
+	select {
+	case b.runSem <- struct{}{}:
+		defer func() { <-b.runSem }()
+	case <-ctx.Done():
+		return nil, -1, ctx.Err().Error()
+	}
+	return b.runUnbounded(ctx, args...)
+}
+
+// runUnbounded runs hogman-host without the non-provision semaphore (used by
+// provision, which is already serialized under b.mu and must not be starved).
+func (b *broker) runUnbounded(ctx context.Context, args ...string) (stdout []byte, code int, stderr string) {
 	cmd := exec.CommandContext(ctx, b.tool, args...)
 	cmd.Env = append(os.Environ(), "HOGMAN_HOME="+b.home)
 	var out, errb bytes.Buffer
@@ -139,7 +181,66 @@ func (b *broker) run(ctx context.Context, args ...string) (stdout []byte, code i
 	return out.Bytes(), code, errb.String()
 }
 
+// readCapacityLocal computes capacity in Go without forking hogman-host when
+// $HOGMAN_HOME/host.env exists (production), avoiding PID exhaustion on /api/status.
+func (b *broker) readCapacityLocal() (*capacity, bool) {
+	if os.Getenv("FAKE_MAX") != "" {
+		return nil, false
+	}
+	envBytes, err := os.ReadFile(filepath.Join(b.home, "host.env"))
+	if err != nil {
+		return nil, false
+	}
+	maxPens := 8
+	for _, line := range strings.Split(string(envBytes), "\n") {
+		line = strings.TrimSpace(line)
+		if val, ok := strings.CutPrefix(line, "MAX_PENS="); ok {
+			val = strings.Trim(strings.TrimSpace(val), `"'`)
+			if n, err := strconv.Atoi(val); err == nil && n >= 0 {
+				maxPens = n
+			}
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(b.home, "pens"))
+	if err != nil && !os.IsNotExist(err) {
+		return nil, false
+	}
+	pens := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(b.home, "pens", e.Name(), ".removed")); err == nil {
+			continue
+		}
+		pens++
+	}
+	return &capacity{Pens: pens, Max: maxPens, Open: pens < maxPens}, true
+}
+
+func (b *broker) invalidateCapacityCache() {
+	b.capMu.Lock()
+	b.capCache = nil
+	b.capMu.Unlock()
+}
+
 func (b *broker) readCapacity(ctx context.Context) (*capacity, error) {
+	b.capMu.Lock()
+	if b.capCache != nil && time.Since(b.capCachedAt) < 2*time.Second {
+		cp := *b.capCache
+		b.capMu.Unlock()
+		return &cp, nil
+	}
+	b.capMu.Unlock()
+
+	if c, ok := b.readCapacityLocal(); ok {
+		b.capMu.Lock()
+		cp := *c
+		b.capCache = &cp
+		b.capCachedAt = time.Now()
+		b.capMu.Unlock()
+		return c, nil
+	}
 	out, code, stderr := b.run(ctx, "capacity")
 	if code != 0 {
 		return nil, fmt.Errorf("capacity: exit %d: %s", code, lastLine(stderr))
@@ -428,7 +529,8 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 	if plan == planWork {
 		args = append(args, "--plan", planWork)
 	}
-	out, code, stderr := b.run(ctx, args...)
+	out, code, stderr := b.runUnbounded(ctx, args...)
+	b.invalidateCapacityCache()
 	switch code {
 	case 0:
 	case 2:

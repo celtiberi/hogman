@@ -529,11 +529,6 @@ func TestWebCreateValidatesCodeAndCapsJobs(t *testing.T) {
 	// Open job cap: mock broker validates synchronously and blocks provision on a gate.
 	gate := make(chan struct{})
 	gateClosed := false
-	defer func() {
-		if !gateClosed {
-			close(gate)
-		}
-	}()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/validate":
@@ -546,12 +541,18 @@ func TestWebCreateValidatesCodeAndCapsJobs(t *testing.T) {
 		}
 	}))
 	defer mock.Close()
+	defer func() {
+		if !gateClosed {
+			close(gate)
+		}
+	}()
 
 	wb2 := newWeb(mock.URL, testToken, "pens.test")
 	h2 := wb2.handler()
 	var ids []string
 	for i := 1; i <= defaultMaxOpenJobs; i++ {
-		code, out := call(h2, "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"pen`+strconv.Itoa(i)+`","handle":"alice"}`, map[string]string{
+		codeVal := "PIG-AAAA-BBB" + string(rune('A'+i-1))
+		code, out := call(h2, "POST", "/api/create", `{"code":"`+codeVal+`","pen":"pen`+strconv.Itoa(i)+`","handle":"alice"}`, map[string]string{
 			"Content-Type": "application/json", "X-Forwarded-For": "198.51.100." + strconv.Itoa(i),
 		})
 		if code != 202 {
@@ -559,7 +560,13 @@ func TestWebCreateValidatesCodeAndCapsJobs(t *testing.T) {
 		}
 		ids = append(ids, out["job"].(string))
 	}
-	if code, _ := call(h2, "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"extra","handle":"alice"}`, map[string]string{
+	// Reusing an in-flight code is rejected immediately with 409.
+	if code, _ := call(h2, "POST", "/api/create", `{"code":"PIG-AAAA-BBBA","pen":"dup","handle":"alice"}`, map[string]string{
+		"Content-Type": "application/json", "X-Forwarded-For": "198.51.100.98",
+	}); code != 409 {
+		t.Fatalf("duplicate in-flight code status = %d, want 409", code)
+	}
+	if code, _ := call(h2, "POST", "/api/create", `{"code":"PIG-AAAA-BBZZ","pen":"extra","handle":"alice"}`, map[string]string{
 		"Content-Type": "application/json", "X-Forwarded-For": "198.51.100.99",
 	}); code != 503 {
 		t.Fatalf("over open-job cap status = %d, want 503", code)

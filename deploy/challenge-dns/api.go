@@ -96,6 +96,8 @@ func (a *API) Handler() http.Handler {
 		case err == nil:
 			log.Printf("txt put %s by %s", normalize(in.FQDN), c.ID)
 			writeJSON(w, http.StatusCreated, map[string]bool{"ok": true})
+		case errors.Is(err, errRevoked):
+			fail(w, http.StatusUnauthorized, "unauthorized")
 		case errors.Is(err, errScope):
 			fail(w, http.StatusForbidden, err.Error())
 		case errors.Is(err, errValue):
@@ -118,11 +120,16 @@ func (a *API) Handler() http.Handler {
 		if !readJSON(w, r, &in) {
 			return
 		}
-		if err := a.store.DeleteTXT(c, in.FQDN, in.Value); errors.Is(err, errScope) {
+		switch err := a.store.DeleteTXT(c, in.FQDN, in.Value); {
+		case err == nil:
+			w.WriteHeader(http.StatusNoContent)
+		case errors.Is(err, errRevoked):
+			fail(w, http.StatusUnauthorized, "unauthorized")
+		case errors.Is(err, errScope):
 			fail(w, http.StatusForbidden, err.Error())
-			return
+		default:
+			fail(w, http.StatusInternalServerError, "internal error")
 		}
-		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /v1/eab", func(w http.ResponseWriter, r *http.Request) {
 		c, ok := a.auth(w, r)
@@ -137,21 +144,38 @@ func (a *API) Handler() http.Handler {
 			fail(w, http.StatusServiceUnavailable, "the fallback certificate authority has no contact address configured (CDNS_GTS_CONTACT)")
 			return
 		}
-		// Stay under Google's per-project request burst limits, then enforce
-		// the credential's hourly and weekly allowances.
-		if !a.global.allow(a.store.now()) {
+		// Check per-credential EAB caps BEFORE consuming the shared global
+		// burst limiter so one exhausted pen cannot starve other pens or host failover.
+		if err := a.store.CheckEAB(c); err != nil {
+			var rle *rateLimitError
+			switch {
+			case errors.Is(err, errRevoked):
+				fail(w, http.StatusUnauthorized, "unauthorized")
+			case errors.As(err, &rle):
+				failRateLimit(w, rle)
+			default:
+				log.Printf("eab check for %s: %v", c.ID, err)
+				fail(w, http.StatusInternalServerError, "internal error")
+			}
+			return
+		}
+		// Exempt the host gate-cert credential from the shared pen global limiter.
+		if c.Kind != "host" && !a.global.allow(a.store.now()) {
 			w.Header().Set("Retry-After", "60")
 			fail(w, http.StatusTooManyRequests, "fallback account keys are rate-limited; try later")
 			return
 		}
 		if err := a.store.AllowEAB(c); err != nil {
 			var rle *rateLimitError
-			if errors.As(err, &rle) {
+			switch {
+			case errors.Is(err, errRevoked):
+				fail(w, http.StatusUnauthorized, "unauthorized")
+			case errors.As(err, &rle):
 				failRateLimit(w, rle)
-				return
+			default:
+				log.Printf("eab allow for %s: %v", c.ID, err)
+				fail(w, http.StatusInternalServerError, "internal error")
 			}
-			log.Printf("eab allow for %s: %v", c.ID, err)
-			fail(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)

@@ -10,9 +10,11 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,24 +27,26 @@ import (
 var webFiles embed.FS
 
 type web struct {
-	brokerURL      string
-	token          string
-	domain         string
-	sitesDomain    string // what pens' names end in: the pens zone (e.g. pens.hogman.network)
-	client         *http.Client
-	checks         *limiter // name checks while typing
-	creates        *limiter // sign-up attempts, which also bounds guessing codes
-	jobPolls       *limiter // status polls for /api/job
-	waits          *limiter // waiting-list joins
-	globalWaits    *limiter // server-wide cap on waiting-list joins
-	leaves         *limiter // taking yourself off the list (its own allowance)
-	checkouts      *limiter // starting a payment
-	webhooks       *limiter // Stripe's calls (it retries what we refuse)
-	jobs           *jobStore
-	stripe         *stripeCheckout // nil: pens aren't for sale
-	workHost       string          // optional secondary sign-up host (e.g. get.work.hogman.network)
-	trustedProxies []netip.Prefix
-	turnstile      *turnstileVerifier
+	brokerURL       string
+	token           string
+	domain          string
+	sitesDomain     string // what pens' names end in: the pens zone (e.g. pens.hogman.network)
+	client          *http.Client
+	statuses        *limiter // /api/status checks
+	checks          *limiter // name checks while typing
+	creates         *limiter // sign-up attempts, which also bounds guessing codes
+	jobPolls        *limiter // status polls for /api/job
+	waits           *limiter // waiting-list joins
+	globalWaits     *limiter // server-wide cap on waiting-list joins
+	leaves          *limiter // taking yourself off the list (its own allowance)
+	checkouts       *limiter // starting a payment
+	globalCheckouts *limiter // server-wide cap on Stripe Checkout session creation
+	webhooks        *limiter // Stripe's calls (it retries what we refuse)
+	jobs            *jobStore
+	stripe          *stripeCheckout // nil: pens aren't for sale
+	workHost        string          // optional secondary sign-up host (e.g. get.work.hogman.network)
+	trustedProxies  []netip.Prefix
+	turnstile       *turnstileVerifier
 }
 
 func runWeb() {
@@ -71,26 +75,35 @@ func runWeb() {
 	}
 	addr := env("LISTEN", ":8080")
 	log.Printf("sign-up page on %s", addr)
-	srv := &http.Server{Addr: addr, Handler: wb.handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           wb.handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	log.Fatal(srv.ListenAndServe())
 }
 
 func newWeb(brokerURL, token, domain string) *web {
 	return &web{
-		brokerURL:   strings.TrimRight(brokerURL, "/"),
-		token:       token,
-		domain:      domain,
-		sitesDomain: "pens.hogman.network",
-		client:      &http.Client{Timeout: 16 * time.Minute},
-		checks:      newLimiter(60, time.Minute),
-		creates:     newLimiter(5, time.Hour),
-		jobPolls:    newLimiter(120, time.Minute),
-		waits:       newLimiter(5, time.Hour),
-		globalWaits: newLimiterWithCap(30, time.Hour, 4),
-		leaves:      newLimiter(5, time.Hour),
-		checkouts:   newLimiter(10, time.Hour),
-		webhooks:    newLimiter(120, time.Minute),
-		jobs:        newJobStore(defaultMaxOpenJobs, defaultMaxStoredJobs, defaultJobTTL, defaultDeliveredTTL),
+		brokerURL:       strings.TrimRight(brokerURL, "/"),
+		token:           token,
+		domain:          domain,
+		sitesDomain:     "pens.hogman.network",
+		client:          &http.Client{Timeout: 16 * time.Minute},
+		statuses:        newLimiter(120, time.Minute),
+		checks:          newLimiter(60, time.Minute),
+		creates:         newLimiter(5, time.Hour),
+		jobPolls:        newLimiter(120, time.Minute),
+		waits:           newLimiter(5, time.Hour),
+		globalWaits:     newLimiterWithCap(30, time.Hour, 4),
+		leaves:          newLimiter(5, time.Hour),
+		checkouts:       newLimiter(10, time.Hour),
+		globalCheckouts: newLimiterWithCap(300, time.Hour, 4),
+		webhooks:        newLimiter(120, time.Minute),
+		jobs:            newJobStore(defaultMaxOpenJobs, defaultMaxStoredJobs, defaultJobTTL, defaultDeliveredTTL),
 	}
 }
 
@@ -148,7 +161,33 @@ func (wb *web) isWorkHost(r *http.Request) bool {
 	return wb.workHost != "" && stripHostPort(r.Host) == wb.workHost
 }
 
+// requireSameOriginJSON blocks cross-site simple POSTs (CSRF) against endpoints
+// that do not require a Turnstile token (such as /api/checkout and /api/waitlist/leave).
+func (wb *web) requireSameOriginJSON(w http.ResponseWriter, r *http.Request) bool {
+	if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "none" {
+		jsonOut(w, 403, map[string]string{"error": "cross-origin request refused"})
+		return false
+	}
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || stripHostPort(u.Host) != stripHostPort(r.Host) {
+			jsonOut(w, 403, map[string]string{"error": "cross-origin request refused"})
+			return false
+		}
+	}
+	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mt != "application/json" {
+		jsonOut(w, 415, map[string]string{"error": "Content-Type must be application/json"})
+		return false
+	}
+	return true
+}
+
 func (wb *web) status(w http.ResponseWriter, r *http.Request) {
+	if wb.statuses != nil && !wb.statuses.allow(rateLimitKey(wb.clientIP(r)), time.Now()) {
+		jsonOut(w, 429, map[string]string{"error": "slow down a little"})
+		return
+	}
 	code, out := wb.ask(r.Context(), "GET", "/capacity", nil)
 	if code != 200 {
 		jsonOut(w, code, out)
@@ -263,8 +302,9 @@ func (wb *web) create(w http.ResponseWriter, r *http.Request) {
 	}
 	// Raising a pen takes a minute or so. It runs as a job the page checks on,
 	// so no single request has to survive that long (proxies and browsers drop
-	// them) and a reload picks up where it left off.
-	id, ok := wb.jobs.start(func() (int, map[string]any) {
+	// them) and a reload picks up where it left off. Deduplicate in-flight jobs
+	// per code so one code cannot fill all open job slots.
+	id, res := wb.jobs.startForCode(in.Code, func() (int, map[string]any) {
 		ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
 		defer cancel()
 		code, out := wb.ask(ctx, "POST", "/provision", brokerReq)
@@ -277,7 +317,11 @@ func (wb *web) create(w http.ResponseWriter, r *http.Request) {
 		}
 		return code, out
 	})
-	if !ok {
+	switch res {
+	case jobStartDup:
+		jsonOut(w, 409, map[string]string{"error": "a sign-up with this code is already running"})
+		return
+	case jobStartBusy:
 		jsonOut(w, 503, map[string]string{"error": "sign-up is busy right now; try again in a minute"})
 		return
 	}
@@ -319,6 +363,14 @@ const (
 	defaultDeliveredTTL  = 5 * time.Minute
 )
 
+type jobStartResult int
+
+const (
+	jobStartOK jobStartResult = iota
+	jobStartBusy
+	jobStartDup
+)
+
 type job struct {
 	started   time.Time
 	finished  time.Time
@@ -326,6 +378,7 @@ type job struct {
 	done      bool
 	status    int
 	out       map[string]any
+	code      string
 }
 
 type jobStore struct {
@@ -336,6 +389,7 @@ type jobStore struct {
 	deliveredTTL time.Duration
 	now          func() time.Time
 	jobs         map[string]*job
+	activeCodes  map[string]string
 }
 
 func newJobStore(maxOpen, maxStored int, ttl, deliveredTTL time.Duration) *jobStore {
@@ -346,6 +400,7 @@ func newJobStore(maxOpen, maxStored int, ttl, deliveredTTL time.Duration) *jobSt
 		deliveredTTL: deliveredTTL,
 		now:          time.Now,
 		jobs:         map[string]*job{},
+		activeCodes:  map[string]string{},
 	}
 }
 
@@ -380,7 +435,21 @@ func (s *jobStore) expired(j *job, now time.Time) bool {
 }
 
 func (s *jobStore) start(run func() (int, map[string]any)) (string, bool) {
+	id, res := s.startForCode("", run)
+	return id, res == jobStartOK
+}
+
+func (s *jobStore) startForCode(code string, run func() (int, map[string]any)) (string, jobStartResult) {
 	s.mu.Lock()
+	if s.activeCodes == nil {
+		s.activeCodes = map[string]string{}
+	}
+	if code != "" {
+		if _, dup := s.activeCodes[code]; dup {
+			s.mu.Unlock()
+			return "", jobStartDup
+		}
+	}
 	maxOpen := s.maxOpen
 	if maxOpen <= 0 {
 		maxOpen = defaultMaxOpenJobs
@@ -402,7 +471,7 @@ func (s *jobStore) start(run func() (int, map[string]any)) (string, bool) {
 	}
 	if open >= maxOpen {
 		s.mu.Unlock()
-		return "", false
+		return "", jobStartBusy
 	}
 	for len(s.jobs) >= maxStored {
 		var oldestID string
@@ -420,23 +489,29 @@ func (s *jobStore) start(run func() (int, map[string]any)) (string, bool) {
 		}
 		if !found {
 			s.mu.Unlock()
-			return "", false
+			return "", jobStartBusy
 		}
 		delete(s.jobs, oldestID)
 	}
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	id := hex.EncodeToString(b)
-	j := &job{started: now}
+	j := &job{started: now, code: code}
 	s.jobs[id] = j
+	if code != "" {
+		s.activeCodes[code] = id
+	}
 	s.mu.Unlock()
 	go func() {
 		status, out := run()
 		s.mu.Lock()
 		j.done, j.finished, j.status, j.out = true, s.clock(), status, out
+		if code != "" && s.activeCodes[code] == id {
+			delete(s.activeCodes, code)
+		}
 		s.mu.Unlock()
 	}()
-	return id, true
+	return id, jobStartOK
 }
 
 func (s *jobStore) take(id string) (job, bool) {
@@ -642,6 +717,9 @@ func (wb *web) waitlist(w http.ResponseWriter, r *http.Request) {
 }
 
 func (wb *web) leaveWaitlist(w http.ResponseWriter, r *http.Request) {
+	if !wb.requireSameOriginJSON(w, r) {
+		return
+	}
 	if !wb.leaves.allow(rateLimitKey(wb.clientIP(r)), time.Now()) {
 		jsonOut(w, 429, map[string]string{"error": "too many tries from here; wait an hour"})
 		return

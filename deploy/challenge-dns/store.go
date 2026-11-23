@@ -62,6 +62,7 @@ var (
 	errEABWeeklyCap    = errors.New("this credential's weekly allowance of fallback account keys is used")
 	errFull            = errors.New("too many live challenge values for this name")
 	errValue           = errors.New("challenge value must be 16-128 characters of A-Z a-z 0-9 _ -")
+	errRevoked         = errors.New("credential revoked")
 )
 
 // rateLimitError pairs a rate-limit sentinel with a Retry-After duration.
@@ -254,10 +255,21 @@ func (s *Store) saveLocked() error {
 		tmp.Close()
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), s.path)
+	if err := os.Rename(tmp.Name(), s.path); err != nil {
+		return err
+	}
+	if dir, err := os.Open(filepath.Dir(s.path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return nil
 }
 
 func hashToken(tok string) string {
@@ -418,9 +430,24 @@ func (s *Store) RemoveCredWithOptions(id string, releaseIfUnused bool) (bool, er
 			s.st.Used = prevUsed
 			return false, err
 		}
+		// Immediately purge any live challenge TXT records in scope of the revoked credential.
+		for fqdn := range s.txt {
+			if s.InScope(c, fqdn) {
+				delete(s.txt, fqdn)
+			}
+		}
 		return canRelease, nil
 	}
 	return false, fmt.Errorf("no credential %q", id)
+}
+
+func (s *Store) credLocked(id string) (Cred, bool) {
+	for _, c := range s.st.Creds {
+		if c.ID == id {
+			return c, true
+		}
+	}
+	return Cred{}, false
 }
 
 func (s *Store) markChallengedLocked(id string) {
@@ -507,6 +534,11 @@ func (s *Store) PutTXT(c Cred, fqdn, value string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	liveCred, ok := s.credLocked(c.ID)
+	if !ok {
+		return errRevoked
+	}
+	c = liveCred
 	now := s.now()
 	live := s.liveLocked(fqdn, now)
 	for i := range live {
@@ -558,7 +590,8 @@ func (s *Store) countLocked(c Cred, fqdn string, now time.Time) error {
 	if seen == nil {
 		seen = map[string]time.Time{}
 	}
-	if _, ok := seen[fqdn]; !ok {
+	_, alreadySeen := seen[fqdn]
+	if !alreadySeen {
 		penHourly := 0
 		var oldestWeekly, oldestHourly time.Time
 		for _, t := range seen {
@@ -590,9 +623,27 @@ func (s *Store) countLocked(c Cred, fqdn string, now time.Time) error {
 		}
 		seen[fqdn] = now
 	}
+	if alreadySeen && c.EverChallenged {
+		return nil
+	}
+	prevChallenged := c.EverChallenged
 	s.st.Seen[c.ID] = seen
 	s.markChallengedLocked(c.ID)
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		if !alreadySeen {
+			delete(seen, fqdn)
+		}
+		if !prevChallenged {
+			for i := range s.st.Creds {
+				if s.st.Creds[i].ID == c.ID {
+					s.st.Creds[i].EverChallenged = false
+					break
+				}
+			}
+		}
+		return err
+	}
+	return nil
 }
 
 // DeleteTXT removes a value if present. Absent or expired is still success.
@@ -603,6 +654,9 @@ func (s *Store) DeleteTXT(c Cred, fqdn, value string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, ok := s.credLocked(c.ID); !ok {
+		return errRevoked
+	}
 	live := s.liveLocked(fqdn, s.now())
 	out := live[:0]
 	for _, v := range live {
@@ -661,16 +715,15 @@ func (s *Store) liveLocked(fqdn string, now time.Time) []txtValue {
 	return out
 }
 
-// AllowEAB records an EAB mint for a credential, gated by the same per-pen
-// hourly and weekly caps as new certificate names.
-func (s *Store) AllowEAB(c Cred) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := s.now()
-	recent := s.st.EAB[c.ID][:0]
+func (s *Store) checkEABLocked(id string, now time.Time) (Cred, []time.Time, error) {
+	liveCred, ok := s.credLocked(id)
+	if !ok {
+		return Cred{}, nil, errRevoked
+	}
+	recent := make([]time.Time, 0, len(s.st.EAB[id]))
 	hourly := 0
 	var oldestWeekly, oldestHourly time.Time
-	for _, t := range s.st.EAB[c.ID] {
+	for _, t := range s.st.EAB[id] {
 		if now.Sub(t) < capWindow {
 			recent = append(recent, t)
 			if oldestWeekly.IsZero() || t.Before(oldestWeekly) {
@@ -684,15 +737,52 @@ func (s *Store) AllowEAB(c Cred) error {
 			}
 		}
 	}
-	if len(recent) >= s.weeklyCapFor(c) {
-		s.st.EAB[c.ID] = recent
-		return &rateLimitError{cause: errEABWeeklyCap, retryAfter: retryAfterFromOldest(oldestWeekly, now, capWindow)}
+	if len(recent) >= s.weeklyCapFor(liveCred) {
+		s.st.EAB[id] = recent
+		return Cred{}, nil, &rateLimitError{cause: errEABWeeklyCap, retryAfter: retryAfterFromOldest(oldestWeekly, now, capWindow)}
 	}
-	if hourly >= s.hourlyCapFor(c) {
-		s.st.EAB[c.ID] = recent
-		return &rateLimitError{cause: errEABHourlyCap, retryAfter: retryAfterFromOldest(oldestHourly, now, hourlyWindow)}
+	if hourly >= s.hourlyCapFor(liveCred) {
+		s.st.EAB[id] = recent
+		return Cred{}, nil, &rateLimitError{cause: errEABHourlyCap, retryAfter: retryAfterFromOldest(oldestHourly, now, hourlyWindow)}
 	}
+	return liveCred, recent, nil
+}
+
+// CheckEAB verifies that a credential is still active and within its per-cred
+// hourly/weekly EAB caps without recording a hit (so rejected callers do not
+// consume global burst capacity).
+func (s *Store) CheckEAB(c Cred) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, _, err := s.checkEABLocked(c.ID, s.now())
+	return err
+}
+
+// AllowEAB records an EAB mint for a credential, gated by the same per-pen
+// hourly and weekly caps as new certificate names.
+func (s *Store) AllowEAB(c Cred) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	liveCred, recent, err := s.checkEABLocked(c.ID, now)
+	if err != nil {
+		return err
+	}
+	prevEAB := append([]time.Time(nil), s.st.EAB[c.ID]...)
+	prevChallenged := liveCred.EverChallenged
 	s.st.EAB[c.ID] = append(recent, now)
 	s.markChallengedLocked(c.ID)
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.st.EAB[c.ID] = prevEAB
+		if !prevChallenged {
+			for i := range s.st.Creds {
+				if s.st.Creds[i].ID == c.ID {
+					s.st.Creds[i].EverChallenged = false
+					break
+				}
+			}
+		}
+		return err
+	}
+	return nil
 }
