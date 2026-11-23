@@ -14,7 +14,8 @@ D("hogman.network", REG_NONE, DnsProvider(DSP_CLOUDFLARE),
   DefaultTTL(1), // Cloudflare's "auto"
 
   // Imported from the live zone on 2026-11-21 (workflow "dns", action "import").
-  // Every record is DNS-only (no Cloudflare proxy).
+  // Records stay DNS-only except get. (sign-up page), which uses Cloudflare
+  // Proxy for edge DDoS absorption, WAF, and rate limiting.
 
   // The website (Fly).
   A("@", "66.241.125.85"),
@@ -25,8 +26,8 @@ D("hogman.network", REG_NONE, DnsProvider(DSP_CLOUDFLARE),
   AAAA("work", "2a09:8280:1::213:c8aa:0"),
 
   // The hosting server.
-  A("get", "159.65.78.95"),    // sign-up page
-  A("ns1", "159.65.78.95"),    // the challenge DNS server (D-18); IPv4 only
+  A("get", "159.65.78.95", CF_PROXY_ON), // sign-up page (proxied via Cloudflare)
+  A("ns1", "159.65.78.95"),              // the challenge DNS server (D-18); IPv4 only
 
   // Hosted pens' sites live under pens. (D-18). The whole subzone is the
   // challenge DNS server's: it answers only SOA, NS, CAA and challenge TXT, so
