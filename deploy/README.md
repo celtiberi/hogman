@@ -106,14 +106,17 @@ hogman-host upgrade bobo                                                        
 `install.sh` resolves `latest` once, then downloads `SHA256SUMS` and every archive from that pinned
 release tag (`releases/download/v<ver>/...`) so a concurrent release cannot mix versions. Set
 `HOGMAN_VERSION=<ver>` to install a specific release tag directly. `install.sh` refreshes the
-`challenge-dns` binary via `hogman-host refresh-services`; if upgrading manually (or without
-prebuilt binaries), re-run `hogman-host challenge-dns-setup <public-ip>` (which keeps the existing
-GCP key) so new `challenge-dns` features such as per-plan certificate caps take effect. Both
-`challenge-dns-setup` and `refresh-services` automatically restart `hogman-signup-broker-1` so the
-broker picks up the updated `/usr/local/bin/challenge-dns` binary and `/run/challenge-dns` mount
-(and `hogman-challenge-dns.service` sets `RuntimeDirectoryPreserve=yes` so `/run/challenge-dns`
-keeps its inode across systemd restarts); if you ever replace `/usr/local/bin/challenge-dns` or
-recreate `/run/challenge-dns` by hand, run `docker restart hogman-signup-broker-1` afterward.
+`challenge-dns` binary via `hogman-host refresh-services` and pre-pulls any missing pinned base and
+runtime container images via `hogman-host pull-images` (so the offline sign-up broker never needs
+container registry access when raising a pen after a base-image bump); `hogman-host signup-setup`
+runs `pull-images` as well. If upgrading manually (or without prebuilt binaries), re-run
+`hogman-host challenge-dns-setup <public-ip>` (which keeps the existing GCP key) so new
+`challenge-dns` features such as per-plan certificate caps take effect. Both `challenge-dns-setup`
+and `refresh-services` automatically restart `hogman-signup-broker-1` so the broker picks up the
+updated `/usr/local/bin/challenge-dns` binary and `/run/challenge-dns` mount (and
+`hogman-challenge-dns.service` sets `RuntimeDirectoryPreserve=yes` so `/run/challenge-dns` keeps its
+inode across systemd restarts); if you ever replace `/usr/local/bin/challenge-dns` or recreate
+`/run/challenge-dns` by hand, run `docker restart hogman-signup-broker-1` afterward.
 
 If upgrading from a pre-switchover server before `gate-cert-setup` and `pens-zone` are configured,
 `install.sh` skips the `signup-setup` refresh with a reminder rather than failing. Once configured,

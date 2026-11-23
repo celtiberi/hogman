@@ -85,6 +85,8 @@ main() {
 
   if [ "$first" = true ]; then
     hogman-host init
+    say "Pre-pulling container images"
+    hogman-host pull-images
     cat <<EOF
 
 ✓ Hogman $ver is installed and the front door is up.
@@ -114,6 +116,8 @@ EOF
     hogman-host list | sed 's/^/    /'
     say "Updating the host's own services (challenge DNS, gate certificate)"
     hogman-host refresh-services
+    say "Pre-pulling container images for offline pen sign-ups"
+    hogman-host pull-images
     echo
     if ( . "$home/host.env" 2>/dev/null && [ -n "${SIGNUP_HOST:-}" ] ); then
       if ( . "$home/host.env" 2>/dev/null && [ -n "${PENS_ZONE:-}" ] && [ -n "${GATE_DOMAIN:-}" ] ); then
