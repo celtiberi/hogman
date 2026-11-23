@@ -1,6 +1,6 @@
 # Used when a release ships the registrar already compiled (prebuilt/registrar/).
 # ./hogman copies the right binary for this machine to registrar.bin first.
-FROM alpine:3.24
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 RUN apk add --no-cache ca-certificates
 COPY registrar.bin /usr/local/bin/registrar
 ENTRYPOINT ["registrar"]

@@ -4,7 +4,7 @@
 name: hogman
 
 x-mesh-node: &mesh-node
-  image: tailscale/tailscale:v1.104.7
+  image: tailscale/tailscale:v1.104.7@sha256:72c1e19e0aedca96b8533bbb0b4368564410ff20b17e53b804eb6c1f04a31be4
   restart: unless-stopped
   cap_add: [NET_ADMIN, NET_RAW]
   devices: [/dev/net/tun:/dev/net/tun]
@@ -20,7 +20,7 @@ services:
   # --- Public foothold: the only things reachable from the internet ---------
 
   headscale:
-    image: headscale/headscale:0.29.7
+    image: headscale/headscale:0.29.7@sha256:11f81665e842809db9fe3006a38c56a66e968baa5abd4bac498e86445572b970
     restart: unless-stopped
     command: serve
     read_only: true
@@ -42,7 +42,7 @@ services:
       retries: 20
 
   edge:
-    image: caddy:2.11.9
+    image: caddy:2.11.9@sha256:4851e54a46b206517c574821bb5cc67f170d2156041e9fbc4c9193b45e84a75b
     restart: unless-stopped
     user: "${HOGMAN_UID:-1000}:${HOGMAN_GID:-1000}"
     read_only: true
@@ -92,7 +92,7 @@ services:
   # --- Services living on those mesh IPs ------------------------------------
 
   portal:
-    image: caddy:2.11.9
+    image: caddy:2.11.9@sha256:4851e54a46b206517c574821bb5cc67f170d2156041e9fbc4c9193b45e84a75b
     restart: unless-stopped
     user: "${HOGMAN_UID:-1000}:${HOGMAN_GID:-1000}"
     read_only: true

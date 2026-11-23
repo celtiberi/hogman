@@ -53,6 +53,14 @@ if ! gh run download "$run" --name "hogman-bin-$full" --dir "$work/prebuilt"; th
   echo "GitHub's build of $sha can't be downloaded (builds are kept 30 days); release a newer commit." >&2
   exit 1
 fi
+# Reject any symlink or non-regular/non-directory entry inside the downloaded
+# build artifact before verifying provenance or archiving into hogman-bin.
+bad_entries="$(find "$work/prebuilt" ! -type f ! -type d)"
+if [ -n "$bad_entries" ]; then
+  echo "unexpected non-regular entries in build artifact (not releasing):" >&2
+  printf '%s\n' "$bad_entries" >&2
+  exit 1
+fi
 # Artifacts lose the executable bit.
 find "$work/prebuilt" -type f ! -name SHA256SUMS -exec chmod 0755 {} +
 repo="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
@@ -110,7 +118,7 @@ if [ "${NO_DEPLOY:-}" != 1 ]; then
 
   live=""
   for _ in 1 2 3 4 5; do
-    live="$(curl -fsSL "https://github.com/$repo/releases/latest/download/latest" 2>/dev/null | tr -d '\r\n' || true)"
+    live="$(curl --proto '=https' --proto-redir '=https' -fsSL "https://github.com/$repo/releases/latest/download/latest" 2>/dev/null | tr -d '\r\n' || true)"
     [ "$live" = "$ver" ] && break
     sleep 2
   done

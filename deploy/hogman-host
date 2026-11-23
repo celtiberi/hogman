@@ -16,7 +16,7 @@ SRC="$HOGMAN_HOME/src"
 FRONT="$HOGMAN_HOME/front"
 PENS="$HOGMAN_HOME/pens"
 HOSTENV="$HOGMAN_HOME/host.env"
-CADDY_IMAGE="caddy:2.11.9"
+CADDY_IMAGE="caddy:2.11.9@sha256:4851e54a46b206517c574821bb5cc67f170d2156041e9fbc4c9193b45e84a75b"
 STUN_BASE=3478
 # Official Cloudflare edge IPv4/IPv6 ranges (cloudflare.com/ips-v4, /ips-v6).
 # Single list shared by the front door's @not_cf origin lock and signup-web's

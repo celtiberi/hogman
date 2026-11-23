@@ -1,6 +1,6 @@
 # Used when a release ships hogman-signup compiled (hogman-host copies it to
 # hogman-signup.bin first).
-FROM alpine:3.24 AS certs
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS certs
 RUN apk add --no-cache ca-certificates
 
 FROM scratch AS web
@@ -11,7 +11,7 @@ USER 65534:65534
 ENV ROLE=web
 ENTRYPOINT ["/hogman-signup"]
 
-FROM alpine:3.24 AS broker
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS broker
 RUN apk add --no-cache bash coreutils findutils grep sed gawk tar gzip rsync age openssl curl util-linux \
       ca-certificates docker-cli docker-cli-compose docker-cli-buildx
 COPY hogman-signup.bin /usr/local/bin/hogman-signup

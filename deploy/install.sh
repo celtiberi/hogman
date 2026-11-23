@@ -26,6 +26,11 @@ main() {
   fi
   command -v curl >/dev/null || die "curl is needed"
 
+  local curl_opts=(-fsSL)
+  if [[ "$base" == https://* ]]; then
+    curl_opts+=(--proto '=https' --proto-redir '=https')
+  fi
+
   # Resolve the release version once, then fetch every file from that pinned tag
   # so a release published mid-install can never mix tarballs and checksums.
   local raw_ver ver tag dl
@@ -34,7 +39,7 @@ main() {
     say "Installing pinned Hogman release $raw_ver"
   else
     say "Finding the newest Hogman"
-    raw_ver="$(curl -fsSL "$base/latest/download/latest" | tr -d '\r\n')" || die "could not reach $base"
+    raw_ver="$(curl "${curl_opts[@]}" "$base/latest/download/latest" | tr -d '\r\n')" || die "could not reach $base"
   fi
   ver="${raw_ver#v}"
   [[ "$ver" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]] && [[ "$ver" != *..* ]] || die "unexpected version from $base: $raw_ver"
@@ -44,24 +49,29 @@ main() {
   tmp="$(mktemp -d)"
   trap 'rm -rf "${tmp:-}"' EXIT   # tmp is global: the trap runs after main returns
 
-  curl -fsSL -o "$tmp/ALLSUMS" "$dl/SHA256SUMS" || die "could not download checksums for $tag from $dl"
+  curl "${curl_opts[@]}" -o "$tmp/ALLSUMS" "$dl/SHA256SUMS" || die "could not download checksums for $tag from $dl"
 
   local tarball="hogman-$ver.tar.gz"
-  curl -fsSL -o "$tmp/$tarball" "$dl/$tarball"
-  grep "  $tarball\$" "$tmp/ALLSUMS" > "$tmp/SHA256SUMS" || die "no checksum for $tarball"
+  curl "${curl_opts[@]}" -o "$tmp/$tarball" "$dl/$tarball"
+  awk -v f="$tarball" 'NF == 2 && $2 == f { print }' "$tmp/ALLSUMS" > "$tmp/SHA256SUMS"
+  [ "$(wc -l < "$tmp/SHA256SUMS")" -eq 1 ] || die "expected exactly one checksum for $tarball"
   (cd "$tmp" && sha256sum -c --quiet SHA256SUMS) || die "checksum mismatch for $tarball: not installing"
   mkdir "$tmp/x" && tar -xzf "$tmp/$tarball" -C "$tmp/x"
   echo "    version $ver ($tag), checksum OK"
 
   # The compiled join tool and registrar, so this server doesn't build them.
+  # If SHA256SUMS lists the prebuilt archive, downloading and verifying it is
+  # mandatory (fail closed rather than silently deleting prebuilt/ on a transient error).
   local bins="hogman-bin-$ver.tar.gz"
-  if curl -fsSL -o "$tmp/$bins" "$dl/$bins" 2>/dev/null; then
-    grep "  $bins\$" "$tmp/ALLSUMS" > "$tmp/BINSUMS" || die "no checksum for $bins"
+  awk -v f="$bins" 'NF == 2 && $2 == f { print }' "$tmp/ALLSUMS" > "$tmp/BINSUMS"
+  if [ -s "$tmp/BINSUMS" ]; then
+    [ "$(wc -l < "$tmp/BINSUMS")" -eq 1 ] || die "expected exactly one checksum for $bins"
+    curl "${curl_opts[@]}" -o "$tmp/$bins" "$dl/$bins" || die "could not download $bins from $dl"
     (cd "$tmp" && sha256sum -c --quiet BINSUMS) || die "checksum mismatch for $bins: not installing"
     tar -xzf "$tmp/$bins" -C "$tmp/x/core"
     echo "    compiled parts, checksum OK"
   else
-    echo "    no compiled parts for this version; they will be built on this server (slow on small servers)"
+    echo "    no compiled parts listed for this version; they will be built on this server (slow on small servers)"
   fi
 
   local first=true
