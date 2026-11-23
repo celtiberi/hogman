@@ -226,6 +226,13 @@ def build_openai_compat_payload(
     return base
 
 
+_ACTION_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+    "exec": ("thought", "action", "command"),
+    "message": ("thought", "action", "to", "message"),
+    "done": ("thought", "action", "summary"),
+}
+
+
 def validate_turn_payload(
     data: Any,
     response_schema: dict[str, Any],
@@ -234,18 +241,34 @@ def validate_turn_payload(
 ) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise LLMError(f"expected JSON object from model, got {type(data).__name__}")
-    required = response_schema.get("required", [])
-    missing = [k for k in required if k not in data]
-    if missing:
-        raise LLMError(f"model response missing required fields: {missing}")
-
     props = response_schema.get("properties") or {}
-    if response_schema.get("additionalProperties") is False:
-        extra = sorted(k for k in data if k not in props)
-        if extra and not allow_extra_fields:
-            raise LLMError(f"model response included unexpected fields: {extra}")
+    allowed_actions = set(props["action"]["enum"])
+    action = data.get("action")
 
-    cleaned = {k: data[k] for k in props if k in data} if allow_extra_fields else data
+    if allow_extra_fields and isinstance(action, str) and action in allowed_actions:
+        # Non-strict OpenAI tool-call fallback (e.g. DeepSeek): require fields
+        # relevant to the chosen action and default omitted unused string fields
+        # to "" while still rejecting missing active fields or wrong types.
+        req_for_action = _ACTION_REQUIRED_FIELDS.get(action, tuple(response_schema.get("required", [])))
+        missing = [k for k in req_for_action if k not in data]
+        if missing:
+            raise LLMError(f"model response missing required fields: {missing}")
+        cleaned: dict[str, Any] = {}
+        for key, spec in props.items():
+            if key in data:
+                cleaned[key] = data[key]
+            elif spec.get("type") == "string":
+                cleaned[key] = ""
+    else:
+        required = response_schema.get("required", [])
+        missing = [k for k in required if k not in data]
+        if missing:
+            raise LLMError(f"model response missing required fields: {missing}")
+        if response_schema.get("additionalProperties") is False:
+            extra = sorted(k for k in data if k not in props)
+            if extra and not allow_extra_fields:
+                raise LLMError(f"model response included unexpected fields: {extra}")
+        cleaned = {k: data[k] for k in props if k in data} if allow_extra_fields else data
 
     for key, spec in props.items():
         if key not in cleaned:
@@ -259,7 +282,6 @@ def validate_turn_payload(
         if expected_type == "boolean" and not isinstance(val, bool):
             raise LLMError(f"field {key!r} must be a boolean, got {type(val).__name__}")
 
-    allowed_actions = set(props["action"]["enum"])
     if cleaned.get("action") not in allowed_actions:
         raise LLMError(f"invalid model action {cleaned.get('action')!r}; expected one of {sorted(allowed_actions)}")
     return cleaned
