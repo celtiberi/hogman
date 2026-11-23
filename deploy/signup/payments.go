@@ -334,7 +334,8 @@ func (b *broker) codeForPayment(s checkoutObject) (code string, fresh bool, err 
 		return "", false, err
 	}
 	// The code first: a payment line always points at a code that existed.
-	if err := b.addCode(code, paidTag+" "+s.ID); err != nil {
+	// Paid pens get a bare name of the buyer's choice (no -xxxx ending).
+	if err := b.addCode(code, "vanity "+paidTag+" "+s.ID); err != nil {
 		return "", false, err
 	}
 	f, err := os.OpenFile(b.paymentsPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)

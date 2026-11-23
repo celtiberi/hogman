@@ -88,7 +88,7 @@ func TestPaidCheckoutBuysOneCode(t *testing.T) {
 		t.Fatalf("retry: %d", code)
 	}
 	codes, _ := os.ReadFile(filepath.Join(home, "signup", "codes"))
-	if n := strings.Count(string(codes), "\n"); n != 1 || !strings.Contains(string(codes), got+" paid "+testSession) {
+	if n := strings.Count(string(codes), "\n"); n != 1 || !strings.Contains(string(codes), got+" vanity paid "+testSession) {
 		t.Fatalf("codes after a retry:\n%s", codes)
 	}
 	pays, _ := os.ReadFile(filepath.Join(home, "signup", "payments"))
@@ -102,7 +102,7 @@ func TestPaidCheckoutBuysOneCode(t *testing.T) {
 
 	// The bought code raises a pen like any other; then the page says "used".
 	pc, po := call(h, "POST", "/provision", fmt.Sprintf(`{"code":%q,"pen":"bought","owner":"alice"}`, got), auth)
-	if pc != 201 {
+	if pc != 201 || po["pen"] != "bought" { // a paid pen keeps its bare name
 		t.Fatalf("provision with a bought code: %d %v", pc, po)
 	}
 	if code, out := call(h, "GET", "/paid-code?session="+testSession, "", auth); code != 200 || out["state"] != "used" || out["code"] != nil {

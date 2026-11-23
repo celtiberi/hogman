@@ -17,7 +17,7 @@
     if (s.state === 'ready') {
       $('waiting').hidden = true;
       $('code').textContent = s.code;
-      $('go').href = '/#code=' + encodeURIComponent(s.code);
+      $('go').href = '/#code=' + encodeURIComponent(s.code) + '&vanity=1';   // paid pens get a bare name
       $('ready').hidden = false;
       return;
     }

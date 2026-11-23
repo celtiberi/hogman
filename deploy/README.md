@@ -183,8 +183,8 @@ hogman-host signup-notify https://ntfy.sh/<topic>
 
 Link directly to the waitlist with `https://<signup-host>/#wait`.
 
-**Selling pens (Stripe, D-28):** a paid checkout buys one sign-up code, which then works like any
-other. Stripe's hosted Checkout takes the card, so card details never reach this server.
+**Selling pens (Stripe, D-28):** a paid checkout buys one sign-up code, which then works like a
+`--vanity` code: the buyer picks a bare pen name, with no random ending. Stripe's hosted Checkout takes the card, so card details never reach this server.
 
 1. In Stripe (test mode first): make a Product with a recurring Price, a **restricted key** that can
    only write Checkout Sessions, and a webhook endpoint at
