@@ -42,7 +42,8 @@ const usageText = `hogman-join: join this device to a Hogman private network
 usage:
   hogman-join [options] '<link>'      join, using an invite or device link
   hogman-join update ['<link|host>']  update hogman-join from a pen's server (verifies SHA-256)
-  hogman-join leave '<link>'          log out and remove this computer from the pen
+  hogman-join leave ['<pen>']         leave a pen (its link, host or name), or every pen if none given
+  hogman-join uninstall               leave every pen and remove Hogman's settings from this computer
   hogman-join status                  show installed pens, browser extension host, and VPN proxy state
   hogman-join browser-setup           register the browser extension native messaging host (no sudo)
   hogman-join share NAME WHAT         put a port or a folder on the pen over HTTPS
@@ -180,10 +181,12 @@ func main() {
 		err = statusCmd()
 	case len(pos) >= 1 && pos[0] == "browser-setup":
 		err = browserSetupCmd(pos[1:], o)
+	case len(pos) >= 1 && pos[0] == "leave":
+		err = leaveCmd(pos[1:], o)
+	case len(pos) >= 1 && pos[0] == "uninstall":
+		err = uninstallCmd(pos[1:], o)
 	case len(pos) == 1:
 		err = join(pos[0], o)
-	case len(pos) == 2 && pos[0] == "leave":
-		err = leave(pos[1], o)
 	default:
 		fmt.Print(usageText)
 		os.Exit(2)
@@ -448,7 +451,7 @@ func join(raw string, o options) error {
 		if st, err := ts.Status(); err == nil && st.BackendState == "Running" && st.OnNetwork(n.Zone) {
 			return errorf("this computer is on %s through its Tailscale app, which Hogman no longer uses.\n"+
 				"  First get a fresh one-time link: open %s, press Add a device, copy the link.\n"+
-				"  Then run hogman-join leave '<this link>', and join with the fresh link.", n.Zone, n.Portal)
+				"  Then run hogman-join leave %s, and join with the fresh link.", n.Zone, n.Portal, n.Zone)
 		}
 	}
 	return joinAlongside(link, n, client, o, "the pen's own small connection: HTTPS to the pen and nothing else")
@@ -492,66 +495,4 @@ func redeemWithHandle(c *http.Client, link *Link, o options) (*enrolment, error)
 		}
 		return en, err
 	}
-}
-
-// ------------------------------------------------------------------ leave --
-
-func leave(raw string, o options) error {
-	link, err := ParseLink(raw)
-	if err != nil {
-		return errorf("%v", err)
-	}
-	client, err := controlClient(o.controlCA)
-	if err != nil {
-		return err
-	}
-	step("Leaving the network at %s", link.Host)
-	n, err := fetchNetwork(client, link.Host)
-	if err != nil {
-		return err
-	}
-	// Shares on this pen go first, while they can still give their names back.
-	for _, dir := range allShares(n.Zone) {
-		if c, err := loadShare(dir); err == nil {
-			if err := removeShareForLeave(dir, c); err != nil {
-				note("could not take down %s: %v", c.url(), firstLine(err.Error()))
-			} else {
-				note("took down %s", c.url())
-			}
-		}
-	}
-	// Legacy private-CA cleanup goes before removing the device, so cancelling
-	// an OS trust prompt leaves this computer still on the pen.
-	rootFP := ""
-	if cfg, err := loadAgentConfig(stateDir(n.Zone)); err == nil {
-		rootFP = cfg.RootFP
-	}
-	if removed, err := removeLegacyHogmanRoot(n.Zone, rootFP); err != nil {
-		return err
-	} else if removed {
-		note("removed the old %s certificate", n.Zone)
-	}
-	// This computer's own device, through its connection while it's still up,
-	// so old devices don't pile up in "Your devices".
-	gone := removeOwnDevice(n.Zone)
-	leaveAlongside(n.Zone, gone)
-	if ts, err := findTailscale(); err == nil {
-		if st, err := ts.Status(); err == nil && st.OnNetwork(n.Zone) {
-			if err := ts.Logout(); err != nil {
-				// Logging out needs the control server. If it can't be reached,
-				// at least disconnect this device locally.
-				_ = ts.Down()
-				note("disconnected, but could not log out (%v)", firstLine(err.Error()))
-				note("the network still lists this device until an admin removes it")
-			} else {
-				note("logged out of %s", n.Zone)
-			}
-			note("to return to another Tailscale network: tailscale switch --list")
-		}
-		if removed := ts.RemoveProfiles(link.Host); removed > 0 {
-			note("removed the saved %s profile from Tailscale", n.Zone)
-		}
-	}
-	say("\n✓ Left %s.", n.Zone)
-	return nil
 }

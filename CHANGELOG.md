@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- `core/join`: `hogman-join leave` no longer needs a keyed join link (I-2). It accepts a link with or without its key, the control host, or the pen zone, and with no argument leaves every pen on the computer. It works from saved settings, so a pen whose server is gone (or unreachable) can still be left. Before macOS asks for a password to change the proxy setting, `hogman-join` now says why.
+
+### Added
+- `core/join`: `hogman-join uninstall` leaves every pen, removes Hogman's settings folders and browser native-messaging host, and prints how to delete the program and the extension.
+
 ### Added
 - `deploy/challenge-dns`, `deploy/signup`, and `deploy/hogman-host`: Work tier plan with higher per-pen certificate caps and separate Stripe pricing (D-30, D-31):
   - `deploy/challenge-dns`: added per-credential `plan` (`personal` default or `work`, zero `state.json` schema migration) with per-plan certificate & EAB caps — Personal stays at **5/hour & 20/7 days** (`CDNS_HOURLY_CAP`, `CDNS_WEEKLY_CAP`), Work gets **10/hour & 60/7 days** (`CDNS_WORK_HOURLY_CAP`, `CDNS_WORK_WEEKLY_CAP`) while keeping the shared **40/hour soft / 60/hour hard global ceiling** and `<2`-name quiet-pen floor so busy Work pens cannot starve quiet or new pens; added `challenge-dns cred add pen <name> --plan work` and live `challenge-dns cred plan <id-or-pen> personal|work` (`PUT /admin/creds/{id}/plan`).

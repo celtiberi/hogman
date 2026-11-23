@@ -52,8 +52,11 @@ More devices: each member adds their own from the home page (`POST /api/devices`
 device link (`https://<PUBLIC_HOST>/join#k=…`, or with `&for=share` for `hogman-join share`). Nobody can
 make one for someone else: there is no account recovery. `hogman-join update` verifies downloads
 against `SHA256SUMS` over HTTPS, cleans up any leftover legacy private-CA root certificates, and
-restarts background agents and service-managed shares. `hogman-join leave '<link>'` stops shares
-on that pen, cleans up any legacy root cert, logs the device out, and removes its local settings.
+restarts background agents and service-managed shares. `hogman-join leave [<pen>]` (a join link
+with or without its key, the control host, or the pen zone; no argument means every pen) stops shares
+on that pen, cleans up any legacy root cert, logs the device out, and removes its local settings. It
+works from saved settings, so a pen whose server is gone can still be left. `hogman-join uninstall`
+leaves every pen and removes Hogman's settings folders, then says how to delete the program.
 
 Built for macOS (Apple silicon, Intel), Linux (x86-64, ARM64) and Windows (x86-64; untested).
 
