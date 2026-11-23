@@ -4,9 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hogman: your own private internet. Clean pigs only.</title>
-<meta name="description" content="Hogman lets you run a private internet for the people you invite. You hold the gate. Clean pigs get in. The filthy horde stays outside the fence.">
+<meta name="description" content="Run an invite-only private web over WireGuard with real domain names, standard browser HTTPS, and zero public IPs. Open source (AGPL-3.0) for macOS and Linux. Clean pigs only.">
+<link rel="canonical" href="https://hogman.network/">
+<link rel="alternate" type="text/plain" href="https://hogman.network/llms.txt" title="Hogman documentation for LLMs">
 <meta property="og:title" content="Hogman: your own private internet">
-<meta property="og:description" content="You hold the gate. Clean pigs get in. The filthy horde stays outside the fence.">
+<meta property="og:description" content="Run an invite-only private web over WireGuard with real domain names, standard browser HTTPS, and zero public IPs. Clean pigs only.">
 <meta property="og:type" content="website">
 <meta property="og:image" content="https://hogman.network/og-hero-v2.jpg">
 <meta property="og:image:type" content="image/jpeg">
@@ -17,13 +19,46 @@
 <meta property="og:site_name" content="Hogman">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Hogman: your own private internet">
-<meta name="twitter:description" content="You hold the gate. Clean pigs get in. The filthy horde stays outside the fence.">
+<meta name="twitter:description" content="Run an invite-only private web over WireGuard with real domain names, standard browser HTTPS, and zero public IPs. Clean pigs only.">
 <meta name="twitter:image" content="https://hogman.network/og-hero-v2.jpg">
 <meta name="theme-color" content="#0e080c">
 <link rel="icon" href="/icons/hogman-32.png" type="image/png" sizes="32x32">
 <link rel="icon" href="/icons/hogman-48.png" type="image/png" sizes="48x48">
 <link rel="apple-touch-icon" href="/hogman-icon.png">
 <link rel="stylesheet" href="/styles.css?v=metal25">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "name": "Hogman",
+      "url": "https://hogman.network/",
+      "description": "Invite-only private web over WireGuard with real domain names, standard browser HTTPS, and zero public IPs."
+    },
+    {
+      "@type": "SoftwareApplication",
+      "name": "Hogman",
+      "url": "https://hogman.network/",
+      "image": "https://hogman.network/og-hero-v2.jpg",
+      "applicationCategory": "NetworkingApplication",
+      "operatingSystem": "macOS, Linux",
+      "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+      "isAccessibleForFree": true,
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "description": "Open-source private network (pen) over WireGuard (Headscale and Tailscale tsnet) that lets groups run HTTPS (port 443) web servers with real domain names, standard ACME DNS-01 browser certificates, and zero public IPs.",
+      "softwareHelp": "https://hogman.network/docs/",
+      "sameAs": [
+        "https://github.com/celtiberi/hogman"
+      ]
+    }
+  ]
+}
+</script>
 </head>
 <body>
 <header class="top">
