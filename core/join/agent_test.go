@@ -750,3 +750,96 @@ func TestPlanAutoProxyActions(t *testing.T) {
 		t.Fatalf("already matching nextURL: got %q, want noop", got)
 	}
 }
+
+func TestEvaluateLiveNodeStatus(t *testing.T) {
+	dnsIP := netip.MustParseAddr("100.64.0.1")
+	peerKey := key.NewNode().Public()
+
+	running := &ipnstate.Status{
+		BackendState: "Running",
+		Self:         &ipnstate.PeerStatus{TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.2")}},
+		Peer: map[key.NodePublic]*ipnstate.PeerStatus{
+			peerKey: {TailscaleIPs: []netip.Addr{dnsIP}},
+		},
+	}
+	if up, nl, reason := evaluateLiveNodeStatus(running, dnsIP.String()); !up || nl || reason != "" {
+		t.Fatalf("running with DNS peer: got (%v, %v, %q), want (true, false, \"\")", up, nl, reason)
+	}
+
+	needsLogin := &ipnstate.Status{BackendState: "NeedsLogin"}
+	if up, nl, reason := evaluateLiveNodeStatus(needsLogin, dnsIP.String()); up || !nl || !strings.Contains(reason, "removed") {
+		t.Fatalf("NeedsLogin: got (%v, %v, %q), want (false, true, removed)", up, nl, reason)
+	}
+
+	expired := &ipnstate.Status{
+		BackendState: "Running",
+		Self:         &ipnstate.PeerStatus{Expired: true},
+		Peer: map[key.NodePublic]*ipnstate.PeerStatus{
+			peerKey: {TailscaleIPs: []netip.Addr{dnsIP}},
+		},
+	}
+	if up, nl, reason := evaluateLiveNodeStatus(expired, dnsIP.String()); up || nl || !strings.Contains(reason, "expired") {
+		t.Fatalf("expired self: got (%v, %v, %q), want (false, false, expired)", up, nl, reason)
+	}
+
+	noDNSPeer := &ipnstate.Status{
+		BackendState: "Running",
+		Self:         &ipnstate.PeerStatus{TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.2")}},
+		Peer:         map[key.NodePublic]*ipnstate.PeerStatus{},
+	}
+	if up, nl, reason := evaluateLiveNodeStatus(noDNSPeer, dnsIP.String()); up || nl || strings.Contains(reason, "removed") || reason != "not connected to pen" {
+		t.Fatalf("missing DNS peer: got (%v, %v, %q), want (false, false, 'not connected to pen')", up, nl, reason)
+	}
+
+	stopped := &ipnstate.Status{BackendState: "Stopped"}
+	if up, nl, reason := evaluateLiveNodeStatus(stopped, dnsIP.String()); up || nl || !strings.Contains(reason, "Stopped") {
+		t.Fatalf("Stopped: got (%v, %v, %q), want (false, false, Stopped)", up, nl, reason)
+	}
+}
+
+func TestAgentStatusReflectsPostKickRevocation(t *testing.T) {
+	cfg := &agentConfig{Zone: "bobo.pens.example", ProxyAddr: "127.0.0.1:18125", DNSServer: "100.64.0.1"}
+	a := newAgent(cfg, nil)
+	a.up = true
+	a.ips = []string{"100.64.0.2"}
+
+	mode := "up"
+	a.liveStatus = func(context.Context) (bool, bool, string, bool) {
+		switch mode {
+		case "timeout":
+			return false, false, "", false
+		case "kicked":
+			return false, true, "device removed from pen", true
+		default:
+			return true, false, "", true
+		}
+	}
+
+	getStatus := func() agentStatus {
+		req := httptest.NewRequest("GET", "/status", nil)
+		req.Host = cfg.ProxyAddr
+		rec := httptest.NewRecorder()
+		a.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /status = %d, want 200", rec.Code)
+		}
+		var st agentStatus
+		if err := json.NewDecoder(rec.Body).Decode(&st); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+
+	if st := getStatus(); !st.Up || st.NeedsLogin || st.Error != "" {
+		t.Fatalf("before kick: got %+v, want Up=true", st)
+	}
+	// A transient liveStatus error/timeout must keep the latched Up=true state.
+	mode = "timeout"
+	if st := getStatus(); !st.Up || st.NeedsLogin || st.Error != "" {
+		t.Fatalf("on liveStatus timeout: got %+v, want latched Up=true", st)
+	}
+	mode = "kicked"
+	if st := getStatus(); st.Up || !st.NeedsLogin || st.Error != "device removed from pen" {
+		t.Fatalf("after kick: got %+v, want Up=false NeedsLogin=true Error='device removed from pen'", st)
+	}
+}

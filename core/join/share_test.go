@@ -222,6 +222,7 @@ func TestSharePermanentErrorClassification(t *testing.T) {
 	}{
 		{"nil error", false, "NeedsLogin", nil, false},
 		{"removed device needs login without key", false, "NeedsLogin", errors.New("context deadline exceeded"), true},
+		{"fast-fail errDeviceRemoved", false, "", errDeviceRemoved, true},
 		{"initial join with key briefly needs login", true, "NeedsLogin", errors.New("context deadline exceeded"), false},
 		{"offline at boot while starting", false, "Starting", errors.New("context deadline exceeded"), false},
 		{"invalid authkey message", true, "", errors.New("tsnet.Up: backend: invalid authkey"), true},
