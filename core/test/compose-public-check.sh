@@ -107,3 +107,53 @@ grep -q '^golang:' <<<"$got_pre" && fail "prebuilt pull-images unexpectedly incl
 echo "pinned shipped images (pull-images --all):"
 printf '  %s\n' $got_all
 echo "shipped container images check: ok"
+
+# Verify non-root headscale/lib ownership migration in core/hogman uses an
+# absolute host path mounted on /hslib (never /lib) and fails loudly on error.
+tmp_mig="$(mktemp -d)"
+trap 'rm -rf "$tmp_home" "$tmp_pre" "$tmp_mig"' EXIT
+mkdir -p "$tmp_mig/bin" "$tmp_mig/data/headscale/lib" "$tmp_mig/data/headscale/config" "$tmp_mig/data/join-dl"
+cat > "$tmp_mig/bin/id" <<'SH'
+#!/bin/sh
+echo 1000
+SH
+cat > "$tmp_mig/bin/find" <<'SH'
+#!/bin/sh
+echo "$1/db.sqlite"
+SH
+cat > "$tmp_mig/bin/docker" <<'SH'
+#!/bin/sh
+printf '%s\n' "$@" > "$FAKE_DOCKER_LOG"
+exit "${FAKE_DOCKER_RC:-0}"
+SH
+chmod +x "$tmp_mig/bin/id" "$tmp_mig/bin/find" "$tmp_mig/bin/docker"
+mig_fn="$(awk '/^own_runtime_files\(\)/,/^}/' "$REPO/core/hogman")"
+(
+  cd "$REPO/core"
+  export PATH="$tmp_mig/bin:$PATH"
+  export DATA="$tmp_mig/data" HOGMAN_UID=1000 HOGMAN_GID=1000
+  export FAKE_DOCKER_LOG="$tmp_mig/docker.args"
+  die() { echo "hogman: $*" >&2; exit 1; }
+  eval "$mig_fn"
+  own_runtime_files
+) || fail "non-root own_runtime_files migration failed unexpectedly"
+grep -qx -- "$tmp_mig/data/headscale/lib:/hslib" "$tmp_mig/docker.args" \
+  || fail "own_runtime_files did not mount $tmp_mig/data/headscale/lib:/hslib (got: $(tr '\n' ' ' < "$tmp_mig/docker.args"))"
+grep -qx -- "/hslib" "$tmp_mig/docker.args" \
+  || fail "own_runtime_files did not chown /hslib"
+! grep -q -- ":/lib$" "$tmp_mig/docker.args" \
+  || fail "own_runtime_files mounted onto /lib"
+mig_err="$(
+  cd "$REPO/core"
+  export PATH="$tmp_mig/bin:$PATH"
+  export DATA="$tmp_mig/data" HOGMAN_UID=1000 HOGMAN_GID=1000
+  export FAKE_DOCKER_LOG="$tmp_mig/docker.args" FAKE_DOCKER_RC=1
+  die() { echo "hogman: $*" >&2; exit 1; }
+  eval "$mig_fn"
+  own_runtime_files 2>&1
+  echo UNEXPECTED_OK
+)" || true
+grep -q "UNEXPECTED_OK" <<<"$mig_err" && fail "own_runtime_files swallowed docker chown failure"
+grep -q "sudo chown -R 1000:1000 $tmp_mig/data/headscale/lib" <<<"$mig_err" \
+  || fail "own_runtime_files failure missing manual chown hint: $mig_err"
+echo "non-root headscale/lib migration check: ok"
