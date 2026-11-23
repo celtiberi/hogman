@@ -34,7 +34,9 @@ services:
     environment:
       GOGC: "25"
       GOMEMLIMIT: 180MiB
-    tmpfs: [/var/run/headscale]
+    tmpfs:
+      - /var/run/headscale:uid=${HOGMAN_UID:-1000},gid=${HOGMAN_GID:-1000},mode=0700
+      - /tmp:uid=${HOGMAN_UID:-1000},gid=${HOGMAN_GID:-1000},mode=0700
     volumes:
       - ./data/headscale/config:/etc/headscale:ro
       - ./data/headscale/lib:/var/lib/headscale

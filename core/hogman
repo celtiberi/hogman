@@ -135,6 +135,9 @@ wait_for() {    # wait_for <description> <seconds> <command...>
     if "$@" >/dev/null 2>&1; then return 0; fi
     sleep 1
   done
+  case "$what" in
+    headscale|registrar) dc logs --tail 30 "$what" >&2 2>&1 || true ;;
+  esac
   die "timed out waiting for $what"
 }
 
@@ -288,7 +291,7 @@ cmd_up() {
   fi
   if [ "$(id -u)" = 0 ] && [ -n "${HOGMAN_UID:-}" ] && [ "$HOGMAN_UID" != 0 ]; then
     local svc cid cur
-    for svc in registrar portal edge; do
+    for svc in headscale registrar portal edge; do
       cid="$(dc ps -q "$svc" 2>/dev/null || true)"
       [ -n "$cid" ] || continue
       cur="$(docker inspect -f '{{.Config.User}}' "$cid" 2>/dev/null || true)"
