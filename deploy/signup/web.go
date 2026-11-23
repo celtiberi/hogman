@@ -36,12 +36,15 @@ type web struct {
 	waits       *limiter // waiting-list joins
 	globalWaits *limiter // server-wide cap on waiting-list joins
 	leaves      *limiter // taking yourself off the list (its own allowance)
+	checkouts   *limiter // starting a payment
 	jobs        *jobStore
+	stripe      *stripeCheckout // nil: pens aren't for sale
 }
 
 func runWeb() {
 	wb := newWeb(env("BROKER_URL", "http://broker:9090"), readToken(), env("PENS_DOMAIN", ""))
 	wb.sitesDomain = env("SITES_DOMAIN", "pens.hogman.network")
+	wb.stripe = loadStripeCheckout()
 	addr := env("LISTEN", ":8080")
 	log.Printf("sign-up page on %s", addr)
 	srv := &http.Server{Addr: addr, Handler: wb.handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
@@ -61,6 +64,7 @@ func newWeb(brokerURL, token, domain string) *web {
 		waits:       newLimiter(5, time.Hour),
 		globalWaits: newLimiterWithCap(30, time.Hour, 4),
 		leaves:      newLimiter(5, time.Hour),
+		checkouts:   newLimiter(10, time.Hour),
 		jobs:        newJobStore(defaultMaxOpenJobs, defaultMaxStoredJobs, defaultJobTTL, defaultDeliveredTTL),
 	}
 }
@@ -75,6 +79,9 @@ func (wb *web) handler() http.Handler {
 	mux.HandleFunc("GET /api/job", wb.job)
 	mux.HandleFunc("POST /api/waitlist", wb.waitlist)
 	mux.HandleFunc("POST /api/waitlist/leave", wb.leaveWaitlist)
+	mux.HandleFunc("POST /api/checkout", wb.checkout)
+	mux.HandleFunc("POST /api/stripe/webhook", wb.stripeWebhook)
+	mux.HandleFunc("GET /api/paid", wb.paid)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
@@ -114,7 +121,7 @@ func (wb *web) status(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, code, out)
 		return
 	}
-	jsonOut(w, 200, map[string]any{"open": out["open"], "pens_domain": wb.domain, "sites_domain": wb.sitesDomain})
+	jsonOut(w, 200, map[string]any{"open": out["open"], "pens_domain": wb.domain, "sites_domain": wb.sitesDomain, "for_sale": wb.stripe != nil})
 }
 
 func (wb *web) check(w http.ResponseWriter, r *http.Request) {

@@ -1,6 +1,11 @@
 # Used when a release ships hogman-signup compiled (hogman-host copies it to
 # hogman-signup.bin first).
+FROM alpine:3.24 AS certs
+RUN apk add --no-cache ca-certificates
+
 FROM scratch AS web
+# Root certificates: the page talks to Stripe's API over HTTPS when it sells pens.
+COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY hogman-signup.bin /hogman-signup
 USER 65534:65534
 ENV ROLE=web

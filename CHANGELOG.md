@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `deploy/signup` & `deploy/hogman-host`: selling pens with Stripe Checkout (D-28), in test mode until the business bank account exists. `hogman-host signup-stripe <price> [tax]` (keys on standard input) turns on a **Buy a pen** button; a paid checkout buys one sign-up code, shown on `/paid.html`. Stripe's webhook is verified by the broker (not the public page), is idempotent per Checkout Session, and records only Stripe IDs and the code in `signup/payments`. Cancelled subscriptions are logged and pushed to the operator. The page's image now carries root certificates for Stripe's API.
+
 ### Changed
 - `deploy/signup` & `deploy/hogman-host`: free/standard sign-ups now automatically append a server-enforced 4-character random ending (`<word>-<xxxx>`, using an unambiguous 31-char lowercase alphabet without `0/o/1/i/l`, max 25-char prefix) so common pen names cannot be squatted or collided on under D-21 permanent retirement. Invite codes tagged with a leading `vanity` keyword in `$HOGMAN_HOME/signup/codes` (created via `hogman-host signup-code --vanity [note]`) keep bare vanity pen names (`3–30` chars); the sign-up UI previews `-xxxx` by default and switches to bare availability checks when opened with `#code=...&vanity=1` (purely a UI hint — the broker always enforces the `vanity` tag server-side).
 

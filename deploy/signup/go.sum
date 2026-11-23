@@ -1,2 +1,6 @@
+github.com/shopspring/decimal v1.5.0 h1:HxSWk31RmJv0EyY4oLiGQB9u7WPludUwPBdvQZnYFPc=
+github.com/shopspring/decimal v1.5.0/go.mod h1:gawqmDU56v4yIKSwfBSFip1HdCCXN8/+DMd9qYNcwME=
+github.com/stripe/stripe-go/v87 v87.2.0 h1:ypVhBiQAmdkeg1t2pBLwyTlp1c8Ya20ok4MjzPBeRSc=
+github.com/stripe/stripe-go/v87 v87.2.0/go.mod h1:i+Gslwxf7LvSZvMcmv0ReTzAZ0nxqHU/4t4imAbGWes=
 rsc.io/qr v0.2.0 h1:6vBLea5/NRMVTz8V66gipeLycZMl/+UlFmk8DvqQ6WY=
 rsc.io/qr v0.2.0/go.mod h1:IF+uZjkb9fqyeF/4tlBoynqmQxUoPfWEKh921coOuXs=
