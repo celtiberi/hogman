@@ -294,7 +294,7 @@ def evaluate_cdns_state(
     pen_b_zone: str,
     hourly_cap: int = 5,
     weekly_cap: int = 20,
-    global_hourly_cap: int = 40,
+    global_hourly_cap: int = 60,
 ) -> list[CheckResult]:
     """Verify challenge-dns per-pen hourly/weekly caps, global hourly cap, and cross-pen ACME TXT scoping."""
     creds = state_data.get("creds")
@@ -1376,7 +1376,7 @@ def run_judge(
                     pen_b["zone"],
                     hourly_cap=5,
                     weekly_cap=20,
-                    global_hourly_cap=40,
+                    global_hourly_cap=60,
                 )
             )
         except (OSError, json.JSONDecodeError) as exc:

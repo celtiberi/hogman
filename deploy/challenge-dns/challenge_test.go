@@ -264,33 +264,109 @@ func TestGlobalHourlyCapAcrossPens(t *testing.T) {
 	}
 }
 
-func TestCapsOverrideAndParse(t *testing.T) {
-	h, w, g, err := parseCapsFromEnv("", "", "")
-	if err != nil || h != defaultHourlyCap || w != defaultCapNames || g != defaultGlobalHourlyCap {
-		t.Fatalf("defaults = (%d,%d,%d,%v), want (%d,%d,%d,nil)", h, w, g, err, defaultHourlyCap, defaultCapNames, defaultGlobalHourlyCap)
+func TestGlobalSoftHardReservedQuietPenFloor(t *testing.T) {
+	s, now := newTestStore(t)
+	s.hourlyCapNames = 4
+	s.capNames = 10
+	s.globalHourlyCapNames = 4
+	s.globalHardHourlyCapNames = 6
+	a, _ := mustCred(t, s, "pen", penA)
+	b, _ := mustCred(t, s, "pen", penB)
+	c, _ := mustCred(t, s, "pen", "penc-quiet")
+	d, _ := mustCred(t, s, "pen", "pend-quiet")
+
+	// penA writes 2 names (t=0, +5m) and penB writes 2 names (+10m, +15m) -> global=4 (soft).
+	if err := s.PutTXT(a, ch("a0", penA), val1); err != nil {
+		t.Fatal(err)
 	}
-	h, w, g, err = parseCapsFromEnv("3", "12", "30")
-	if err != nil || h != 3 || w != 12 || g != 30 {
-		t.Fatalf("overrides = (%d,%d,%d,%v), want (3,12,30,nil)", h, w, g, err)
+	*now = now.Add(5 * time.Minute)
+	if err := s.PutTXT(a, ch("a1", penA), val1); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(5 * time.Minute)
+	if err := s.PutTXT(b, ch("b0", penB), val1); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(5 * time.Minute)
+	if err := s.PutTXT(b, ch("b1", penB), val1); err != nil {
+		t.Fatal(err)
+	}
+
+	// At t=+20m, bursty penA (penHourly=2 >= 2) is shed at the soft cap (40m until a0 rolls off).
+	*now = now.Add(5 * time.Minute)
+	err := s.PutTXT(a, ch("a2", penA), val1)
+	if !errors.Is(err, errGlobalHourlyCap) {
+		t.Fatalf("bursty penA above soft cap: %v, want errGlobalHourlyCap", err)
+	}
+	var rle *rateLimitError
+	if !errors.As(err, &rle) || rle.retryAfter != 40*time.Minute {
+		t.Fatalf("soft cap Retry-After = %v, want 40m", rle)
+	}
+
+	// Meanwhile, quiet/new penC (penHourly < 2) uses the reserved soft..hard headroom for its first 2 names.
+	if err := s.PutTXT(c, ch("home", "penc-quiet"), val1); err != nil {
+		t.Fatalf("quiet penC 1st name should use reserved headroom: %v", err)
+	}
+	if err := s.PutTXT(c, ch("vault", "penc-quiet"), val1); err != nil {
+		t.Fatalf("quiet penC 2nd name should use reserved headroom: %v", err)
+	}
+
+	// Now global == hard (6): even quiet penD is stopped at the hard ceiling.
+	err = s.PutTXT(d, ch("home", "pend-quiet"), val1)
+	if !errors.Is(err, errGlobalHourlyCap) {
+		t.Fatalf("penD at hard cap: %v, want errGlobalHourlyCap", err)
+	}
+	if !errors.As(err, &rle) || rle.retryAfter != 40*time.Minute {
+		t.Fatalf("hard cap Retry-After = %v, want 40m", rle)
+	}
+
+	// At t=+60m, a0 rolls off (global=5, still >= soft=4): bursty penB stays shed,
+	// while quiet penD immediately gets priority in the reserved headroom.
+	*now = now.Add(40 * time.Minute)
+	if err := s.PutTXT(b, ch("b2", penB), val1); !errors.Is(err, errGlobalHourlyCap) {
+		t.Fatalf("bursty penB during recovery (global=5 >= soft=4): %v, want errGlobalHourlyCap", err)
+	}
+	if err := s.PutTXT(d, ch("home", "pend-quiet"), val1); err != nil {
+		t.Fatalf("quiet penD should win priority during recovery: %v", err)
+	}
+}
+
+func TestCapsOverrideAndParse(t *testing.T) {
+	h, w, g, gh, err := parseCapsFromEnv("", "", "", "")
+	if err != nil || h != defaultHourlyCap || w != defaultCapNames || g != defaultGlobalHourlyCap || gh != defaultGlobalHardHourlyCap {
+		t.Fatalf("defaults = (%d,%d,%d,%d,%v), want (%d,%d,%d,%d,nil)",
+			h, w, g, gh, err, defaultHourlyCap, defaultCapNames, defaultGlobalHourlyCap, defaultGlobalHardHourlyCap)
+	}
+	h, w, g, gh, err = parseCapsFromEnv("3", "12", "30", "45")
+	if err != nil || h != 3 || w != 12 || g != 30 || gh != 45 {
+		t.Fatalf("overrides = (%d,%d,%d,%d,%v), want (3,12,30,45,nil)", h, w, g, gh, err)
 	}
 	// Setting only CDNS_WEEKLY_CAP below the default hourly cap clamps hourly down cleanly.
-	h, w, g, err = parseCapsFromEnv("", "3", "")
-	if err != nil || h != 3 || w != 3 || g != defaultGlobalHourlyCap {
-		t.Fatalf("weekly-only clamp = (%d,%d,%d,%v), want (3,3,%d,nil)", h, w, g, err, defaultGlobalHourlyCap)
+	h, w, g, gh, err = parseCapsFromEnv("", "3", "", "")
+	if err != nil || h != 3 || w != 3 || g != defaultGlobalHourlyCap || gh != defaultGlobalHardHourlyCap {
+		t.Fatalf("weekly-only clamp = (%d,%d,%d,%d,%v), want (3,3,%d,%d,nil)",
+			h, w, g, gh, err, defaultGlobalHourlyCap, defaultGlobalHardHourlyCap)
+	}
+	// Raising CDNS_GLOBAL_HOURLY_CAP above default hard cap without setting hard lifts hard to match.
+	h, w, g, gh, err = parseCapsFromEnv("", "", "80", "")
+	if err != nil || h != defaultHourlyCap || w != defaultCapNames || g != 80 || gh != 80 {
+		t.Fatalf("soft-above-default-hard = (%d,%d,%d,%d,%v), want (5,20,80,80,nil)", h, w, g, gh, err)
 	}
 	for _, tc := range []struct {
-		name, h, w, g string
+		name, h, w, g, gh string
 	}{
-		{"hourly > weekly", "6", "5", "40"},
-		{"global < hourly", "5", "20", "4"},
-		{"zero hourly", "0", "20", "40"},
-		{"neg weekly", "5", "-1", "40"},
-		{"huge weekly", "5", "1001", "40"},
-		{"bad global", "5", "20", "10001"},
-		{"non-int", "abc", "20", "40"},
+		{"hourly > weekly", "6", "5", "40", "60"},
+		{"global < hourly", "5", "20", "4", "60"},
+		{"hard < soft", "5", "20", "50", "40"},
+		{"zero hourly", "0", "20", "40", "60"},
+		{"neg weekly", "5", "-1", "40", "60"},
+		{"huge weekly", "5", "1001", "40", "60"},
+		{"bad global", "5", "20", "10001", "10001"},
+		{"bad hard", "5", "20", "40", "10001"},
+		{"non-int", "abc", "20", "40", "60"},
 	} {
-		if _, _, _, err := parseCapsFromEnv(tc.h, tc.w, tc.g); err == nil {
-			t.Errorf("parseCapsFromEnv(%s: %q,%q,%q) succeeded, want error", tc.name, tc.h, tc.w, tc.g)
+		if _, _, _, _, err := parseCapsFromEnv(tc.h, tc.w, tc.g, tc.gh); err == nil {
+			t.Errorf("parseCapsFromEnv(%s: %q,%q,%q,%q) succeeded, want error", tc.name, tc.h, tc.w, tc.g, tc.gh)
 		}
 	}
 

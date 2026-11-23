@@ -14,13 +14,16 @@ It never serves an address. Names under its zones that have nothing are answered
 **Who may write what.** Each pen's registrar has a credential for that pen alone: it can write
 `_acme-challenge.<site>.<its pen name>.pens.hogman.network` and nothing else, subject to a
 two-window cap on distinct new names: by default **5 per rolling hour** (`CDNS_HOURLY_CAP`) and
-**20 per rolling 7 days** (`CDNS_WEEKLY_CAP`) per pen, plus a **40 per rolling hour** global
-ceiling across all pens (`CDNS_GLOBAL_HOURLY_CAP`) to protect the shared CA quotas. `home.<pen>`
-uses one slot, **attempts count rather than issued certs** (a failed-then-undone share still uses a
-slot for 1 hour and 7 days once its challenge TXT was written), and retries or renewals of names
-already in the 7-day window are free. Lowering caps takes effect immediately on restart, and `429`
-responses carry a `Retry-After` header in seconds. The host's front door has one credential, for
-its `*.gate` wildcard only. Tokens are stored as SHA-256 hashes.
+**20 per rolling 7 days** (`CDNS_WEEKLY_CAP`) per pen, plus a global hourly ceiling across all
+pens: **40 per rolling hour soft cap** (`CDNS_GLOBAL_HOURLY_CAP`) and **60 per rolling hour hard
+cap** (`CDNS_GLOBAL_HARD_HOURLY_CAP`). Slots between the soft and hard caps are reserved
+exclusively for quiet or newly created pens (pens with fewer than 2 new names in the last hour), so
+bursty pens cannot starve quiet users or new pen sign-ups. `home.<pen>` uses one slot, **attempts
+count rather than issued certs** (a failed-then-undone share still uses a slot for 1 hour and 7
+days once its challenge TXT was written), and retries or renewals of names already in the 7-day
+window are free. Lowering caps takes effect immediately on restart, and `429` responses carry a
+`Retry-After` header in seconds. The host's front door has one credential, for its `*.gate`
+wildcard only. Tokens are stored as SHA-256 hashes.
 
 **What it keeps, and nothing more:** token hashes; for the hourly and weekly caps, which names each
 pen wrote in the last 7 days (timestamped); recent fallback-key mints (7 days); and the names of
@@ -49,6 +52,6 @@ challenge-dns name used <penname>        # sign-up asks before raising a pen
 
 | API (Unix socket `/run/hogman-acme/api.sock`, bearer token) | |
 |---|---|
-| `POST /v1/txt {fqdn, value}` | 201 (also on repeat) · 400 bad value · 403 out of scope · 409 two live already · 429 weekly cap |
+| `POST /v1/txt {fqdn, value}` | 201 (also on repeat) · 400 bad value · 403 out of scope · 409 two live already · 429 hourly/weekly/global cap (`Retry-After`) |
 | `DELETE /v1/txt {fqdn, value}` | 204 (also when absent) · 403 out of scope |
 | `POST /v1/eab` | 201 `{kid, hmac_b64url, contact}` · 429 allowance or Google quota · 503 not configured or no contact |

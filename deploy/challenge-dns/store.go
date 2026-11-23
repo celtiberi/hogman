@@ -26,9 +26,11 @@ const (
 	maxLivePer             = 2                // live values per name (ACME may ask for two at once)
 	hourlyWindow           = time.Hour
 	capWindow              = 7 * 24 * time.Hour
-	defaultHourlyCap       = 5  // distinct new names per pen per rolling hour (CDNS_HOURLY_CAP)
-	defaultCapNames        = 20 // distinct new names per pen per 7 days (CDNS_WEEKLY_CAP)
-	defaultGlobalHourlyCap = 40 // distinct new names across all pens per rolling hour (CDNS_GLOBAL_HOURLY_CAP)
+	defaultHourlyCap           = 5  // distinct new names per pen per rolling hour (CDNS_HOURLY_CAP)
+	defaultCapNames            = 20 // distinct new names per pen per 7 days (CDNS_WEEKLY_CAP)
+	defaultGlobalHourlyCap     = 40 // soft global hourly cap across all pens (CDNS_GLOBAL_HOURLY_CAP)
+	defaultGlobalHardHourlyCap = 60 // hard global hourly ceiling with reserved quiet-pen floor (CDNS_GLOBAL_HARD_HOURLY_CAP)
+	quietPenHourlyFloor        = 2  // pens with <2 new names in the last hour may use soft..hard headroom
 	acmePrefix             = "_acme-challenge."
 	maxSiteDepth           = 4 // labels before the pen name, as site names allow
 )
@@ -101,15 +103,16 @@ type txtValue struct {
 
 // Store holds the state (persisted) and the live challenge records (not).
 type Store struct {
-	mu                   sync.Mutex
-	path                 string
-	zones                Zones
-	st                   state
-	txt                  map[string][]txtValue // fqdn -> live values
-	now                  func() time.Time
-	hourlyCapNames       int // 0 uses defaultHourlyCap (clamped to weeklyCap)
-	capNames             int // 0 uses defaultCapNames
-	globalHourlyCapNames int // 0 uses defaultGlobalHourlyCap
+	mu                       sync.Mutex
+	path                     string
+	zones                    Zones
+	st                       state
+	txt                      map[string][]txtValue // fqdn -> live values
+	now                      func() time.Time
+	hourlyCapNames           int // 0 uses defaultHourlyCap (clamped to weeklyCap)
+	capNames                 int // 0 uses defaultCapNames
+	globalHourlyCapNames     int // 0 uses defaultGlobalHourlyCap (soft global cap)
+	globalHardHourlyCapNames int // 0 uses defaultGlobalHardHourlyCap (or globalHourlyCapNames if set directly)
 }
 
 func (s *Store) weeklyCap() int {
@@ -135,6 +138,20 @@ func (s *Store) globalHourlyCap() int {
 		return s.globalHourlyCapNames
 	}
 	return defaultGlobalHourlyCap
+}
+
+func (s *Store) globalHardHourlyCap() int {
+	h := s.globalHardHourlyCapNames
+	if h <= 0 {
+		if s.globalHourlyCapNames > 0 {
+			return s.globalHourlyCapNames
+		}
+		h = defaultGlobalHardHourlyCap
+	}
+	if soft := s.globalHourlyCap(); h < soft {
+		return soft
+	}
+	return h
 }
 
 // Zones are the names this server answers for.
@@ -420,7 +437,11 @@ func (s *Store) countLocked(c Cred, fqdn string, now time.Time) error {
 			s.st.Seen[c.ID] = seen
 			return &rateLimitError{cause: errHourlyCap, retryAfter: retryAfterFromOldest(oldestHourly, now, hourlyWindow)}
 		}
-		if globalHourly >= s.globalHourlyCap() {
+		if globalHourly >= s.globalHardHourlyCap() {
+			s.st.Seen[c.ID] = seen
+			return &rateLimitError{cause: errGlobalHourlyCap, retryAfter: retryAfterFromOldest(oldestGlobalHourly, now, hourlyWindow)}
+		}
+		if globalHourly >= s.globalHourlyCap() && penHourly >= quietPenHourlyFloor {
 			s.st.Seen[c.ID] = seen
 			return &rateLimitError{cause: errGlobalHourlyCap, retryAfter: retryAfterFromOldest(oldestGlobalHourly, now, hourlyWindow)}
 		}

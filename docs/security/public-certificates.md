@@ -64,7 +64,7 @@ We follow two existing models rather than invent our own:
     - The two CAs give the host two different account URIs, and they exist only after the host registers, so these CAA records are added after that.
 - **Each pen gets its own API credential, scoped to that pen.** It can write TXT records under `_acme-challenge.*.<its pen name>.pens.hogman.network`, and nothing else: no other pen, no other record type, nothing under `gate.`.
   - It allows at most 2 live TXT records per name.
-  - Its **two-window per-pen caps and global hourly ceiling** count distinct names whose challenge was written, not raw TXT writes: **5 new names per rolling hour** (`CDNS_HOURLY_CAP`) and **20 per rolling 7 days** (`CDNS_WEEKLY_CAP`) per pen, plus **40 per rolling hour across all pens combined** (`CDNS_GLOBAL_HOURLY_CAP`). `home.<pen>` uses one slot; attempts count on the first TXT write (not issued certs), retries and renewals of already-counted names are exempt, and `429` responses carry a `Retry-After` header with a distinct message for hourly, weekly, and global limits. Fallback EAB mints (`POST /v1/eab`) follow the same per-credential hourly and weekly windows.
+  - Its **two-window per-pen caps and soft/hard global hourly ceiling** count distinct names whose challenge was written, not raw TXT writes: **5 new names per rolling hour** (`CDNS_HOURLY_CAP`) and **20 per rolling 7 days** (`CDNS_WEEKLY_CAP`) per pen, plus **40/hour soft** (`CDNS_GLOBAL_HOURLY_CAP`) and **60/hour hard** (`CDNS_GLOBAL_HARD_HOURLY_CAP`) across all pens combined. Headroom between the soft and hard global caps is reserved exclusively for quiet or newly created pens (`< 2` new names in the last hour) so bursty pens cannot starve quiet users or new pen sign-ups. `home.<pen>` uses one slot; attempts count on the first TXT write (not issued certs), retries and renewals of already-counted names are exempt, and `429` responses carry a `Retry-After` header with a distinct message for hourly, weekly, and global limits. Fallback EAB mints (`POST /v1/eab`) follow the same per-credential hourly and weekly windows.
   - The host has one separate credential, which only the front door uses, for the `*.gate.hogman.network` wildcard.
   - The registrar reaches the server's HTTP API over a host-only Docker network, documented in `hogman-host`. The API never faces the internet.
 - **Self-hosted pens:** the registrar uses a DNS provider library (libdns) with the operator's DNS API token. The docs recommend the narrowest token the provider allows. They also show the standard trick for making it narrower: delegate `_acme-challenge` with a CNAME to a zone used only for challenges.
@@ -203,7 +203,7 @@ The docs say, in one sentence, that pens created before this change need to be r
 | acme-dns or our own | Our own small server on `miekg/dns`. |
 | certmagic | Yes, with public resolvers for propagation checks and its cache kept across updates. |
 | `get_certificate` | Dropped. Atomic files in a mount-isolated folder, and a reload over Caddy's admin Unix socket. |
-| Rate caps | 5/hour (`CDNS_HOURLY_CAP`) and 20/7d (`CDNS_WEEKLY_CAP`) per pen, plus 40/hour global (`CDNS_GLOBAL_HOURLY_CAP`), counting distinct new names on first TXT write (attempts count; renewals are exempt), with `Retry-After` headers. |
+| Rate caps | 5/hour (`CDNS_HOURLY_CAP`) and 20/7d (`CDNS_WEEKLY_CAP`) per pen, plus 40/hour soft (`CDNS_GLOBAL_HOURLY_CAP`) / 60/hour hard (`CDNS_GLOBAL_HARD_HOURLY_CAP`) global ceiling with a reserved quiet-pen floor, counting distinct new names on first TXT write (attempts count; renewals are exempt), with `Retry-After` headers. |
 | Pen ID length | 12 characters at rev 2; replaced by readable pen names in D-21. |
 
 Also fixed:
@@ -219,7 +219,7 @@ Also fixed:
 2. Should the challenge DNS service be acme-dns itself (joohoi/acme-dns, extended with pen scopes and the cap), or our own small server on `miekg/dns`, which the registrar already uses?
 3. certmagic in shares: the dependency weight is acceptable, it already brings libdns and ARI, and keeps `CGO_ENABLED=0`. Better alternatives?
 4. Should `get_certificate http` for the home page and front door replace a custom Caddy build?
-5. Is a per-pen cap of 10 new certificates a week right for the trial? *(Answered: replaced with a two-window cap — 5/hour burst (`CDNS_HOURLY_CAP`) and 20/7d (`CDNS_WEEKLY_CAP`) per pen plus a 40/hour global ceiling (`CDNS_GLOBAL_HOURLY_CAP`), keeping bursts bounded while letting active pens add sites over a week.)*
+5. Is a per-pen cap of 10 new certificates a week right for the trial? *(Answered: replaced with a two-window cap — 5/hour burst (`CDNS_HOURLY_CAP`) and 20/7d (`CDNS_WEEKLY_CAP`) per pen plus a 40/hour soft / 60/hour hard global ceiling (`CDNS_GLOBAL_HOURLY_CAP`, `CDNS_GLOBAL_HARD_HOURLY_CAP`) reserving headroom for quiet/new pens.)*
 6. Keep 8-character pen IDs, or longer?
 
 ## What the operator needs to set up (before code reaches production)
