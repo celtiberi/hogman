@@ -69,7 +69,7 @@ func removeLegacyHogmanRoot(zone, rootFP string) (bool, error) {
 		return false, nil
 	}
 	for _, p := range paths {
-		if out, err := run(true, "rm", "-f", p); err != nil {
+		if out, err := run(true, "/bin/rm", "-f", p); err != nil {
 			return false, errorf("could not remove old certificate (%s): %v\n%s", p, err, out)
 		}
 	}

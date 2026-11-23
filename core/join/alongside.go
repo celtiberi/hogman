@@ -1,7 +1,8 @@
 package main
 
 import (
-	"crypto/sha256"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -54,13 +55,17 @@ func hasAlongside(zone string) bool {
 	return err == nil
 }
 
-// pickLocalAddr chooses a deterministic port outside the OS ephemeral range
-// (17000-26999) from the zone name, scanning forward if that port is in use.
-func pickLocalAddr(zone string) (string, error) {
+// pickLocalAddr chooses a random port outside the OS ephemeral range
+// (17000-26999), scanning forward if that port is in use, so remote web pages
+// cannot predict a pen's loopback proxy port from its zone name.
+func pickLocalAddr(_ string) (string, error) {
 	const basePort = 17000
 	const span = 10000
-	sum := sha256.Sum256([]byte(zone))
-	start := int(binary.BigEndian.Uint32(sum[:4]) % span)
+	var rb [4]byte
+	if _, err := rand.Read(rb[:]); err != nil {
+		return "", fmt.Errorf("pick local port: %w", err)
+	}
+	start := int(binary.BigEndian.Uint32(rb[:]) % span)
 	for i := 0; i < span; i++ {
 		port := basePort + (start+i)%span
 		addr := fmt.Sprintf("127.0.0.1:%d", port)
@@ -75,17 +80,48 @@ func pickLocalAddr(zone string) (string, error) {
 }
 
 func agentState(c *agentConfig) (*agentStatus, error) {
-	resp, err := (&http.Client{Timeout: 2 * time.Second}).Get(c.proxyURL() + "/status")
+	return agentStateInDir(stateDir(c.Zone), c)
+}
+
+func agentStateInDir(dir string, c *agentConfig) (*agentStatus, error) {
+	tokBytes, err := os.ReadFile(filepath.Join(dir, statusTokenFilename))
+	token := strings.TrimSpace(string(tokBytes))
+	if err != nil || token == "" {
+		return nil, fmt.Errorf("missing agent status token for %s", c.Zone)
+	}
+	nonce, err := generateHexToken(16)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodGet, c.proxyURL()+"/status", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Hogman-Challenge", nonce)
+	client := &http.Client{
+		Timeout:       2 * time.Second,
+		Transport:     &http.Transport{Proxy: nil},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("something else is listening on %s", c.ProxyAddr)
+	}
 	var st agentStatus
-	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16*1024)).Decode(&st); err != nil {
 		return nil, err
 	}
 	if st.Zone != c.Zone {
 		return nil, fmt.Errorf("something else is listening on %s", c.ProxyAddr)
+	}
+	gotProof := strings.TrimSpace(resp.Header.Get("X-Hogman-Proof"))
+	wantProof := computeStatusProof(token, nonce, c.Zone)
+	if gotProof == "" || !hmac.Equal([]byte(gotProof), []byte(wantProof)) {
+		return nil, fmt.Errorf("unverified process listening on %s", c.ProxyAddr)
 	}
 	return &st, nil
 }
@@ -179,6 +215,9 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 			cfg.ControlCA = string(pemBytes)
 		}
 		if err := cfg.save(dir); err != nil {
+			return err
+		}
+		if _, err := writeStatusToken(dir); err != nil {
 			return err
 		}
 		if err := os.WriteFile(filepath.Join(dir, "authkey"), []byte(key), 0o600); err != nil {

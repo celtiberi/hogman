@@ -606,11 +606,17 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 
 	h, closeH, err := shareHandler(c)
 	if err != nil {
+		if fresh {
+			undoFreshShare(hc, node, dir, c)
+		}
 		return fail(err)
 	}
 	defer closeH()
 	ln443, err := node.Listen("tcp", ":443")
 	if err != nil {
+		if fresh {
+			undoFreshShare(hc, node, dir, c)
+		}
 		return fail(err)
 	}
 	quiet := log.New(io.Discard, "", 0)
@@ -618,6 +624,9 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 	cm, err := newShareCertManager(shareACMEConfigFromEnv(c.Zone, c.fqdn(), certStateDir, hc))
 	if err != nil {
 		_ = ln443.Close()
+		if fresh {
+			undoFreshShare(hc, node, dir, c)
+		}
 		return fail(err)
 	}
 	defer cm.Close()
@@ -688,6 +697,22 @@ func formatFreshShareCertError(fqdn, name string, err error) error {
 	return errorf("no certificate for %s: %v\n  Nothing was left behind: the name %s is free again. Fix the problem above,\n  then share again with a fresh share link (this one is used up).", fqdn, err, name)
 }
 
+// hasPathTraversal reports whether a request's path or raw escaped path attempts
+// to traverse out of a subpath-scoped reverse-proxy target using dot-segments,
+// backslashes, or percent-encoded dots/slashes.
+func hasPathTraversal(u *url.URL) bool {
+	raw := strings.ToLower(u.EscapedPath())
+	if strings.Contains(raw, "%2e") || strings.Contains(raw, "%2f") || strings.Contains(raw, "%5c") || strings.Contains(raw, "\\") {
+		return true
+	}
+	for _, seg := range strings.Split(u.Path, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 func shareHandler(c *shareConfig) (http.Handler, func(), error) {
 	if c.Folder {
 		// os.Root keeps every read inside the folder: a symlink pointing out
@@ -702,7 +727,7 @@ func shareHandler(c *shareConfig) (http.Handler, func(), error) {
 	if err != nil {
 		return nil, nil, permanentShare(err)
 	}
-	return &httputil.ReverseProxy{
+	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(u) // Host becomes the target's: dev servers expect their own
 			pr.SetXForwarded()
@@ -713,7 +738,18 @@ func shareHandler(c *shareConfig) (http.Handler, func(), error) {
 			fmt.Fprintf(w, "%s is shared from a computer where the app isn't answering right now.\n", c.fqdn())
 		},
 		ErrorLog: log.New(io.Discard, "", 0),
-	}, func() {}, nil
+	}
+	if u.Path != "" && u.Path != "/" {
+		scoped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if hasPathTraversal(r.URL) {
+				http.Error(w, "invalid path", http.StatusBadRequest)
+				return
+			}
+			rp.ServeHTTP(w, r)
+		})
+		return scoped, func() {}, nil
+	}
+	return rp, func() {}, nil
 }
 
 // ------------------------------------------------- background, status --

@@ -149,8 +149,8 @@ func TestCollectNativePensStrictValidationLegacyAndSquatDetection(t *testing.T) 
 	fakeSrv.Start()
 	defer fakeSrv.Close()
 
-	// 3. Legacy agent: started before status.token existed (no token file on disk),
-	// answers /status with valid matching zone JSON -> reported as Up + Legacy, NOT Squatted.
+	// 3. Missing status.token on disk: listener answers /status with matching
+	// zone JSON but cannot prove ownership -> fail closed as Squatted.
 	lnLeg, portLeg := listenInHogmanRange(t)
 	zoneLeg := "legacy2.pens.hogman.network"
 	dirLeg := filepath.Join(base, zoneLeg)
@@ -211,8 +211,8 @@ func TestCollectNativePensStrictValidationLegacyAndSquatDetection(t *testing.T) 
 	if p := byZone[zone2]; p.Up || p.Port != 0 || !p.Squatted {
 		t.Fatalf("zone2 squatted entry = %+v, want Up=false Port=0 Squatted=true", p)
 	}
-	if p := byZone[zoneLeg]; !p.Up || p.Port != portLeg || !p.Hosted || !p.Legacy || p.Squatted {
-		t.Fatalf("zoneLeg entry = %+v, want Up=true Port=%d Hosted=true Legacy=true Squatted=false", p, portLeg)
+	if p := byZone[zoneLeg]; p.Up || p.Port != 0 || !p.Hosted || p.Legacy || !p.Squatted {
+		t.Fatalf("zoneLeg missing-token entry = %+v, want Up=false Port=0 Hosted=true Legacy=false Squatted=true", p)
 	}
 	if p := byZone[zone3]; p.Up || p.Port != port3 || p.Hosted || p.Squatted || p.Legacy {
 		t.Fatalf("zone3 stopped entry = %+v, want Up=false Port=%d Hosted=false Squatted=false", p, port3)

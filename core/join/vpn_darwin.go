@@ -8,13 +8,13 @@ import (
 )
 
 func detectSystemProxyState(known []*agentConfig) systemProxyState {
-	proxyOut, err := exec.Command("scutil", "--proxy").Output()
+	proxyOut, err := exec.Command("/usr/sbin/scutil", "--proxy").Output()
 	if err != nil {
 		return systemProxyState{}
 	}
 	proxy := parseScutilProxy(string(proxyOut))
 
-	cmd := exec.Command("scutil")
+	cmd := exec.Command("/usr/sbin/scutil")
 	cmd.Stdin = strings.NewReader("show State:/Network/Global/IPv4\n")
 	ipv4Out, _ := cmd.Output()
 	primaryIface := parseScutilPrimaryInterface(string(ipv4Out))

@@ -22,27 +22,31 @@ import (
 )
 
 func TestPickLocalAddr(t *testing.T) {
-	a1, err := pickLocalAddr("bobo.hogman")
-	if err != nil {
-		t.Fatal(err)
+	seen := map[string]bool{}
+	var a1 string
+	for i := 0; i < 8; i++ {
+		addr, err := pickLocalAddr("bobo.hogman")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a1 == "" {
+			a1 = addr
+		}
+		seen[addr] = true
+		_, portStr, err := net.SplitHostPort(addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 17000 || port >= 27000 {
+			t.Fatalf("port %d out of [17000, 27000)", port)
+		}
 	}
-	a2, err := pickLocalAddr("bobo.hogman")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if a1 != a2 {
-		t.Fatalf("pickLocalAddr not deterministic: %q != %q", a1, a2)
-	}
-	_, portStr, err := net.SplitHostPort(a1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port < 17000 || port >= 27000 {
-		t.Fatalf("port %d out of [17000, 27000)", port)
+	if len(seen) < 2 {
+		t.Fatalf("pickLocalAddr should randomize ports per install, got only %v", seen)
 	}
 
-	// Occupy the preferred port and verify it picks the next free port in range.
+	// Occupy one port and verify pickLocalAddr returns a different free port in range.
 	ln, err := net.Listen("tcp", a1)
 	if err != nil {
 		t.Fatal(err)
@@ -400,7 +404,10 @@ func TestFetchNetworkValidation(t *testing.T) {
 	}{
 		{"private cert_mode", func(n *networkInfo) { n.CertMode = "private" }},
 		{"unknown cert_mode", func(n *networkInfo) { n.CertMode = "bogus" }},
-		{"cross-pen zone", func(n *networkInfo) { n.Zone = "alice.pens.example.com"; n.Portal = "https://home.alice.pens.example.com" }},
+		{"cross-pen zone", func(n *networkInfo) {
+			n.Zone = "alice.pens.example.com"
+			n.Portal = "https://home.alice.pens.example.com"
+		}},
 		{"non-public zone", func(n *networkInfo) { n.Zone = "bobo.hogman"; n.Portal = "https://home.bobo.hogman" }},
 		{"mismatched login_server", func(n *networkInfo) { n.LoginServer = "https://evil.example" }},
 		{"foreign portal", func(n *networkInfo) { n.Portal = "https://evil.example/phish" }},

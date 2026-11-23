@@ -9,7 +9,7 @@ const systemKeychain = "/Library/Keychains/System.keychain"
 func isRoot() bool { return os.Geteuid() == 0 }
 
 func removeLegacyHogmanRoot(zone, rootFP string) (bool, error) {
-	out, err := run(false, "security", "find-certificate", "-a", "-p", systemKeychain)
+	out, err := run(false, "/usr/bin/security", "find-certificate", "-a", "-p", systemKeychain)
 	if err != nil {
 		return false, nil
 	}
@@ -20,10 +20,10 @@ func removeLegacyHogmanRoot(zone, rootFP string) (bool, error) {
 	removed := false
 	for _, m := range matches {
 		if path, cleanup, err := writeTempCert(m.PEM); err == nil {
-			_, _ = run(true, "security", "remove-trusted-cert", "-d", path)
+			_, _ = run(true, "/usr/bin/security", "remove-trusted-cert", "-d", path)
 			cleanup()
 		}
-		delOut, err := run(true, "security", "delete-certificate", "-Z", m.SHA1, systemKeychain)
+		delOut, err := run(true, "/usr/bin/security", "delete-certificate", "-Z", m.SHA1, systemKeychain)
 		if err != nil {
 			return removed, errorf("could not remove old certificate (%s): %v\n%s", m.CommonName, err, delOut)
 		}
@@ -41,4 +41,4 @@ func tailscaleInstallHelp() string {
 	return "Install Tailscale from the Mac App Store or https://tailscale.com/download/mac, open it once, then run this again."
 }
 
-func openURL(u string) { _, _ = run(false, "open", u) }
+func openURL(u string) { _, _ = run(false, "/usr/bin/open", u) }

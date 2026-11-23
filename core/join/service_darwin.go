@@ -37,8 +37,8 @@ func startAgent(dir string, c *agentConfig, o options) error {
 		return err
 	}
 	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_, _ = run(false, "launchctl", "bootout", domain+"/"+launchLabel(c.Zone))
-	if out, err := run(false, "launchctl", "bootstrap", domain, path); err != nil {
+	_, _ = run(false, "/bin/launchctl", "bootout", domain+"/"+launchLabel(c.Zone))
+	if out, err := run(false, "/bin/launchctl", "bootstrap", domain, path); err != nil {
 		// No desktop session (for example over SSH): fall back to a plain background process.
 		_ = os.Remove(path)
 		note("could not register a login item (%s); running in the background until restart", firstLine(out))
@@ -50,7 +50,7 @@ func startAgent(dir string, c *agentConfig, o options) error {
 
 func stopAgent(dir string, c *agentConfig) {
 	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_, _ = run(false, "launchctl", "bootout", domain+"/"+launchLabel(c.Zone))
+	_, _ = run(false, "/bin/launchctl", "bootout", domain+"/"+launchLabel(c.Zone))
 	_ = os.Remove(launchPlist(c.Zone))
 	stopDetached(dir)
 }
@@ -91,8 +91,8 @@ func startShareServiceWithBinary(bin, dir string, c *shareConfig, noService bool
 		return false, 0, err
 	}
 	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_, _ = run(false, "launchctl", "bootout", domain+"/"+shareLaunchLabel(c))
-	if out, err := run(false, "launchctl", "bootstrap", domain, path); err != nil {
+	_, _ = run(false, "/bin/launchctl", "bootout", domain+"/"+shareLaunchLabel(c))
+	if out, err := run(false, "/bin/launchctl", "bootstrap", domain, path); err != nil {
 		_ = os.Remove(path)
 		note("could not register a login item (%s); running in the background until restart", firstLine(out))
 		pid, serr := spawnDetached(logPath, bin, "__share-run", dir)
@@ -104,7 +104,7 @@ func startShareServiceWithBinary(bin, dir string, c *shareConfig, noService bool
 
 func stopShareService(c *shareConfig) {
 	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_, _ = run(false, "launchctl", "bootout", domain+"/"+shareLaunchLabel(c))
+	_, _ = run(false, "/bin/launchctl", "bootout", domain+"/"+shareLaunchLabel(c))
 	_ = os.Remove(sharePlist(c))
 }
 
@@ -122,7 +122,7 @@ func startDetached(bin, dir string) error {
 
 // networkServices lists the Mac's enabled network services (Wi-Fi, Ethernet...).
 func networkServices() []string {
-	out, err := run(false, "networksetup", "-listallnetworkservices")
+	out, err := run(false, "/usr/sbin/networksetup", "-listallnetworkservices")
 	if err != nil {
 		return nil
 	}
@@ -137,7 +137,7 @@ func networkServices() []string {
 }
 
 func autoProxyState(svc string) (string, bool) {
-	out, _ := run(false, "networksetup", "-getautoproxyurl", svc)
+	out, _ := run(false, "/usr/sbin/networksetup", "-getautoproxyurl", svc)
 	return parseAutoProxyOutput(out)
 }
 
@@ -159,7 +159,7 @@ func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, error) {
 		case "noop":
 			done = append(done, svc)
 		case "set":
-			if out, err := run(true, "networksetup", "-setautoproxyurl", svc, want); err != nil {
+			if out, err := run(true, "/usr/sbin/networksetup", "-setautoproxyurl", svc, want); err != nil {
 				return "", fmt.Errorf("%s (%s). To do it by hand, %s", firstLine(out), svc, manual)
 			}
 			done = append(done, svc)
@@ -192,11 +192,11 @@ func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {
 		cur, enabled := autoProxyState(svc)
 		switch planClearAutoProxyAction(cur, enabled, known, nextURL) {
 		case "off":
-			if _, err := run(true, "networksetup", "-setautoproxystate", svc, "off"); err == nil {
+			if _, err := run(true, "/usr/sbin/networksetup", "-setautoproxystate", svc, "off"); err == nil {
 				turnedOff = true
 			}
 		case "set":
-			if _, err := run(true, "networksetup", "-setautoproxyurl", svc, nextURL); err == nil {
+			if _, err := run(true, "/usr/sbin/networksetup", "-setautoproxyurl", svc, nextURL); err == nil {
 				updated = true
 			}
 		}

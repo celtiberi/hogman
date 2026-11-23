@@ -401,10 +401,6 @@ func newShareCertManager(cfg shareACMEConfig) (*shareCertManager, error) {
 	if len(cfg.Resolvers) == 0 {
 		cfg.Resolvers = []string{"1.1.1.1:53", "8.8.8.8:53"}
 	}
-	if err := os.MkdirAll(cfg.StorageDir, 0o700); err != nil {
-		return nil, fmt.Errorf("create ACME storage dir: %w", err)
-	}
-
 	var roots *x509.CertPool
 	if cfg.CARootFile != "" {
 		raw, err := os.ReadFile(cfg.CARootFile)
@@ -415,6 +411,9 @@ func newShareCertManager(cfg shareACMEConfig) (*shareCertManager, error) {
 		if !roots.AppendCertsFromPEM(raw) {
 			return nil, fmt.Errorf("HOGMAN_ACME_CA_ROOT %s contains no valid PEM certificate", cfg.CARootFile)
 		}
+	}
+	if err := os.MkdirAll(cfg.StorageDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create ACME storage dir: %w", err)
 	}
 
 	logger := zap.NewNop()
