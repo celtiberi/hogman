@@ -1,0 +1,29 @@
+# Hogman
+
+> Hogman lets you run an invite-only private web ("pen") over WireGuard with real domain names (`*.pens.hogman.network`), standard browser HTTPS certificates, and zero public IP addresses. Open source (AGPL-3.0).
+
+## Key facts
+
+- **What it is:** A private web for groups (families, friends, clubs, teams) where members open private HTTPS (`:443`) sites in ordinary browsers (Chrome, Safari, Firefox) after joining from a single-use invite link.
+- **What it deliberately is NOT:** Not a VPN (ordinary internet traffic goes direct untouched), not SSH, not raw TCP/UDP, not an exit node, and personal laptops accept zero inbound connections. Only HTTPS (`:443`) to explicitly shared server nodes (`tag:server`) is permitted.
+- **Hosting model:** Control planes are hosted-only on `hogman.network` (no self-hosted pen server support). Users host their own HTTPS web servers or static folders inside their pen via `hogman-join share`.
+- **Architecture:** Built on Headscale, Tailscale `tsnet` (userspace WireGuard), Caddy, and CertMagic. Runs cleanly alongside existing Tailscale setups.
+- **DNS & HTTPS:** Split-horizon ACME DNS-01 (`ns1.hogman.network` serves only temporary `_acme-challenge.*` TXT, `SOA`, `NS`, `CAA` — zero public `A`/`AAAA` records). Standard public certificates verified by stock OS trust stores (no custom root CA).
+- **Platforms & pricing:** Free while testing. macOS and Linux work today; Windows is built but untested; mobile app in progress. Companion Manifest V3 browser extension (`browser-ext/`) supports VPN coexistence on Chrome, Brave, Edge, and Firefox.
+- **Security & limits:** Experimental and not yet independently audited. Payloads are end-to-end encrypted (WireGuard + TLS 1.3). Hostnames appear in public Certificate Transparency logs (names only, never site contents). There is zero account recovery (owners should appoint a second owner). Until `pens.hogman.network` is listed on the Public Suffix List, use a separate browser profile for untrusted pens.
+
+## Documentation
+
+- [Quickstart](https://hogman.network/docs/): Create a pen, join with one command, and put an HTTPS server on your private network.
+- [Joining a pen](https://hogman.network/docs/join.html): Join a pen on Mac or Linux, handle VPNs and browsers, add devices, update, and leave.
+- [Hosting HTTPS servers](https://hogman.network/docs/share.html): Put any web app, local port, or static directory inside your pen over HTTPS (port 443).
+- [Running a pen](https://hogman.network/docs/keeper.html): Roles, invites, the herd, suspend and kick, and what keepers can and can't see.
+- [Architecture & security](https://hogman.network/docs/security.html): Packet flow, components, client isolation, DNS-01 HTTPS, threat model, host isolation, and known limits.
+- [FAQ & troubleshooting](https://hogman.network/docs/faq.html): Common questions (Tailscale, self-hosting, VPNs, limits) and fixes for common errors.
+
+## Full documentation & links
+
+- [Complete documentation in one Markdown file](https://hogman.network/llms-full.txt)
+- [Homepage](https://hogman.network/)
+- [Create a pen](https://get.hogman.network/)
+- [Source code (AGPL-3.0) on GitHub](https://github.com/celtiberi/hogman)

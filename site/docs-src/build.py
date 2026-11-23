@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
-"""Build hogman.network/docs: wrap each page in site/docs-src in the shared layout
-(header, left sidebar, right on-this-page TOC, prev/next pager, footer) and write
-it to site/public/docs/.
+"""Build hogman.network/docs and machine-readable discovery files:
+- Wraps each page in site/docs-src/ in the shared layout (header, left sidebar,
+  right on-this-page TOC, prev/next pager, footer, canonical & JSON-LD metadata)
+  and writes it to site/public/docs/.
+- Generates deterministic site/public/sitemap.xml, site/public/llms.txt, and
+  site/public/llms-full.txt so search engines and AI assistants stay in sync.
 
     python3 site/docs-src/build.py
 
 Edit the page fragments here, not the generated files. To add a page, add its
 fragment and a line to PAGES."""
 import html as html_mod
+from html.parser import HTMLParser
+import json
 import os
 import re
 
 SRC = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(SRC, "..", "public", "docs")
+PUBLIC = os.path.normpath(os.path.join(SRC, "..", "public"))
+OUT = os.path.join(PUBLIC, "docs")
+BASE_URL = "https://hogman.network"
 
 PAGES = [  # (file, nav title, page title, description, sidebar group)
     ("index", "Quickstart", "Docs — Quickstart", "Create a pen, join with one command, and put an HTTPS server on your private network.", "Guides"),
@@ -24,6 +31,7 @@ PAGES = [  # (file, nav title, page title, description, sidebar group)
 ]
 
 H2_RE = re.compile(r'<h2\b[^>]*\bid="([^"]+)"[^>]*>(.*?)</h2>', re.DOTALL)
+FAQ_PAIR_RE = re.compile(r"<dt\b[^>]*>(.*?)</dt>\s*<dd\b[^>]*>(.*?)</dd>", re.DOTALL)
 TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -31,10 +39,15 @@ def page_href(slug: str) -> str:
     return "/docs/" if slug == "index" else f"/docs/{slug}.html"
 
 
+def plain_text(fragment: str) -> str:
+    text = html_mod.unescape(TAG_RE.sub("", fragment))
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def build_toc(body: str) -> str:
     items = []
     for hid, raw_title in H2_RE.findall(body):
-        label = html_mod.unescape(TAG_RE.sub("", raw_title)).strip()
+        label = plain_text(raw_title)
         items.append(f'<li><a href="#{hid}">{html_mod.escape(label)}</a></li>')
     if not items:
         return ""
@@ -67,6 +80,268 @@ def build_pager(idx: int) -> str:
     return f'<nav class="docs-pager" aria-label="Adjacent pages">\n  {prev_html}\n  {next_html}\n</nav>'
 
 
+def build_jsonld(slug: str, navt: str, title: str, desc: str, body: str) -> str:
+    url = BASE_URL + page_href(slug)
+    crumbs = [
+        {"@type": "ListItem", "position": 1, "name": "Hogman", "item": BASE_URL + "/"},
+        {"@type": "ListItem", "position": 2, "name": "Docs", "item": BASE_URL + "/docs/"},
+    ]
+    if slug != "index":
+        crumbs.append({"@type": "ListItem", "position": 3, "name": navt, "item": url})
+
+    graph = [
+        {
+            "@type": "TechArticle",
+            "headline": f"{title} · Hogman",
+            "description": desc,
+            "url": url,
+            "image": BASE_URL + "/og-hero-v2.jpg",
+            "isPartOf": {"@type": "WebSite", "name": "Hogman", "url": BASE_URL + "/"},
+        },
+        {
+            "@type": "BreadcrumbList",
+            "itemListElement": crumbs,
+        },
+    ]
+
+    if slug == "faq":
+        entities = []
+        for q_html, a_html in FAQ_PAIR_RE.findall(body):
+            q = plain_text(q_html)
+            a = plain_text(a_html)
+            if q and a:
+                entities.append({
+                    "@type": "Question",
+                    "name": q,
+                    "acceptedAnswer": {"@type": "Answer", "text": a},
+                })
+        if entities:
+            graph.append({"@type": "FAQPage", "mainEntity": entities})
+
+    payload = json.dumps({"@context": "https://schema.org", "@graph": graph}, ensure_ascii=False, indent=2)
+    payload = payload.replace("</", "<\\/")
+    return f'<script type="application/ld+json">\n{payload}\n</script>'
+
+
+class MarkdownConverter(HTMLParser):
+    """Minimal deterministic HTML-fragment to clean Markdown converter for llms-full.txt."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out = []
+        self.in_pre = False
+        self.in_code = False
+        self.in_table_row = []
+        self.in_table_head = False
+        self.table_rows = []
+        self.in_cell = False
+        self.cell_buf = []
+        self.link_href = None
+        self.link_buf = []
+        self.list_stack = []
+
+    def _emit(self, text: str):
+        if self.in_cell:
+            self.cell_buf.append(text)
+        elif self.link_href is not None:
+            self.link_buf.append(text)
+        else:
+            self.out.append(text)
+
+    def handle_starttag(self, tag, attrs):
+        attr = dict(attrs)
+        if tag == "h1":
+            self._emit("\n# ")
+        elif tag == "h2":
+            self._emit("\n\n## ")
+        elif tag == "h3":
+            self._emit("\n\n### ")
+        elif tag == "p":
+            self._emit("\n\n")
+        elif tag == "br":
+            self._emit("\n")
+        elif tag == "pre":
+            self.in_pre = True
+            self._emit("\n\n```text\n")
+        elif tag == "code":
+            self.in_code = True
+            if not self.in_pre:
+                self._emit("`")
+        elif tag in ("strong", "b"):
+            self._emit("**")
+        elif tag in ("em", "i"):
+            self._emit("*")
+        elif tag == "ul":
+            self.list_stack.append(("ul", 0))
+            self._emit("\n")
+        elif tag == "ol":
+            self.list_stack.append(("ol", 0))
+            self._emit("\n")
+        elif tag == "li":
+            if self.list_stack:
+                kind, n = self.list_stack[-1]
+                n += 1
+                self.list_stack[-1] = (kind, n)
+                prefix = f"{n}. " if kind == "ol" else "- "
+            else:
+                prefix = "- "
+            self._emit(f"\n{prefix}")
+        elif tag == "dt":
+            self._emit("\n\n### ")
+        elif tag == "dd":
+            self._emit("\n\n")
+        elif tag == "a":
+            href = attr.get("href", "")
+            if href.startswith("/"):
+                href = BASE_URL + href
+            self.link_href = href
+            self.link_buf = []
+        elif tag == "table":
+            self.table_rows = []
+        elif tag == "thead":
+            self.in_table_head = True
+        elif tag == "tr":
+            self.in_table_row = []
+        elif tag in ("th", "td"):
+            self.in_cell = True
+            self.cell_buf = []
+
+    def handle_endtag(self, tag):
+        if tag in ("h1", "h2", "h3"):
+            self._emit("\n")
+        elif tag == "pre":
+            self.in_pre = False
+            self._emit("\n```\n")
+        elif tag == "code":
+            if not self.in_pre:
+                self._emit("`")
+            self.in_code = False
+        elif tag in ("strong", "b"):
+            self._emit("**")
+        elif tag in ("em", "i"):
+            self._emit("*")
+        elif tag in ("ul", "ol"):
+            if self.list_stack:
+                self.list_stack.pop()
+            self._emit("\n")
+        elif tag == "a":
+            label = "".join(self.link_buf).strip()
+            href = self.link_href
+            self.link_href = None
+            self.link_buf = []
+            if href and label and label != href:
+                self._emit(f"[{label}]({href})")
+            else:
+                self._emit(label or href or "")
+        elif tag in ("th", "td"):
+            cell = re.sub(r"\s+", " ", "".join(self.cell_buf)).strip()
+            self.in_table_row.append(cell)
+            self.in_cell = False
+            self.cell_buf = []
+        elif tag == "tr":
+            if self.in_table_row:
+                self.table_rows.append((self.in_table_head, self.in_table_row))
+            self.in_table_row = []
+        elif tag == "thead":
+            self.in_table_head = False
+        elif tag == "table":
+            if self.table_rows:
+                lines = [""]
+                for idx, (is_hdr, row) in enumerate(self.table_rows):
+                    lines.append("| " + " | ".join(row) + " |")
+                    if idx == 0:
+                        lines.append("| " + " | ".join(["---"] * len(row)) + " |")
+                lines.append("")
+                self._emit("\n".join(lines))
+            self.table_rows = []
+
+    def handle_data(self, data):
+        if self.in_pre:
+            self._emit(data)
+        else:
+            collapsed = re.sub(r"\s+", " ", data)
+            self._emit(collapsed)
+
+    def render(self) -> str:
+        raw = "".join(self.out)
+        lines = [line.rstrip() if not line.startswith("    ") else line.rstrip() for line in raw.splitlines()]
+        cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+        return cleaned + "\n"
+
+
+def html_to_markdown(fragment: str) -> str:
+    conv = MarkdownConverter()
+    conv.feed(fragment)
+    conv.close()
+    return conv.render()
+
+
+def write_sitemap():
+    urls = [(BASE_URL + "/", "1.0")]
+    for slug, *_ in PAGES:
+        prio = "0.9" if slug == "index" else "0.8"
+        urls.append((BASE_URL + page_href(slug), prio))
+    entries = "\n".join(
+        f"  <url>\n    <loc>{loc}</loc>\n    <priority>{prio}</priority>\n  </url>"
+        for loc, prio in urls
+    )
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        f"{entries}\n"
+        "</urlset>\n"
+    )
+    open(os.path.join(PUBLIC, "sitemap.xml"), "w").write(xml)
+    print("wrote sitemap.xml")
+
+
+def write_llms_files(bodies: list[tuple[str, str, str, str, str]]):
+    doc_links = "\n".join(
+        f"- [{navt}]({BASE_URL}{page_href(slug)}): {desc}"
+        for slug, navt, _, desc, _ in PAGES
+    )
+    llms_txt = f"""# Hogman
+
+> Hogman lets you run an invite-only private web ("pen") over WireGuard with real domain names (`*.pens.hogman.network`), standard browser HTTPS certificates, and zero public IP addresses. Open source (AGPL-3.0).
+
+## Key facts
+
+- **What it is:** A private web for groups (families, friends, clubs, teams) where members open private HTTPS (`:443`) sites in ordinary browsers (Chrome, Safari, Firefox) after joining from a single-use invite link.
+- **What it deliberately is NOT:** Not a VPN (ordinary internet traffic goes direct untouched), not SSH, not raw TCP/UDP, not an exit node, and personal laptops accept zero inbound connections. Only HTTPS (`:443`) to explicitly shared server nodes (`tag:server`) is permitted.
+- **Hosting model:** Control planes are hosted-only on `hogman.network` (no self-hosted pen server support). Users host their own HTTPS web servers or static folders inside their pen via `hogman-join share`.
+- **Architecture:** Built on Headscale, Tailscale `tsnet` (userspace WireGuard), Caddy, and CertMagic. Runs cleanly alongside existing Tailscale setups.
+- **DNS & HTTPS:** Split-horizon ACME DNS-01 (`ns1.hogman.network` serves only temporary `_acme-challenge.*` TXT, `SOA`, `NS`, `CAA` — zero public `A`/`AAAA` records). Standard public certificates verified by stock OS trust stores (no custom root CA).
+- **Platforms & pricing:** Free while testing. macOS and Linux work today; Windows is built but untested; mobile app in progress. Companion Manifest V3 browser extension (`browser-ext/`) supports VPN coexistence on Chrome, Brave, Edge, and Firefox.
+- **Security & limits:** Experimental and not yet independently audited. Payloads are end-to-end encrypted (WireGuard + TLS 1.3). Hostnames appear in public Certificate Transparency logs (names only, never site contents). There is zero account recovery (owners should appoint a second owner). Until `pens.hogman.network` is listed on the Public Suffix List, use a separate browser profile for untrusted pens.
+
+## Documentation
+
+{doc_links}
+
+## Full documentation & links
+
+- [Complete documentation in one Markdown file]({BASE_URL}/llms-full.txt)
+- [Homepage]({BASE_URL}/)
+- [Create a pen](https://get.hogman.network/)
+- [Source code (AGPL-3.0) on GitHub](https://github.com/celtiberi/hogman)
+"""
+    open(os.path.join(PUBLIC, "llms.txt"), "w").write(llms_txt)
+    print("wrote llms.txt")
+
+    sections = [
+        "# Hogman — Complete Documentation\n\n"
+        f"Source: {BASE_URL}/docs/  \n"
+        "Repository: https://github.com/celtiberi/hogman  \n"
+        "License: AGPL-3.0\n"
+    ]
+    for slug, navt, title, desc, body in bodies:
+        url = BASE_URL + page_href(slug)
+        md = html_to_markdown(body)
+        sections.append(f"---\n\n<!-- Page: {navt} ({url}) -->\n\n{md}")
+    open(os.path.join(PUBLIC, "llms-full.txt"), "w").write("\n".join(sections))
+    print("wrote llms-full.txt")
+
+
 HEAD = """<!doctype html>
 <html lang="en">
 <head>
@@ -74,6 +349,8 @@ HEAD = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title} · Hogman</title>
 <meta name="description" content="{desc}">
+<link rel="canonical" href="https://hogman.network{href}">
+<link rel="alternate" type="text/plain" href="https://hogman.network/llms.txt" title="Hogman documentation for LLMs">
 <meta property="og:title" content="{title} · Hogman">
 <meta property="og:description" content="{desc}">
 <meta property="og:type" content="website">
@@ -93,6 +370,7 @@ HEAD = """<!doctype html>
 <link rel="icon" href="/icons/hogman-48.png" type="image/png" sizes="48x48">
 <link rel="apple-touch-icon" href="/hogman-icon.png">
 <link rel="stylesheet" href="/styles.css?v=metal25">
+{jsonld}
 </head>
 <!-- Generated by site/docs-src/build.py from site/docs-src. Edit there. -->
 <body class="docs-page">
@@ -134,8 +412,10 @@ FOOT = """
 """
 
 os.makedirs(OUT, exist_ok=True)
+built_bodies = []
 for idx, (f, navt, title, desc, _) in enumerate(PAGES):
     body = open(os.path.join(SRC, f + ".html")).read().strip()
+    built_bodies.append((f, navt, title, desc, body))
     nav, group = [], None
     for g, n, _, _, grp in PAGES:
         if grp != group:
@@ -148,10 +428,19 @@ for idx, (f, navt, title, desc, _) in enumerate(PAGES):
     nav.append("</ul>")
 
     out_html = (
-        HEAD.format(title=title, desc=desc, href=page_href(f), nav="\n".join(nav))
+        HEAD.format(
+            title=title,
+            desc=desc,
+            href=page_href(f),
+            jsonld=build_jsonld(f, navt, title, desc, body),
+            nav="\n".join(nav),
+        )
         + body
         + "\n"
         + FOOT.format(pager=build_pager(idx), toc=build_toc(body))
     )
     open(os.path.join(OUT, f + ".html"), "w").write(out_html)
     print("wrote", f)
+
+write_sitemap()
+write_llms_files(built_bodies)
