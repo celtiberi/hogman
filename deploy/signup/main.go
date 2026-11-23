@@ -11,13 +11,18 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
+	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const (
@@ -178,8 +183,56 @@ func readToken() string {
 	return t
 }
 
+func brokerHealthURL(addr string) string {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil || port == "" {
+		return "http://127.0.0.1:9090/health"
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/health"
+}
+
+func checkBrokerHealth(ctx context.Context, healthURL, token string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	c := &http.Client{Timeout: 8 * time.Second}
+	resp, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK {
+		msg := strings.TrimSpace(string(body))
+		if msg != "" {
+			return fmt.Errorf("broker health %d: %s", resp.StatusCode, msg)
+		}
+		return fmt.Errorf("broker health %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func runBrokerHealth() {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	url := brokerHealthURL(env("BROKER_ADDR", ":9090"))
+	if err := checkBrokerHealth(ctx, url, readToken()); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
 func main() {
 	log.SetFlags(0)
+	if len(os.Args) > 1 && os.Args[1] == "health" {
+		runBrokerHealth()
+		return
+	}
 	switch env("ROLE", "") {
 	case "web":
 		runWeb()

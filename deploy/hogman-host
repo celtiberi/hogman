@@ -71,6 +71,8 @@ usage: hogman-host <command>
   challenge-dns <args...>        talk to it, e.g.  challenge-dns cred list
   refresh-services               after an update: restart the challenge DNS server and the
                                  gate-certificate keeper on this release (install.sh runs it)
+  pull-images [--list] [--all]   pre-pull container images needed to raise pens offline in the
+                                 sign-up broker (install.sh and signup-setup run it)
   gate-cert-setup <gate-domain>  keep the front door's *.<gate-domain> certificate
                                  (e.g. gate-cert-setup gate.hogman.network)
   pens-zone <zone>               where public pens live (e.g. pens.hogman.network); set it
@@ -976,11 +978,18 @@ $broker_stripe
     # signup: the page reaches it here (internal: no internet). out, only with
     # push notifications on: nothing else is on it, so nothing reaches it there.
     networks: $broker_nets
+    healthcheck:
+      test: ["CMD", "hogman-signup", "health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 networks:
   hogman-front: { external: true }
   signup: { internal: true }
 $out_net
 EOF
+  cmd_pull_images
   (cd "$SIGNUP" && docker compose up -d --build --remove-orphans >&2) || die "the sign-up page did not start: cd $SIGNUP && docker compose logs"
   write_front
   reload_front
@@ -1421,6 +1430,7 @@ StateDirectory=challenge-dns
 StateDirectoryMode=0700
 RuntimeDirectory=challenge-dns
 RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 ReadWritePaths=/run/hogman-acme
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
@@ -1462,6 +1472,7 @@ UNIT
   fi
   sleep 1
   systemctl is-active --quiet hogman-challenge-dns.service || die "it didn't start: journalctl -u hogman-challenge-dns"
+  restart_signup_broker
   info "challenge-dns answers on $ip:53 (UDP and TCP)$( [ -n "$cred" ] && echo ", with the Google fallback CA")"
   [ -n "$cred" ] && [ ! -f "$CDNS_CONTACT_DROPIN" ] && info "Google needs a contact for its accounts: hogman-host fallback-contact <email>"
   info "Check from outside:  dig @$ip pens.hogman.network SOA   (and +tcp)"
@@ -1483,6 +1494,16 @@ gate_tls_line() {
   return 0
 }
 
+# Re-resolve host bind mounts ($CDNS_BIN and /run/challenge-dns) in the sign-up
+# broker whenever challenge-dns is reinstalled or restarted.
+restart_signup_broker() {
+  [ -f "$SIGNUP/compose.yaml" ] || return 0
+  if [ -n "$(docker ps -q --filter name=^/hogman-signup-broker-1$ 2>/dev/null)" ]; then
+    (cd "$SIGNUP" && docker compose restart broker >&2) || docker restart hogman-signup-broker-1 >/dev/null
+    info "sign-up broker restarted to refresh challenge-dns mounts"
+  fi
+}
+
 # refresh-services: after an update, put this release's compiled challenge DNS
 # server and gate-certificate keeper in place and restart them, but only the
 # ones this host already runs and only when the binary changed. install.sh
@@ -1499,9 +1520,128 @@ cmd_refresh_services() {
     systemctl restart "$svc.service"
     systemctl is-active --quiet "$svc.service" || die "$svc didn't come back: journalctl -u $svc"
     info "$svc: updated and restarted"
+    if [ "$svc" = hogman-challenge-dns ]; then
+      restart_signup_broker
+    fi
   }
   refresh_one "$CDNS_BIN" "$SRC/prebuilt/challenge-dns/challenge-dns-linux-$arch" hogman-challenge-dns
   refresh_one /usr/local/bin/hogman-registrar "$SRC/prebuilt/registrar/registrar-linux-$arch" hogman-gate-cert
+}
+
+# dockerfile_images <file...>: print every external FROM image (skipping
+# scratch and earlier stage names) from the given Dockerfiles.
+dockerfile_images() {
+  awk '
+    FNR == 1 { split("", stages) }
+    tolower($1) == "from" {
+      i = 2
+      while (i <= NF && substr($i, 1, 2) == "--") i++
+      if (i > NF) next
+      img = $i
+      if (tolower(img) != "scratch" && !(tolower(img) in stages)) {
+        print img
+      }
+      if ((i + 2) <= NF && tolower($(i + 1)) == "as") {
+        stages[tolower($(i + 2))] = 1
+      }
+    }
+  ' "$@"
+}
+
+# compose_images <file...>: print every external `image:` value (skipping
+# locally-built hogman/* images) from the given Compose files.
+compose_images() {
+  awk '
+    /^[[:space:]]*image:[[:space:]]*/ {
+      line = $0
+      sub(/^[[:space:]]*image:[[:space:]]*/, "", line)
+      sub(/[[:space:]]*#.*$/, "", line)
+      gsub(/^["'\'']|["'\'']$/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      if (line != "" && line !~ /^hogman\// && line !~ /\$/) {
+        print line
+      }
+    }
+  ' "$@"
+}
+
+# shipped_images [host|all]: print sorted unique external container images
+# required to build and run pens (and the sign-up stack) offline on this host.
+shipped_images() {
+  local mode="${1:-host}" arch=""
+  case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; esac
+  local dfs=() cfs=()
+  [ -f "$SRC/compose.yaml" ] && cfs+=("$SRC/compose.yaml")
+  [ -f "$SRC/compose.front.yaml" ] && cfs+=("$SRC/compose.front.yaml")
+  if [ "$mode" = all ]; then
+    for f in "$SRC/registrar/Dockerfile.prebuilt" "$SRC/registrar/Dockerfile" \
+             "$SRC/join/Dockerfile" \
+             "$HOGMAN_HOME/signup-src/Dockerfile.prebuilt" "$HOGMAN_HOME/signup-src/Dockerfile" \
+             "$SIGNUP/build/Dockerfile.prebuilt" "$SIGNUP/build/Dockerfile"; do
+      [ -f "$f" ] && dfs+=("$f")
+    done
+  else
+    if [ -n "$arch" ] && [ -f "$SRC/prebuilt/registrar/registrar-linux-$arch" ] && [ -f "$SRC/registrar/Dockerfile.prebuilt" ]; then
+      dfs+=("$SRC/registrar/Dockerfile.prebuilt")
+    elif [ -f "$SRC/registrar/Dockerfile" ]; then
+      dfs+=("$SRC/registrar/Dockerfile")
+    fi
+    if [ ! -f "$SRC/prebuilt/join/SHA256SUMS" ] && [ -f "$SRC/join/Dockerfile" ]; then
+      dfs+=("$SRC/join/Dockerfile")
+    fi
+    local sdir=""
+    if [ -d "$HOGMAN_HOME/signup-src" ]; then sdir="$HOGMAN_HOME/signup-src"
+    elif [ -d "$SIGNUP/build" ]; then sdir="$SIGNUP/build"
+    fi
+    if [ -n "$sdir" ]; then
+      if [ -n "$arch" ] && [ -f "$SRC/prebuilt/signup/hogman-signup-linux-$arch" ] && [ -f "$sdir/Dockerfile.prebuilt" ]; then
+        dfs+=("$sdir/Dockerfile.prebuilt")
+      elif [ -f "$sdir/Dockerfile" ]; then
+        dfs+=("$sdir/Dockerfile")
+      fi
+    fi
+  fi
+  {
+    [ -n "${CADDY_IMAGE:-}" ] && printf '%s\n' "$CADDY_IMAGE"
+    [ "${#cfs[@]}" -gt 0 ] && compose_images "${cfs[@]}"
+    [ "${#dfs[@]}" -gt 0 ] && dockerfile_images "${dfs[@]}"
+  } | sort -u
+}
+
+# pull-images [--list] [--all]: pre-pull every external base and runtime image
+# referenced by the shipped Dockerfiles and Compose files, so the sign-up broker
+# (which runs on an internal network with no internet) never needs to contact
+# a container registry when provisioning a pen.
+cmd_pull_images() {
+  local mode="host" list_only=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --list) list_only=1; shift ;;
+      --all)  mode="all"; shift ;;
+      *) die "usage: hogman-host pull-images [--list] [--all]" ;;
+    esac
+  done
+  local imgs
+  imgs="$(shipped_images "$mode")"
+  if [ "$list_only" = 1 ]; then
+    [ -n "$imgs" ] && printf '%s\n' "$imgs"
+    return 0
+  fi
+  [ -n "$imgs" ] || return 0
+  command -v docker >/dev/null || die "Docker is not installed"
+  local img pulled=0
+  while IFS= read -r img; do
+    [ -n "$img" ] || continue
+    if docker image inspect "$img" >/dev/null 2>&1; then
+      continue
+    fi
+    info "pulling $img"
+    docker pull -q "$img" >&2 || die "could not pull $img"
+    pulled=$((pulled + 1))
+  done <<< "$imgs"
+  if [ "$pulled" -eq 0 ]; then
+    info "container images already cached"
+  fi
 }
 
 # gate-cert-setup <gate-domain>: keep the *.<gate-domain> wildcard for the
@@ -1634,6 +1774,7 @@ case "${1:-}" in
   challenge-dns-setup) shift; cmd_challenge_dns_setup "$@" ;;
   fallback-contact) shift; cmd_fallback_contact "$@" ;;
   refresh-services) shift; load_host; cmd_refresh_services "$@" ;;
+  pull-images) shift; cmd_pull_images "$@" ;;
   challenge-dns) shift; load_host; [ -x "$CDNS_BIN" ] || die "not set up: hogman-host challenge-dns-setup"; CDNS_ADMIN_SOCK="$CDNS_ADMIN" exec "$CDNS_BIN" "$@" ;;
   pens-zone) shift; cmd_pens_zone "$@" ;;
   name-free) shift; load_host; [[ "${1:-}" =~ $HOSTED_RE ]] || die "usage: hogman-host name-free <pen>"; name_free "$1"; exit $? ;;

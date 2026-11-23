@@ -29,3 +29,84 @@ for s in $svcs; do
 done
 mounts portal | grep -qx /run/hogman-acme && fail "the portal can reach the challenge DNS API"
 echo "public-certificate pen compose: ok"
+
+# Verify every shipped Dockerfile FROM and Compose image is explicitly pinned
+# (no untagged or :latest images) and covered by `hogman-host pull-images` so
+# the offline sign-up broker never needs container registry access.
+REPO="$(cd .. && pwd)"
+shipped_from() {
+  awk '
+    FNR == 1 { split("", stages) }
+    tolower($1) == "from" {
+      i = 2
+      while (i <= NF && substr($i, 1, 2) == "--") i++
+      if (i > NF) next
+      img = $i
+      if (tolower(img) != "scratch" && !(tolower(img) in stages)) print img
+      if ((i + 2) <= NF && tolower($(i + 1)) == "as") stages[tolower($(i + 2))] = 1
+    }
+  ' "$@"
+}
+expected_all="$(
+  {
+    grep -m1 '^CADDY_IMAGE=' "$REPO/deploy/hogman-host" | cut -d'"' -f2
+    jq -r '.services[].image // empty' <<<"$cfg" | grep -v '^hogman/'
+    shipped_from \
+      "$REPO/core/registrar/Dockerfile" \
+      "$REPO/core/registrar/Dockerfile.prebuilt" \
+      "$REPO/core/join/Dockerfile" \
+      "$REPO/deploy/signup/Dockerfile" \
+      "$REPO/deploy/signup/Dockerfile.prebuilt"
+  } | sort -u
+)"
+[ -n "$expected_all" ] || fail "found no shipped container images"
+while IFS= read -r img; do
+  case "$img" in
+    *@sha256:*) ;;
+    *:latest|*:edge|*:stable|*:main) fail "floating tag on shipped image: $img" ;;
+    *:*) ;;
+    *) fail "unpinned shipped image (missing tag): $img" ;;
+  esac
+done <<< "$expected_all"
+
+tmp_home="$(mktemp -d)"
+trap 'rm -rf "$tmp_home"' EXIT
+ln -s "$REPO/core" "$tmp_home/src"
+ln -s "$REPO/deploy/signup" "$tmp_home/signup-src"
+got_all="$(HOGMAN_HOME="$tmp_home" "$REPO/deploy/hogman-host" pull-images --list --all)"
+if [ "$got_all" != "$expected_all" ]; then
+  echo "expected:" >&2; printf '  %s\n' $expected_all >&2
+  echo "got:" >&2; printf '  %s\n' $got_all >&2
+  fail "hogman-host pull-images --list --all mismatch"
+fi
+
+# Verify prebuilt-host mode covers every runtime + prebuilt base image without
+# pulling the source-build Go toolchain image.
+tmp_pre="$(mktemp -d)"
+trap 'rm -rf "$tmp_home" "$tmp_pre"' EXIT
+arch="$(uname -m)"; case "$arch" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; esac
+mkdir -p "$tmp_pre/src/registrar" "$tmp_pre/src/prebuilt/registrar" "$tmp_pre/src/prebuilt/join" "$tmp_pre/src/prebuilt/signup" "$tmp_pre/signup-src"
+cp "$REPO/core/compose.yaml" "$tmp_pre/src/compose.yaml"
+cp "$REPO/core/registrar/Dockerfile.prebuilt" "$tmp_pre/src/registrar/Dockerfile.prebuilt"
+cp "$REPO/core/registrar/Dockerfile" "$tmp_pre/src/registrar/Dockerfile"
+cp "$REPO/deploy/signup/Dockerfile.prebuilt" "$tmp_pre/signup-src/Dockerfile.prebuilt"
+cp "$REPO/deploy/signup/Dockerfile" "$tmp_pre/signup-src/Dockerfile"
+touch "$tmp_pre/src/prebuilt/registrar/registrar-linux-$arch" \
+      "$tmp_pre/src/prebuilt/join/SHA256SUMS" \
+      "$tmp_pre/src/prebuilt/signup/hogman-signup-linux-$arch"
+got_pre="$(HOGMAN_HOME="$tmp_pre" "$REPO/deploy/hogman-host" pull-images --list)"
+expected_pre="$(
+  {
+    grep -m1 '^CADDY_IMAGE=' "$REPO/deploy/hogman-host" | cut -d'"' -f2
+    jq -r '.services[].image // empty' <<<"$cfg" | grep -v '^hogman/'
+    shipped_from \
+      "$REPO/core/registrar/Dockerfile.prebuilt" \
+      "$REPO/deploy/signup/Dockerfile.prebuilt"
+  } | sort -u
+)"
+[ "$got_pre" = "$expected_pre" ] || fail "prebuilt pull-images list mismatch: got [$got_pre], want [$expected_pre]"
+grep -q '^golang:' <<<"$got_pre" && fail "prebuilt pull-images unexpectedly includes golang image"
+
+echo "pinned shipped images (pull-images --all):"
+printf '  %s\n' $got_all
+echo "shipped container images check: ok"

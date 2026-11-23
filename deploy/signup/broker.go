@@ -31,6 +31,7 @@ type broker struct {
 	waitJoins     *limiter
 	waitNotify    *limiter
 	raiseNotify   *limiter
+	healthNotify  *limiter
 	ntfySem       chan struct{}
 	suffixFn      func() (string, error) // nil uses randomPenSuffix (tests override)
 	webhookSecret string                 // Stripe's webhook signing secret; empty: payments off
@@ -69,6 +70,9 @@ func (b *broker) ensureLimits() {
 	if b.raiseNotify == nil {
 		b.raiseNotify = newLimiterWithCap(20, time.Hour, 4)
 	}
+	if b.healthNotify == nil {
+		b.healthNotify = newLimiterWithCap(1, time.Hour, 4)
+	}
 	if b.ntfySem == nil {
 		b.ntfySem = make(chan struct{}, 4)
 	}
@@ -81,14 +85,19 @@ func (b *broker) allowWaitlistJoin(now time.Time) bool {
 
 func (b *broker) notifyLimiter(kind string) *limiter {
 	b.ensureLimits()
-	if kind == "waitlist" {
+	switch kind {
+	case "waitlist":
 		return b.waitNotify
+	case "health":
+		return b.healthNotify
+	default:
+		return b.raiseNotify
 	}
-	return b.raiseNotify
 }
 
 func (b *broker) handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", b.health)
 	mux.HandleFunc("GET /capacity", b.capacity)
 	mux.HandleFunc("GET /check", b.check)
 	mux.HandleFunc("POST /validate", b.validate)
@@ -152,18 +161,60 @@ func (b *broker) capacity(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, c)
 }
 
+const nameCheckUnavailableMsg = "could not check name availability right now; try again in a minute"
+
+var errChallengeDNSDown = errors.New("challenge-dns unavailable")
+
+// checkChallengeDNS probes hogman-host name-free to verify the broker can reach
+// challenge-dns (exit 0 free or 2 taken are both healthy; any other exit means
+// the binary or admin socket bind-mount is stale or challenge-dns is down).
+func (b *broker) checkChallengeDNS(ctx context.Context) error {
+	_, code, stderr := b.run(ctx, "name-free", "probe")
+	if code == 0 || code == 2 {
+		return nil
+	}
+	msg := lastLine(stderr)
+	if msg == "" {
+		return fmt.Errorf("name-free probe: exit %d", code)
+	}
+	return fmt.Errorf("name-free probe: exit %d: %s", code, msg)
+}
+
+func (b *broker) health(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	if err := b.checkChallengeDNS(ctx); err != nil {
+		log.Printf("health: %v", err)
+		b.notifyKind("health", "Sign-up broker cannot reach challenge-dns: "+err.Error())
+		jsonOut(w, 503, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	jsonOut(w, 200, map[string]any{"ok": true})
+}
+
 // taken: a pen here has the name, or (public pens) it was ever used (D-21).
-// hogman-host name-free answers 0 free, 2 taken; anything else counts as
-// taken, so a name is never offered when we can't tell.
-func (b *broker) taken(ctx context.Context, pen string) bool {
+// hogman-host name-free answers 0 free, 2 taken; anything else returns an error
+// (with taken=true to stay fail-closed) so callers return 503 instead of
+// falsely claiming the name is taken.
+func (b *broker) taken(ctx context.Context, pen string) (bool, error) {
 	if _, err := os.Stat(filepath.Join(b.home, "pens", pen)); err == nil {
-		return true
+		return true, nil
 	}
 	_, code, stderr := b.run(ctx, "name-free", pen)
-	if code != 0 && code != 2 {
-		log.Printf("name-free %s: exit %d: %s", pen, code, lastLine(stderr))
+	switch code {
+	case 0:
+		return false, nil
+	case 2:
+		return true, nil
+	default:
+		detail := fmt.Sprintf("name-free %s: exit %d", pen, code)
+		if msg := lastLine(stderr); msg != "" {
+			detail += ": " + msg
+		}
+		log.Print(detail)
+		b.notifyKind("health", "Sign-up broker cannot reach challenge-dns: "+detail)
+		return true, fmt.Errorf("%w: %s", errChallengeDNSDown, detail)
 	}
-	return code != 0
 }
 
 func (b *broker) check(w http.ResponseWriter, r *http.Request) {
@@ -181,7 +232,12 @@ func (b *broker) check(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 200, map[string]any{"free": false, "vanity": true, "reason": why})
 		return
 	}
-	if b.taken(r.Context(), pen) {
+	isTaken, err := b.taken(r.Context(), pen)
+	if err != nil {
+		jsonOut(w, 503, map[string]string{"error": nameCheckUnavailableMsg})
+		return
+	}
+	if isTaken {
 		jsonOut(w, 200, map[string]any{"free": false, "vanity": true, "reason": "that name is taken"})
 		return
 	}
@@ -260,7 +316,12 @@ func (b *broker) validate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if vanity {
-		if b.taken(r.Context(), in.Pen) {
+		isTaken, err := b.taken(r.Context(), in.Pen)
+		if err != nil {
+			jsonOut(w, 503, map[string]string{"error": nameCheckUnavailableMsg})
+			return
+		}
+		if isTaken {
 			jsonOut(w, 409, map[string]string{"error": "that name is taken"})
 			return
 		}
@@ -291,7 +352,11 @@ func (b *broker) pickSuffixedPen(ctx context.Context, prefix string) (string, er
 			return "", err
 		}
 		cand := prefix + "-" + sfx
-		if !b.taken(ctx, cand) {
+		isTaken, err := b.taken(ctx, cand)
+		if err != nil {
+			return "", err
+		}
+		if !isTaken {
 			return cand, nil
 		}
 	}
@@ -323,7 +388,12 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 	}
 	targetPen := in.Pen
 	if vanity {
-		if b.taken(r.Context(), targetPen) {
+		isTaken, err := b.taken(r.Context(), targetPen)
+		if err != nil {
+			jsonOut(w, 503, map[string]string{"error": nameCheckUnavailableMsg})
+			return
+		}
+		if isTaken {
 			jsonOut(w, 409, map[string]string{"error": "that name is taken"})
 			return
 		}
@@ -335,6 +405,10 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 		targetPen, err = b.pickSuffixedPen(r.Context(), in.Pen)
 		if err != nil {
 			log.Printf("pickSuffixedPen %s: %v", in.Pen, err)
+			if errors.Is(err, errChallengeDNSDown) {
+				jsonOut(w, 503, map[string]string{"error": nameCheckUnavailableMsg})
+				return
+			}
 			jsonOut(w, 500, map[string]string{"error": "could not pick a free ending; try again"})
 			return
 		}
