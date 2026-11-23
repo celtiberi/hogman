@@ -14,7 +14,7 @@ ENV ROLE=web
 ENTRYPOINT ["/hogman-signup"]
 
 # hogman-host and ./hogman run in here, so it carries what they use.
-FROM alpine:3.22 AS broker
+FROM alpine:3.24 AS broker
 RUN apk add --no-cache bash coreutils findutils grep sed gawk tar gzip rsync age openssl curl util-linux \
       ca-certificates docker-cli docker-cli-compose docker-cli-buildx
 COPY --from=build /hogman-signup /usr/local/bin/hogman-signup
