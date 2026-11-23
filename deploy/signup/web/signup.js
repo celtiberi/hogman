@@ -22,7 +22,47 @@
   // What pens' names end in (<pen>.pens.hogman.network), from the server.
   let sites = 'pens.hogman.network';
   const setSites = () => document.querySelectorAll('.sites').forEach(e => { e.textContent = sites; });
-  api('GET', '/status').then(r => { if (/^[a-z0-9.-]+$/.test(r.sites_domain || '')) { sites = r.sites_domain; setSites(); } }).catch(() => {});
+
+  // Optional Cloudflare Turnstile widget (loaded only when server advertises a site key).
+  let tsSiteKey = '';
+  let tsFormToken = '', tsWaitToken = '';
+  let tsFormWidget = null, tsWaitWidget = null;
+  const resetTurnstile = kind => {
+    if (!window.turnstile) return;
+    if (kind === 'form' && tsFormWidget !== null) { tsFormToken = ''; window.turnstile.reset(tsFormWidget); }
+    if (kind === 'wait' && tsWaitWidget !== null) { tsWaitToken = ''; window.turnstile.reset(tsWaitWidget); }
+  };
+  const mountTurnstile = siteKey => {
+    if (!siteKey || tsSiteKey) return;
+    tsSiteKey = siteKey;
+    const render = () => {
+      if (!window.turnstile) return;
+      if ($('ts-form') && tsFormWidget === null) {
+        $('ts-form').hidden = false;
+        tsFormWidget = window.turnstile.render('#ts-form', {
+          sitekey: tsSiteKey, theme: 'dark',
+          callback: t => { tsFormToken = t; },
+          'expired-callback': () => { tsFormToken = ''; },
+          'error-callback': () => { tsFormToken = ''; },
+        });
+      }
+      if ($('ts-wait') && tsWaitWidget === null) {
+        $('ts-wait').hidden = false;
+        tsWaitWidget = window.turnstile.render('#ts-wait', {
+          sitekey: tsSiteKey, theme: 'dark',
+          callback: t => { tsWaitToken = t; },
+          'expired-callback': () => { tsWaitToken = ''; },
+          'error-callback': () => { tsWaitToken = ''; },
+        });
+      }
+    };
+    const sc = document.createElement('script');
+    sc.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    sc.async = true;
+    sc.defer = true;
+    sc.onload = render;
+    document.head.appendChild(sc);
+  };
 
   const penDisplay = raw => {
     const base = raw || '<network>';
@@ -92,14 +132,17 @@
     $('w-err').hidden = true;
     const email = $('w-email').value.trim();
     if (!email.includes('@')) { $('w-err').textContent = 'Your email, please.'; $('w-err').hidden = false; return; }
+    if (tsSiteKey && !tsWaitToken) { $('w-err').textContent = 'Please complete the verification check first.'; $('w-err').hidden = false; return; }
     $('w-go').disabled = true;
     try {
-      const r = await api('POST', '/waitlist', { email, pen: $('w-pen').value.trim(), note: $('w-note').value.trim() });
+      const payload = { email, pen: $('w-pen').value.trim(), note: $('w-note').value.trim() };
+      if (tsSiteKey) payload.turnstile_token = tsWaitToken;
+      const r = await api('POST', '/waitlist', payload);
       $('waited-title').textContent = r.already ? "You're already on the list" : "You're on the list";
       $('waited-text').textContent = `You're number ${r.place}. We'll email ${email} a sign-up code when there's room.`;
       show('waited');
     } catch (e) { $('w-err').textContent = e.message; $('w-err').hidden = false; }
-    finally { $('w-go').disabled = false; }
+    finally { resetTurnstile('wait'); $('w-go').disabled = false; }
   });
 
   // Raising a pen is a job on the server: start it, then check on it. The job's
@@ -165,13 +208,17 @@
     if (!body.code.trim() || !body.pen.trim() || !body.handle.trim()) {
       $('err').textContent = 'Fill in all three.'; $('err').hidden = false; return;
     }
+    if (tsSiteKey && !tsFormToken) {
+      $('err').textContent = 'Please complete the verification check first.'; $('err').hidden = false; return;
+    }
+    if (tsSiteKey) body.turnstile_token = tsFormToken;
     $('go').disabled = true;
     sessionStorage.removeItem(JOB_DONE);
     try {
       const r = await api('POST', '/create', body);
       sessionStorage.setItem(JOB, r.job);
       await follow(r.job);
-    } catch (e) { fail(e.message); }
+    } catch (e) { resetTurnstile('form'); fail(e.message); }
   });
   const pending = sessionStorage.getItem(JOB);
   if (pending) {
@@ -180,6 +227,8 @@
     show('wait');   // a link straight to the waiting list
   }
   api('GET', '/status').then(s => {
+    if (/^[a-z0-9.-]+$/.test(s.sites_domain || '')) { sites = s.sites_domain; setSites(); }
+    if (s.turnstile_site_key) mountTurnstile(s.turnstile_site_key);
     if (s.for_sale && s.open) {
       $('buy-line').hidden = false;
       $('buy').addEventListener('click', async () => {

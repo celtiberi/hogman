@@ -248,6 +248,8 @@ input:focus { border-color: var(--gold); }
 .hint.ok { color: var(--good); font-weight: 600; }
 .hint.bad { color: var(--danger); font-weight: 600; }
 
+.turnstile { margin-top: 1.15rem; }
+
 .disclosure {
   margin-top: 1.25rem;
   padding: 0.8rem 0.95rem;

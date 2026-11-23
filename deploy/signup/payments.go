@@ -115,7 +115,7 @@ func (wb *web) checkout(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 404, map[string]string{"error": "pens aren't for sale here"})
 		return
 	}
-	if !wb.checkouts.allow(rateLimitKey(clientIP(r)), time.Now()) {
+	if !wb.checkouts.allow(rateLimitKey(wb.clientIP(r)), time.Now()) {
 		jsonOut(w, 429, map[string]string{"error": "too many tries from here; wait an hour"})
 		return
 	}
@@ -145,7 +145,7 @@ func (wb *web) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if !wb.webhooks.allow(rateLimitKey(clientIP(r)), time.Now()) {
+	if !wb.webhooks.allow(rateLimitKey(wb.clientIP(r)), time.Now()) {
 		jsonOut(w, 429, map[string]string{"error": "slow down a little"}) // Stripe retries
 		return
 	}
@@ -171,7 +171,7 @@ func (wb *web) paid(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 404, map[string]string{"error": "pens aren't for sale here"})
 		return
 	}
-	if !wb.jobPolls.allow(rateLimitKey(clientIP(r)), time.Now()) {
+	if !wb.jobPolls.allow(rateLimitKey(wb.clientIP(r)), time.Now()) {
 		jsonOut(w, 429, map[string]string{"error": "slow down a little"})
 		return
 	}

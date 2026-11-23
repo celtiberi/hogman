@@ -70,6 +70,8 @@
       <p class="hint"><strong>Before you pick a name:</strong> free sign-ups add a random 4-character ending (like <code>coffee-7k2m</code>) so common names aren't squatted or collided on; pen names are permanent (a used name is never given out again). Pen and site names appear in public Certificate Transparency logs (contents stay private), and hosted pens currently share <code>pens.hogman.network</code> so use a separate browser profile for any pen you don't fully trust.</p>
     </div>
 
+    <div class="turnstile" id="ts-form" hidden></div>
+
     <div class="actions">
       <button class="btn" id="go" type="submit">Raise my pen</button>
     </div>
@@ -100,6 +102,8 @@
 
     <p class="hint">We keep your email only to send you a code, and delete it once you've signed up,
       or right away if you take yourself off the list with the same email.</p>
+
+    <div class="turnstile" id="ts-wait" hidden></div>
 
     <div class="actions">
       <button class="btn" id="w-go" type="submit">Put me on the list</button>
