@@ -224,8 +224,8 @@
     <code>serverMayUse</code> (a share can only certify names pointing solely to itself), and writes
     challenges using the pen's scoped hashed API token (capped at 5 distinct new names/hour and
     20/7 days per pen, plus a 40/hour soft / 60/hour hard global ceiling across all pens that
-    reserves headroom for quiet and newly created pens; attempts count, not issued certs, and
-    renewals are exempt).</li>
+    reserves headroom for quiet and newly created pens; attempts count, not issued certs, and a name
+    already counted in the last 7 days (retries) is free).</li>
   <li><strong>CAA + CA failover:</strong> <code>pens.hogman.network</code> publishes strict
     <code>dns-01</code> CAA rules for <code>letsencrypt.org</code> (primary, with ARI) and
     <code>pki.goog</code> (Google Trust Services failover via single-use mesh EAB on 429/5xx, with
