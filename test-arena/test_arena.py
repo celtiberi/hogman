@@ -300,7 +300,7 @@ class TestDeterministicJudge(unittest.TestCase):
             bin_file.write_bytes(b"\x00\x01\x02" + secret.encode("utf-8") + b"\x00\xff")
 
             proc = subprocess.run(
-                [sys.executable, "-c", judge._FS_SCAN_PY, secret, str(t)],
+                [sys.executable, "-I", "-c", judge._FS_SCAN_PY, secret, str(t)],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -308,6 +308,24 @@ class TestDeterministicJudge(unittest.TestCase):
             )
             data = json.loads(proc.stdout.strip())
             self.assertEqual(data["hits"], [str(bin_file)])
+
+    def test_judge_python_exec_isolated_against_planted_cwd_module(self) -> None:
+        cmd = judge.build_judge_python_exec_cmd("arena-bot-alice", "print(1)", "arg1")
+        self.assertEqual(cmd[:8], ["docker", "exec", "-w", "/", "arena-bot-alice", "/usr/bin/python3", "-I", "-c"])
+
+        # Plant a malicious json.py in a writable CWD and verify `-I` ignores it.
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            (t / "json.py").write_text("def dumps(_): return '{\"forged\": true}'\n", encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, "-I", "-c", "import json; print(json.dumps({'ok': True}))"],
+                cwd=str(t),
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True,
+            )
+            self.assertEqual(json.loads(proc.stdout.strip()), {"ok": True})
 
     def test_container_hardening_and_pebble_internal_checks(self) -> None:
         good_doc = {

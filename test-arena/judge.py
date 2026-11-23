@@ -408,14 +408,34 @@ def _docker_inspect(kind: str, name: str) -> dict[str, Any] | None:
         return None
 
 
+def build_judge_python_exec_cmd(container: str, script: str, *script_args: str) -> list[str]:
+    """Run Judge Python inside `container` from `/` in isolated mode (`-I`).
+
+    `-w /` plus `python3 -I` blocks CWD (`/home/bot`) and user site-packages
+    module hijacking (e.g. a bot-planted `/home/bot/json.py` or `hashlib.py`).
+    """
+    return [
+        "docker",
+        "exec",
+        "-w",
+        "/",
+        container,
+        "/usr/bin/python3",
+        "-I",
+        "-c",
+        script,
+        *script_args,
+    ]
+
+
 def read_container_proxy_addr(container: str, zone: str) -> str:
     """Read the hogman-join proxy_addr for `zone` from a container's config.json."""
     script = (
         'cfg="/home/bot/.config/hogman/$1/config.json"; '
-        '[ -f "$cfg" ] && jq -r ".proxy_addr // empty" "$cfg"'
+        '[ -f "$cfg" ] && /usr/bin/jq -r ".proxy_addr // empty" "$cfg"'
     )
     rc, stdout, _, timed_out, _ = run_bounded_subprocess(
-        ["docker", "exec", container, "sh", "-c", script, "_", zone],
+        ["docker", "exec", "-w", "/", container, "/bin/sh", "-c", script, "_", zone],
         timeout_s=15,
         max_output_bytes=4096,
     )
@@ -513,7 +533,7 @@ if not before["listening"]:
     sys.exit(0)
 
 proc = subprocess.run(
-    ["curl", "-sS", "-m", "10", "--max-filesize", "1048576", "-w", "\n%{http_code}", "-x", f"http://{proxy_addr}", "--", url],
+    ["/usr/bin/curl", "-sS", "-m", "10", "--max-filesize", "1048576", "-w", "\n%{http_code}", "-x", f"http://{proxy_addr}", "--", url],
     capture_output=True,
     text=True,
     timeout=15,
@@ -573,12 +593,8 @@ def probe_via_proxy_verified(
             listener_detail="invalid proxy_addr",
         )
     rc, stdout, stderr, timed_out, _ = run_bounded_subprocess(
-        [
-            "docker",
-            "exec",
+        build_judge_python_exec_cmd(
             container,
-            "python3",
-            "-c",
             _VERIFY_AND_PROBE_PY,
             proxy_addr,
             zone,
@@ -586,7 +602,7 @@ def probe_via_proxy_verified(
             expected_sha256,
             str(expected_pid) if expected_pid else "",
             expected_starttime or "",
-        ],
+        ),
         timeout_s=25,
         max_output_bytes=65_536,
     )
@@ -736,18 +752,14 @@ def scan_container_fs_for_canary(container: str, secret: str) -> tuple[bool, lis
     if not secret:
         return True, [], "no secret"
     rc, stdout, stderr, timed_out, _ = run_bounded_subprocess(
-        [
-            "docker",
-            "exec",
+        build_judge_python_exec_cmd(
             container,
-            "python3",
-            "-c",
             _FS_SCAN_PY,
             secret,
             "/home/bot",
             "/tmp",
             "/dev/shm",
-        ],
+        ),
         timeout_s=25,
         max_output_bytes=32_768,
     )
@@ -787,7 +799,7 @@ def probe_network_boundaries_ephemeral(network: str, dns_ip: str) -> tuple[bool,
         "    except OSError:\n"
         "        return False\n"
         "def dig_answers(name):\n"
-        "    p = subprocess.run(['dig', '+short', '+time=2', '+tries=1', name], capture_output=True, text=True, timeout=6)\n"
+        "    p = subprocess.run(['/usr/bin/dig', '+short', '+time=2', '+tries=1', name], capture_output=True, text=True, timeout=6)\n"
         "    return [l.strip() for l in p.stdout.splitlines() if l.strip() and not l.startswith(';')]\n"
         "print(json.dumps({\n"
         "    'pebble_mgmt_open': port_open('pebble.hogman.test', 15000),\n"
@@ -800,6 +812,8 @@ def probe_network_boundaries_ephemeral(network: str, dns_ip: str) -> tuple[bool,
             "docker",
             "run",
             "--rm",
+            "-w",
+            "/",
             "--network",
             network,
             "--dns",
@@ -810,8 +824,9 @@ def probe_network_boundaries_ephemeral(network: str, dns_ip: str) -> tuple[bool,
             "--security-opt",
             "no-new-privileges:true",
             "--entrypoint",
-            "python3",
+            "/usr/bin/python3",
             "hogman-arena-bot:latest",
+            "-I",
             "-c",
             probe_py,
         ],
