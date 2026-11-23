@@ -3,10 +3,11 @@
 #
 # Safety boundaries:
 # - Must NOT run on a production host or any machine joined to a Tailscale tailnet.
-# - Locks inbound SSH strictly to the operator's IP/CIDR via ufw AND installs a
-#   persistent DOCKER-USER iptables/ip6tables firewall so Docker-published ports
-#   (80, 443, STUN UDP) are never exposed to the public internet.
-# - Installs native Linux Docker Engine + arena prerequisites; stores zero prod secrets.
+# - Locks inbound SSH strictly to the operator's IP/CIDR via ufw.
+# - Installs a DOCKER-USER firewall via a docker.service ExecStartPre drop-in
+#   (and systemd unit) so Docker-published ports (80/443/STUN) are NEVER exposed
+#   externally, even during a reboot before containers restart.
+# - Configures Docker json-file log rotation so adversarial traffic cannot fill disk.
 #
 # usage:
 #   sudo test-arena/setup-droplet.sh --allow-ssh-from <YOUR_IP/32> [--repo-dir /opt/hogman-arena]
@@ -20,7 +21,7 @@ usage() {
 usage: sudo test-arena/setup-droplet.sh --allow-ssh-from <CIDR> [--repo-dir DIR]
 
 options:
-  --allow-ssh-from CIDR   required; restrict inbound SSH and Docker-published ports to this IP/CIDR (e.g. 203.0.113.10/32)
+  --allow-ssh-from CIDR   required; restrict inbound SSH (port 22) to this IP/CIDR (e.g. 203.0.113.10/32)
   --repo-dir DIR          target directory for the arena checkout (default: /opt/hogman-arena)
 EOF
   exit 2
@@ -52,23 +53,12 @@ done
 [ -n "$ALLOW_SSH_FROM" ] || { echo "ERROR: --allow-ssh-from <IP/32> is required" >&2; usage; }
 
 # Refuse to run on any host connected to Tailscale or hosting Hogman.
-if command -v tailscale >/dev/null 2>&1 || [ -S /var/run/tailscale/tailscaled.sock ]; then
+if command -v tailscale >/dev/null 2>&1 || [ -x /usr/sbin/tailscaled ] || [ -S /var/run/tailscale/tailscaled.sock ]; then
   echo "ERROR: Tailscale detected on this machine. Run the Bot Arena only on a separate disposable droplet." >&2
   exit 1
 fi
-if [ -d /opt/hogman ]; then
-  echo "ERROR: /opt/hogman detected. Refusing to run on a Hogman host." >&2
-  exit 1
-fi
-
-# Validate CIDR format before touching ufw or iptables.
-IS_IPV6=false
-if printf '%s' "$ALLOW_SSH_FROM" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$'; then
-  IS_IPV6=false
-elif printf '%s' "$ALLOW_SSH_FROM" | grep -Eq '^[0-9a-fA-F:]+/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$'; then
-  IS_IPV6=true
-else
-  echo "ERROR: --allow-ssh-from must be a valid IPv4 or IPv6 CIDR (for example 203.0.113.10/32)" >&2
+if [ -d /opt/hogman ] || [ -f /etc/systemd/system/hogman-challenge-dns.service ] || [ -f /etc/systemd/system/hogman-gate-cert.service ]; then
+  echo "ERROR: Existing Hogman host files/services detected. Refusing to run on a Hogman host." >&2
   exit 1
 fi
 
@@ -88,9 +78,77 @@ apt-get install -y -qq \
   rsync \
   ufw
 
-systemctl enable --now docker
+# Validate CIDR strictly with Python ipaddress BEFORE touching ufw or iptables.
+python3 - "$ALLOW_SSH_FROM" <<'PY' || exit 1
+import ipaddress, sys
+raw = sys.argv[1]
+try:
+    net = ipaddress.ip_network(raw, strict=False)
+except ValueError as exc:
+    print(f"ERROR: invalid --allow-ssh-from CIDR {raw!r}: {exc}", file=sys.stderr)
+    sys.exit(1)
+if net.prefixlen == 0:
+    print(f"ERROR: refusing wildcard CIDR {raw!r}; specify your operator IP (e.g. /32 or /128)", file=sys.stderr)
+    sys.exit(1)
+PY
 
-# Add 2 GB swapfile if total RAM is under 4 GB so 2 pens + Pebble + 5 sandboxes stay comfortable.
+# Configure Docker json-file log rotation before starting Docker so noisy bots
+# cannot fill the droplet's root filesystem.
+mkdir -p /etc/docker
+if [ ! -f /etc/docker/daemon.json ]; then
+  cat > /etc/docker/daemon.json <<'JSON'
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  }
+}
+JSON
+fi
+
+# Install the DOCKER-USER firewall script BEFORE starting Docker and wire it
+# into docker.service via ExecStartPre + ExecStartPost so external traffic to
+# Docker-published ports (80/443/STUN) is dropped even across reboots.
+# Bots talk exclusively on local bridges; operators connect over SSH (port 22).
+echo "[setup] Installing persistent DOCKER-USER firewall (drops all external access to Docker-published ports)"
+cat > /usr/local/sbin/hogman-arena-docker-firewall <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+apply_chain() {
+  local ipt="$1"
+  "$ipt" -N DOCKER-USER 2>/dev/null || true
+  "$ipt" -C FORWARD -j DOCKER-USER 2>/dev/null || "$ipt" -I FORWARD 1 -j DOCKER-USER
+  "$ipt" -F DOCKER-USER
+  # Allow established replies and local Docker bridge traffic only.
+  "$ipt" -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+  "$ipt" -A DOCKER-USER -i lo -j RETURN
+  "$ipt" -A DOCKER-USER -i docker0 -j RETURN
+  "$ipt" -A DOCKER-USER -i br-+ -j RETURN
+  "$ipt" -A DOCKER-USER -j DROP
+}
+
+apply_chain iptables
+if command -v ip6tables >/dev/null 2>&1 && ip6tables -L FORWARD >/dev/null 2>&1; then
+  apply_chain ip6tables
+fi
+EOF
+chmod 0750 /usr/local/sbin/hogman-arena-docker-firewall
+
+install -d -m 0755 /etc/systemd/system/docker.service.d
+cat > /etc/systemd/system/docker.service.d/arena-firewall.conf <<'DROPIN'
+[Service]
+ExecStartPre=/usr/local/sbin/hogman-arena-docker-firewall
+ExecStartPost=/usr/local/sbin/hogman-arena-docker-firewall
+DROPIN
+
+systemctl daemon-reload
+/usr/local/sbin/hogman-arena-docker-firewall
+systemctl enable --now docker
+systemctl restart docker
+
+# Add 2 GB swapfile if total RAM is under 4 GB so 2 pens + Pebble + sandboxes stay comfortable.
 mem_mb="$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)"
 if [ "$mem_mb" -lt 3800 ] && [ ! -f /swapfile ]; then
   echo "[setup] RAM is ${mem_mb}MB (<4GB); creating 2G /swapfile"
@@ -108,59 +166,6 @@ ufw default allow outgoing >/dev/null
 ufw allow from "$ALLOW_SSH_FROM" to any port 22 proto tcp >/dev/null
 ufw --force enable >/dev/null
 
-# Docker bypasses ufw for published container ports (80/443/STUN). Install a
-# persistent DOCKER-USER firewall service so external traffic to any published
-# port is dropped unless it originates from ALLOW_SSH_FROM or a local Docker bridge.
-echo "[setup] Installing persistent DOCKER-USER firewall (blocks external access to Docker-published ports)"
-cat > /usr/local/sbin/hogman-arena-docker-firewall <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-
-ALLOW_CIDR='${ALLOW_SSH_FROM}'
-IS_IPV6='${IS_IPV6}'
-
-apply_chain() {
-  local ipt="\$1"
-  local allow_v="\$2"
-  "\$ipt" -N DOCKER-USER 2>/dev/null || true
-  "\$ipt" -F DOCKER-USER
-  # Allow established replies and container-initiated / inter-bridge traffic.
-  "\$ipt" -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-  "\$ipt" -A DOCKER-USER -i lo -j RETURN
-  "\$ipt" -A DOCKER-USER -i docker0 -j RETURN
-  "\$ipt" -A DOCKER-USER -i br-+ -j RETURN
-  if [ "\$allow_v" = true ]; then
-    "\$ipt" -A DOCKER-USER -s "\$ALLOW_CIDR" -j RETURN
-  fi
-  "\$ipt" -A DOCKER-USER -j DROP
-}
-
-apply_chain iptables "\$( [ "\$IS_IPV6" = false ] && echo true || echo false )"
-if command -v ip6tables >/dev/null 2>&1 && ip6tables -L FORWARD >/dev/null 2>&1; then
-  apply_chain ip6tables "\$IS_IPV6"
-fi
-EOF
-chmod 0750 /usr/local/sbin/hogman-arena-docker-firewall
-
-cat > /etc/systemd/system/hogman-arena-firewall.service <<'UNIT'
-[Unit]
-Description=Hogman Bot Arena DOCKER-USER firewall
-After=docker.service ufw.service
-Requires=docker.service
-PartOf=docker.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/sbin/hogman-arena-docker-firewall
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-systemctl daemon-reload
-systemctl enable --now hogman-arena-firewall.service
-
 mkdir -p "$REPO_DIR"
 chmod 0750 "$REPO_DIR"
 
@@ -169,9 +174,11 @@ cat <<EOF
 [setup] Disposable Bot Arena droplet is ready.
 
 Firewall note:
-  ufw + DOCKER-USER drop all external inbound traffic except from ${ALLOW_SSH_FROM}.
-  As defense-in-depth, also attach a DigitalOcean Cloud Firewall allowing only
-  inbound TCP 22 from ${ALLOW_SSH_FROM}.
+  - ufw allows inbound SSH (TCP 22) ONLY from ${ALLOW_SSH_FROM}.
+  - DOCKER-USER drops ALL external inbound traffic to Docker-published ports
+    (IPv4 and IPv6) before and after docker.service starts.
+  - As defense-in-depth, also attach a DigitalOcean Cloud Firewall allowing only
+    inbound TCP 22 from ${ALLOW_SSH_FROM}.
 
 Next steps:
   1. Clone the repository into ${REPO_DIR} (if not already present):

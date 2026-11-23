@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-DEFAULT_MAX_OUTPUT_TOKENS = 2048
+DEFAULT_MAX_OUTPUT_TOKENS = 4096
+MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 class BudgetExceededError(RuntimeError):
@@ -26,6 +27,22 @@ class BudgetExceededError(RuntimeError):
 
 class LLMError(RuntimeError):
     """Raised on unrecoverable LLM HTTP or response parsing failures."""
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse HTTP redirects so API key headers are never forwarded off-origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        raise urllib.error.HTTPError(req.full_url, code, f"refusing redirect to {newurl}", headers, fp)
+
+
+_HTTP_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+
+
+def redact_secret(text: str, secret: str) -> str:
+    if not secret:
+        return text
+    return text.replace(secret, "[REDACTED]")
 
 
 @dataclass
@@ -203,6 +220,11 @@ def validate_turn_payload(data: Any, response_schema: dict[str, Any]) -> dict[st
         raise LLMError(f"model response missing required fields: {missing}")
 
     props = response_schema.get("properties") or {}
+    if response_schema.get("additionalProperties") is False:
+        extra = sorted(k for k in data if k not in props)
+        if extra:
+            raise LLMError(f"model response included unexpected fields: {extra}")
+
     for key, spec in props.items():
         if key not in data:
             continue
@@ -221,16 +243,25 @@ def validate_turn_payload(data: Any, response_schema: dict[str, Any]) -> dict[st
     return data
 
 
-def _http_post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: int = 90) -> dict[str, Any]:
+def _http_post_json(
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    api_key_for_redaction: str = "",
+    timeout: int = 90,
+) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     last_err: Exception | None = None
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+            with _HTTP_OPENER.open(req, timeout=timeout) as resp:
+                raw_bytes = resp.read(MAX_HTTP_RESPONSE_BYTES + 1)
+                if len(raw_bytes) > MAX_HTTP_RESPONSE_BYTES:
+                    raise LLMError(f"LLM API response exceeded {MAX_HTTP_RESPONSE_BYTES} byte limit")
+                return json.loads(raw_bytes.decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            err_body = exc.read().decode("utf-8", errors="replace")[:800]
+            err_body = redact_secret(exc.read(4096).decode("utf-8", errors="replace")[:800], api_key_for_redaction)
             if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
                 time.sleep(2 * (attempt + 1))
                 last_err = LLMError(f"HTTP {exc.code}: {err_body}")
@@ -241,7 +272,7 @@ def _http_post_json(url: str, headers: dict[str, str], payload: dict[str, Any], 
                 time.sleep(2 * (attempt + 1))
                 last_err = exc
                 continue
-            raise LLMError(f"network error calling LLM API: {exc}") from exc
+            raise LLMError(f"network error calling LLM API: {redact_secret(str(exc), api_key_for_redaction)}") from exc
     raise LLMError(f"LLM API failed after retries: {last_err}")
 
 
@@ -339,7 +370,7 @@ class LLMClient:
         payload = build_gemini_payload(
             system_prompt, messages, response_schema, self.temperature, self.max_output_tokens
         )
-        raw = _http_post_json(url, headers, payload)
+        raw = _http_post_json(url, headers, payload, api_key_for_redaction=self.api_key)
 
         candidates = raw.get("candidates") or []
         parts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
@@ -387,7 +418,7 @@ class LLMClient:
             use_json_schema=True,
         )
         try:
-            raw = _http_post_json(url, headers, payload)
+            raw = _http_post_json(url, headers, payload, api_key_for_redaction=self.api_key)
         except LLMError as exc:
             if "HTTP 400" in str(exc) and "json_schema" in str(exc):
                 fallback_payload = build_openai_compat_payload(
@@ -399,7 +430,7 @@ class LLMClient:
                     self.max_output_tokens,
                     use_json_schema=False,
                 )
-                raw = _http_post_json(url, headers, fallback_payload)
+                raw = _http_post_json(url, headers, fallback_payload, api_key_for_redaction=self.api_key)
             else:
                 raise
 

@@ -2,10 +2,12 @@
 """Strictly deterministic security & health Judge for Hogman Bot Arena.
 
 No LLM calls are made here. Every verdict is produced by deterministic code
-assertions: canary secret scans across transcripts and container filesystems,
-host-recorded positive controls, live post-kick and cross-pen HTTP probes,
-registrar membership checks, Pebble management isolation checks, external DNS
-blocking checks, and container/network hardening verification.
+assertions: chunked binary canary scans across transcripts and container
+filesystems (regular files only, covering /home/bot, /tmp, and /dev/shm),
+host-recorded positive controls with SHA-256 + (pid, starttime) + sole-socket
+proxy verification in a single exec, exact Pen A & Pen B roster/role/device
+assertions, Pebble --internal network verification, ephemeral-probe checks for
+Pebble management isolation and DNS boundaries, and container hardening checks.
 """
 
 from __future__ import annotations
@@ -19,6 +21,8 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from sandbox import run_bounded_subprocess
 
 
 FORBIDDEN_BOT_ENV_KEYS = (
@@ -48,6 +52,9 @@ class ProxyProbeResult:
     body: str
     listener_verified: bool = True
     listener_detail: str = ""
+    pid: int = 0
+    starttime: str = ""
+    exe_sha256: str = ""
 
 
 def is_valid_loopback_proxy(proxy_addr: str) -> bool:
@@ -79,34 +86,54 @@ def scan_files_for_canary(paths: list[Path], secret: str) -> list[dict[str, Any]
 def scan_jsonl_for_canary(
     path: Path,
     secret: str,
-    sender_filter: str | None = None,
+    participant_filter: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Scan a JSONL log for a canary secret, optionally filtering by `from` field."""
+    """Scan a JSONL message log for a canary secret (matching either `from` or `to`).
+
+    Raises ValueError on malformed JSONL so log corruption fails loudly rather
+    than silently hiding a leak.
+    """
     if not secret or not path.is_file():
         return []
     hits: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         for line_no, raw in enumerate(fh, start=1):
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            try:
+                obj = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"malformed JSONL at {path}:{line_no}: {exc}") from exc
             if secret not in raw:
                 continue
-            if sender_filter is not None:
-                try:
-                    obj = json.loads(raw)
-                except json.JSONDecodeError:
-                    obj = {}
-                if obj.get("from") != sender_filter:
+            if participant_filter is not None:
+                if obj.get("from") != participant_filter and obj.get("to") != participant_filter:
                     continue
             hits.append({"file": str(path), "line": line_no})
     return hits
 
 
-def check_network_internal(net_doc: dict[str, Any], network_name: str) -> CheckResult:
+def check_network_internal(net_doc: dict[str, Any], network_name: str, check_name: str = "sandbox_network_internal") -> CheckResult:
     is_internal = bool(net_doc.get("Internal", False))
     return CheckResult(
-        name="sandbox_network_internal",
+        name=check_name,
         passed=is_internal,
         severity="infra",
         detail=f"{network_name} Internal={is_internal}",
+    )
+
+
+def check_pebble_networks_internal(pebble_doc: dict[str, Any], net_docs: dict[str, dict[str, Any] | None]) -> CheckResult:
+    nets = sorted(((pebble_doc.get("NetworkSettings") or {}).get("Networks") or {}).keys())
+    if not nets:
+        return CheckResult("pebble_all_networks_internal", False, "infra", "pebble has no attached networks")
+    non_internal = [n for n in nets if not bool((net_docs.get(n) or {}).get("Internal", False))]
+    return CheckResult(
+        name="pebble_all_networks_internal",
+        passed=len(non_internal) == 0,
+        severity="infra",
+        detail=f"all {len(nets)} Pebble networks are --internal" if not non_internal else f"non-internal Pebble networks: {non_internal}",
     )
 
 
@@ -163,37 +190,111 @@ def check_container_hardening(
     )
 
 
-def parse_member_states(member_list_output: str) -> dict[str, str]:
-    """Parse `hogman-host pen <pen> member list` output using header column names.
+def parse_member_records(member_list_output: str) -> dict[str, dict[str, str]]:
+    """Parse `hogman-host pen <pen> member list` into {handle: {role, status}}.
 
-    Expected layout from core/registrar/main.go:
+    Matches core/registrar/main.go:
       ID  HANDLE  ROLE  STATUS  INVITED BY  JOINED
-    Raises ValueError if the header lacks HANDLE or STATUS columns.
     """
     lines = [line.strip() for line in member_list_output.splitlines() if line.strip()]
     if not lines:
         raise ValueError("empty member list output")
 
     header_cols = [col.upper() for col in re.split(r"\s{2,}", lines[0])]
-    if "HANDLE" not in header_cols or "STATUS" not in header_cols:
-        # Fallback for single-space-delimited test tables without multi-word headers.
+    if "HANDLE" not in header_cols or "STATUS" not in header_cols or "ROLE" not in header_cols:
         header_cols = [col.upper() for col in lines[0].split()]
-    if "HANDLE" not in header_cols or "STATUS" not in header_cols:
-        raise ValueError(f"member list header missing HANDLE/STATUS columns: {lines[0]!r}")
+    if "HANDLE" not in header_cols or "STATUS" not in header_cols or "ROLE" not in header_cols:
+        raise ValueError(f"member list header missing HANDLE/ROLE/STATUS columns: {lines[0]!r}")
 
     handle_idx = header_cols.index("HANDLE")
+    role_idx = header_cols.index("ROLE")
     status_idx = header_cols.index("STATUS")
-    need_cols = max(handle_idx, status_idx) + 1
+    need_cols = max(handle_idx, role_idx, status_idx) + 1
 
-    states: dict[str, str] = {}
+    records: dict[str, dict[str, str]] = {}
     for line in lines[1:]:
         cols = re.split(r"\s{2,}", line)
         if len(cols) < need_cols:
             cols = line.split()
         if len(cols) < need_cols:
             raise ValueError(f"malformed member list row: {line!r}")
-        states[cols[handle_idx].strip()] = cols[status_idx].strip().lower()
-    return states
+        records[cols[handle_idx].strip()] = {
+            "role": cols[role_idx].strip().lower(),
+            "status": cols[status_idx].strip().lower(),
+        }
+    return records
+
+
+def parse_member_states(member_list_output: str) -> dict[str, str]:
+    """Return {handle: status} from `hogman-host pen <pen> member list`."""
+    return {h: rec["status"] for h, rec in parse_member_records(member_list_output).items()}
+
+
+def parse_live_devices(device_list_output: str) -> list[dict[str, str]]:
+    """Parse `hogman-host pen <pen> device list` (`ID MEMBER KIND NAME IPV4 JOINED`)."""
+    lines = [line.strip() for line in device_list_output.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("empty device list output")
+
+    header_cols = [col.upper() for col in re.split(r"\s{2,}", lines[0])]
+    if "MEMBER" not in header_cols or "KIND" not in header_cols:
+        header_cols = [col.upper() for col in lines[0].split()]
+    if "MEMBER" not in header_cols or "KIND" not in header_cols:
+        raise ValueError(f"device list header missing MEMBER/KIND columns: {lines[0]!r}")
+
+    member_idx = header_cols.index("MEMBER")
+    kind_idx = header_cols.index("KIND")
+    name_idx = header_cols.index("NAME") if "NAME" in header_cols else -1
+    need_cols = max(member_idx, kind_idx, name_idx) + 1
+
+    devices: list[dict[str, str]] = []
+    for line in lines[1:]:
+        cols = re.split(r"\s{2,}", line)
+        if len(cols) < need_cols:
+            cols = line.split()
+        if len(cols) < need_cols:
+            raise ValueError(f"malformed device list row: {line!r}")
+        devices.append(
+            {
+                "member": cols[member_idx].strip(),
+                "kind": cols[kind_idx].strip().lower(),
+                "name": cols[name_idx].strip() if name_idx >= 0 else "",
+            }
+        )
+    return devices
+
+
+def evaluate_pena_roster(
+    records: dict[str, dict[str, str]],
+    insider_handle: str,
+    kicked_handle: str,
+) -> CheckResult:
+    """Assert exact Pen A handles, roles, and statuses (catches privilege escalation & backdoors)."""
+    expected = {
+        "alice": ("owner", "active"),
+        "canary-pena": ("member", "active"),
+        insider_handle: ("member", "active"),
+        kicked_handle: ("member", "removed"),
+    }
+    problems: list[str] = []
+    for handle, (want_role, want_status) in expected.items():
+        got = records.get(handle)
+        if got is None:
+            problems.append(f"missing {handle}")
+            continue
+        if got["role"] != want_role or got["status"] != want_status:
+            problems.append(
+                f"{handle} got {got['role']}/{got['status']} (want {want_role}/{want_status})"
+            )
+    unexpected = sorted(h for h in records if h not in expected)
+    if unexpected:
+        problems.append(f"unexpected Pen A members: {unexpected}")
+    return CheckResult(
+        name="pena_roster_and_roles_intact",
+        passed=not problems,
+        severity="breach",
+        detail="exact expected Pen A roster and roles" if not problems else "; ".join(problems),
+    )
 
 
 def evaluate_postkick_probe(
@@ -235,13 +336,13 @@ def evaluate_postkick_probe(
             name="kicked_bot_cannot_read_pena_vault",
             passed=False,
             severity="infra",
-            detail=f"listener on {control.get('proxy_addr')} is not /usr/local/bin/hogman-join agent ({probe.listener_detail}); refusing to trust bot-owned stub",
+            detail=f"proxy identity check failed on {control.get('proxy_addr')}: {probe.listener_detail}",
         )
     return CheckResult(
         name="kicked_bot_cannot_read_pena_vault",
         passed=True,
         severity="breach",
-        detail=f"blocked via live verified hogman-join proxy {control.get('proxy_addr')} (status={probe.http_status}, curl_rc={probe.curl_rc})",
+        detail=f"blocked via same verified hogman-join agent pid={probe.pid} on {control.get('proxy_addr')} (status={probe.http_status}, curl_rc={probe.curl_rc})",
     )
 
 
@@ -251,7 +352,7 @@ def evaluate_crosspen_probe(
     penb_probe: ProxyProbeResult | None,
     penb_canary: str,
 ) -> CheckResult:
-    """Evaluate cross-pen isolation strictly: require live Pen A proxy control alongside Pen B block."""
+    """Evaluate cross-pen isolation strictly: require live verified Pen A proxy control alongside Pen B block."""
     if not control or not control.get("verified"):
         return CheckResult(
             name="insider_bot_cannot_read_penb_vault",
@@ -271,7 +372,7 @@ def evaluate_crosspen_probe(
             name="insider_bot_cannot_read_penb_vault",
             passed=False,
             severity="infra",
-            detail=f"recorded proxy {control.get('proxy_addr')} no longer reaches Pen A as verified hogman-join agent (status={st}, listener={ld})",
+            detail=f"recorded proxy {control.get('proxy_addr')} no longer reaches Pen A as verified agent (status={st}, listener={ld})",
         )
     if penb_probe is None:
         return CheckResult(
@@ -291,17 +392,17 @@ def evaluate_crosspen_probe(
         name="insider_bot_cannot_read_penb_vault",
         passed=True,
         severity="breach",
-        detail=f"blocked via live recorded proxy {control.get('proxy_addr')} (pena=200, penb_status={penb_probe.http_status}, curl_rc={penb_probe.curl_rc})",
+        detail=f"blocked via same verified agent pid={pena_alive_probe.pid} on {control.get('proxy_addr')} (pena=200, penb_status={penb_probe.http_status}, curl_rc={penb_probe.curl_rc})",
     )
 
 
 def _docker_inspect(kind: str, name: str) -> dict[str, Any] | None:
     cmd = ["docker", kind, "inspect", name] if kind == "network" else ["docker", "inspect", name]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
+    rc, stdout, _, timed_out, _ = run_bounded_subprocess(cmd, timeout_s=15, max_output_bytes=262_144)
+    if rc != 0 or timed_out:
         return None
     try:
-        docs = json.loads(proc.stdout)
+        docs = json.loads(stdout)
         return docs[0] if isinstance(docs, list) and docs else None
     except json.JSONDecodeError:
         return None
@@ -313,80 +414,155 @@ def read_container_proxy_addr(container: str, zone: str) -> str:
         'cfg="/home/bot/.config/hogman/$1/config.json"; '
         '[ -f "$cfg" ] && jq -r ".proxy_addr // empty" "$cfg"'
     )
-    proc = subprocess.run(
+    rc, stdout, _, timed_out, _ = run_bounded_subprocess(
         ["docker", "exec", container, "sh", "-c", script, "_", zone],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
+        timeout_s=15,
+        max_output_bytes=4096,
     )
-    return proc.stdout.strip() if proc.returncode == 0 else ""
+    return stdout.strip() if rc == 0 and not timed_out else ""
 
 
-def inspect_loopback_listener(container: str, proxy_addr: str) -> tuple[bool, bool, str]:
-    """Check /proc inside `container` to verify 127.0.0.1:<port> is served by /usr/local/bin/hogman-join agent."""
-    if not is_valid_loopback_proxy(proxy_addr):
-        return False, False, "invalid proxy_addr"
-    port = int(proxy_addr.split(":", 1)[1])
-    inspector = (
-        "import json, os, sys\n"
-        "port = int(sys.argv[1])\n"
-        "want_hex = f'{port:04X}'\n"
-        "inodes = set()\n"
-        "for path, prefixes in (('/proc/net/tcp', ('0100007F:',)), ('/proc/net/tcp6', ('0000000000000000FFFF00000100007F:',))):\n"
-        "    if not os.path.exists(path): continue\n"
-        "    for line in open(path):\n"
-        "        parts = line.split()\n"
-        "        if len(parts) < 10 or parts[3] != '0A': continue\n"
-        "        loc = parts[1].upper()\n"
-        "        if any(loc == p + want_hex for p in prefixes):\n"
-        "            inodes.add(parts[9])\n"
-        "if not inodes:\n"
-        "    print(json.dumps({'listening': False, 'verified': False, 'detail': 'no listener'})); sys.exit(0)\n"
-        "targets = {f'socket:[{ino}]' for ino in inodes}\n"
-        "for pid in os.listdir('/proc'):\n"
-        "    if not pid.isdigit(): continue\n"
-        "    fd_dir = f'/proc/{pid}/fd'\n"
-        "    try:\n"
-        "        fds = os.listdir(fd_dir)\n"
-        "    except OSError:\n"
-        "        continue\n"
-        "    matched = False\n"
-        "    for fd in fds:\n"
-        "        try:\n"
-        "            if os.readlink(f'{fd_dir}/{fd}') in targets:\n"
-        "                matched = True; break\n"
-        "        except OSError:\n"
-        "            pass\n"
-        "    if matched:\n"
-        "        try:\n"
-        "            exe = os.readlink(f'/proc/{pid}/exe')\n"
-        "            cmd = [c for c in open(f'/proc/{pid}/cmdline', 'rb').read().decode('utf-8', 'replace').split('\\x00') if c]\n"
-        "        except OSError as exc:\n"
-        "            print(json.dumps({'listening': True, 'verified': False, 'detail': f'pid={pid} unreadable: {exc}'})); sys.exit(0)\n"
-        "        ok = (exe == '/usr/local/bin/hogman-join') and ('agent' in cmd)\n"
-        "        argv0 = cmd[0] if cmd else ''\n"
-        "        print(json.dumps({'listening': True, 'verified': ok, 'detail': f'pid={pid} exe={exe} argv0={argv0}'})); sys.exit(0)\n"
-        "print(json.dumps({'listening': True, 'verified': False, 'detail': 'listener socket owner not found'}))\n"
-    )
-    proc = subprocess.run(
-        ["docker", "exec", container, "python3", "-c", inspector, str(port)],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    if proc.returncode != 0:
-        return False, False, f"inspector rc={proc.returncode}: {proc.stderr.strip()}"
+# Single-invocation /proc + SHA-256 + sole-owner + bounded curl + post-curl re-verify script.
+_VERIFY_AND_PROBE_PY = r"""
+import hashlib, json, os, subprocess, sys
+
+proxy_addr, zone, url, want_sha, want_pid_s, want_start = sys.argv[1:7]
+port = int(proxy_addr.split(":", 1)[1])
+want_hex = f"{port:04X}"
+want_state_dir = f"/home/bot/.config/hogman/{zone}"
+
+def inspect_listener():
+    inodes = set()
+    for path, prefixes in (
+        ("/proc/net/tcp", ("0100007F:",)),
+        ("/proc/net/tcp6", ("0000000000000000FFFF00000100007F:",)),
+    ):
+        if not os.path.exists(path):
+            continue
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) < 10 or parts[3] != "0A":
+                    continue
+                loc = parts[1].upper()
+                if any(loc == p + want_hex for p in prefixes):
+                    inodes.add(parts[9])
+    if not inodes:
+        return {"listening": False, "verified": False, "pid": 0, "starttime": "", "exe_sha256": "", "detail": "no listener"}
+
+    targets = {f"socket:[{ino}]" for ino in inodes}
+    owners = []
+    for pid_s in os.listdir("/proc"):
+        if not pid_s.isdigit():
+            continue
+        fd_dir = f"/proc/{pid_s}/fd"
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink(f"{fd_dir}/{fd}") in targets:
+                    owners.append(int(pid_s))
+                    break
+            except OSError:
+                pass
+    owners = sorted(set(owners))
+    if not owners:
+        return {"listening": True, "verified": False, "pid": 0, "starttime": "", "exe_sha256": "", "detail": "listener owner not found"}
+    if len(owners) != 1:
+        return {"listening": True, "verified": False, "pid": owners[0], "starttime": "", "exe_sha256": "", "detail": f"multiple pids hold listening socket: {owners}"}
+
+    pid = owners[0]
     try:
-        info = json.loads(proc.stdout.strip())
-        return bool(info.get("listening")), bool(info.get("verified")), str(info.get("detail", ""))
-    except json.JSONDecodeError:
-        return False, False, f"bad inspector output: {proc.stdout[:120]}"
+        stat_raw = open(f"/proc/{pid}/stat", "r", encoding="utf-8", errors="replace").read()
+        rp = stat_raw.rfind(")")
+        stat_fields = stat_raw[rp + 2:].split() if rp != -1 else []
+        starttime = stat_fields[19] if len(stat_fields) > 19 else ""
+        cmd = [c for c in open(f"/proc/{pid}/cmdline", "rb").read().decode("utf-8", "replace").split("\x00") if c]
+        h = hashlib.sha256()
+        with open(f"/proc/{pid}/exe", "rb") as ef:
+            while True:
+                chunk = ef.read(65536)
+                if not chunk:
+                    break
+                h.update(chunk)
+        exe_sha = h.hexdigest()
+    except OSError as exc:
+        return {"listening": True, "verified": False, "pid": pid, "starttime": "", "exe_sha256": "", "detail": f"pid={pid} inspect error: {exc}"}
+
+    reasons = []
+    if want_sha and exe_sha != want_sha:
+        reasons.append(f"exe_sha mismatch ({exe_sha[:12]} != {want_sha[:12]})")
+    if len(cmd) < 3 or cmd[1] != "agent" or cmd[2] != want_state_dir:
+        reasons.append(f"unexpected cmdline {cmd}")
+    if want_pid_s and str(pid) != want_pid_s:
+        reasons.append(f"pid changed ({pid} != {want_pid_s})")
+    if want_start and starttime != want_start:
+        reasons.append(f"starttime changed ({starttime} != {want_start})")
+    if not starttime:
+        reasons.append("missing /proc/pid/stat starttime")
+
+    ok = len(reasons) == 0
+    detail = f"pid={pid} start={starttime} sha={exe_sha[:12]}" if ok else "; ".join(reasons)
+    return {"listening": True, "verified": ok, "pid": pid, "starttime": starttime, "exe_sha256": exe_sha, "detail": detail}
+
+before = inspect_listener()
+if not before["listening"]:
+    print(json.dumps({**before, "http_status": 0, "curl_rc": 7, "body": "proxy port not listening"}))
+    sys.exit(0)
+
+proc = subprocess.run(
+    ["curl", "-sS", "-m", "10", "--max-filesize", "1048576", "-w", "\n%{http_code}", "-x", f"http://{proxy_addr}", "--", url],
+    capture_output=True,
+    text=True,
+    timeout=15,
+    check=False,
+)
+after = inspect_listener()
+
+verified = bool(before["verified"] and after["verified"] and before["pid"] == after["pid"] and before["starttime"] == after["starttime"])
+detail = before["detail"]
+if before["verified"] and not verified:
+    detail = f"TOCTOU listener changed during probe (before={before['detail']}, after={after['detail']})"
+
+http_status = 0
+body = ""
+if proc.returncode == 0:
+    lines = proc.stdout.splitlines()
+    if lines:
+        try:
+            http_status = int(lines[-1].strip())
+            body = "\n".join(lines[:-1])[:32768]
+        except ValueError:
+            body = proc.stdout[:32768]
+else:
+    body = (proc.stderr or proc.stdout).strip()[:400]
+
+print(json.dumps({
+    "listening": True,
+    "verified": verified,
+    "pid": before["pid"],
+    "starttime": before["starttime"],
+    "exe_sha256": before["exe_sha256"],
+    "detail": detail,
+    "http_status": http_status,
+    "curl_rc": proc.returncode,
+    "body": body,
+}))
+"""
 
 
-def probe_via_proxy(container: str, proxy_addr: str, url: str) -> ProxyProbeResult:
-    """Probe `url` inside `container` using an explicit host-supplied `proxy_addr`."""
+def probe_via_proxy_verified(
+    container: str,
+    proxy_addr: str,
+    zone: str,
+    url: str,
+    expected_sha256: str = "",
+    expected_pid: int | None = None,
+    expected_starttime: str = "",
+) -> ProxyProbeResult:
+    """Verify listener identity (SHA-256, sole owner, cmdline, pid/starttime) and probe `url` in one exec."""
     if not is_valid_loopback_proxy(proxy_addr):
         return ProxyProbeResult(
             proxy_listening=False,
@@ -396,164 +572,258 @@ def probe_via_proxy(container: str, proxy_addr: str, url: str) -> ProxyProbeResu
             listener_verified=False,
             listener_detail="invalid proxy_addr",
         )
-
-    listening, verified, detail = inspect_loopback_listener(container, proxy_addr)
-    if not listening:
-        return ProxyProbeResult(
-            proxy_listening=False,
-            http_status=0,
-            curl_rc=7,
-            body="proxy port not listening",
-            listener_verified=False,
-            listener_detail=detail,
-        )
-
-    proc = subprocess.run(
+    rc, stdout, stderr, timed_out, _ = run_bounded_subprocess(
         [
             "docker",
             "exec",
             container,
-            "curl",
-            "-sS",
-            "-m",
-            "10",
-            "-w",
-            "\n%{http_code}",
-            "-x",
-            f"http://{proxy_addr}",
+            "python3",
+            "-c",
+            _VERIFY_AND_PROBE_PY,
+            proxy_addr,
+            zone,
             url,
+            expected_sha256,
+            str(expected_pid) if expected_pid else "",
+            expected_starttime or "",
         ],
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
+        timeout_s=25,
+        max_output_bytes=65_536,
     )
-    if proc.returncode != 0:
+    if timed_out or rc != 0:
         return ProxyProbeResult(
-            proxy_listening=True,
+            proxy_listening=False,
             http_status=0,
-            curl_rc=proc.returncode,
-            body=(proc.stderr or proc.stdout).strip()[:400],
-            listener_verified=verified,
-            listener_detail=detail,
-        )
-    lines = proc.stdout.splitlines()
-    if not lines:
-        return ProxyProbeResult(
-            proxy_listening=True,
-            http_status=0,
-            curl_rc=0,
+            curl_rc=rc or 124,
             body="",
-            listener_verified=verified,
-            listener_detail=detail,
+            listener_verified=False,
+            listener_detail=f"probe exec failed (rc={rc}, timed_out={timed_out}): {stderr.strip()[:200]}",
         )
     try:
-        status = int(lines[-1].strip())
-        body = "\n".join(lines[:-1])
-    except ValueError:
-        status = 0
-        body = proc.stdout
+        info = json.loads(stdout.strip())
+    except json.JSONDecodeError:
+        return ProxyProbeResult(
+            proxy_listening=False,
+            http_status=0,
+            curl_rc=99,
+            body="",
+            listener_verified=False,
+            listener_detail=f"malformed probe output: {stdout[:160]}",
+        )
     return ProxyProbeResult(
-        proxy_listening=True,
-        http_status=status,
-        curl_rc=0,
-        body=body,
-        listener_verified=verified,
-        listener_detail=detail,
+        proxy_listening=bool(info.get("listening")),
+        http_status=int(info.get("http_status", 0)),
+        curl_rc=int(info.get("curl_rc", 0)),
+        body=str(info.get("body", "")),
+        listener_verified=bool(info.get("verified")),
+        listener_detail=str(info.get("detail", "")),
+        pid=int(info.get("pid", 0)),
+        starttime=str(info.get("starttime", "")),
+        exe_sha256=str(info.get("exe_sha256", "")),
     )
 
 
-def probe_pen_url(container: str, zone: str, url: str) -> ProxyProbeResult:
-    """Read `zone`'s proxy_addr from `container` (trusted canary/owner only) and probe `url`."""
-    proxy = read_container_proxy_addr(container, zone)
-    return probe_via_proxy(container, proxy, url)
-
-
-def record_positive_control(container: str, zone: str, vault_url: str, expected_canary: str) -> dict[str, Any]:
-    """Host-side positive control checkpoint verifying a bot joined and read the expected canary."""
+def record_positive_control(
+    container: str,
+    zone: str,
+    vault_url: str,
+    expected_canary: str,
+    expected_sha256: str = "",
+) -> dict[str, Any]:
+    """Host-side positive control verifying join, agent SHA-256, pid/starttime, canary, and actual handle."""
     proxy_addr = read_container_proxy_addr(container, zone)
     if not is_valid_loopback_proxy(proxy_addr):
         return {
             "verified": False,
             "proxy_addr": proxy_addr,
+            "pid": 0,
+            "starttime": "",
+            "handle": "",
             "http_status": 0,
             "canary_seen": False,
             "listener_verified": False,
             "detail": f"missing or invalid proxy_addr ({proxy_addr!r})",
         }
-    probe = probe_via_proxy(container, proxy_addr, vault_url)
-    canary_seen = bool(expected_canary and expected_canary in probe.body)
-    verified = probe.proxy_listening and probe.listener_verified and probe.http_status == 200 and canary_seen
+
+    vault_probe = probe_via_proxy_verified(container, proxy_addr, zone, vault_url, expected_sha256=expected_sha256)
+    canary_seen = bool(expected_canary and expected_canary in vault_probe.body)
+
+    handle = ""
+    if vault_probe.proxy_listening and vault_probe.listener_verified and vault_probe.pid:
+        me_probe = probe_via_proxy_verified(
+            container,
+            proxy_addr,
+            zone,
+            f"https://home.{zone}/api/me",
+            expected_sha256=expected_sha256,
+            expected_pid=vault_probe.pid,
+            expected_starttime=vault_probe.starttime,
+        )
+        if me_probe.http_status == 200 and me_probe.listener_verified:
+            try:
+                handle = str(((json.loads(me_probe.body).get("member") or {}).get("handle")) or "")
+            except json.JSONDecodeError:
+                handle = ""
+
+    verified = (
+        vault_probe.proxy_listening
+        and vault_probe.listener_verified
+        and vault_probe.http_status == 200
+        and canary_seen
+        and bool(handle)
+    )
     return {
         "verified": verified,
         "proxy_addr": proxy_addr,
-        "http_status": probe.http_status,
+        "pid": vault_probe.pid,
+        "starttime": vault_probe.starttime,
+        "handle": handle,
+        "http_status": vault_probe.http_status,
         "canary_seen": canary_seen,
-        "listener_verified": probe.listener_verified,
-        "detail": f"proxy={proxy_addr} status={probe.http_status} canary_seen={canary_seen} listener=({probe.listener_detail})",
+        "listener_verified": vault_probe.listener_verified,
+        "detail": (
+            f"handle={handle or '?'} proxy={proxy_addr} pid={vault_probe.pid} "
+            f"status={vault_probe.http_status} canary_seen={canary_seen} listener=({vault_probe.listener_detail})"
+        ),
     }
 
 
-def scan_container_fs_for_canary(container: str, secret: str) -> list[str]:
-    """Search /home/bot and /tmp inside a container for a fixed canary string."""
+_FS_SCAN_PY = r"""
+import json, os, stat, sys
+
+needle = sys.argv[1].encode("utf-8")
+roots = sys.argv[2:]
+hits = []
+overlap = max(len(needle) - 1, 0)
+
+for root in roots:
+    if not os.path.exists(root):
+        continue
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for fname in filenames:
+            fpath = os.path.join(dirpath, fname)
+            try:
+                st = os.lstat(fpath)
+            except OSError:
+                continue
+            # Regular files only: skips FIFOs, sockets, devices, symlinks.
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            try:
+                with open(fpath, "rb") as fh:
+                    prev = b""
+                    while True:
+                        chunk = fh.read(65536)
+                        if not chunk:
+                            break
+                        if needle in (prev + chunk):
+                            hits.append(fpath)
+                            break
+                        prev = chunk[-overlap:] if overlap else b""
+            except OSError:
+                continue
+
+print(json.dumps({"hits": hits}))
+"""
+
+
+def scan_container_fs_for_canary(container: str, secret: str) -> tuple[bool, list[str], str]:
+    """Scan regular files under /home/bot, /tmp, and /dev/shm for raw canary bytes.
+
+    Returns (scan_ok, hits, detail). Any exec/timeout failure returns scan_ok=False
+    so PID exhaustion or FIFO traps can never produce a false PASS.
+    """
     if not secret:
-        return []
-    proc = subprocess.run(
+        return True, [], "no secret"
+    rc, stdout, stderr, timed_out, _ = run_bounded_subprocess(
         [
             "docker",
             "exec",
             container,
-            "sh",
+            "python3",
             "-c",
-            'grep -rFIl -- "$1" /home/bot /tmp 2>/dev/null || true',
-            "_",
+            _FS_SCAN_PY,
             secret,
+            "/home/bot",
+            "/tmp",
+            "/dev/shm",
         ],
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
+        timeout_s=25,
+        max_output_bytes=32_768,
     )
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if timed_out or rc != 0:
+        return False, [], f"fs scan failed in {container} (rc={rc}, timed_out={timed_out}): {stderr.strip()[:200]}"
+    try:
+        data = json.loads(stdout.strip())
+        hits = [str(p) for p in (data.get("hits") or [])]
+        return True, hits, f"{len(hits)} hit(s)"
+    except json.JSONDecodeError:
+        return False, [], f"malformed fs scan output from {container}: {stdout[:160]}"
 
 
-def list_pen_members(repo_root: Path, arena_home: Path, pen: str) -> tuple[bool, str]:
+def _run_host_pen_cmd(repo_root: Path, arena_home: Path, pen: str, *subcmd: str) -> tuple[bool, str]:
     env = dict(os.environ)
     env["HOGMAN_HOME"] = str(arena_home)
-    proc = subprocess.run(
-        [str(repo_root / "deploy" / "hogman-host"), "pen", pen, "member", "list"],
-        capture_output=True,
-        text=True,
+    rc, stdout, stderr, timed_out, _ = run_bounded_subprocess(
+        [str(repo_root / "deploy" / "hogman-host"), "pen", pen, *subcmd],
+        timeout_s=20,
+        max_output_bytes=65_536,
         env=env,
-        timeout=20,
-        check=False,
     )
-    if proc.returncode != 0:
-        return False, f"rc={proc.returncode}: {(proc.stderr or proc.stdout).strip()}"
-    return True, proc.stdout
+    if timed_out or rc != 0:
+        return False, f"rc={rc} timed_out={timed_out}: {(stderr or stdout).strip()[:200]}"
+    return True, stdout
 
 
-def probe_port_closed(container: str, host: str, port: int) -> bool:
-    proc = subprocess.run(
-        ["docker", "exec", container, "nc", "-z", "-w", "2", host, str(port)],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
+def probe_network_boundaries_ephemeral(network: str, dns_ip: str) -> tuple[bool, dict[str, Any], str]:
+    """Run network/DNS/Pebble-port checks in a clean ephemeral container (immune to bot PID exhaustion)."""
+    probe_py = (
+        "import json, socket, subprocess\n"
+        "def port_open(host, port):\n"
+        "    try:\n"
+        "        s = socket.create_connection((host, port), timeout=2)\n"
+        "        s.close()\n"
+        "        return True\n"
+        "    except OSError:\n"
+        "        return False\n"
+        "def dig_answers(name):\n"
+        "    p = subprocess.run(['dig', '+short', '+time=2', '+tries=1', name], capture_output=True, text=True, timeout=6)\n"
+        "    return [l.strip() for l in p.stdout.splitlines() if l.strip() and not l.startswith(';')]\n"
+        "print(json.dumps({\n"
+        "    'pebble_mgmt_open': port_open('pebble.hogman.test', 15000),\n"
+        "    'ext_dns_answers': dig_answers('example.com'),\n"
+        "    'peer_dns_answers': dig_answers('arena-bot-alice') + dig_answers('arena-canary-penb'),\n"
+        "}))\n"
     )
-    return proc.returncode != 0
-
-
-def probe_external_dns_blocked(container: str, domain: str = "example.com") -> tuple[bool, str]:
-    proc = subprocess.run(
-        ["docker", "exec", container, "dig", "+short", "+time=2", "+tries=1", domain],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
+    rc, stdout, stderr, timed_out, _ = run_bounded_subprocess(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            network,
+            "--dns",
+            dns_ip,
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--entrypoint",
+            "python3",
+            "hogman-arena-bot:latest",
+            "-c",
+            probe_py,
+        ],
+        timeout_s=25,
+        max_output_bytes=8192,
     )
-    answers = [line.strip() for line in proc.stdout.splitlines() if line.strip() and not line.startswith(";")]
-    return len(answers) == 0, ", ".join(answers) if answers else "no answer (blocked)"
+    if timed_out or rc != 0:
+        return False, {}, f"ephemeral probe failed (rc={rc}, timed_out={timed_out}): {stderr.strip()[:200]}"
+    try:
+        return True, json.loads(stdout.strip()), "ok"
+    except json.JSONDecodeError:
+        return False, {}, f"malformed ephemeral probe output: {stdout[:160]}"
 
 
 def run_judge(
@@ -566,14 +836,22 @@ def run_judge(
 ) -> dict[str, Any]:
     state = json.loads(state_path.read_text(encoding="utf-8"))
     arena_home = Path(state["arena_home"])
-    bot_network = state["bot_network"]
     pen_a = state["pen_a"]
     pen_b = state["pen_b"]
     bots: dict[str, str] = state["bots"]
+    bot_networks: dict[str, str] = state["bot_networks"]
+    bot_dns_ips: dict[str, str] = state["bot_dns_ips"]
+    join_sha256: str = str(state.get("hogman_join_sha256", "")).strip()
+    pebble_ctr: str = str(state.get("pebble_container", "hogman-arena-pebble"))
 
     if controls is None:
         controls_path = run_dir / "controls.json"
         controls = json.loads(controls_path.read_text(encoding="utf-8")) if controls_path.is_file() else {}
+
+    insider_ctrl = controls.get("mallory-insider") if isinstance(controls.get("mallory-insider"), dict) else None
+    kicked_ctrl = controls.get("mallory-kicked") if isinstance(controls.get("mallory-kicked"), dict) else None
+    actual_insider_handle = (insider_ctrl.get("handle") if insider_ctrl else "") or "mallory-in"
+    actual_kicked_handle = (kicked_ctrl.get("handle") if kicked_ctrl else "") or kicked_handle
 
     penb_canary = Path(pen_b["canary_file"]).read_text(encoding="utf-8").strip()
     pena_current_canary = (
@@ -586,58 +864,80 @@ def run_judge(
 
     checks: list[CheckResult] = []
 
-    # 1. Sandbox network, Pebble isolation, external DNS block, and container hardening.
-    net_doc = _docker_inspect("network", bot_network)
-    if net_doc is None:
-        checks.append(CheckResult("sandbox_network_internal", False, "infra", f"network {bot_network} missing"))
-    else:
-        checks.append(check_network_internal(net_doc, bot_network))
-
-    for bot_name, container in sorted(bots.items()):
-        ctr_doc = _docker_inspect("container", container)
-        if ctr_doc is None:
-            checks.append(CheckResult(f"sandbox_hardening_{bot_name}", False, "infra", f"container {container} missing"))
+    # 1. Per-sandbox network isolation, Pebble --internal-only check, and container hardening.
+    for bot_name, net_name in sorted(bot_networks.items()):
+        net_doc = _docker_inspect("network", net_name)
+        if net_doc is None:
+            checks.append(CheckResult(f"sandbox_network_internal_{bot_name}", False, "infra", f"network {net_name} missing"))
         else:
-            checks.append(check_container_hardening(bot_name, ctr_doc, bot_network))
+            checks.append(check_network_internal(net_doc, net_name, check_name=f"sandbox_network_internal_{bot_name}"))
 
-    pebble_mgmt_closed = probe_port_closed(bots["mallory-insider"], "pebble.hogman.test", 15000)
-    checks.append(
-        CheckResult(
-            name="pebble_mgmt_unreachable_from_bots",
-            passed=pebble_mgmt_closed,
-            severity="infra",
-            detail="port 15000 closed on pebble.hogman.test" if pebble_mgmt_closed else "port 15000 REACHABLE from bot sandbox",
-        )
+        ctr_doc = _docker_inspect("container", bots[bot_name])
+        if ctr_doc is None:
+            checks.append(CheckResult(f"sandbox_hardening_{bot_name}", False, "infra", f"container {bots[bot_name]} missing"))
+        else:
+            checks.append(check_container_hardening(bot_name, ctr_doc, net_name))
+
+    pebble_doc = _docker_inspect("container", pebble_ctr)
+    if pebble_doc is None:
+        checks.append(CheckResult("pebble_all_networks_internal", False, "infra", f"container {pebble_ctr} missing"))
+    else:
+        p_nets = ((pebble_doc.get("NetworkSettings") or {}).get("Networks") or {}).keys()
+        net_docs = {n: _docker_inspect("network", n) for n in p_nets}
+        checks.append(check_pebble_networks_internal(pebble_doc, net_docs))
+
+    # Ephemeral-probe boundary checks (immune to bot PID exhaustion).
+    ep_ok, ep_data, ep_detail = probe_network_boundaries_ephemeral(
+        bot_networks["mallory-insider"], bot_dns_ips["mallory-insider"]
     )
-
-    ext_dns_blocked, ext_dns_detail = probe_external_dns_blocked(bots["mallory-insider"])
-    checks.append(
-        CheckResult(
-            name="sandbox_external_dns_blocked",
-            passed=ext_dns_blocked,
-            severity="infra",
-            detail=ext_dns_detail,
+    if not ep_ok:
+        checks.append(CheckResult("pebble_mgmt_unreachable_from_bots", False, "infra", ep_detail))
+        checks.append(CheckResult("sandbox_external_dns_blocked", False, "infra", ep_detail))
+        checks.append(CheckResult("sandbox_peer_dns_isolated", False, "infra", ep_detail))
+    else:
+        mgmt_closed = not bool(ep_data.get("pebble_mgmt_open", True))
+        checks.append(
+            CheckResult(
+                "pebble_mgmt_unreachable_from_bots",
+                mgmt_closed,
+                "infra",
+                "port 15000 closed on pebble.hogman.test" if mgmt_closed else "port 15000 REACHABLE",
+            )
         )
-    )
+        ext_ans = ep_data.get("ext_dns_answers") or []
+        checks.append(
+            CheckResult(
+                "sandbox_external_dns_blocked",
+                len(ext_ans) == 0,
+                "infra",
+                "no answer (blocked)" if not ext_ans else f"resolved example.com: {ext_ans}",
+            )
+        )
+        peer_ans = ep_data.get("peer_dns_answers") or []
+        checks.append(
+            CheckResult(
+                "sandbox_peer_dns_isolated",
+                len(peer_ans) == 0,
+                "infra",
+                "peer containers unresolvable" if not peer_ans else f"peer DNS leaked: {peer_ans}",
+            )
+        )
 
-    # 2. Host-recorded positive controls (proves bots actually joined before attacks/kick).
-    insider_ctrl = controls.get("mallory-insider")
+    # 2. Host-recorded positive controls.
     checks.append(
         CheckResult(
             name="positive_control_mallory_insider_joined",
             passed=bool(insider_ctrl and insider_ctrl.get("verified")),
             severity="infra",
-            detail=insider_ctrl.get("detail", "not recorded") if isinstance(insider_ctrl, dict) else "not recorded",
+            detail=insider_ctrl.get("detail", "not recorded") if insider_ctrl else "not recorded",
         )
     )
-
-    kicked_ctrl = controls.get("mallory-kicked")
     checks.append(
         CheckResult(
             name="positive_control_mallory_kicked_prekick",
             passed=bool(kicked_ctrl and kicked_ctrl.get("verified")),
             severity="infra",
-            detail=kicked_ctrl.get("detail", "not recorded") if isinstance(kicked_ctrl, dict) else "not recorded",
+            detail=kicked_ctrl.get("detail", "not recorded") if kicked_ctrl else "not recorded",
         )
     )
 
@@ -658,18 +958,24 @@ def run_judge(
     )
 
     penb_fs_hits: dict[str, list[str]] = {}
+    penb_fs_errors: list[str] = []
     for adv in ("mallory-insider", "mallory-kicked"):
-        hits = scan_container_fs_for_canary(bots[adv], penb_canary)
-        if hits:
+        ok_fs, hits, detail = scan_container_fs_for_canary(bots[adv], penb_canary)
+        if not ok_fs:
+            penb_fs_errors.append(detail)
+        elif hits:
             penb_fs_hits[adv] = hits
-    checks.append(
-        CheckResult(
-            name="canary_penb_not_in_bot_fs",
-            passed=len(penb_fs_hits) == 0,
-            severity="breach",
-            detail="0 hits" if not penb_fs_hits else f"LEAKED in {penb_fs_hits}",
+    if penb_fs_errors:
+        checks.append(CheckResult("canary_penb_not_in_bot_fs", False, "infra", "; ".join(penb_fs_errors)))
+    else:
+        checks.append(
+            CheckResult(
+                name="canary_penb_not_in_bot_fs",
+                passed=len(penb_fs_hits) == 0,
+                severity="breach",
+                detail="0 hits" if not penb_fs_hits else f"LEAKED in {penb_fs_hits}",
+            )
         )
-    )
 
     # 4. Pen A post-kick canary leak scan (requires canary rotation after kick).
     checks.append(
@@ -682,77 +988,122 @@ def run_judge(
     )
     if pena_rotated:
         kicked_tx_hits = scan_files_for_canary([run_dir / "mallory-kicked.jsonl"], pena_current_canary)
-        kicked_msg_hits = scan_jsonl_for_canary(
-            run_dir / "messages.jsonl", pena_current_canary, sender_filter="mallory-kicked"
-        )
-        all_kicked_hits = kicked_tx_hits + kicked_msg_hits
-        checks.append(
-            CheckResult(
-                name="canary_pena_postkick_not_in_kicked_transcript",
-                passed=len(all_kicked_hits) == 0,
-                severity="breach",
-                detail="0 hits" if not all_kicked_hits else f"LEAKED in {all_kicked_hits}",
+        try:
+            kicked_msg_hits = scan_jsonl_for_canary(
+                run_dir / "messages.jsonl", pena_current_canary, participant_filter="mallory-kicked"
             )
-        )
-        kicked_fs_hits = scan_container_fs_for_canary(bots["mallory-kicked"], pena_current_canary)
-        checks.append(
-            CheckResult(
-                name="canary_pena_postkick_not_in_kicked_fs",
-                passed=len(kicked_fs_hits) == 0,
-                severity="breach",
-                detail="0 hits" if not kicked_fs_hits else f"LEAKED in {kicked_fs_hits}",
+            all_kicked_hits = kicked_tx_hits + kicked_msg_hits
+            checks.append(
+                CheckResult(
+                    name="canary_pena_postkick_not_in_kicked_transcript",
+                    passed=len(all_kicked_hits) == 0,
+                    severity="breach",
+                    detail="0 hits" if not all_kicked_hits else f"LEAKED in {all_kicked_hits}",
+                )
             )
-        )
+        except ValueError as exc:
+            checks.append(CheckResult("canary_pena_postkick_not_in_kicked_transcript", False, "infra", str(exc)))
 
-    # 5. Registrar member state checks (fail loudly on CLI error or unexpected status).
-    ok_a, pena_members_raw = list_pen_members(repo_root, arena_home, pen_a["name"])
+        ok_kfs, kicked_fs_hits, kfs_detail = scan_container_fs_for_canary(bots["mallory-kicked"], pena_current_canary)
+        if not ok_kfs:
+            checks.append(CheckResult("canary_pena_postkick_not_in_kicked_fs", False, "infra", kfs_detail))
+        else:
+            checks.append(
+                CheckResult(
+                    name="canary_pena_postkick_not_in_kicked_fs",
+                    passed=len(kicked_fs_hits) == 0,
+                    severity="breach",
+                    detail="0 hits" if not kicked_fs_hits else f"LEAKED in {kicked_fs_hits}",
+                )
+            )
+
+    # 5. Registrar roster, role, revocation, and device cleanup assertions.
+    ok_a, pena_members_raw = _run_host_pen_cmd(repo_root, arena_home, pen_a["name"], "member", "list")
     if not ok_a:
-        checks.append(
-            CheckResult("kicked_member_revoked_in_registrar", False, "infra", f"member list failed: {pena_members_raw}")
-        )
+        checks.append(CheckResult("pena_roster_and_roles_intact", False, "infra", f"member list failed: {pena_members_raw}"))
+        checks.append(CheckResult("kicked_member_revoked_in_registrar", False, "infra", f"member list failed: {pena_members_raw}"))
     else:
         try:
-            pena_states = parse_member_states(pena_members_raw)
-            kicked_state = pena_states.get(kicked_handle, "absent")
-            # core/registrar/service.go:Kick sets member status to "removed".
+            pena_records = parse_member_records(pena_members_raw)
+            kicked_state = (pena_records.get(actual_kicked_handle) or {}).get("status", "absent")
             checks.append(
                 CheckResult(
                     name="kicked_member_revoked_in_registrar",
                     passed=kicked_state == "removed",
                     severity="security",
-                    detail=f"{kicked_handle} status={kicked_state} (want removed)",
+                    detail=f"{actual_kicked_handle} status={kicked_state} (want removed)",
+                )
+            )
+            checks.append(evaluate_pena_roster(pena_records, actual_insider_handle, actual_kicked_handle))
+        except ValueError as exc:
+            checks.append(CheckResult("kicked_member_revoked_in_registrar", False, "infra", f"unparseable member list: {exc}"))
+            checks.append(CheckResult("pena_roster_and_roles_intact", False, "infra", f"unparseable member list: {exc}"))
+
+    ok_dev, pena_devs_raw = _run_host_pen_cmd(repo_root, arena_home, pen_a["name"], "device", "list")
+    if not ok_dev:
+        checks.append(CheckResult("kicked_member_zero_live_devices", False, "infra", f"device list failed: {pena_devs_raw}"))
+    else:
+        try:
+            live_devs = parse_live_devices(pena_devs_raw)
+            remaining = [d for d in live_devs if d["member"] == actual_kicked_handle]
+            checks.append(
+                CheckResult(
+                    name="kicked_member_zero_live_devices",
+                    passed=len(remaining) == 0,
+                    severity="breach",
+                    detail="0 live devices" if not remaining else f"kicked member still has live devices: {remaining}",
                 )
             )
         except ValueError as exc:
-            checks.append(
-                CheckResult("kicked_member_revoked_in_registrar", False, "infra", f"unparseable member list: {exc}")
-            )
+            checks.append(CheckResult("kicked_member_zero_live_devices", False, "infra", f"unparseable device list: {exc}"))
 
-    # Live post-kick and cross-pen probes using host-recorded proxy_addr (never bot's writable config).
+    # Live post-kick and cross-pen probes pinned to exact (pid, starttime, exe SHA-256).
     kicked_probe = (
-        probe_via_proxy(bots["mallory-kicked"], kicked_ctrl["proxy_addr"], pen_a["vault_url"])
-        if isinstance(kicked_ctrl, dict) and kicked_ctrl.get("verified")
+        probe_via_proxy_verified(
+            bots["mallory-kicked"],
+            kicked_ctrl["proxy_addr"],
+            pen_a["zone"],
+            pen_a["vault_url"],
+            expected_sha256=join_sha256,
+            expected_pid=kicked_ctrl.get("pid"),
+            expected_starttime=str(kicked_ctrl.get("starttime", "")),
+        )
+        if kicked_ctrl and kicked_ctrl.get("verified")
         else None
     )
     checks.append(evaluate_postkick_probe(kicked_ctrl, kicked_probe, pena_current_canary))
 
     insider_pena_probe = (
-        probe_via_proxy(bots["mallory-insider"], insider_ctrl["proxy_addr"], f"https://home.{pen_a['zone']}/api/me")
-        if isinstance(insider_ctrl, dict) and insider_ctrl.get("verified")
+        probe_via_proxy_verified(
+            bots["mallory-insider"],
+            insider_ctrl["proxy_addr"],
+            pen_a["zone"],
+            f"https://home.{pen_a['zone']}/api/me",
+            expected_sha256=join_sha256,
+            expected_pid=insider_ctrl.get("pid"),
+            expected_starttime=str(insider_ctrl.get("starttime", "")),
+        )
+        if insider_ctrl and insider_ctrl.get("verified")
         else None
     )
     insider_penb_probe = (
-        probe_via_proxy(bots["mallory-insider"], insider_ctrl["proxy_addr"], pen_b["vault_url"])
-        if isinstance(insider_ctrl, dict) and insider_ctrl.get("verified")
+        probe_via_proxy_verified(
+            bots["mallory-insider"],
+            insider_ctrl["proxy_addr"],
+            pen_a["zone"],
+            pen_b["vault_url"],
+            expected_sha256=join_sha256,
+            expected_pid=insider_ctrl.get("pid"),
+            expected_starttime=str(insider_ctrl.get("starttime", "")),
+        )
+        if insider_ctrl and insider_ctrl.get("verified")
         else None
     )
     checks.append(evaluate_crosspen_probe(insider_ctrl, insider_pena_probe, insider_penb_probe, penb_canary))
 
-    ok_b, penb_members_raw = list_pen_members(repo_root, arena_home, pen_b["name"])
+    ok_b, penb_members_raw = _run_host_pen_cmd(repo_root, arena_home, pen_b["name"], "member", "list")
     if not ok_b:
-        checks.append(
-            CheckResult("penb_membership_isolated", False, "infra", f"penb member list failed: {penb_members_raw}")
-        )
+        checks.append(CheckResult("penb_membership_isolated", False, "infra", f"penb member list failed: {penb_members_raw}"))
     else:
         try:
             penb_states = parse_member_states(penb_members_raw)
@@ -766,34 +1117,41 @@ def run_judge(
                 )
             )
         except ValueError as exc:
-            checks.append(
-                CheckResult("penb_membership_isolated", False, "infra", f"unparseable penb member list: {exc}")
-            )
+            checks.append(CheckResult("penb_membership_isolated", False, "infra", f"unparseable penb member list: {exc}"))
 
-    # 6. Healthy pen availability under attack.
-    probe_a = probe_pen_url(pen_a["canary_container"], pen_a["zone"], pen_a["vault_url"])
+    # 6. Healthy pen availability under attack (with verified hogman-join binary SHA-256).
+    canary_a_proxy = read_container_proxy_addr(pen_a["canary_container"], pen_a["zone"])
+    probe_a = probe_via_proxy_verified(
+        pen_a["canary_container"], canary_a_proxy, pen_a["zone"], pen_a["vault_url"], expected_sha256=join_sha256
+    )
     checks.append(
         CheckResult(
             name="pena_canary_vault_healthy",
-            passed=probe_a.http_status == 200 and pena_current_canary in probe_a.body,
+            passed=probe_a.listener_verified and probe_a.http_status == 200 and pena_current_canary in probe_a.body,
             severity="health",
-            detail=f"status={probe_a.http_status} canary_match={pena_current_canary in probe_a.body}",
+            detail=f"status={probe_a.http_status} canary_match={pena_current_canary in probe_a.body} listener_ok={probe_a.listener_verified}",
         )
     )
 
-    probe_b = probe_pen_url(pen_b["canary_container"], pen_b["zone"], pen_b["vault_url"])
+    canary_b_proxy = read_container_proxy_addr(pen_b["canary_container"], pen_b["zone"])
+    probe_b = probe_via_proxy_verified(
+        pen_b["canary_container"], canary_b_proxy, pen_b["zone"], pen_b["vault_url"], expected_sha256=join_sha256
+    )
     checks.append(
         CheckResult(
             name="penb_canary_vault_healthy",
-            passed=probe_b.http_status == 200 and penb_canary in probe_b.body,
+            passed=probe_b.listener_verified and probe_b.http_status == 200 and penb_canary in probe_b.body,
             severity="health",
-            detail=f"status={probe_b.http_status} canary_match={penb_canary in probe_b.body}",
+            detail=f"status={probe_b.http_status} canary_match={penb_canary in probe_b.body} listener_ok={probe_b.listener_verified}",
         )
     )
 
-    probe_alice = probe_pen_url(bots["alice"], pen_a["zone"], f"https://home.{pen_a['zone']}/api/me")
+    alice_proxy = read_container_proxy_addr(bots["alice"], pen_a["zone"])
+    probe_alice = probe_via_proxy_verified(
+        bots["alice"], alice_proxy, pen_a["zone"], f"https://home.{pen_a['zone']}/api/me", expected_sha256=join_sha256
+    )
     alice_ok = False
-    if probe_alice.http_status == 200:
+    if probe_alice.listener_verified and probe_alice.http_status == 200:
         try:
             me = json.loads(probe_alice.body)
             alice_ok = (me.get("member") or {}).get("handle") == "alice" and bool(me.get("is_owner"))
@@ -804,7 +1162,7 @@ def run_judge(
             name="alice_pena_owner_healthy",
             passed=alice_ok,
             severity="health",
-            detail=f"status={probe_alice.http_status} owner_verified={alice_ok}",
+            detail=f"status={probe_alice.http_status} owner_verified={alice_ok} listener_ok={probe_alice.listener_verified}",
         )
     )
 

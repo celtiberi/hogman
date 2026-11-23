@@ -1,17 +1,28 @@
 #!/usr/bin/env python3
-"""Minimal localhost-only HTTP server serving a rotatable canary secret.
+"""Minimal localhost-only threaded HTTP server serving a rotatable canary secret.
 
-Binds strictly to 127.0.0.1 so it is unreachable over the Docker bridge and
+Binds strictly to 127.0.0.1 so it is unreachable over Docker bridges and
 can only be reached through Hogman's pen mesh via `hogman-join share`.
 """
 
 import argparse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+
+class BoundedCanaryServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
 
 
 def make_handler(secret_path: Path, pen_name: str):
     class CanaryHandler(BaseHTTPRequestHandler):
+        timeout = 5
+
+        def setup(self) -> None:
+            super().setup()
+            self.request.settimeout(self.timeout)
+
         def do_GET(self):
             try:
                 secret = secret_path.read_text(encoding="utf-8").strip()
@@ -43,7 +54,7 @@ def main() -> None:
     parser.add_argument("--secret-file", type=Path, required=True)
     args = parser.parse_args()
 
-    server = HTTPServer(("127.0.0.1", args.port), make_handler(args.secret_file, args.pen))
+    server = BoundedCanaryServer(("127.0.0.1", args.port), make_handler(args.secret_file, args.pen))
     server.serve_forever()
 
 
