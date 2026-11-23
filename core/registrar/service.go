@@ -23,6 +23,7 @@ type Config struct {
 	Zone              string // bobo.pens.hogman.network
 	PublicHost        string // control server hostname
 	CoreIP            string // mesh IP of the core node (DNS, portal)
+	Theme             string // optional UI theme: "" (default) or "work"
 	InviteTTL         time.Duration
 	DeviceKeyTTL      time.Duration
 	MembersCanInvite  bool
@@ -31,6 +32,19 @@ type Config struct {
 	MaxOpenInvites    int
 	MaxInviteNoteLen  int
 	ACMEBackend       ACMEBackend
+}
+
+// normaliseTheme validates the pen UI theme against the strict allowlist.
+// Empty or "default" resolves to "" (omitted in JSON); only "work" is set.
+func normaliseTheme(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "default":
+		return "", nil
+	case "work":
+		return "work", nil
+	default:
+		return "", fmt.Errorf("unknown theme %q (want default or work)", raw)
+	}
 }
 
 // Actor is whoever is performing an action: a member over the mesh API,
@@ -86,6 +100,11 @@ type Service struct {
 }
 
 func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
+	theme, err := normaliseTheme(cfg.Theme)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Theme = theme
 	if cfg.MaxOpenDeviceKeys <= 0 {
 		cfg.MaxOpenDeviceKeys = 10
 	}
@@ -111,6 +130,8 @@ type NetworkInfo struct {
 	// Mesh address of the pen's DNS server. Only reachable from inside the
 	// mesh; side-by-side clients resolve pen names through it.
 	DNSServer string `json:"dns_server"`
+	// Optional UI theme for join-page and portal ("work"); omitted when default.
+	Theme string `json:"theme,omitempty"`
 }
 
 func (s *Service) NetworkInfo() NetworkInfo {
@@ -120,6 +141,7 @@ func (s *Service) NetworkInfo() NetworkInfo {
 		CertMode:    "public",
 		Portal:      "https://home." + s.cfg.Zone,
 		DNSServer:   s.cfg.CoreIP,
+		Theme:       s.cfg.Theme,
 	}
 }
 

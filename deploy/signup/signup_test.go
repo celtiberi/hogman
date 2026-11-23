@@ -26,8 +26,14 @@ case "$1" in
     [ -e "$HOGMAN_HOME/pens/$2" ] && exit 2
     [ $(ls "$HOGMAN_HOME/pens" | wc -l) -ge ${FAKE_MAX:-3} ] && exit 3
     mkdir "$HOGMAN_HOME/pens/$2"
+    theme=""
+    if [ "${4:-}" = "--theme" ]; then theme="${5:-}"; fi
     echo "==> lots of progress" >&2
-    echo "{\"pen\":\"$2\",\"zone\":\"$2.pens.example.com\",\"host\":\"$2.gate.example.com\",\"owner\":\"$3\",\"join_link\":\"https://$2.gate.example.com/join#k=abc\",\"valid_until\":\"x\"}" ;;
+    if [ -n "$theme" ]; then
+      echo "{\"pen\":\"$2\",\"zone\":\"$2.pens.example.com\",\"host\":\"$2.gate.example.com\",\"owner\":\"$3\",\"join_link\":\"https://$2.gate.example.com/join#k=abc\",\"valid_until\":\"x\",\"theme\":\"$theme\"}"
+    else
+      echo "{\"pen\":\"$2\",\"zone\":\"$2.pens.example.com\",\"host\":\"$2.gate.example.com\",\"owner\":\"$3\",\"join_link\":\"https://$2.gate.example.com/join#k=abc\",\"valid_until\":\"x\"}"
+    fi ;;
   name-free) [ -e "$HOGMAN_HOME/pens/$2" ] && exit 2; [ "$2" = burned ] && exit 2; exit 0 ;;
   *) exit 9 ;;
 esac
@@ -811,5 +817,109 @@ func TestTurnstileVerificationCSPAndGlobalWaitlistProtection(t *testing.T) {
 	down.Store(false)
 	if code, out := call(h, "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"coffee","handle":"alice","turnstile_token":"good-token"}`, humanHdr); code != 202 || out["job"] == nil {
 		t.Fatalf("create with good token: %d %v, want 202", code, out)
+	}
+}
+
+func TestWorkHostThemeAndMultiHostTurnstile(t *testing.T) {
+	b, home := newTestBroker(t, "PIG-AAAA-BBBB vanity work1\nPIG-CCCC-DDDD vanity work2\nPIG-EEEE-FFFF vanity def1\n")
+	brokerSrv := httptest.NewServer(b.handler())
+	defer brokerSrv.Close()
+
+	tsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		switch r.Form.Get("response") {
+		case "tok-main":
+			jsonOut(w, 200, map[string]any{"success": true, "hostname": "get.example.com"})
+		case "tok-work":
+			jsonOut(w, 200, map[string]any{"success": true, "hostname": "get.work.example.com"})
+		default:
+			jsonOut(w, 200, map[string]any{"success": true, "hostname": "evil.example.net"})
+		}
+	}))
+	defer tsSrv.Close()
+
+	wb := newWeb(brokerSrv.URL, testToken, "pens.test")
+	wb.workHost = "get.work.example.com"
+	wb.turnstile = newTurnstileVerifier("0x4TEST", "secret", tsSrv.URL, "get.example.com,get.work.example.com")
+	h := wb.handler()
+
+	callHost := func(host, method, path, body string) (int, map[string]any) {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Host = host
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		out := map[string]any{}
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return rec.Code, out
+	}
+
+	// 1. /api/status advertises theme="work" only on the Work host (case/port insensitive).
+	if code, out := callHost("get.example.com", "GET", "/api/status", ""); code != 200 || out["theme"] != nil {
+		t.Fatalf("default host status: %d %v", code, out)
+	}
+	if code, out := callHost("GET.WORK.EXAMPLE.COM:443", "GET", "/api/status", ""); code != 200 || out["theme"] != "work" {
+		t.Fatalf("work host status: %d %v", code, out)
+	}
+
+	// 2. Invalid theme is rejected with 400 on both web and broker.
+	if code, _ := callHost("get.example.com", "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"acme","handle":"alice","theme":"neon","turnstile_token":"tok-main"}`); code != 400 {
+		t.Fatalf("invalid theme on web: %d, want 400", code)
+	}
+	if code, _ := call(b.handler(), "POST", "/validate", `{"code":"PIG-AAAA-BBBB","pen":"acme","owner":"alice","theme":"neon"}`, auth); code != 400 {
+		t.Fatalf("invalid theme on broker: %d, want 400", code)
+	}
+
+	// 3. Turnstile rejects foreign hostname even when multiple signup hosts are allowed.
+	if code, _ := callHost("get.work.example.com", "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"acme","handle":"alice","turnstile_token":"tok-evil"}`); code != 403 {
+		t.Fatalf("foreign Turnstile host: %d, want 403", code)
+	}
+
+	waitDone := func(jobID string) map[string]any {
+		t.Helper()
+		for i := 0; i < 100; i++ {
+			code, j := callHost("get.work.example.com", "GET", "/api/job?id="+jobID, "")
+			if code == 200 && j["state"] == "done" {
+				return j["result"].(map[string]any)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("job %s did not finish", jobID)
+		return nil
+	}
+
+	// 4. Work host with omitted theme defaults to "work" and accepts work-host Turnstile token.
+	code, out := callHost("get.work.example.com", "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"acme","handle":"alice","turnstile_token":"tok-work"}`)
+	if code != 202 {
+		t.Fatalf("work host create: %d %v", code, out)
+	}
+	if res := waitDone(out["job"].(string)); res["theme"] != "work" {
+		t.Fatalf("work host create result = %v, want theme=work", res)
+	}
+
+	// 5. Default host with explicit theme="work" also passes --theme work.
+	code, out = callHost("get.example.com", "POST", "/api/create", `{"code":"PIG-CCCC-DDDD","pen":"beta","handle":"bob","theme":"work","turnstile_token":"tok-main"}`)
+	if code != 202 {
+		t.Fatalf("explicit work theme create: %d %v", code, out)
+	}
+	if res := waitDone(out["job"].(string)); res["theme"] != "work" {
+		t.Fatalf("explicit work theme result = %v, want theme=work", res)
+	}
+
+	// 6. Work host with explicit theme="default" keeps default theme (no --theme flag).
+	code, out = callHost("get.work.example.com", "POST", "/api/create", `{"code":"PIG-EEEE-FFFF","pen":"gamma","handle":"carol","theme":"default","turnstile_token":"tok-work"}`)
+	if code != 202 {
+		t.Fatalf("explicit default theme on work host: %d %v", code, out)
+	}
+	if res := waitDone(out["job"].(string)); res["theme"] != nil {
+		t.Fatalf("explicit default theme result = %v, want no theme", res)
+	}
+
+	ledger, _ := os.ReadFile(filepath.Join(home, "signup", "raised.log"))
+	if !strings.Contains(string(ledger), "raised acme for alice with PIG-AAAA-BBBB (work1) [vanity] [theme=work]") {
+		t.Fatalf("ledger missing [theme=work] for acme:\n%s", ledger)
+	}
+	if strings.Contains(string(ledger), "raised gamma for carol") && strings.Contains(strings.Split(string(ledger), "raised gamma for carol")[1], "[theme=work]") {
+		t.Fatalf("ledger unexpectedly tagged gamma with [theme=work]:\n%s", ledger)
 	}
 }

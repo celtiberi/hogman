@@ -292,3 +292,53 @@ func TestAutomaticTaxParams(t *testing.T) {
 		}
 	}
 }
+
+func TestStripeCheckoutDualHostOriginAllowlist(t *testing.T) {
+	b, _ := newTestBroker(t, "")
+	b.webhookSecret = testWebhookSecret
+	bsrv := httptest.NewServer(b.handler())
+	defer bsrv.Close()
+
+	wb := newWeb(bsrv.URL, testToken, "pens.test")
+	wb.workHost = "get.work.example.com"
+	fake, form := fakeStripe(t)
+	sc := &stripeCheckout{
+		client: stripe.NewClient("sk_test_fakefakefake123", stripe.WithBackends(stripe.NewBackendsWithConfig(&stripe.BackendConfig{
+			URL: stripe.String(fake.URL), HTTPClient: fake.Client(), MaxNetworkRetries: stripe.Int64(0)}))),
+		price:     "price_test_pen",
+		publicURL: "https://get.example.com",
+	}
+	sc.allowOrigin("https://get.example.com")
+	sc.allowOrigin("https://get.work.example.com")
+	wb.stripe = sc
+	h := wb.handler()
+
+	postCheckout := func(host string) {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/api/checkout", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("checkout host=%s: %d %s", host, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Work host stays on get.work.example.com through Stripe's success/cancel URLs.
+	postCheckout("get.work.example.com")
+	if got := form.Get("success_url"); got != "https://get.work.example.com/paid.html?session_id={CHECKOUT_SESSION_ID}" {
+		t.Fatalf("work success_url = %q", got)
+	}
+	if got := form.Get("cancel_url"); got != "https://get.work.example.com/" {
+		t.Fatalf("work cancel_url = %q", got)
+	}
+
+	// Forged Host header MUST NOT be reflected into Stripe redirect URLs.
+	postCheckout("evil.attacker.example")
+	if got := form.Get("success_url"); got != "https://get.example.com/paid.html?session_id={CHECKOUT_SESSION_ID}" {
+		t.Fatalf("forged host reflected into success_url: %q", got)
+	}
+	if got := form.Get("cancel_url"); got != "https://get.example.com/" {
+		t.Fatalf("forged host reflected into cancel_url: %q", got)
+	}
+}

@@ -26,6 +26,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -50,10 +51,29 @@ var sessionRE = regexp.MustCompile(`^cs_(test|live)_[A-Za-z0-9]{10,200}$`)
 
 // stripeCheckout is what the page needs to sell a pen. nil: selling is off.
 type stripeCheckout struct {
-	client     *stripe.Client
-	price      string // price_...
-	publicURL  string // https://get.example.com, for Stripe's redirects
-	automatTax bool   // Stripe Tax computes tax (needs Stripe Tax set up)
+	client         *stripe.Client
+	price          string            // price_...
+	publicURL      string            // default https://get.example.com, for Stripe's redirects
+	allowedOrigins map[string]string // lowercased bare host -> allowlisted https://<host>
+	automatTax     bool              // Stripe Tax computes tax (needs Stripe Tax set up)
+}
+
+func (sc *stripeCheckout) allowOrigin(rawURL string) {
+	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(rawURL), "/"))
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return
+	}
+	if sc.allowedOrigins == nil {
+		sc.allowedOrigins = map[string]string{}
+	}
+	sc.allowedOrigins[stripHostPort(u.Host)] = "https://" + u.Host
+}
+
+func (sc *stripeCheckout) originForHost(reqHost string) string {
+	if origin, ok := sc.allowedOrigins[stripHostPort(reqHost)]; ok {
+		return origin
+	}
+	return sc.publicURL
 }
 
 func loadStripeCheckout() *stripeCheckout {
@@ -73,8 +93,13 @@ func loadStripeCheckout() *stripeCheckout {
 	if !strings.HasPrefix(pub, "https://") {
 		log.Fatal("PUBLIC_URL must be the page's https:// address when selling pens")
 	}
+	sc := &stripeCheckout{client: stripe.NewClient(key), price: price, publicURL: pub, automatTax: env("STRIPE_AUTOMATIC_TAX", "") == "1"}
+	sc.allowOrigin(pub)
+	if workHost := stripHostPort(env("WORK_SIGNUP_HOST", "")); workHost != "" {
+		sc.allowOrigin("https://" + workHost)
+	}
 	log.Printf("selling pens with Stripe (%s mode)", stripeMode(key))
-	return &stripeCheckout{client: stripe.NewClient(key), price: price, publicURL: pub, automatTax: env("STRIPE_AUTOMATIC_TAX", "") == "1"}
+	return sc
 }
 
 func validStripeKey(k string) bool {
@@ -89,11 +114,18 @@ func stripeMode(k string) string {
 }
 
 func (sc *stripeCheckout) params() *stripe.CheckoutSessionCreateParams {
+	return sc.paramsForOrigin(sc.publicURL)
+}
+
+func (sc *stripeCheckout) paramsForOrigin(origin string) *stripe.CheckoutSessionCreateParams {
+	if origin == "" {
+		origin = sc.publicURL
+	}
 	p := &stripe.CheckoutSessionCreateParams{
 		Mode:       stripe.String(string(stripe.CheckoutSessionModeSubscription)),
 		LineItems:  []*stripe.CheckoutSessionCreateLineItemParams{{Price: stripe.String(sc.price), Quantity: stripe.Int64(1)}},
-		SuccessURL: stripe.String(sc.publicURL + "/paid.html?session_id={CHECKOUT_SESSION_ID}"),
-		CancelURL:  stripe.String(sc.publicURL + "/"),
+		SuccessURL: stripe.String(origin + "/paid.html?session_id={CHECKOUT_SESSION_ID}"),
+		CancelURL:  stripe.String(origin + "/"),
 		Metadata:   map[string]string{penMetaKey: penMetaValue},
 		SubscriptionData: &stripe.CheckoutSessionCreateSubscriptionDataParams{
 			Metadata: map[string]string{penMetaKey: penMetaValue},
@@ -130,7 +162,7 @@ func (wb *web) checkout(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	s, err := wb.stripe.client.V1CheckoutSessions.Create(ctx, wb.stripe.params())
+	s, err := wb.stripe.client.V1CheckoutSessions.Create(ctx, wb.stripe.paramsForOrigin(wb.stripe.originForHost(r.Host)))
 	if err != nil || s == nil || !strings.HasPrefix(s.URL, "https://") {
 		log.Printf("stripe checkout: %v", err)
 		jsonOut(w, 502, map[string]string{"error": "the payment page didn't open; try again in a minute"})

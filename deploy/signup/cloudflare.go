@@ -87,23 +87,39 @@ var (
 )
 
 type turnstileVerifier struct {
-	siteKey      string
-	secret       string
-	verifyURL    string
-	expectedHost string
-	client       *http.Client
+	siteKey       string
+	secret        string
+	verifyURL     string
+	expectedHosts []string
+	client        *http.Client
 }
 
-func newTurnstileVerifier(siteKey, secret, verifyURL, expectedHost string) *turnstileVerifier {
+func parseHostList(items ...string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, raw := range items {
+		fields := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' })
+		for _, f := range fields {
+			h := stripHostPort(f)
+			if h != "" && !seen[h] {
+				seen[h] = true
+				out = append(out, h)
+			}
+		}
+	}
+	return out
+}
+
+func newTurnstileVerifier(siteKey, secret, verifyURL string, expectedHosts ...string) *turnstileVerifier {
 	if verifyURL == "" {
 		verifyURL = defaultTurnstileVerifyURL
 	}
 	return &turnstileVerifier{
-		siteKey:      strings.TrimSpace(siteKey),
-		secret:       strings.TrimSpace(secret),
-		verifyURL:    strings.TrimSpace(verifyURL),
-		expectedHost: strings.TrimSpace(expectedHost),
-		client:       &http.Client{Timeout: 5 * time.Second},
+		siteKey:       strings.TrimSpace(siteKey),
+		secret:        strings.TrimSpace(secret),
+		verifyURL:     strings.TrimSpace(verifyURL),
+		expectedHosts: parseHostList(expectedHosts...),
+		client:        &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
@@ -124,12 +140,29 @@ func turnstileFromEnv() (*turnstileVerifier, error) {
 	if secret == "" {
 		return nil, errors.New("TURNSTILE_SECRET_FILE is empty")
 	}
+	expected := strings.TrimSpace(os.Getenv("TURNSTILE_EXPECTED_HOSTS"))
+	if expected == "" {
+		expected = strings.TrimSpace(os.Getenv("TURNSTILE_EXPECTED_HOST"))
+	}
 	return newTurnstileVerifier(
 		siteKey,
 		secret,
 		env("TURNSTILE_VERIFY_URL", defaultTurnstileVerifyURL),
-		strings.TrimSpace(os.Getenv("TURNSTILE_EXPECTED_HOST")),
+		expected,
 	), nil
+}
+
+func (tv *turnstileVerifier) hostAllowed(hostname string) bool {
+	if len(tv.expectedHosts) == 0 {
+		return true
+	}
+	got := stripHostPort(hostname)
+	for _, want := range tv.expectedHosts {
+		if got == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (tv *turnstileVerifier) verify(ctx context.Context, token, remoteIP string) error {
@@ -166,7 +199,7 @@ func (tv *turnstileVerifier) verify(ctx context.Context, token, remoteIP string)
 	if !out.Success {
 		return errTurnstileInvalid
 	}
-	if tv.expectedHost != "" && !strings.EqualFold(strings.TrimSpace(out.Hostname), tv.expectedHost) {
+	if !tv.hostAllowed(out.Hostname) {
 		return errTurnstileInvalid
 	}
 	return nil

@@ -140,6 +140,7 @@ services:
       ZONE: ${ZONE}
       PUBLIC_HOST: ${PUBLIC_HOST}
       CORE_MESH_IP: ${CORE_MESH_IP:-}
+      THEME: ${THEME:-}
       MEMBERS_CAN_INVITE: ${MEMBERS_CAN_INVITE:-false}
       MESH_ADDR: unix:/run/hogman-api/mesh.sock
       CHALLENGE_DNS_URL: unix:///run/hogman-acme/api.sock

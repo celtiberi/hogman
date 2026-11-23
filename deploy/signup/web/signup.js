@@ -23,6 +23,9 @@
   let sites = 'pens.hogman.network';
   const setSites = () => document.querySelectorAll('.sites').forEach(e => { e.textContent = sites; });
 
+  // Optional pen UI theme ("work" when on the work signup host or ?theme=work).
+  let penTheme = new URLSearchParams(location.search).get('theme') === 'work' ? 'work' : '';
+
   // Optional Cloudflare Turnstile widget (loaded only when server advertises a site key).
   let tsSiteKey = '';
   let tsFormToken = '', tsWaitToken = '';
@@ -205,6 +208,7 @@
     $('err').hidden = true;
     setNames();
     const body = { code: $('code').value, pen: $('pen').value, handle: $('handle').value };
+    if (penTheme) body.theme = penTheme;
     if (!body.code.trim() || !body.pen.trim() || !body.handle.trim()) {
       $('err').textContent = 'Fill in all three.'; $('err').hidden = false; return;
     }
@@ -228,6 +232,7 @@
   }
   api('GET', '/status').then(s => {
     if (/^[a-z0-9.-]+$/.test(s.sites_domain || '')) { sites = s.sites_domain; setSites(); }
+    if (s.theme === 'work') penTheme = 'work';
     if (s.turnstile_site_key) mountTurnstile(s.turnstile_site_key);
     if (s.for_sale && s.open) {
       $('buy-line').hidden = false;

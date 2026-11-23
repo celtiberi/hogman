@@ -817,3 +817,53 @@ func TestMeshAPIOverUnixSocket(t *testing.T) {
 	}
 	ln2.Close()
 }
+
+func TestNetworkInfoTheme(t *testing.T) {
+	// Default ("", "default") omits "theme" from JSON; "work" (case-insensitive)
+	// exposes "theme":"work" on both /hogman/v1/network and /api/me; anything else fails.
+	e := newTestEnv(t)
+	if _, err := e.svc.AddMember(context.Background(), Actor{CLI: true}, "alice", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	e.addDevice(t, "alice", "personal", "laptop", "100.64.0.10", "")
+
+	// Empty theme omits field on both public and mesh endpoints.
+	req, _ := http.NewRequest("GET", "/hogman/v1/network", nil)
+	rec := httptest.NewRecorder()
+	PublicHandler(e.svc).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"theme"`) {
+		t.Fatalf("default /hogman/v1/network: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doMeshReq(MeshHandler(e.svc), "GET", "/api/me", "100.64.0.10", "", nil)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"theme"`) {
+		t.Fatalf("default /api/me: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Normalisation & invalid value check on NewService.
+	cfg := e.svc.cfg
+	cfg.Theme = "default"
+	svcDef, err := NewService(cfg, e.svc.st, e.svc.hs)
+	if err != nil || svcDef.NetworkInfo().Theme != "" {
+		t.Fatalf("theme=default: svc=%v err=%v", svcDef, err)
+	}
+	cfg.Theme = "  WORK "
+	svcWork, err := NewService(cfg, e.svc.st, e.svc.hs)
+	if err != nil || svcWork.NetworkInfo().Theme != "work" {
+		t.Fatalf("theme=WORK: svc=%v err=%v", svcWork, err)
+	}
+	req, _ = http.NewRequest("GET", "/hogman/v1/network", nil)
+	rec = httptest.NewRecorder()
+	PublicHandler(svcWork).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"theme":"work"`) {
+		t.Fatalf("work /hogman/v1/network: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doMeshReq(MeshHandler(svcWork), "GET", "/api/me", "100.64.0.10", "", nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"theme":"work"`) {
+		t.Fatalf("work /api/me: %d %s", rec.Code, rec.Body.String())
+	}
+
+	cfg.Theme = "neon"
+	if _, err := NewService(cfg, e.svc.st, e.svc.hs); err == nil {
+		t.Fatal("invalid theme accepted by NewService")
+	}
+}

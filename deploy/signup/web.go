@@ -40,6 +40,7 @@ type web struct {
 	webhooks       *limiter // Stripe's calls (it retries what we refuse)
 	jobs           *jobStore
 	stripe         *stripeCheckout // nil: pens aren't for sale
+	workHost       string          // optional secondary sign-up host (e.g. get.work.hogman.network)
 	trustedProxies []netip.Prefix
 	turnstile      *turnstileVerifier
 }
@@ -47,6 +48,7 @@ type web struct {
 func runWeb() {
 	wb := newWeb(env("BROKER_URL", "http://broker:9090"), readToken(), env("PENS_DOMAIN", ""))
 	wb.sitesDomain = env("SITES_DOMAIN", "pens.hogman.network")
+	wb.workHost = stripHostPort(env("WORK_SIGNUP_HOST", ""))
 	wb.stripe = loadStripeCheckout()
 	proxies, err := trustedProxiesFromEnv()
 	if err != nil {
@@ -58,11 +60,14 @@ func runWeb() {
 		log.Fatalf("turnstile: %v", err)
 	}
 	wb.turnstile = tv
+	if wb.workHost != "" {
+		log.Printf("work sign-up host enabled: %s", wb.workHost)
+	}
 	if len(wb.trustedProxies) > 0 {
 		log.Printf("trusting CF-Connecting-IP from %d proxy CIDRs", len(wb.trustedProxies))
 	}
 	if wb.turnstile != nil {
-		log.Printf("Cloudflare Turnstile enabled (expected host: %q)", wb.turnstile.expectedHost)
+		log.Printf("Cloudflare Turnstile enabled (expected hosts: %v)", wb.turnstile.expectedHosts)
 	}
 	addr := env("LISTEN", ":8080")
 	log.Printf("sign-up page on %s", addr)
@@ -139,6 +144,10 @@ func (wb *web) ask(ctx context.Context, method, path string, body any) (int, map
 	return resp.StatusCode, out
 }
 
+func (wb *web) isWorkHost(r *http.Request) bool {
+	return wb.workHost != "" && stripHostPort(r.Host) == wb.workHost
+}
+
 func (wb *web) status(w http.ResponseWriter, r *http.Request) {
 	code, out := wb.ask(r.Context(), "GET", "/capacity", nil)
 	if code != 200 {
@@ -146,6 +155,9 @@ func (wb *web) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res := map[string]any{"open": out["open"], "pens_domain": wb.domain, "sites_domain": wb.sitesDomain, "for_sale": wb.stripe != nil}
+	if wb.isWorkHost(r) {
+		res["theme"] = "work"
+	}
 	if wb.turnstile != nil {
 		res["turnstile_site_key"] = wb.turnstile.siteKey
 	}
@@ -202,6 +214,7 @@ func (wb *web) create(w http.ResponseWriter, r *http.Request) {
 		Code           string `json:"code"`
 		Pen            string `json:"pen"`
 		Handle         string `json:"handle"`
+		Theme          string `json:"theme"`
 		TurnstileToken string `json:"turnstile_token"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
@@ -212,6 +225,15 @@ func (wb *web) create(w http.ResponseWriter, r *http.Request) {
 	in.Pen = strings.ToLower(strings.TrimSpace(in.Pen))
 	in.Handle = strings.ToLower(strings.TrimSpace(in.Handle))
 	in.Code = normCode(in.Code)
+	rawTheme := strings.TrimSpace(in.Theme)
+	theme, ok := normaliseTheme(rawTheme)
+	if !ok {
+		jsonOut(w, 400, map[string]string{"error": "unknown theme"})
+		return
+	}
+	if rawTheme == "" && wb.isWorkHost(r) {
+		theme = "work"
+	}
 	if why, ok := validPen(in.Pen); !ok {
 		jsonOut(w, 400, map[string]string{"error": "pen name: " + why})
 		return
@@ -227,7 +249,11 @@ func (wb *web) create(w http.ResponseWriter, r *http.Request) {
 	if !wb.verifyTurnstile(w, r, in.TurnstileToken, ip) {
 		return
 	}
-	code, out := wb.ask(r.Context(), "POST", "/validate", map[string]string{"code": in.Code, "pen": in.Pen, "owner": in.Handle})
+	brokerReq := map[string]string{"code": in.Code, "pen": in.Pen, "owner": in.Handle}
+	if theme != "" {
+		brokerReq["theme"] = theme
+	}
+	code, out := wb.ask(r.Context(), "POST", "/validate", brokerReq)
 	if code != 200 {
 		jsonOut(w, code, out)
 		return
@@ -238,7 +264,7 @@ func (wb *web) create(w http.ResponseWriter, r *http.Request) {
 	id, ok := wb.jobs.start(func() (int, map[string]any) {
 		ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
 		defer cancel()
-		code, out := wb.ask(ctx, "POST", "/provision", map[string]string{"code": in.Code, "pen": in.Pen, "owner": in.Handle})
+		code, out := wb.ask(ctx, "POST", "/provision", brokerReq)
 		if code == 201 {
 			if link, _ := out["join_link"].(string); link != "" {
 				if svg, err := qrSVG(link); err == nil {

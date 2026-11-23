@@ -164,6 +164,8 @@ hogman-host signup-code "for alice"          # standard code: appends -xxxx rand
 hogman-host signup-code --vanity "for alice" # vanity code: allows a bare pen name
 hogman-host signup-cloudflare on             # trust CF-Connecting-IP + block direct-to-origin bypasses
 hogman-host signup-turnstile <site-key> < ts-secret  # require Cloudflare Turnstile on signup/waitlist
+hogman-host signup-work-host get.work.example.com    # optional Work sign-up host (THEME=work default)
+hogman-host theme <pen> work                         # toggle an existing pen's UI theme (work|default)
 ```
 
 **Cloudflare Proxy rollout order:** deploy this release first, run `hogman-host signup-cloudflare on`,
@@ -173,6 +175,12 @@ per-IP rate limits (checks, creates, waits, checkouts, webhooks) throttle everyo
 Cloudflare dashboard, set **SSL/TLS encryption mode** to **Full (strict)**, and keep **Bot Fight
 Mode** off (or add a WAF skip rule for `/api/stripe/webhook`) so Cloudflare does not block Stripe's
 webhook deliveries.
+
+When `signup-work-host` is configured, the front door serves the same `signup-web` container on both
+hosts (with the same Cloudflare Proxy CIDR lock when `signup-cloudflare on` is active), Turnstile
+accepts tokens minted on either hostname, Stripe Checkout returns buyers to whichever configured
+signup host they started from, and pens raised on the Work host default to `THEME=work` (exposed as
+`"theme": "work"` on `/hogman/v1/network` and `/api/me` for the join page and portal).
 
 The `web` container runs read-only and unprivileged (`65534:65534`), speaking over an internal
 network to `broker` (which runs `hogman-host provision` and has outbound internet only if
