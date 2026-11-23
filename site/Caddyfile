@@ -12,6 +12,16 @@
 		path /
 	}
 	rewrite @work_root /work/index.html
+	@work_docs_bare {
+		host work.hogman.network
+		path /docs
+	}
+	redir @work_docs_bare /docs/ permanent
+	@work_docs {
+		host work.hogman.network
+		path /docs/*
+	}
+	rewrite @work_docs /work{uri}
 	redir /docs/how-it-works.html /docs/security.html permanent
 	redir /docs/self-host.html /docs/faq.html#self-host permanent
 	redir /docs/use-cases.html /docs/share.html permanent
