@@ -70,10 +70,20 @@ type stripeCheckout struct {
 }
 
 func (sc *stripeCheckout) priceForPlan(plan string) string {
-	if plan == planWork && sc.workPrice != "" {
+	if plan == planWork {
 		return sc.workPrice
 	}
 	return sc.price
+}
+
+func (wb *web) forSaleForRequest(r *http.Request) bool {
+	if wb.stripe == nil {
+		return false
+	}
+	if wb.isWorkHost(r) {
+		return wb.stripe.workPrice != ""
+	}
+	return true
 }
 
 func (sc *stripeCheckout) allowOrigin(rawURL string) {
@@ -176,7 +186,7 @@ func (sc *stripeCheckout) paramsFor(origin, plan string) *stripe.CheckoutSession
 // checkout starts a Checkout Session. Not when the server is full: nobody
 // should pay for a pen that can't be raised.
 func (wb *web) checkout(w http.ResponseWriter, r *http.Request) {
-	if wb.stripe == nil {
+	if !wb.forSaleForRequest(r) {
 		jsonOut(w, 404, map[string]string{"error": "pens aren't for sale here"})
 		return
 	}

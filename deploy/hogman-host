@@ -1212,7 +1212,7 @@ cmd_signup_stripe() {
     if [ "$wp" = off ]; then
       set_host_var SIGNUP_STRIPE_WORK_PRICE ""
       cmd_signup_setup
-      info "Work sign-up host now uses the default Stripe price ($SIGNUP_STRIPE_PRICE)"
+      info "Work sign-up host Stripe checkout is off (set work-price <price_...> to re-enable)"
       return
     fi
     [[ "$wp" =~ ^price_[A-Za-z0-9]{6,64}$ ]] || die "usage: hogman-host signup-stripe work-price <price_...>|off"

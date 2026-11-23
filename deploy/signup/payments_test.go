@@ -324,7 +324,39 @@ func TestStripeCheckoutDualHostOriginAllowlist(t *testing.T) {
 		}
 	}
 
-	// Work host without workPrice falls back to personal price, still tagging plan=work.
+	statusFor := func(host string) (int, map[string]any) {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/api/status", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		out := map[string]any{}
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return rec.Code, out
+	}
+
+	// Without workPrice configured, the Work host MUST refuse checkout (404) and
+	// report for_sale=false so it never sells a Work plan at the Personal price,
+	// while the primary host remains for sale.
+	if code, out := statusFor("get.work.example.com"); code != 200 || out["for_sale"] != false {
+		t.Fatalf("work status without workPrice: %d %v, want for_sale=false", code, out)
+	}
+	req := httptest.NewRequest("POST", "/api/checkout", nil)
+	req.Host = "get.work.example.com"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 404 {
+		t.Fatalf("work checkout without workPrice: %d %s, want 404", rec.Code, rec.Body.String())
+	}
+	if code, out := statusFor("get.example.com"); code != 200 || out["for_sale"] != true {
+		t.Fatalf("primary status without workPrice: %d %v, want for_sale=true", code, out)
+	}
+
+	// With workPrice configured, get.work reports for_sale=true and uses workPrice + Work origin + plan=work.
+	sc.workPrice = "price_test_work"
+	if code, out := statusFor("get.work.example.com"); code != 200 || out["for_sale"] != true {
+		t.Fatalf("work status with workPrice: %d %v, want for_sale=true", code, out)
+	}
 	postCheckout("get.work.example.com")
 	if got := form.Get("success_url"); got != "https://get.work.example.com/paid.html?session_id={CHECKOUT_SESSION_ID}" {
 		t.Fatalf("work success_url = %q", got)
@@ -332,8 +364,8 @@ func TestStripeCheckoutDualHostOriginAllowlist(t *testing.T) {
 	if got := form.Get("cancel_url"); got != "https://get.work.example.com/" {
 		t.Fatalf("work cancel_url = %q", got)
 	}
-	if got := form.Get("line_items[0][price]"); got != "price_test_pen" {
-		t.Fatalf("work fallback price = %q, want price_test_pen", got)
+	if got := form.Get("line_items[0][price]"); got != "price_test_work" {
+		t.Fatalf("work price = %q, want price_test_work", got)
 	}
 	if got := form.Get("metadata[plan]"); got != "work" {
 		t.Fatalf("work metadata[plan] = %q, want work", got)
@@ -342,12 +374,6 @@ func TestStripeCheckoutDualHostOriginAllowlist(t *testing.T) {
 		t.Fatalf("work subscription metadata[plan] = %q, want work", got)
 	}
 
-	// With workPrice configured, get.work uses workPrice while primary host keeps personal price.
-	sc.workPrice = "price_test_work"
-	postCheckout("get.work.example.com")
-	if got := form.Get("line_items[0][price]"); got != "price_test_work" {
-		t.Fatalf("work price = %q, want price_test_work", got)
-	}
 	postCheckout("get.example.com")
 	if got := form.Get("line_items[0][price]"); got != "price_test_pen" {
 		t.Fatalf("personal price = %q, want price_test_pen", got)

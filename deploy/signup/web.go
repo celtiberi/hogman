@@ -154,7 +154,7 @@ func (wb *web) status(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, code, out)
 		return
 	}
-	res := map[string]any{"open": out["open"], "pens_domain": wb.domain, "sites_domain": wb.sitesDomain, "for_sale": wb.stripe != nil}
+	res := map[string]any{"open": out["open"], "pens_domain": wb.domain, "sites_domain": wb.sitesDomain, "for_sale": wb.forSaleForRequest(r)}
 	if wb.isWorkHost(r) {
 		res["theme"] = "work"
 	}

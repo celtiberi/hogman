@@ -105,7 +105,10 @@ hogman-host upgrade bobo                                                        
 
 `install.sh` resolves `latest` once, then downloads `SHA256SUMS` and every archive from that pinned
 release tag (`releases/download/v<ver>/...`) so a concurrent release cannot mix versions. Set
-`HOGMAN_VERSION=<ver>` to install a specific release tag directly.
+`HOGMAN_VERSION=<ver>` to install a specific release tag directly. `install.sh` refreshes the
+`challenge-dns` binary via `hogman-host refresh-services`; if upgrading manually (or without
+prebuilt binaries), re-run `hogman-host challenge-dns-setup <public-ip>` (which keeps the existing
+GCP key) so new `challenge-dns` features such as per-plan certificate caps take effect.
 
 If upgrading from a pre-switchover server before `gate-cert-setup` and `pens-zone` are configured,
 `install.sh` skips the `signup-setup` refresh with a reminder rather than failing. Once configured,
@@ -229,7 +232,9 @@ hogman-host signup-stripe off
 
 When `--work` (or `work-price`) is set, checkouts started on the Work sign-up host use the Work
 Stripe Price over the same single webhook, and both Stripe metadata and `/opt/hogman/signup/payments`
-record the tier (`personal` or `work`).
+record the tier (`personal` or `work`). When no Work price is configured, the Work host reports
+`for_sale: false` and refuses `/api/checkout` (`404`) so it never sells a Work plan at the Personal
+price.
 
 The page shows **Buy a pen** while the server has room. After paying, Stripe sends the buyer to
 `/paid.html`, which shows their code once Stripe's event arrives. The broker checks every event's
