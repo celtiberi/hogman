@@ -97,7 +97,7 @@ name burning, and public sign-ups against `challenge-dns` and Pebble.
 ## Updating
 
 ```bash
-curl -fsSL https://hogman.network/install.sh | sudo bash   # new code; pens untouched; refreshes signup if configured
+curl -fsSL https://hogman.network/install.sh | sudo bash   # new code; pens untouched; refreshes signup, challenge DNS and gate-cert
 hogman-host upgrade bobo                                   # restart a pen on the new version
 ```
 

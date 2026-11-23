@@ -1095,3 +1095,20 @@ func TestRegistrarACMENoPromptSubprocess(t *testing.T) {
 		t.Fatalf("restart hit /acct unexpectedly: %d", acctHits.Load())
 	}
 }
+
+// Run stops the cache when it returns and callers also defer Close; a second
+// certmagic Cache.Stop panics ("close of closed channel"), which crashed the
+// gate-cert service and pen registrars on every shutdown.
+func TestHomeCertManagerCloseIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	m, err := NewHomeCertManager(HomeConfig{Zone: "bobo.pens.example.test", HomeTLSDir: filepath.Join(dir, "h"),
+		StorageDir: filepath.Join(dir, "a"), Backend: noopACMEBackend{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Run returns at once, stopping the cache on the way out
+	m.Run(ctx)
+	m.Close()
+	m.Close()
+}
