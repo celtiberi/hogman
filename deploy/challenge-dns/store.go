@@ -22,17 +22,17 @@ import (
 )
 
 const (
-	txtTTL                 = 10 * time.Minute // a challenge record lives this long unless refreshed
-	maxLivePer             = 2                // live values per name (ACME may ask for two at once)
-	hourlyWindow           = time.Hour
-	capWindow              = 7 * 24 * time.Hour
+	txtTTL                     = 10 * time.Minute // a challenge record lives this long unless refreshed
+	maxLivePer                 = 2                // live values per name (ACME may ask for two at once)
+	hourlyWindow               = time.Hour
+	capWindow                  = 7 * 24 * time.Hour
 	defaultHourlyCap           = 5  // distinct new names per pen per rolling hour (CDNS_HOURLY_CAP)
 	defaultCapNames            = 20 // distinct new names per pen per 7 days (CDNS_WEEKLY_CAP)
 	defaultGlobalHourlyCap     = 40 // soft global hourly cap across all pens (CDNS_GLOBAL_HOURLY_CAP)
 	defaultGlobalHardHourlyCap = 60 // hard global hourly ceiling with reserved quiet-pen floor (CDNS_GLOBAL_HARD_HOURLY_CAP)
 	quietPenHourlyFloor        = 2  // pens with <2 new names in the last hour may use soft..hard headroom
-	acmePrefix             = "_acme-challenge."
-	maxSiteDepth           = 4 // labels before the pen name, as site names allow
+	acmePrefix                 = "_acme-challenge."
+	maxSiteDepth               = 4 // labels before the pen name, as site names allow
 )
 
 var (
