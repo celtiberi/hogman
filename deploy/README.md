@@ -255,24 +255,6 @@ hogman-host remove <name>
 Enable **Immutable releases** in the repository's GitHub settings (**Settings → General → Releases**)
 so published release tags and their assets cannot be modified or replaced after publication.
 
-## Website deployment (`hogman.network`)
-
-Changes under `site/` deploy automatically to Fly.io on merge to `main` via
-`.github/workflows/site-deploy.yml` (and can also be triggered manually via `workflow_dispatch`):
-
-1. Create a GitHub Actions environment named `site` restricted to `main` only.
-2. Generate an app-scoped Fly deploy token and store it as the `FLY_API_TOKEN` secret inside the
-   `site` environment:
-
-   ```bash
-   fly tokens create deploy -a hogman
-   ```
-
-Before deploying, the workflow checks that `site/docs-src/build.py` matches `site/public/docs/`,
-preserves the live `/dl/` release bundles after verifying both `hogman-<ver>.tar.gz` (against
-`git archive <commit>`) and every binary in `hogman-bin-<ver>.tar.gz` (via `gh attestation verify`
-against `.github/workflows/build.yml`), and smoke-tests `https://hogman.network/` and `/dl/latest`.
-
 ## Testing locally
 
 ```bash
