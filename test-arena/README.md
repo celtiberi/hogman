@@ -75,6 +75,12 @@ Use a separate DigitalOcean project and a fresh Ubuntu 24.04 LTS droplet (2 vCPU
    sudo -E python3 test-arena/run.py
    ```
 
+   Or run the expanded **v2 red-team scenario** (ACME `/api/acme/{txt,eab}` & `CDNS_WEEKLY_CAP=5` exhaustion, reserved/victim name hijacking, `X-Forwarded-For` impersonation, admin privilege escalation, proxy/CSWSH checks, cross-pen isolation, and post-kick revocation):
+
+   ```bash
+   sudo -E python3 test-arena/run.py --prompts test-arena/prompts.v2.json
+   ```
+
    Optional budget/model overrides:
 
    ```bash
