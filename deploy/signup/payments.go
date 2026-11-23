@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -190,8 +191,16 @@ func (wb *web) checkout(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 404, map[string]string{"error": "pens aren't for sale here"})
 		return
 	}
-	if !wb.checkouts.allow(rateLimitKey(wb.clientIP(r)), time.Now()) {
+	if !wb.requireSameOriginJSON(w, r) {
+		return
+	}
+	now := time.Now()
+	if !wb.checkouts.allow(rateLimitKey(wb.clientIP(r)), now) {
 		jsonOut(w, 429, map[string]string{"error": "too many tries from here; wait an hour"})
+		return
+	}
+	if wb.globalCheckouts != nil && !wb.globalCheckouts.allow("*", now) {
+		jsonOut(w, 429, map[string]string{"error": "sign-up payments are busy right now; try again in a minute"})
 		return
 	}
 	code, out := wb.ask(r.Context(), "GET", "/capacity", nil)
@@ -272,12 +281,15 @@ type stripeEventIn struct {
 
 // The fields we read from a Checkout Session (data.object of its events).
 type checkoutObject struct {
-	ID            string            `json:"id"`
-	Mode          string            `json:"mode"`
-	PaymentStatus string            `json:"payment_status"`
-	Customer      string            `json:"customer"`
-	Subscription  string            `json:"subscription"`
-	Metadata      map[string]string `json:"metadata"`
+	ID             string            `json:"id"`
+	Mode           string            `json:"mode"`
+	PaymentStatus  string            `json:"payment_status"`
+	Currency       string            `json:"currency"`
+	AmountTotal    int64             `json:"amount_total"`
+	AmountSubtotal int64             `json:"amount_subtotal"`
+	Customer       string            `json:"customer"`
+	Subscription   string            `json:"subscription"`
+	Metadata       map[string]string `json:"metadata"`
 }
 
 type subscriptionObject struct {
@@ -307,6 +319,11 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "bad signature"})
 		return
 	}
+	if b.expectLivemode != nil && ev.Livemode != *b.expectLivemode {
+		log.Printf("stripe event refused: livemode=%v (want %v)", ev.Livemode, *b.expectLivemode)
+		jsonOut(w, 400, map[string]string{"error": "livemode mismatch"})
+		return
+	}
 	switch ev.Type {
 	case "checkout.session.completed", "checkout.session.async_payment_succeeded":
 		var s checkoutObject
@@ -317,6 +334,27 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 		if s.Metadata[penMetaKey] != penMetaValue || s.Mode != "subscription" || s.PaymentStatus != "paid" {
 			jsonOut(w, 200, map[string]string{"ok": "ignored"}) // not ours, or not paid yet
 			return
+		}
+		if s.Currency != "" && !strings.EqualFold(s.Currency, "usd") {
+			log.Printf("stripe %s refused: unexpected currency %q", s.ID, s.Currency)
+			jsonOut(w, 200, map[string]string{"ok": "ignored"})
+			return
+		}
+		plan := planFromMeta(s.Metadata)
+		minCents := b.minPersonalCents
+		if plan == planWork {
+			minCents = b.minWorkCents
+		}
+		if minCents > 0 {
+			paid := s.AmountSubtotal
+			if paid <= 0 {
+				paid = s.AmountTotal
+			}
+			if !strings.EqualFold(s.Currency, "usd") || paid < minCents {
+				log.Printf("stripe %s refused: plan=%s paid=%d %q < min=%d", s.ID, plan, paid, s.Currency, minCents)
+				jsonOut(w, 200, map[string]string{"ok": "ignored"})
+				return
+			}
 		}
 		code, fresh, err := b.codeForPayment(s)
 		if err != nil {
@@ -405,7 +443,7 @@ func (b *broker) findPaymentLocked(session string) (payment, bool, error) {
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		p := strings.Fields(sc.Text())
-		if len(p) >= 4 && p[0] == session {
+		if len(p) >= 4 && subtle.ConstantTimeCompare([]byte(p[0]), []byte(session)) == 1 {
 			plan := planPersonal
 			if len(p) >= 6 && p[5] == planWork {
 				plan = planWork

@@ -357,7 +357,7 @@
         $('buy').disabled = true;
         $('buy-err').hidden = true;
         try {
-          const r = await api('POST', '/checkout');
+          const r = await api('POST', '/checkout', {});
           location.href = r.url;   // Stripe's own page takes the card
         } catch (e) {
           $('buy-err').textContent = e.message;

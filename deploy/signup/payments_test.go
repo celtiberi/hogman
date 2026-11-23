@@ -206,11 +206,12 @@ func TestWebSellsPens(t *testing.T) {
 	wb := newWeb(bsrv.URL, testToken, "pens.test")
 	h := wb.handler()
 
+	js := map[string]string{"Content-Type": "application/json"}
 	// Selling is off unless configured.
 	if _, out := call(h, "GET", "/api/status", "", nil); out["for_sale"] != false {
 		t.Fatalf("status without Stripe: %v", out)
 	}
-	if code, _ := call(h, "POST", "/api/checkout", "", nil); code != 404 {
+	if code, _ := call(h, "POST", "/api/checkout", "{}", js); code != 404 {
 		t.Fatalf("checkout without Stripe: %d", code)
 	}
 
@@ -223,7 +224,7 @@ func TestWebSellsPens(t *testing.T) {
 	if _, out := call(h, "GET", "/api/status", "", nil); out["for_sale"] != true {
 		t.Fatalf("status with Stripe: %v", out)
 	}
-	code, out := call(h, "POST", "/api/checkout", "", nil)
+	code, out := call(h, "POST", "/api/checkout", "{}", js)
 	if code != 200 || out["url"] != "https://checkout.stripe.com/c/pay/"+testSession {
 		t.Fatalf("checkout: %d %v", code, out)
 	}
@@ -270,7 +271,7 @@ func TestWebSellsPens(t *testing.T) {
 
 	// A full server doesn't sell.
 	t.Setenv("FAKE_MAX", "0")
-	if code, _ := call(h, "POST", "/api/checkout", "", nil); code != 409 {
+	if code, _ := call(h, "POST", "/api/checkout", "{}", js); code != 409 {
 		t.Fatalf("checkout while full: %d", code)
 	}
 }
@@ -315,8 +316,9 @@ func TestStripeCheckoutDualHostOriginAllowlist(t *testing.T) {
 
 	postCheckout := func(host string) {
 		t.Helper()
-		req := httptest.NewRequest("POST", "/api/checkout", nil)
+		req := httptest.NewRequest("POST", "/api/checkout", strings.NewReader("{}"))
 		req.Host = host
+		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		if rec.Code != 200 {
@@ -341,8 +343,9 @@ func TestStripeCheckoutDualHostOriginAllowlist(t *testing.T) {
 	if code, out := statusFor("get.work.example.com"); code != 200 || out["for_sale"] != false {
 		t.Fatalf("work status without workPrice: %d %v, want for_sale=false", code, out)
 	}
-	req := httptest.NewRequest("POST", "/api/checkout", nil)
+	req := httptest.NewRequest("POST", "/api/checkout", strings.NewReader("{}"))
 	req.Host = "get.work.example.com"
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 404 {

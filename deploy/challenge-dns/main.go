@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/mail"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -369,7 +370,7 @@ func credCmd(args []string) error {
 		_ = json.Unmarshal(b, &out)
 		fmt.Printf("id:    %s\ntoken: %s\n(shown once: put it in the pen's registrar config, nowhere else)\n", out.ID, out.Token)
 	case len(args) == 3 && args[0] == "plan":
-		b, code, err := adminDo(sock, "PUT", "/admin/creds/"+args[1]+"/plan", map[string]string{"plan": args[2]})
+		b, code, err := adminDo(sock, "PUT", "/admin/creds/"+url.PathEscape(args[1])+"/plan", map[string]string{"plan": args[2]})
 		if err != nil {
 			return err
 		}
@@ -384,7 +385,7 @@ func credCmd(args []string) error {
 		_ = json.Unmarshal(b, &out)
 		fmt.Printf("%s (%s): plan=%s\n", out.PenID, out.ID, out.Plan)
 	case (len(args) == 2 || (len(args) == 3 && args[2] == "--release-if-unused")) && args[0] == "rm":
-		path := "/admin/creds/" + args[1]
+		path := "/admin/creds/" + url.PathEscape(args[1])
 		if len(args) == 3 {
 			path += "?release_if_unused=1"
 		}
@@ -438,7 +439,7 @@ func nameCmd(args []string) error {
 	if len(args) != 2 || args[0] != "used" {
 		return errors.New("usage: name used <penname>")
 	}
-	b, code, err := adminDo(env("CDNS_ADMIN_SOCK", "/run/challenge-dns/admin.sock"), "GET", "/admin/names/"+args[1], nil)
+	b, code, err := adminDo(env("CDNS_ADMIN_SOCK", "/run/challenge-dns/admin.sock"), "GET", "/admin/names/"+url.PathEscape(args[1]), nil)
 	if err != nil {
 		return err
 	}
@@ -446,7 +447,9 @@ func nameCmd(args []string) error {
 		return fmt.Errorf("HTTP %d", code)
 	}
 	var out struct{ Used bool }
-	_ = json.Unmarshal(b, &out)
+	if err := json.Unmarshal(b, &out); err != nil {
+		return fmt.Errorf("unexpected response: %w", err)
+	}
 	if out.Used {
 		fmt.Println("used")
 		return nil

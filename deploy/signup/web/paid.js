@@ -90,6 +90,8 @@
         await navigator.clipboard.writeText(s.code);
         $('copy-code').textContent = 'Copied';
       };
+      // Scrub ?session_id= from the URL bar/history once the code is shown.
+      history.replaceState(null, '', location.pathname + suffix);
       $('ready').hidden = false;
       return;
     }

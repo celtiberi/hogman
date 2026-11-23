@@ -94,12 +94,23 @@ func (d *DNS) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		m.Ns = append(m.Ns, d.soa(zone, apexOwner))
 	}
 	if opt := r.IsEdns0(); opt != nil {
-		m.SetEdns0(opt.UDPSize(), false)
+		udpSize := opt.UDPSize()
+		if udpSize < dns.MinMsgSize {
+			udpSize = dns.MinMsgSize
+		} else if udpSize > 1232 {
+			udpSize = 1232
+		}
+		m.SetEdns0(udpSize, false)
 	}
 	if _, udp := w.RemoteAddr().(*netUDPAddr); udp {
 		size := dns.MinMsgSize
 		if opt := r.IsEdns0(); opt != nil {
 			size = int(opt.UDPSize())
+			if size < dns.MinMsgSize {
+				size = dns.MinMsgSize
+			} else if size > 1232 {
+				size = 1232
+			}
 		}
 		m.Truncate(size)
 	}
