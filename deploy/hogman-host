@@ -1271,7 +1271,7 @@ cmd_challenge_dns_setup() {
     || die "$ip isn't a public address of this server (answering on 127.0.0.53 would clash with systemd-resolved)"
   case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) die "unsupported CPU $(uname -m)" ;; esac
   local bin="$SRC/prebuilt/challenge-dns/challenge-dns-linux-$arch"
-  [ -f "$bin" ] || die "no compiled challenge-dns in this release ($bin); update first: curl -fsSL https://hogman.network/install.sh | sudo bash"
+  [ -f "$bin" ] || die "no compiled challenge-dns in this release ($bin); update first: curl -fsSL https://github.com/celtiberi/hogman/releases/latest/download/install.sh | sudo bash"
   install -m 0755 "$bin" "$CDNS_BIN"
 
   # A fixed system user (not DynamicUser): the API socket's folder is bind-

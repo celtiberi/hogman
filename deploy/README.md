@@ -22,10 +22,12 @@ door and a host-level ACME DNS-01 challenge server (`challenge-dns`):
 1. **Install** on the server:
 
    ```bash
-   curl -fsSL https://hogman.network/install.sh | sudo bash
+   curl -fsSL https://github.com/celtiberi/hogman/releases/latest/download/install.sh | sudo bash
    ```
 
-   Downloads the verified release tarball and GitHub-built binaries (signed SLSA provenance:
+   (`https://hogman.network/install.sh` redirects to the same GitHub Release for convenience; use the
+   GitHub Releases URL directly when auditing or skipping the marketing site.) Downloads the
+   version-pinned release tarball and GitHub-built binaries (signed SLSA provenance:
    `gh attestation verify FILE --repo celtiberi/hogman`), bootstraps the OS, installs into
    `/opt/hogman`, and starts the shared front door. Pens run as unprivileged user `65532`.
 
@@ -97,9 +99,13 @@ name burning, and public sign-ups against `challenge-dns` and Pebble.
 ## Updating
 
 ```bash
-curl -fsSL https://hogman.network/install.sh | sudo bash   # new code; pens untouched; refreshes signup, challenge DNS and gate-cert
-hogman-host upgrade bobo                                   # restart a pen on the new version
+curl -fsSL https://github.com/celtiberi/hogman/releases/latest/download/install.sh | sudo bash   # new code; pens untouched; refreshes signup, challenge DNS and gate-cert
+hogman-host upgrade bobo                                                                        # restart a pen on the new version
 ```
+
+`install.sh` resolves `latest` once, then downloads `SHA256SUMS` and every archive from that pinned
+release tag (`releases/download/v<ver>/...`) so a concurrent release cannot mix versions. Set
+`HOGMAN_VERSION=<ver>` to install a specific release tag directly.
 
 If upgrading from a pre-switchover server before `gate-cert-setup` and `pens-zone` are configured,
 `install.sh` skips the `signup-setup` refresh with a reminder rather than failing. Once configured,
@@ -180,7 +186,10 @@ When `signup-work-host` is configured, the front door serves the same `signup-we
 hosts (with the same Cloudflare Proxy CIDR lock when `signup-cloudflare on` is active), Turnstile
 accepts tokens minted on either hostname, Stripe Checkout returns buyers to whichever configured
 signup host they started from, and pens raised on the Work host default to `THEME=work` (exposed as
-`"theme": "work"` on `/hogman/v1/network` and `/api/me` for the join page and portal).
+`"theme": "work"` on `/hogman/v1/network` and `/api/me` for the join page and portal). **Rollout
+order for `signup-work-host`:** deploy this release first, apply the DNS PR that points the proxied
+Work sign-up hostname at this server, and only then run `hogman-host signup-work-host <host>` (so
+Caddy can obtain its origin certificate immediately).
 
 The `web` container runs read-only and unprivileged (`65534:65534`), speaking over an internal
 network to `broker` (which runs `hogman-host provision` and has outbound internet only if
@@ -231,6 +240,20 @@ hogman-host pen <name> <hogman args>
 hogman-host upgrade <name>
 hogman-host remove <name>
 ```
+
+## Publishing releases
+
+`deploy/release.sh [git-ref]` publishes a release to GitHub Releases on `celtiberi/hogman`:
+
+1. Verifies a successful non-PR `.github/workflows/build.yml` run for the exact commit and checks
+   GitHub build provenance (`gh attestation verify`) on every compiled binary before packaging.
+2. Packages `hogman-<ver>.tar.gz`, `hogman-bin-<ver>.tar.gz`, `install.sh` (from the committed ref),
+   `SHA256SUMS`, and `latest`.
+3. Uploads all five assets into a **draft** release (`v<ver>`), verifies the asset list, then
+   publishes and marks it `latest` atomically (`gh release edit --draft=false --latest`).
+
+Enable **Immutable releases** in the repository's GitHub settings (**Settings → General → Releases**)
+so published release tags and their assets cannot be modified or replaced after publication.
 
 ## Website deployment (`hogman.network`)
 
