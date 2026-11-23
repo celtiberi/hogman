@@ -4,97 +4,159 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#0e080c">
 <title>Get a pen · Hogman</title>
-<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/hogman-32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="/hogman-48.png" type="image/png" sizes="48x48">
 <link rel="stylesheet" href="/signup.css">
 </head>
 <body>
-<main>
-  <a href="https://hogman.network/" class="logo"><img src="/logo.webp" alt="Hogman" width="200" height="200"></a>
-  <h1>Get a pen</h1>
-  <p class="sub">Your own private internet, on our server. Your people get names inside it,
-    real HTTPS, and nobody gets in unless you let them.</p>
 
-  <p class="notice" id="closed" hidden>The farm is full right now. Join the waiting list and we'll email you a code when there's room.</p>
-  <p class="notice" id="down" hidden>The sign-up service is resting. Try again in a bit.</p>
+<header class="top">
+  <div class="top-inner">
+    <a class="brand" href="https://hogman.network/" aria-label="Hogman home">
+      <img class="brand-icon" src="/hogman-icon.webp" width="28" height="28" alt="">
+      <span>H&Ouml;GMAN</span>
+    </a>
+    <nav aria-label="Site navigation">
+      <a href="https://hogman.network/#why">Why a pen?</a>
+      <a href="https://hogman.network/#tech">Under the hood</a>
+      <a href="https://hogman.network/docs/">Docs</a>
+      <a href="https://github.com/celtiberi/hogman">Source</a>
+      <a href="/" aria-current="true">Get a pen</a>
+    </nav>
+  </div>
+</header>
+<div class="studs" aria-hidden="true"></div>
+
+<main class="shell">
+  <section class="hero">
+    <h1>Get a pen</h1>
+    <p class="sub">Your own private internet — real domain names, standard HTTPS, and nobody gets in unless you let them.</p>
+  </section>
+
+  <p class="callout warn" id="closed" hidden>The farm is full right now. Join the waiting list and we'll email you a code when there's room.</p>
+  <p class="callout warn" id="down" hidden>The sign-up service is resting. Try again in a bit.</p>
 
   <form id="form" class="panel" novalidate>
-    <label for="code">Sign-up code</label>
-    <input id="code" name="code" placeholder="PIG-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="13" required>
-    <p class="hint">Sign-ups are by invitation while we test. Got a link? The code is already filled in.
-      No code? <a href="#wait" id="to-wait">Join the waiting list</a>.</p>
+    <div class="field">
+      <label for="code">Sign-up code</label>
+      <input id="code" name="code" placeholder="PIG-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="13" required>
+      <p class="hint">Sign-ups are by invitation while we test. Got a link? The code is already filled in.
+        No code? <a href="#wait" id="to-wait">Join the waiting list</a>.</p>
+    </div>
 
-    <label for="pen">Network name (your pen)</label>
-    <div class="suffix"><input id="pen" name="pen" placeholder="your-network" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30" required><span>.<span class="sites">pens.hogman.network</span></span></div>
-    <p class="hint" id="pen-hint">For your private network itself. Sites and addresses will end in .<span class="penname">&lt;network&gt;</span>.<span class="sites">pens.hogman.network</span></p>
+    <div class="field">
+      <label for="pen">Network name (your pen)</label>
+      <div class="suffix">
+        <input id="pen" name="pen" placeholder="your-network" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30" required>
+        <span>.<span class="sites">pens.hogman.network</span></span>
+      </div>
+      <p class="hint" id="pen-hint">For your private network itself. Sites and addresses will end in <span class="nowrap">.<span class="penname">&lt;network&gt;</span>.<span class="sites">pens.hogman.network</span></span></p>
+    </div>
 
-    <label for="handle">Your personal name in it</label>
-    <div class="suffix"><input id="handle" name="handle" placeholder="your-name" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" required><span>.<span class="penname">&lt;network&gt;</span>.<span class="sites">pens.hogman.network</span></span></div>
-    <p class="hint">For you as the pen's keeper: you invite people and can remove anyone.</p>
-    <p class="hint">Pen names are permanent (a used name is never given out again). Pen and site names
-      appear in public Certificate Transparency logs (contents stay private), and hosted pens
-      currently share <code>pens.hogman.network</code> so use a separate browser profile for any
-      pen you don't fully trust.</p>
+    <div class="field">
+      <label for="handle">Your personal name in it</label>
+      <div class="suffix">
+        <input id="handle" name="handle" placeholder="your-name" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" required>
+        <span>.<span class="penname">&lt;network&gt;</span>.<span class="sites">pens.hogman.network</span></span>
+      </div>
+      <p class="hint">For you as the pen's keeper: you invite people and can remove anyone.</p>
+    </div>
 
-    <button class="btn" id="go" type="submit">Raise my pen</button>
+    <div class="disclosure">
+      <p class="hint"><strong>Before you pick a name:</strong> pen names are permanent (a used name is never given out again). Pen and site names appear in public Certificate Transparency logs (contents stay private), and hosted pens currently share <code>pens.hogman.network</code> so use a separate browser profile for any pen you don't fully trust.</p>
+    </div>
+
+    <div class="actions">
+      <button class="btn" id="go" type="submit">Raise my pen</button>
+    </div>
     <p class="error" id="err" role="alert" hidden></p>
   </form>
 
   <form id="wait" class="panel" novalidate hidden>
     <h2>The waiting list</h2>
-    <p>Leave your email and we'll send you a sign-up code when there's room.</p>
-    <label for="w-email">Email</label>
-    <input id="w-email" type="email" autocomplete="email" maxlength="254" required>
-    <label for="w-pen">The pen name you'd like <span class="opt">(optional)</span></label>
-    <div class="suffix"><input id="w-pen" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30"><span>.<span class="sites">pens.hogman.network</span></span></div>
-    <label for="w-note">Anything you'd like us to know <span class="opt">(optional)</span></label>
-    <input id="w-note" maxlength="280" autocomplete="off" placeholder="who it's for, how you heard of us">
+    <p class="panel-intro">Leave your email and we'll send you a sign-up code when there's room.</p>
+
+    <div class="field">
+      <label for="w-email">Email</label>
+      <input id="w-email" type="email" autocomplete="email" maxlength="254" required>
+    </div>
+
+    <div class="field">
+      <label for="w-pen">The pen name you'd like <span class="opt">(optional)</span></label>
+      <div class="suffix">
+        <input id="w-pen" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30">
+        <span>.<span class="sites">pens.hogman.network</span></span>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="w-note">Anything you'd like us to know <span class="opt">(optional)</span></label>
+      <input id="w-note" maxlength="280" autocomplete="off" placeholder="who it's for, how you heard of us">
+    </div>
+
     <p class="hint">We keep your email only to send you a code, and delete it once you've signed up,
-      or right away if you take yourself off the list (the button below, with the same email).</p>
-    <button class="btn" id="w-go" type="submit">Put me on the list</button>
-    <button class="btn small ghost" id="w-leave" type="button">Take me off the list</button>
+      or right away if you take yourself off the list with the same email.</p>
+
+    <div class="actions">
+      <button class="btn" id="w-go" type="submit">Put me on the list</button>
+      <button class="btn small ghost" id="w-leave" type="button">Take me off the list</button>
+    </div>
     <p class="error" id="w-err" role="alert" hidden></p>
-    <p class="hint"><a href="#" id="to-form">I have a code</a></p>
+    <p class="hint switch-link"><a href="#" id="to-form">&larr; I have a code</a></p>
   </form>
 
   <section id="waited" class="panel" hidden aria-live="polite">
     <h2 id="waited-title">You're on the list</h2>
-    <p id="waited-text"></p>
-    <p class="hint"><a href="#" id="waited-back">Back</a> · <a href="#" id="waited-code">I have a code</a></p>
+    <p id="waited-text" class="panel-intro"></p>
+    <p class="hint switch-link"><a href="#" id="waited-back">&larr; Back</a> &middot; <a href="#" id="waited-code">I have a code</a></p>
   </section>
 
   <section id="working" class="panel" hidden aria-live="polite">
     <h2>Raising your pen</h2>
-    <p>About a minute. You can reload this page; it picks up where it left off.</p>
-    <p class="stage" id="stage" aria-live="polite">Building the fence…</p>
+    <p class="panel-intro">Setting up your isolated control plane and HTTPS certificate. You can reload this page — it picks up where it left off.</p>
+    <p class="stage" id="stage" aria-live="polite">Building the fence&hellip;</p>
     <div class="bar"><div id="bar"></div></div>
   </section>
 
   <section id="done" class="panel" hidden>
     <h2>Your pen is up</h2>
-    <p><strong id="done-zone"></strong> is yours. Once your laptop joins, your pen's home page will be <code id="done-home"></code>.</p>
-    <ol>
-      <li>Open this setup link <strong>on your laptop</strong> (macOS or Linux):
+    <p class="panel-intro"><strong id="done-zone"></strong> is yours. Once your laptop joins, your pen's home page will be <code id="done-home"></code>.</p>
+    <ol class="done-steps">
+      <li>
+        <p>Open this setup link <strong>on your laptop</strong> (macOS or Linux):</p>
         <div class="linkbox" id="link"></div>
-        <button class="btn small" id="copy" type="button">Copy link</button></li>
+        <button class="btn small" id="copy" type="button">Copy link</button>
+      </li>
       <li>The link opens a page with one command to paste into a terminal. It downloads <code>hogman-join</code>,
         sets up a local connection for your pen, and joins.</li>
       <li>You land on <code id="done-home-step"></code>, where you add other devices, invite
         people, and run the herd.</li>
     </ol>
-    <div class="qr"><img id="qr" alt="QR code of the same link"><p>Same link, for the phone app (coming soon).</p></div>
-    <p class="warn">This link carries a <strong>one-time key — treat it like a password</strong> and don't share it.
+    <div class="qr">
+      <img id="qr" alt="QR code of the same link">
+      <p>Same link, for the phone app (coming soon).</p>
+    </div>
+    <p class="callout warn">This link carries a <strong>one-time key — treat it like a password</strong> and don't share it.
       It works once within an hour, and this page is the only place it's shown, so keep it open until your laptop is in.</p>
-    <p class="warn"><strong>Back up your keeper access once you're in:</strong> make a friend you
+    <p class="callout warn"><strong>Back up your keeper access once you're in:</strong> make a friend you
       trust a second owner in <em>The herd</em>. There is no account recovery and we never recover
       a pen on request: lose every device and another owner is the only way back in.</p>
   </section>
-
-  <footer>
-    <p>Free while we test it. Experimental: not audited, so don't trust it with anything that matters yet.</p>
-    <p>Hogman is open source: <a href="https://github.com/celtiberi/hogman">read the code</a>.</p>
-  </footer>
 </main>
+
+<footer class="foot">
+  <p>Free while we test. Experimental and not independently audited — don't trust it with anything high-stakes yet.</p>
+  <p class="foot-links">
+    <a href="https://hogman.network/">Home</a> &middot;
+    <a href="https://hogman.network/docs/">Docs</a> &middot;
+    <a href="https://hogman.network/docs/security.html">Security</a> &middot;
+    <a href="https://hogman.network/docs/faq.html">FAQ</a> &middot;
+    <a href="https://github.com/celtiberi/hogman">Source</a>
+  </p>
+</footer>
+
 <script src="/signup.js" defer></script>
 </body>
 </html>
