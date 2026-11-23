@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/net/netns"
 	"tailscale.com/tsnet"
@@ -143,6 +145,116 @@ func newNode(dir string, c *agentConfig, authKey string) *tsnet.Server {
 	return s
 }
 
+var errDeviceRemoved = errors.New("device is no longer authorized on this pen (NeedsLogin)")
+
+// upNode brings node up and returns its status. For already-enrolled nodes
+// (hasAuthKey == false), it fails fast with errDeviceRemoved if the control
+// server rejects the device and requests interactive login, instead of
+// blocking until ctx expires as tsnet.Server.Up does.
+func upNode(ctx context.Context, node *tsnet.Server, hasAuthKey bool) (*ipnstate.Status, error) {
+	if hasAuthKey {
+		return node.Up(ctx)
+	}
+	lc, err := node.LocalClient()
+	if err != nil {
+		return nil, fmt.Errorf("tsnet.Up: %w", err)
+	}
+	watcher, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState)
+	if err != nil {
+		return nil, fmt.Errorf("tsnet.Up: %w", err)
+	}
+	defer watcher.Close()
+
+	sawStarting := false
+	for {
+		n, err := watcher.Next()
+		if err != nil {
+			return nil, fmt.Errorf("tsnet.Up: %w", err)
+		}
+		if n.ErrMessage != nil && *n.ErrMessage != "" {
+			return nil, fmt.Errorf("tsnet.Up: backend: %s", *n.ErrMessage)
+		}
+		if n.BrowseToURL != nil && *n.BrowseToURL != "" {
+			return nil, errDeviceRemoved
+		}
+		if n.State == nil {
+			continue
+		}
+		switch *n.State {
+		case ipn.Starting:
+			sawStarting = true
+		case ipn.Running:
+			sawStarting = true
+			st, err := lc.Status(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("tsnet.Up: %w", err)
+			}
+			if len(st.TailscaleIPs) > 0 {
+				return st, nil
+			}
+		case ipn.NeedsLogin:
+			if sawStarting {
+				return nil, errDeviceRemoved
+			}
+			if st, err := lc.StatusWithoutPeers(ctx); err == nil && st != nil && st.AuthURL != "" {
+				return nil, errDeviceRemoved
+			}
+		}
+	}
+}
+
+func statusHasPeerIP(st *ipnstate.Status, want netip.Addr) bool {
+	if st == nil {
+		return false
+	}
+	want = want.Unmap()
+	if st.Self != nil {
+		for _, ip := range st.Self.TailscaleIPs {
+			if ip.Unmap() == want {
+				return true
+			}
+		}
+	}
+	for _, p := range st.Peer {
+		if p == nil {
+			continue
+		}
+		for _, ip := range p.TailscaleIPs {
+			if ip.Unmap() == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// evaluateLiveNodeStatus translates a running tsnet node's current Status into
+// (up, reason). Once an agent has joined, this catches post-kick revocations
+// (BackendState leaving Running, expired session, or losing the pen's DNS peer).
+func evaluateLiveNodeStatus(st *ipnstate.Status, dnsServer string) (bool, string) {
+	if st == nil {
+		return false, "no node status"
+	}
+	switch st.BackendState {
+	case "Running":
+		if st.Self != nil && st.Self.Expired {
+			return false, "device session expired"
+		}
+		if dnsServer != "" {
+			if dnsIP, err := netip.ParseAddr(dnsServer); err == nil && !statusHasPeerIP(st, dnsIP) {
+				return false, "device removed from pen"
+			}
+		}
+		return true, ""
+	case "NeedsLogin":
+		return false, "device removed from pen"
+	case "":
+		return false, "not connected"
+	default:
+		return false, "not connected (" + st.BackendState + ")"
+	}
+}
+
 // runAgent is the long-running process: connect to the pen, serve the proxy.
 func runAgent(dir string) error {
 	c, err := loadAgentConfig(dir)
@@ -165,7 +277,8 @@ func runAgent(dir string) error {
 
 	keyFile := filepath.Join(dir, "authkey")
 	key, _ := os.ReadFile(keyFile)
-	node := newNode(dir, c, strings.TrimSpace(string(key)))
+	authKey := strings.TrimSpace(string(key))
+	node := newNode(dir, c, authKey)
 	defer node.Close()
 
 	a := newAgent(c, node)
@@ -183,7 +296,7 @@ func runAgent(dir string) error {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		st, err := node.Up(ctx)
+		st, err := upNode(ctx, node, authKey != "")
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		if err != nil {
@@ -232,7 +345,8 @@ type agent struct {
 	// Only those may be dialed: tsnet's Dial quietly uses the computer's own
 	// network for anything else, so a pen whose DNS answered 127.0.0.1, a LAN
 	// address or another tailnet's 100.x address would otherwise reach it.
-	isPeer func(ctx context.Context, ip netip.Addr) bool
+	isPeer     func(ctx context.Context, ip netip.Addr) bool
+	liveStatus func(ctx context.Context) (bool, string)
 
 	mu     sync.Mutex
 	up     bool
@@ -277,6 +391,17 @@ func newAgent(c *agentConfig, node *tsnet.Server) *agent {
 				return nil, err
 			}
 			return peerIPsForHost(st, host), nil
+		}
+		a.liveStatus = func(ctx context.Context) (bool, string) {
+			lc, err := node.LocalClient()
+			if err != nil {
+				return false, err.Error()
+			}
+			st, err := lc.Status(ctx)
+			if err != nil {
+				return false, err.Error()
+			}
+			return evaluateLiveNodeStatus(st, c.DNSServer)
 		}
 	}
 	return a
@@ -429,6 +554,15 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		st := agentStatus{Zone: a.cfg.Zone, Up: a.up, Error: a.err, IPs: a.ips, Server: a.server}
 		a.mu.Unlock()
+		if st.Up && a.liveStatus != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 200*time.Millisecond)
+			liveUp, liveErr := a.liveStatus(ctx)
+			cancel()
+			if !liveUp {
+				st.Up = false
+				st.Error = liveErr
+			}
+		}
 		if a.statusToken != "" {
 			if nonce := strings.TrimSpace(r.Header.Get("X-Hogman-Challenge")); nonce != "" && len(nonce) <= 128 {
 				w.Header().Set("X-Hogman-Proof", computeStatusProof(a.statusToken, nonce, a.cfg.Zone))
@@ -537,9 +671,9 @@ func agentLogout(dir string) {
 	c.trustControlCA()
 	node := newNode(dir, c, "")
 	defer node.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := node.Up(ctx); err != nil {
+	if _, err := upNode(ctx, node, false); err != nil {
 		return
 	}
 	if lc, err := node.LocalClient(); err == nil {

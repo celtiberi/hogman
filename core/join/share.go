@@ -469,11 +469,14 @@ func isPermanentNodeError(hasAuthKey bool, backendState string, err error) bool 
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, errDeviceRemoved) {
+		return true
+	}
 	if !hasAuthKey && backendState == "NeedsLogin" {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
-	for _, needle := range []string{"invalid authkey", "authkey expired", "auth key", "not authorized", "unauthorized", "node not found"} {
+	for _, needle := range []string{"invalid authkey", "authkey expired", "auth key", "not authorized", "unauthorized", "node not found", "needslogin"} {
 		if strings.Contains(msg, needle) {
 			return true
 		}
@@ -491,7 +494,7 @@ func shareNode(ctx context.Context, dir string, c *shareConfig) (*tsnet.Server, 
 	node := newNode(dir, ac, authKey)
 	upCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	st, err := node.Up(upCtx)
+	st, err := upNode(upCtx, node, authKey != "")
 	if err != nil {
 		var backendState string
 		if lc, lerr := node.LocalClient(); lerr == nil {
@@ -856,6 +859,17 @@ func shareStop(name string, o options) error {
 
 // removeShare stops a share, gives its name back and removes its device.
 func removeShare(dir string, c *shareConfig) error {
+	return removeShareWithOptions(dir, c, 30*time.Second, false)
+}
+
+// removeShareForLeave tears down a share during `hogman-join leave`, bounding
+// network wait and cleaning up local state even if the pen already removed it
+// or is unreachable.
+func removeShareForLeave(dir string, c *shareConfig) error {
+	return removeShareWithOptions(dir, c, 15*time.Second, true)
+}
+
+func removeShareWithOptions(dir string, c *shareConfig, timeout time.Duration, cleanupOnUnreachable bool) error {
 	stopShare(dir, c)
 	// Never got as far as joining the pen (its one-time key is still unused,
 	// or has expired): there's nothing on the pen to give back.
@@ -863,15 +877,27 @@ func removeShare(dir string, c *shareConfig) error {
 		note("%s never came up; removed it from this computer", c.url())
 		return os.RemoveAll(dir)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	node, _, hc, err := shareNode(ctx, dir, c)
 	if err != nil {
+		if isPermanentShareError(err) {
+			note("%s was already removed from the pen; cleaned up local files", c.url())
+			return os.RemoveAll(dir)
+		}
+		if cleanupOnUnreachable {
+			note("could not reach the pen for %s (%v); cleaned up local files", c.url(), firstLine(err.Error()))
+			return os.RemoveAll(dir)
+		}
 		return errorf("could not reach the pen (%v).\n  Remove the server on your home page instead, then delete %s", err, dir)
 	}
 	err = giveBack(ctx, hc, c)
 	node.Close()
 	if err != nil {
+		if cleanupOnUnreachable {
+			note("could not give back %s (%v); cleaned up local files", c.url(), firstLine(err.Error()))
+			return os.RemoveAll(dir)
+		}
 		return err
 	}
 	return os.RemoveAll(dir)

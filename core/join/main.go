@@ -497,7 +497,7 @@ func leave(raw string, o options) error {
 	// Shares on this pen go first, while they can still give their names back.
 	for _, dir := range allShares(n.Zone) {
 		if c, err := loadShare(dir); err == nil {
-			if err := removeShare(dir, c); err != nil {
+			if err := removeShareForLeave(dir, c); err != nil {
 				note("could not take down %s: %v", c.url(), firstLine(err.Error()))
 			} else {
 				note("took down %s", c.url())

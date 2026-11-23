@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -424,5 +425,41 @@ func TestRenderPACNormalizesTrailingDots(t *testing.T) {
 	})
 	if !strings.Contains(multi, `.replace(/\.+$/, "")`) {
 		t.Fatalf("multi-pen PAC missing trailing-dot normalization:\n%s", multi)
+	}
+}
+
+func TestVerifyAgentEndpointReportsRemovedReason(t *testing.T) {
+	base := t.TempDir()
+	ln, port := listenInHogmanRange(t)
+	zone := "kicked1.pens.hogman.network"
+	dir := filepath.Join(base, zone)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &agentConfig{Zone: zone, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port)}
+	if err := cfg.save(dir); err != nil {
+		t.Fatal(err)
+	}
+	tok := "0123456789abcdef0123456789abcdef"
+	if err := os.WriteFile(filepath.Join(dir, statusTokenFilename), []byte(tok), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := newAgent(cfg, nil)
+	a.up = true
+	a.statusToken = tok
+	a.liveStatus = func(context.Context) (bool, string) {
+		return false, "device removed from pen"
+	}
+	srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: a}}
+	srv.Start()
+	defer srv.Close()
+
+	state, reason := verifyAgentEndpointWithReason(dir, cfg)
+	if state != agentEndpointDown || reason != "device removed from pen" {
+		t.Fatalf("verifyAgentEndpointWithReason = (%v, %q), want (down, 'device removed from pen')", state, reason)
+	}
+	pens, _ := collectNativePens(base)
+	if len(pens) != 1 || pens[0].Up || pens[0].Squatted || pens[0].statusReason != "device removed from pen" {
+		t.Fatalf("collectNativePens = %+v, want Up=false Squatted=false statusReason='device removed from pen'", pens)
 	}
 }

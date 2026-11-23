@@ -120,6 +120,11 @@ registrar, a suspension and a kick.
 test/run.sh            # add --keep to leave it running
 ```
 
+### Test-only `hogman-join` environment variables
+
+- `HOGMAN_DISABLE_NETNS=1` — **test-only, for isolated networks with no default route** (such as Docker `--internal` bridges). Disables Tailscale's `netns` `SO_BINDTODEVICE` hook (which otherwise binds unprivileged sockets to `lo` on Linux 5.7+ when no default gateway exists). Do **not** set this on ordinary laptops or desktops: it turns off `tsnet`'s VPN bypass.
+- `HOGMAN_ACME_CA_ROOT` / `HOGMAN_ACME_CA_URL` / `HOGMAN_ACME_RESOLVERS` — point `hogman-join` at a local Pebble test ACME CA during offline tests.
+
 Also covers the join page and downloads, and the join tool on two fresh Linux machines
 with only Tailscale installed: a tampered link refused before the invite is used, a full
 join, a second device via a device link, and leaving.

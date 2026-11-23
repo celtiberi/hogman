@@ -302,6 +302,12 @@ func removeOwnDevice(zone string) bool {
 	if err != nil {
 		return false
 	}
+	// If the running agent already knows this device was removed from the pen,
+	// skip both the doomed /api/me probe and the redundant __agent-logout retry.
+	if st, err := agentState(cfg); err == nil && !st.Up && strings.Contains(strings.ToLower(st.Error), "removed") {
+		note("this computer was already removed from the pen")
+		return true
+	}
 	pool, err := testACMECAPool()
 	if err != nil {
 		note("could not read HOGMAN_ACME_CA_ROOT while leaving: %v", err)
@@ -311,7 +317,7 @@ func removeOwnDevice(zone string) bool {
 	if err != nil {
 		return false
 	}
-	c := &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{
+	c := &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{
 		Proxy: http.ProxyURL(pu), TLSClientConfig: &tls.Config{RootCAs: pool}}}
 	var me meView
 	if _, err := homeAPI(c, zone, "GET", "/me", nil, &me); err != nil || me.ThisDevice.ID == 0 {
