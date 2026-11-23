@@ -161,7 +161,7 @@ own_runtime_files() {
   local d
   chmod 755 "$DATA/join-dl" 2>/dev/null || true
   chmod -R a+rX "$DATA/join-dl" 2>/dev/null || true
-  for d in "$DATA/registrar" "$DATA/api" "$DATA/edge" "$DATA/portal" "$DATA/secrets/registrar" "$DATA/home-tls" "$DATA/caddy-admin"; do
+  for d in "$DATA/headscale/lib" "$DATA/registrar" "$DATA/api" "$DATA/edge" "$DATA/portal" "$DATA/secrets/registrar" "$DATA/home-tls" "$DATA/caddy-admin"; do
     [ -e "$d" ] && chown -R "$HOGMAN_UID:$HOGMAN_GID" "$d"
   done
   return 0

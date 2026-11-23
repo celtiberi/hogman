@@ -20,18 +20,21 @@ import (
 )
 
 type Config struct {
-	Zone              string // bobo.pens.hogman.network
-	PublicHost        string // control server hostname
-	CoreIP            string // mesh IP of the core node (DNS, portal)
-	Theme             string // optional UI theme: "" (default) or "work"
-	InviteTTL         time.Duration
-	DeviceKeyTTL      time.Duration
-	MembersCanInvite  bool
-	MaxOpenDeviceKeys int
-	MaxNamesPerMember int
-	MaxOpenInvites    int
-	MaxInviteNoteLen  int
-	ACMEBackend       ACMEBackend
+	Zone                    string // bobo.pens.hogman.network
+	PublicHost              string // control server hostname
+	CoreIP                  string // mesh IP of the core node (DNS, portal)
+	Theme                   string // optional UI theme: "" (default) or "work"
+	InviteTTL               time.Duration
+	DeviceKeyTTL            time.Duration
+	MembersCanInvite        bool
+	MaxOpenDeviceKeys       int
+	MaxNamesPerMember       int
+	MaxOpenInvites          int
+	MaxInviteNoteLen        int
+	MaxServerEABPerDay      int
+	MaxMemberEABPerDay      int
+	MaxMemberACMETXTPerHour int
+	ACMEBackend             ACMEBackend
 }
 
 // normaliseTheme validates the pen UI theme against the strict allowlist.
@@ -94,9 +97,49 @@ type Service struct {
 	hs   *Headscale
 	acme ACMEBackend
 
-	mu         sync.Mutex // serialises changes that touch Headscale or policy
-	lastPolicy string
-	orphans    map[string]bool
+	mu             sync.Mutex // serialises changes that touch Headscale or policy
+	lastPolicy     string
+	orphans        map[string]bool
+	deletedHSUsers map[int64]bool
+
+	acmeMu        sync.Mutex
+	serverEABHits map[int64][]time.Time
+	memberEABHits map[int64][]time.Time
+	memberTXTHits map[int64][]time.Time
+	nowFn         func() time.Time
+}
+
+func (s *Service) clock() time.Time {
+	if s.nowFn != nil {
+		return s.nowFn()
+	}
+	return time.Now()
+}
+
+// allowWindow checks and records a hit inside a sliding window for key,
+// returning (true, 0) if permitted or (false, retryAfterSeconds) if capped.
+func allowWindow(m map[int64][]time.Time, key int64, limit int, window time.Duration, ts time.Time) (bool, int) {
+	if limit <= 0 {
+		return true, 0
+	}
+	prev := m[key]
+	kept := prev[:0]
+	for _, t := range prev {
+		if ts.Sub(t) < window {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= limit {
+		m[key] = kept
+		rem := kept[0].Add(window).Sub(ts)
+		secs := int((rem + time.Second - 1) / time.Second)
+		if secs < 1 {
+			secs = 1
+		}
+		return false, secs
+	}
+	m[key] = append(kept, ts)
+	return true, 0
 }
 
 func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
@@ -117,7 +160,26 @@ func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
 	if cfg.MaxInviteNoteLen <= 0 {
 		cfg.MaxInviteNoteLen = 256
 	}
-	return &Service{cfg: cfg, st: st, hs: hs, acme: cfg.ACMEBackend, orphans: map[string]bool{}}, nil
+	if cfg.MaxServerEABPerDay <= 0 {
+		cfg.MaxServerEABPerDay = 2
+	}
+	if cfg.MaxMemberEABPerDay <= 0 {
+		cfg.MaxMemberEABPerDay = 4
+	}
+	if cfg.MaxMemberACMETXTPerHour <= 0 {
+		cfg.MaxMemberACMETXTPerHour = 20
+	}
+	return &Service{
+		cfg:            cfg,
+		st:             st,
+		hs:             hs,
+		acme:           cfg.ACMEBackend,
+		orphans:        map[string]bool{},
+		deletedHSUsers: map[int64]bool{},
+		serverEABHits:  map[int64][]time.Time{},
+		memberEABHits:  map[int64][]time.Time{},
+		memberTXTHits:  map[int64][]time.Time{},
+	}, nil
 }
 
 func (s *Service) LoginServer() string { return "https://" + s.cfg.PublicHost }
@@ -188,7 +250,7 @@ func (s *Service) normaliseName(raw string) (string, error) {
 		return "", bad("name %q has too many levels", raw)
 	}
 	for _, l := range labels {
-		if l == "_acme-challenge" {
+		if l == "_acme-challenge" || reservedNSLabelRE.MatchString(l) {
 			return "", forbidden("%q is reserved by the network", l)
 		}
 		if !labelRE.MatchString(l) {
@@ -199,6 +261,25 @@ func (s *Service) normaliseName(raw string) (string, error) {
 		return "", forbidden("%q is reserved by the network", labels[len(labels)-1])
 	}
 	return n, nil
+}
+
+// refreshActorLocked reloads a non-CLI actor from SQLite under s.mu so racing
+// kicks, suspensions, or role demotions take effect before authorizing mutations.
+func (s *Service) refreshActorLocked(a Actor) (Actor, error) {
+	if a.CLI {
+		return a, nil
+	}
+	if a.Member == nil {
+		return Actor{}, forbidden("not authenticated")
+	}
+	m, err := s.st.MemberByID(a.Member.ID)
+	if err != nil {
+		return Actor{}, forbidden("membership not found")
+	}
+	if m.Status != "active" {
+		return Actor{}, forbidden("membership %s", m.Status)
+	}
+	return Actor{Member: m}, nil
 }
 
 func topLabel(name string) string {
@@ -219,17 +300,21 @@ func (s *Service) member(handle string) (*Member, error) {
 // AddMember creates a member directly, without an invite. Used to create the
 // owner, and by admins who want to skip the invite step.
 func (s *Service) AddMember(ctx context.Context, a Actor, handle, role string) (*Member, error) {
-	if !a.IsAdmin() {
-		return nil, forbidden("only admins can add members directly")
-	}
 	if !validRoles[role] {
 		return nil, bad("role must be owner, admin or member")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var err error
+	if a, err = s.refreshActorLocked(a); err != nil {
+		return nil, err
+	}
+	if !a.IsAdmin() {
+		return nil, forbidden("only admins can add members directly")
 	}
 	if role != "member" && !a.IsOwner() {
 		return nil, forbidden("only the owner can create admins or owners")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	m, err := s.createMember(ctx, handle, role, a.memberID())
 	if err != nil {
 		return nil, err
@@ -264,14 +349,18 @@ func (s *Service) createMember(ctx context.Context, handle, role string, invited
 }
 
 func (s *Service) SetRole(a Actor, handle, role string) error {
-	if !a.IsOwner() {
-		return forbidden("only the owner can change roles")
-	}
 	if !validRoles[role] {
 		return bad("role must be owner, admin or member")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var err error
+	if a, err = s.refreshActorLocked(a); err != nil {
+		return err
+	}
+	if !a.IsOwner() {
+		return forbidden("only the owner can change roles")
+	}
 	m, err := s.member(handle)
 	if err != nil {
 		return err
@@ -348,6 +437,12 @@ func (s *Service) revokeOpenKeys(ctx context.Context, memberID int64, action str
 }
 
 func (s *Service) Suspend(ctx context.Context, a Actor, handle, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var err error
+	if a, err = s.refreshActorLocked(a); err != nil {
+		return err
+	}
 	m, err := s.member(handle)
 	if err != nil {
 		return err
@@ -358,8 +453,6 @@ func (s *Service) Suspend(ctx context.Context, a Actor, handle, reason string) e
 	if m.Status != "active" {
 		return conflict("%s is %s", handle, m.Status)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.st.SetMemberStatus(m.ID, "suspended"); err != nil {
 		return err
 	}
@@ -369,6 +462,12 @@ func (s *Service) Suspend(ctx context.Context, a Actor, handle, reason string) e
 }
 
 func (s *Service) Resume(ctx context.Context, a Actor, handle string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var err error
+	if a, err = s.refreshActorLocked(a); err != nil {
+		return err
+	}
 	m, err := s.member(handle)
 	if err != nil {
 		return err
@@ -379,8 +478,6 @@ func (s *Service) Resume(ctx context.Context, a Actor, handle string) error {
 	if m.Status != "suspended" {
 		return conflict("%s is %s, not suspended", handle, m.Status)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.st.SetMemberStatus(m.ID, "active"); err != nil {
 		return err
 	}
@@ -398,6 +495,12 @@ type KickReport struct {
 // Kick ends a membership. Order matters: mark removed and drop from policy
 // first (instant cut-off), then delete their devices from the mesh.
 func (s *Service) Kick(ctx context.Context, a Actor, handle, reason string) (*KickReport, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var err error
+	if a, err = s.refreshActorLocked(a); err != nil {
+		return nil, err
+	}
 	m, err := s.member(handle)
 	if err != nil {
 		return nil, err
@@ -408,8 +511,6 @@ func (s *Service) Kick(ctx context.Context, a Actor, handle, reason string) (*Ki
 	if m.Status == "removed" {
 		return nil, conflict("%s has already been removed", handle)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	rep := &KickReport{}
 
 	// 1. From now on the registrar refuses them everything.
@@ -480,20 +581,28 @@ type MintedInvite struct {
 	URL   string `json:"url"`
 }
 
+func cleanInviteNote(raw string) string {
+	var b strings.Builder
+	b.Grow(len(raw))
+	for _, r := range raw {
+		switch {
+		case r == '\r' || r == '\n' || r == '\t' || r == '\u2028' || r == '\u2029':
+			b.WriteByte(' ')
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
 func (s *Service) MintInvite(a Actor, role, note string, ttl time.Duration) (*MintedInvite, error) {
 	if role == "" {
 		role = "member"
 	}
-	switch {
-	case role != "member" && role != "admin":
+	if role != "member" && role != "admin" {
 		return nil, bad("invites can be for members or admins")
-	case role == "admin" && !a.IsOwner():
-		return nil, forbidden("only the owner can invite admins")
-	case !a.IsAdmin() && !s.cfg.MembersCanInvite:
-		return nil, forbidden("on this network only admins can invite")
-	}
-	if !a.CLI && a.Member.Status != "active" {
-		return nil, forbidden("your membership is %s", a.Member.Status)
 	}
 	if ttl <= 0 {
 		ttl = s.cfg.InviteTTL
@@ -503,6 +612,19 @@ func (s *Service) MintInvite(a Actor, role, note string, ttl time.Duration) (*Mi
 	}
 	if len(note) > s.cfg.MaxInviteNoteLen {
 		return nil, bad("invite note must be at most %d characters", s.cfg.MaxInviteNoteLen)
+	}
+	note = cleanInviteNote(note)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var err error
+	if a, err = s.refreshActorLocked(a); err != nil {
+		return nil, err
+	}
+	switch {
+	case role == "admin" && !a.IsOwner():
+		return nil, forbidden("only the owner can invite admins")
+	case !a.IsAdmin() && !s.cfg.MembersCanInvite:
+		return nil, forbidden("on this network only admins can invite")
 	}
 	if !a.IsAdmin() && a.memberID() != nil {
 		n, err := s.st.CountOpenInvites(*a.memberID())
@@ -523,6 +645,12 @@ func (s *Service) MintInvite(a Actor, role, note string, ttl time.Duration) (*Mi
 }
 
 func (s *Service) RevokeInvite(a Actor, id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var err error
+	if a, err = s.refreshActorLocked(a); err != nil {
+		return err
+	}
 	inv, err := s.st.InviteByID(id)
 	if errors.Is(err, ErrNotFound) {
 		return missing("no invite %d", id)
@@ -595,9 +723,11 @@ func (s *Service) Redeem(ctx context.Context, token, handle string) (*Enrolment,
 		if derr := s.st.DeleteMember(m.ID); derr != nil {
 			log.Printf("redeem rollback member %d: %v", m.ID, derr)
 		}
-		if herr := s.hs.DeleteUser(ctx, m.HSUserID); herr != nil {
+		rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		if herr := s.hs.DeleteUser(rbCtx, m.HSUserID); herr != nil {
 			log.Printf("redeem rollback headscale user %s: %v", m.HSUserID, herr)
 		}
+		rbCancel()
 		return nil, forbidden("invite not valid")
 	}
 	key, exp, err := s.issueKey(ctx, m, "personal")
@@ -608,9 +738,11 @@ func (s *Service) Redeem(ctx context.Context, token, handle string) (*Enrolment,
 		if derr := s.st.DeleteMember(m.ID); derr != nil {
 			log.Printf("redeem rollback member %d: %v", m.ID, derr)
 		}
-		if herr := s.hs.DeleteUser(ctx, m.HSUserID); herr != nil {
+		rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		if herr := s.hs.DeleteUser(rbCtx, m.HSUserID); herr != nil {
 			log.Printf("redeem rollback headscale user %s: %v", m.HSUserID, herr)
 		}
+		rbCancel()
 		return nil, err
 	}
 	s.st.Audit(handle, "invite.redeem", fmt.Sprintf("invite#%d", inv.ID), "")
@@ -624,12 +756,18 @@ func (s *Service) Redeem(ctx context.Context, token, handle string) (*Enrolment,
 // --------------------------------------------------------------- devices --
 
 func (s *Service) IssueDeviceKey(ctx context.Context, a Actor, handle, kind string) (string, int64, error) {
+	if kind != "personal" && kind != "server" {
+		return "", 0, bad("kind must be personal or server")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var err error
+	if a, err = s.refreshActorLocked(a); err != nil {
+		return "", 0, err
+	}
 	m, err := s.member(handle)
 	if err != nil {
 		return "", 0, err
-	}
-	if kind != "personal" && kind != "server" {
-		return "", 0, bad("kind must be personal or server")
 	}
 	if !a.Is(m) {
 		if !a.IsAdmin() {
@@ -659,8 +797,6 @@ func (s *Service) IssueDeviceKey(ctx context.Context, a Actor, handle, kind stri
 	if m.Status != "active" {
 		return "", 0, conflict("%s is %s", handle, m.Status)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !a.CLI {
 		open, err := s.st.CountOpenDeviceKeys(m.ID)
 		if err != nil {
@@ -697,6 +833,16 @@ func (s *Service) issueKey(ctx context.Context, m *Member, kind string) (string,
 }
 
 func (s *Service) RemoveDevice(ctx context.Context, a Actor, id int64) error {
+	// A server removing itself loses its connection as its node goes, and the
+	// request's context is cancelled with it: finish the job regardless.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var err error
+	if a, err = s.refreshActorLocked(a); err != nil {
+		return err
+	}
 	d, err := s.st.DeviceByID(id)
 	if errors.Is(err, ErrNotFound) || (err == nil && d.RemovedAt != nil) {
 		return missing("no device %d", id)
@@ -715,17 +861,12 @@ func (s *Service) RemoveDevice(ctx context.Context, a Actor, id int64) error {
 			return forbidden("only the owner can remove devices of an owner or admin")
 		}
 	}
-	// A server removing itself loses its connection as its node goes, and the
-	// request's context is cancelled with it: finish the job regardless.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
-	defer cancel()
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.hs.DeleteNode(ctx, d.HSNodeID); err != nil {
 		return err
 	}
-	// Removing a device on purpose gives back the names it served (a share's
-	// name, say), so they aren't stuck. A kick holds names instead (Kick).
+	// Removing a device on purpose gives back the leaf names it served (a share's
+	// name, say), so they aren't stuck, while preserving parent names that still
+	// have subdomains on other devices. A kick holds names instead (Kick).
 	if err := s.st.DeleteNamesOfDevice(d.ID); err != nil {
 		return err
 	}
@@ -844,6 +985,10 @@ func (s *Service) ServerClaim(a Actor, d *Device, rawName string, note *string) 
 
 // claimLocked: s.mu held. server is the calling server device, or nil.
 func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, rawNote *string, server *Device) (string, error) {
+	var err error
+	if a, err = s.refreshActorLocked(a); err != nil {
+		return "", err
+	}
 	m, err := s.member(handle)
 	if err != nil {
 		return "", err
@@ -875,6 +1020,25 @@ func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, r
 		return "", err
 	} else {
 		existing = nil
+	}
+	// If claiming an unclaimed top-level name, refuse if another member (or a
+	// retired record) already owns a subdomain under it.
+	if existing == nil && topLabel(name) == name {
+		all, err := s.st.Names()
+		if err != nil {
+			return "", err
+		}
+		for _, x := range all {
+			if !strings.HasSuffix(x.Name, "."+name) {
+				continue
+			}
+			if x.RetiredAt != nil {
+				return "", conflict("%s has retired subdomains and cannot be reused", name)
+			}
+			if x.MemberID != m.ID && !a.IsOwner() {
+				return "", conflict("%s has subdomains belonging to %s", name, x.Member)
+			}
+		}
 	}
 	// A server always counts against the cap, even the owner's: a leaked server
 	// link must not be able to claim names without limit.
@@ -1050,6 +1214,12 @@ func (s *Service) ServerSetACMETXT(ctx context.Context, d *Device, rawName, valu
 	if err != nil {
 		return "", err
 	}
+	s.acmeMu.Lock()
+	ok, retry := allowWindow(s.memberTXTHits, d.MemberID, s.cfg.MaxMemberACMETXTPerHour, time.Hour, s.clock())
+	s.acmeMu.Unlock()
+	if !ok {
+		return "", &Problem{Status: 429, Msg: "too many ACME challenge writes for this member in the last hour", RetryAfter: retry}
+	}
 	fqdn := "_acme-challenge." + name + "." + s.cfg.Zone
 	if err := s.acme.SetTXT(ctx, fqdn, value); err != nil {
 		return "", err
@@ -1093,11 +1263,30 @@ func (s *Service) ServerMintACMEEAB(ctx context.Context, d *Device) (*EABPair, e
 	if !hasName {
 		return nil, forbidden("claim a name for this server first")
 	}
+	s.acmeMu.Lock()
+	nowTS := s.clock()
+	// Check member quota without consuming server quota if member is already capped.
+	memberOK, memberRetry := allowWindow(s.memberEABHits, d.MemberID, s.cfg.MaxMemberEABPerDay, 24*time.Hour, nowTS)
+	if !memberOK {
+		s.acmeMu.Unlock()
+		return nil, &Problem{Status: 429, Msg: "too many fallback account keys for this member today", RetryAfter: memberRetry}
+	}
+	serverOK, serverRetry := allowWindow(s.serverEABHits, d.ID, s.cfg.MaxServerEABPerDay, 24*time.Hour, nowTS)
+	if !serverOK {
+		// Roll back the member hit we just appended.
+		hits := s.memberEABHits[d.MemberID]
+		if len(hits) > 0 {
+			s.memberEABHits[d.MemberID] = hits[:len(hits)-1]
+		}
+		s.acmeMu.Unlock()
+		return nil, &Problem{Status: 429, Msg: "too many fallback account keys for this server today", RetryAfter: serverRetry}
+	}
+	s.acmeMu.Unlock()
 	pair, err := s.acme.MintEAB(ctx)
 	if err != nil {
 		return nil, err
 	}
-	s.st.Audit(d.Name, "acme.eab", fmt.Sprintf("device#%d", d.ID), "")
+	s.st.Audit(d.Member, "acme.eab", fmt.Sprintf("device#%d", d.ID), "")
 	return pair, nil
 }
 
@@ -1119,6 +1308,10 @@ func (s *Service) ServerRelease(a Actor, d *Device, rawName string) error {
 }
 
 func (s *Service) releaseLocked(a Actor, rawName string) error {
+	var err error
+	if a, err = s.refreshActorLocked(a); err != nil {
+		return err
+	}
 	name := strings.TrimSuffix(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rawName)), "."), "."+s.cfg.Zone)
 	n, err := s.st.NameByName(name)
 	if errors.Is(err, ErrNotFound) {
@@ -1129,30 +1322,46 @@ func (s *Service) releaseLocked(a Actor, rawName string) error {
 	if n.RetiredAt != nil {
 		return conflict("%s is retired and cannot be released", name)
 	}
-	if !a.IsOwner() {
-		owner, err := s.st.MemberByID(n.MemberID)
+	canReleaseRow := func(row *Name) error {
+		if a.IsOwner() {
+			return nil
+		}
+		owner, err := s.st.MemberByID(row.MemberID)
 		if err != nil {
 			return err
 		}
 		switch {
-		case a.Member != nil && a.Member.ID == n.MemberID:
-			// members and admins may release their own active names
+		case a.Member != nil && a.Member.ID == row.MemberID:
+			return nil
 		case a.IsAdmin() && owner.Role == "member":
-			// admins may release regular members' active names
+			return nil
 		case a.IsAdmin():
 			return forbidden("only the owner can release names belonging to an owner or admin")
 		default:
-			return forbidden("%s is not yours", name)
+			return forbidden("%s is not yours", row.Name)
 		}
 	}
-	all, _ := s.st.Names()
+	if err := canReleaseRow(n); err != nil {
+		return err
+	}
+	all, err := s.st.Names()
+	if err != nil {
+		return err
+	}
+	var toDelete []string
 	for _, x := range all {
 		if x.RetiredAt != nil {
 			continue
 		}
 		if x.Name == name || strings.HasSuffix(x.Name, "."+name) {
-			_ = s.st.DeleteName(x.Name)
+			if err := canReleaseRow(x); err != nil {
+				return err
+			}
+			toDelete = append(toDelete, x.Name)
 		}
+	}
+	for _, dn := range toDelete {
+		_ = s.st.DeleteName(dn)
 	}
 	s.st.Audit(a.String(), "name.release", name+"."+s.cfg.Zone, "")
 	return nil
@@ -1225,8 +1434,8 @@ func (s *Service) Sync(ctx context.Context) error {
 			continue
 		}
 		m := memberOf(k.MemberID)
-		if m == nil || m.Status == "removed" || k.RevokedAt != nil {
-			s.deleteStray(ctx, n, nil, "key revoked or member removed")
+		if m == nil || m.Status != "active" || k.RevokedAt != nil {
+			s.deleteStray(ctx, n, nil, "key revoked or member not active")
 			continue
 		}
 		d := &Device{MemberID: k.MemberID, Kind: k.Kind, HSNodeID: n.ID, Name: name, IPv4: v4, IPv6: v6}
@@ -1240,6 +1449,22 @@ func (s *Service) Sync(ctx context.Context) error {
 		if !seen[d.HSNodeID] {
 			_ = s.st.MarkDeviceRemoved(d.ID)
 			s.st.Audit("registrar", "device.gone", fmt.Sprintf("%s/%s#%d", d.Member, d.Name, d.ID), "no longer in headscale")
+		}
+	}
+	// Retry Headscale user deletion for removed members once all their nodes are gone.
+	if allMembers, err := s.st.Members(); err == nil {
+		liveByMember := map[int64]bool{}
+		if curLive, err := s.st.LiveDevices(); err == nil {
+			for _, d := range curLive {
+				liveByMember[d.MemberID] = true
+			}
+		}
+		for _, m := range allMembers {
+			if m.Status == "removed" && m.HSUserID != "" && !liveByMember[m.ID] && !s.deletedHSUsers[m.ID] {
+				if err := s.hs.DeleteUser(ctx, m.HSUserID); err == nil {
+					s.deletedHSUsers[m.ID] = true
+				}
+			}
 		}
 	}
 	return s.applyPolicy(ctx)
