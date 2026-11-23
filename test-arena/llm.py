@@ -17,6 +17,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+DEFAULT_MAX_OUTPUT_TOKENS = 2048
+
+
 class BudgetExceededError(RuntimeError):
     """Raised when a bot or run exceeds its configured token budget."""
 
@@ -31,6 +34,7 @@ class BotTokenUsage:
     output_tokens: int = 0
     total_tokens: int = 0
     api_calls: int = 0
+    estimated_calls: int = 0
 
 
 @dataclass
@@ -59,7 +63,14 @@ class TokenLedger:
                 f"bot '{bot}' token budget exceeded ({bot_total} >= {self.max_bot_tokens})"
             )
 
-    def record(self, bot: str, input_tokens: int, output_tokens: int, total_tokens: int | None = None) -> None:
+    def record(
+        self,
+        bot: str,
+        input_tokens: int,
+        output_tokens: int,
+        total_tokens: int | None = None,
+        estimated: bool = False,
+    ) -> None:
         in_tok = max(0, int(input_tokens))
         out_tok = max(0, int(output_tokens))
         tot_tok = max(in_tok + out_tok, int(total_tokens) if total_tokens is not None else in_tok + out_tok)
@@ -68,6 +79,8 @@ class TokenLedger:
         entry.output_tokens += out_tok
         entry.total_tokens += tot_tok
         entry.api_calls += 1
+        if estimated:
+            entry.estimated_calls += 1
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -77,16 +90,23 @@ class TokenLedger:
             "total_output_tokens": sum(u.output_tokens for u in self.by_bot.values()),
             "total_tokens": self.total_tokens,
             "total_api_calls": sum(u.api_calls for u in self.by_bot.values()),
+            "estimated_calls": sum(u.estimated_calls for u in self.by_bot.values()),
             "by_bot": {
                 bot: {
                     "input_tokens": u.input_tokens,
                     "output_tokens": u.output_tokens,
                     "total_tokens": u.total_tokens,
                     "api_calls": u.api_calls,
+                    "estimated_calls": u.estimated_calls,
                 }
                 for bot, u in sorted(self.by_bot.items())
             },
         }
+
+
+def estimate_tokens(text: str) -> int:
+    """Conservative ~4 chars/token fallback when an API omits usage metadata."""
+    return max(1, (len(text) + 3) // 4)
 
 
 def translate_schema_for_gemini(schema: dict[str, Any]) -> dict[str, Any]:
@@ -123,6 +143,7 @@ def build_gemini_payload(
     messages: list[dict[str, str]],
     response_schema: dict[str, Any],
     temperature: float = 0.2,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
 ) -> dict[str, Any]:
     contents = []
     for msg in messages:
@@ -133,6 +154,7 @@ def build_gemini_payload(
         "contents": contents,
         "generationConfig": {
             "temperature": temperature,
+            "maxOutputTokens": max_output_tokens,
             "responseMimeType": "application/json",
             "responseSchema": translate_schema_for_gemini(response_schema),
         },
@@ -145,6 +167,7 @@ def build_openai_compat_payload(
     messages: list[dict[str, str]],
     response_schema: dict[str, Any],
     temperature: float = 0.2,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     use_json_schema: bool = True,
 ) -> dict[str, Any]:
     chat_messages = [{"role": "system", "content": system_prompt}] + [
@@ -164,6 +187,7 @@ def build_openai_compat_payload(
     return {
         "model": model,
         "temperature": temperature,
+        "max_tokens": max_output_tokens,
         "messages": chat_messages,
         "response_format": response_format,
     }
@@ -176,7 +200,21 @@ def validate_turn_payload(data: Any, response_schema: dict[str, Any]) -> dict[st
     missing = [k for k in required if k not in data]
     if missing:
         raise LLMError(f"model response missing required fields: {missing}")
-    allowed_actions = set(response_schema["properties"]["action"]["enum"])
+
+    props = response_schema.get("properties") or {}
+    for key, spec in props.items():
+        if key not in data:
+            continue
+        expected_type = spec.get("type")
+        val = data[key]
+        if expected_type == "string" and not isinstance(val, str):
+            raise LLMError(f"field {key!r} must be a string, got {type(val).__name__}")
+        if expected_type == "integer" and (isinstance(val, bool) or not isinstance(val, int)):
+            raise LLMError(f"field {key!r} must be an integer, got {type(val).__name__}")
+        if expected_type == "boolean" and not isinstance(val, bool):
+            raise LLMError(f"field {key!r} must be a boolean, got {type(val).__name__}")
+
+    allowed_actions = set(props["action"]["enum"])
     if data.get("action") not in allowed_actions:
         raise LLMError(f"invalid model action {data.get('action')!r}; expected one of {sorted(allowed_actions)}")
     return data
@@ -206,6 +244,26 @@ def _http_post_json(url: str, headers: dict[str, str], payload: dict[str, Any], 
     raise LLMError(f"LLM API failed after retries: {last_err}")
 
 
+def _record_usage_or_estimate(
+    ledger: TokenLedger,
+    bot: str,
+    in_tok: Any,
+    out_tok: Any,
+    tot_tok: Any,
+    prompt_text: str,
+    reply_text: str,
+) -> None:
+    parsed_in = int(in_tok) if isinstance(in_tok, (int, float)) and in_tok > 0 else 0
+    parsed_out = int(out_tok) if isinstance(out_tok, (int, float)) and out_tok > 0 else 0
+    parsed_tot = int(tot_tok) if isinstance(tot_tok, (int, float)) and tot_tok > 0 else 0
+    if parsed_in == 0 and parsed_out == 0 and parsed_tot == 0:
+        est_in = estimate_tokens(prompt_text)
+        est_out = estimate_tokens(reply_text)
+        ledger.record(bot, est_in, est_out, est_in + est_out, estimated=True)
+        return
+    ledger.record(bot, parsed_in, parsed_out, parsed_tot if parsed_tot > 0 else None, estimated=False)
+
+
 class LLMClient:
     """Thin structured-output client for Gemini (default) or OpenAI-compatible APIs."""
 
@@ -217,10 +275,12 @@ class LLMClient:
         base_url: str | None = None,
         ledger: TokenLedger | None = None,
         temperature: float = 0.2,
+        max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     ) -> None:
         self.provider = provider.strip().lower()
         self.ledger = ledger or TokenLedger()
         self.temperature = temperature
+        self.max_output_tokens = max_output_tokens
 
         if self.provider == "gemini":
             self.model = model or os.environ.get("ARENA_LLM_MODEL", "gemini-2.5-flash")
@@ -273,22 +333,29 @@ class LLMClient:
             "Content-Type": "application/json",
             "x-goog-api-key": self.api_key,
         }
-        payload = build_gemini_payload(system_prompt, messages, response_schema, self.temperature)
+        payload = build_gemini_payload(
+            system_prompt, messages, response_schema, self.temperature, self.max_output_tokens
+        )
         raw = _http_post_json(url, headers, payload)
 
+        candidates = raw.get("candidates") or []
+        parts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
+        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+
         usage = raw.get("usageMetadata") or {}
-        self.ledger.record(
+        prompt_text = system_prompt + "\n" + "\n".join(m["content"] for m in messages)
+        _record_usage_or_estimate(
+            self.ledger,
             bot,
-            input_tokens=usage.get("promptTokenCount", 0),
-            output_tokens=usage.get("candidatesTokenCount", 0),
-            total_tokens=usage.get("totalTokenCount"),
+            usage.get("promptTokenCount"),
+            usage.get("candidatesTokenCount"),
+            usage.get("totalTokenCount"),
+            prompt_text,
+            text,
         )
 
-        candidates = raw.get("candidates") or []
         if not candidates:
             raise LLMError(f"Gemini returned no candidates: {json.dumps(raw)[:500]}")
-        parts = (candidates[0].get("content") or {}).get("parts") or []
-        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError as exc:
@@ -308,32 +375,48 @@ class LLMClient:
             "Authorization": f"Bearer {self.api_key}",
         }
         payload = build_openai_compat_payload(
-            self.model, system_prompt, messages, response_schema, self.temperature, use_json_schema=True
+            self.model,
+            system_prompt,
+            messages,
+            response_schema,
+            self.temperature,
+            self.max_output_tokens,
+            use_json_schema=True,
         )
         try:
             raw = _http_post_json(url, headers, payload)
         except LLMError as exc:
             if "HTTP 400" in str(exc) and "json_schema" in str(exc):
-                # Some OpenAI-compatible providers accept json_object rather than strict json_schema.
                 fallback_payload = build_openai_compat_payload(
-                    self.model, system_prompt, messages, response_schema, self.temperature, use_json_schema=False
+                    self.model,
+                    system_prompt,
+                    messages,
+                    response_schema,
+                    self.temperature,
+                    self.max_output_tokens,
+                    use_json_schema=False,
                 )
                 raw = _http_post_json(url, headers, fallback_payload)
             else:
                 raise
 
+        choices = raw.get("choices") or []
+        text = (((choices[0].get("message") or {}).get("content")) or "").strip() if choices else ""
+
         usage = raw.get("usage") or {}
-        self.ledger.record(
+        prompt_text = system_prompt + "\n" + "\n".join(m["content"] for m in messages)
+        _record_usage_or_estimate(
+            self.ledger,
             bot,
-            input_tokens=usage.get("prompt_tokens", 0),
-            output_tokens=usage.get("completion_tokens", 0),
-            total_tokens=usage.get("total_tokens"),
+            usage.get("prompt_tokens"),
+            usage.get("completion_tokens"),
+            usage.get("total_tokens"),
+            prompt_text,
+            text,
         )
 
-        choices = raw.get("choices") or []
         if not choices:
             raise LLMError(f"OpenAI-compatible endpoint returned no choices: {json.dumps(raw)[:500]}")
-        text = ((choices[0].get("message") or {}).get("content") or "").strip()
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError as exc:

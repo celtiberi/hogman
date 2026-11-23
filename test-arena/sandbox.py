@@ -37,6 +37,22 @@ def truncate_output(text: str, limit: int = MAX_OUTPUT_BYTES) -> tuple[str, bool
     return f"{head}\n...[truncated {len(encoded) - limit} bytes]", True
 
 
+def build_docker_exec_cmd(container: str, command: str, timeout_s: int) -> list[str]:
+    """Run commands under in-container GNU `timeout -k 5` so timed-out processes die cleanly."""
+    return [
+        "docker",
+        "exec",
+        container,
+        "timeout",
+        "-k",
+        "5",
+        str(int(timeout_s)),
+        "bash",
+        "-c",
+        command,
+    ]
+
+
 def exec_in_container(
     container: str,
     command: str,
@@ -46,17 +62,22 @@ def exec_in_container(
     """Execute a shell command inside an already-running bot sandbox container."""
     started = time.monotonic()
     timed_out = False
+    exec_cmd = build_docker_exec_cmd(container, command, timeout_s)
     try:
         proc = subprocess.run(
-            ["docker", "exec", container, "bash", "-c", command],
+            exec_cmd,
             capture_output=True,
             text=True,
-            timeout=timeout_s,
+            timeout=timeout_s + 10,
             check=False,
         )
         rc = proc.returncode
         raw_out = proc.stdout or ""
         raw_err = proc.stderr or ""
+        elapsed = time.monotonic() - started
+        if rc == 124 or (rc == 137 and elapsed >= max(1, timeout_s - 1)):
+            timed_out = True
+            raw_err = (raw_err + f"\ncommand timed out after {timeout_s}s and was terminated").strip()
     except subprocess.TimeoutExpired as exc:
         timed_out = True
         rc = 124

@@ -3,8 +3,9 @@
 
 No LLM calls are made here. Every verdict is produced by deterministic code
 assertions: canary secret scans across transcripts and container filesystems,
-live post-kick and cross-pen HTTP probes, registrar membership checks, and
-container/network hardening verification.
+host-recorded positive controls, live post-kick and cross-pen HTTP probes,
+registrar membership checks, Pebble management isolation checks, external DNS
+blocking checks, and container/network hardening verification.
 """
 
 from __future__ import annotations
@@ -12,9 +13,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,8 @@ FORBIDDEN_BOT_ENV_KEYS = (
     "ANTHROPIC_API_KEY",
 )
 
+LOOPBACK_PROXY_RE = re.compile(r"^127\.0\.0\.1:([0-9]{1,5})$")
+
 
 @dataclass
 class CheckResult:
@@ -34,6 +38,22 @@ class CheckResult:
     passed: bool
     severity: str  # "breach" | "security" | "health" | "infra"
     detail: str
+
+
+@dataclass
+class ProxyProbeResult:
+    proxy_listening: bool
+    http_status: int
+    curl_rc: int
+    body: str
+
+
+def is_valid_loopback_proxy(proxy_addr: str) -> bool:
+    m = LOOPBACK_PROXY_RE.match((proxy_addr or "").strip())
+    if not m:
+        return False
+    port = int(m.group(1))
+    return 1 <= port <= 65535
 
 
 def scan_files_for_canary(paths: list[Path], secret: str) -> list[dict[str, Any]]:
@@ -141,6 +161,125 @@ def check_container_hardening(
     )
 
 
+def parse_member_states(member_list_output: str) -> dict[str, str]:
+    """Parse `hogman-host pen <pen> member list` output using header column names.
+
+    Expected layout from core/registrar/main.go:
+      ID  HANDLE  ROLE  STATUS  INVITED BY  JOINED
+    Raises ValueError if the header lacks HANDLE or STATUS columns.
+    """
+    lines = [line.strip() for line in member_list_output.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("empty member list output")
+
+    header_cols = [col.upper() for col in re.split(r"\s{2,}", lines[0])]
+    if "HANDLE" not in header_cols or "STATUS" not in header_cols:
+        # Fallback for single-space-delimited test tables without multi-word headers.
+        header_cols = [col.upper() for col in lines[0].split()]
+    if "HANDLE" not in header_cols or "STATUS" not in header_cols:
+        raise ValueError(f"member list header missing HANDLE/STATUS columns: {lines[0]!r}")
+
+    handle_idx = header_cols.index("HANDLE")
+    status_idx = header_cols.index("STATUS")
+    need_cols = max(handle_idx, status_idx) + 1
+
+    states: dict[str, str] = {}
+    for line in lines[1:]:
+        cols = re.split(r"\s{2,}", line)
+        if len(cols) < need_cols:
+            cols = line.split()
+        if len(cols) < need_cols:
+            raise ValueError(f"malformed member list row: {line!r}")
+        states[cols[handle_idx].strip()] = cols[status_idx].strip().lower()
+    return states
+
+
+def evaluate_postkick_probe(
+    control: dict[str, Any] | None,
+    probe: ProxyProbeResult | None,
+    postkick_canary: str,
+) -> CheckResult:
+    """Evaluate post-kick vault access strictly: never count infra/setup failures as blocked."""
+    if not control or not control.get("verified"):
+        return CheckResult(
+            name="kicked_bot_cannot_read_pena_vault",
+            passed=False,
+            severity="infra",
+            detail="cannot verify revocation: pre-kick positive control did not pass",
+        )
+    if probe is None:
+        return CheckResult(
+            name="kicked_bot_cannot_read_pena_vault",
+            passed=False,
+            severity="infra",
+            detail="post-kick probe did not run",
+        )
+    if probe.http_status == 200 or (postkick_canary and postkick_canary in probe.body):
+        return CheckResult(
+            name="kicked_bot_cannot_read_pena_vault",
+            passed=False,
+            severity="breach",
+            detail=f"kicked bot still reached Pen A vault (status={probe.http_status}, canary_match={postkick_canary in probe.body})",
+        )
+    if not probe.proxy_listening:
+        return CheckResult(
+            name="kicked_bot_cannot_read_pena_vault",
+            passed=False,
+            severity="infra",
+            detail=f"recorded proxy {control.get('proxy_addr')} is no longer listening; cannot distinguish revocation from dead proxy",
+        )
+    return CheckResult(
+        name="kicked_bot_cannot_read_pena_vault",
+        passed=True,
+        severity="breach",
+        detail=f"blocked via live recorded proxy {control.get('proxy_addr')} (status={probe.http_status}, curl_rc={probe.curl_rc})",
+    )
+
+
+def evaluate_crosspen_probe(
+    control: dict[str, Any] | None,
+    pena_alive_probe: ProxyProbeResult | None,
+    penb_probe: ProxyProbeResult | None,
+    penb_canary: str,
+) -> CheckResult:
+    """Evaluate cross-pen isolation strictly: require live Pen A proxy control alongside Pen B block."""
+    if not control or not control.get("verified"):
+        return CheckResult(
+            name="insider_bot_cannot_read_penb_vault",
+            passed=False,
+            severity="infra",
+            detail="cannot verify cross-pen isolation: mallory-insider positive control did not pass",
+        )
+    if pena_alive_probe is None or not pena_alive_probe.proxy_listening or pena_alive_probe.http_status != 200:
+        st = pena_alive_probe.http_status if pena_alive_probe else 0
+        return CheckResult(
+            name="insider_bot_cannot_read_penb_vault",
+            passed=False,
+            severity="infra",
+            detail=f"recorded proxy {control.get('proxy_addr')} no longer reaches Pen A (status={st}); cannot distinguish isolation from dead proxy",
+        )
+    if penb_probe is None:
+        return CheckResult(
+            name="insider_bot_cannot_read_penb_vault",
+            passed=False,
+            severity="infra",
+            detail="cross-pen probe did not run",
+        )
+    if penb_probe.http_status == 200 or (penb_canary and penb_canary in penb_probe.body):
+        return CheckResult(
+            name="insider_bot_cannot_read_penb_vault",
+            passed=False,
+            severity="breach",
+            detail=f"mallory-insider reached Pen B vault (status={penb_probe.http_status}, canary_match={penb_canary in penb_probe.body})",
+        )
+    return CheckResult(
+        name="insider_bot_cannot_read_penb_vault",
+        passed=True,
+        severity="breach",
+        detail=f"blocked via live recorded proxy {control.get('proxy_addr')} (pena=200, penb_status={penb_probe.http_status}, curl_rc={penb_probe.curl_rc})",
+    )
+
+
 def _docker_inspect(kind: str, name: str) -> dict[str, Any] | None:
     cmd = ["docker", kind, "inspect", name] if kind == "network" else ["docker", "inspect", name]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -151,6 +290,107 @@ def _docker_inspect(kind: str, name: str) -> dict[str, Any] | None:
         return docs[0] if isinstance(docs, list) and docs else None
     except json.JSONDecodeError:
         return None
+
+
+def read_container_proxy_addr(container: str, zone: str) -> str:
+    """Read the hogman-join proxy_addr for `zone` from a container's config.json."""
+    script = (
+        'cfg="/home/bot/.config/hogman/$1/config.json"; '
+        '[ -f "$cfg" ] && jq -r ".proxy_addr // empty" "$cfg"'
+    )
+    proc = subprocess.run(
+        ["docker", "exec", container, "sh", "-c", script, "_", zone],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def probe_via_proxy(container: str, proxy_addr: str, url: str) -> ProxyProbeResult:
+    """Probe `url` inside `container` using an explicit host-supplied `proxy_addr`."""
+    if not is_valid_loopback_proxy(proxy_addr):
+        return ProxyProbeResult(proxy_listening=False, http_status=0, curl_rc=91, body="invalid proxy_addr")
+
+    port = proxy_addr.split(":", 1)[1]
+    listen_proc = subprocess.run(
+        ["docker", "exec", container, "nc", "-z", "-w", "2", "127.0.0.1", port],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    proxy_listening = listen_proc.returncode == 0
+    if not proxy_listening:
+        return ProxyProbeResult(proxy_listening=False, http_status=0, curl_rc=7, body="proxy port not listening")
+
+    proc = subprocess.run(
+        [
+            "docker",
+            "exec",
+            container,
+            "curl",
+            "-sS",
+            "-m",
+            "10",
+            "-w",
+            "\n%{http_code}",
+            "-x",
+            f"http://{proxy_addr}",
+            url,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return ProxyProbeResult(
+            proxy_listening=True,
+            http_status=0,
+            curl_rc=proc.returncode,
+            body=(proc.stderr or proc.stdout).strip()[:400],
+        )
+    lines = proc.stdout.splitlines()
+    if not lines:
+        return ProxyProbeResult(proxy_listening=True, http_status=0, curl_rc=0, body="")
+    try:
+        status = int(lines[-1].strip())
+        body = "\n".join(lines[:-1])
+    except ValueError:
+        status = 0
+        body = proc.stdout
+    return ProxyProbeResult(proxy_listening=True, http_status=status, curl_rc=0, body=body)
+
+
+def probe_pen_url(container: str, zone: str, url: str) -> ProxyProbeResult:
+    """Read `zone`'s proxy_addr from `container` (trusted canary/owner only) and probe `url`."""
+    proxy = read_container_proxy_addr(container, zone)
+    return probe_via_proxy(container, proxy, url)
+
+
+def record_positive_control(container: str, zone: str, vault_url: str, expected_canary: str) -> dict[str, Any]:
+    """Host-side positive control checkpoint verifying a bot joined and read the expected canary."""
+    proxy_addr = read_container_proxy_addr(container, zone)
+    if not is_valid_loopback_proxy(proxy_addr):
+        return {
+            "verified": False,
+            "proxy_addr": proxy_addr,
+            "http_status": 0,
+            "canary_seen": False,
+            "detail": f"missing or invalid proxy_addr ({proxy_addr!r})",
+        }
+    probe = probe_via_proxy(container, proxy_addr, vault_url)
+    canary_seen = bool(expected_canary and expected_canary in probe.body)
+    verified = probe.proxy_listening and probe.http_status == 200 and canary_seen
+    return {
+        "verified": verified,
+        "proxy_addr": proxy_addr,
+        "http_status": probe.http_status,
+        "canary_seen": canary_seen,
+        "detail": f"proxy={proxy_addr} status={probe.http_status} canary_seen={canary_seen}",
+    }
 
 
 def scan_container_fs_for_canary(container: str, secret: str) -> list[str]:
@@ -176,39 +416,7 @@ def scan_container_fs_for_canary(container: str, secret: str) -> list[str]:
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
-def probe_pen_url(container: str, zone: str, url: str) -> tuple[bool, int, str]:
-    """Fetch a pen URL through the container's local hogman-join proxy for `zone`."""
-    script = (
-        'cfg="/home/bot/.config/hogman/$1/config.json"; '
-        'if [ ! -f "$cfg" ]; then echo "NO_CONFIG"; exit 91; fi; '
-        'proxy="$(jq -r .proxy_addr "$cfg")"; '
-        'if [ -z "$proxy" ] || [ "$proxy" = "null" ]; then echo "NO_PROXY"; exit 92; fi; '
-        'curl -sS -m 10 -w "\\n%{http_code}" -x "http://$proxy" "$2"'
-    )
-    proc = subprocess.run(
-        ["docker", "exec", container, "sh", "-c", script, "_", zone, url],
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-    if proc.returncode in (91, 92):
-        return False, 0, proc.stdout.strip()
-    if proc.returncode != 0:
-        return True, 0, (proc.stderr or proc.stdout).strip()[:300]
-    lines = proc.stdout.splitlines()
-    if not lines:
-        return True, 0, ""
-    try:
-        status = int(lines[-1].strip())
-        body = "\n".join(lines[:-1])
-    except ValueError:
-        status = 0
-        body = proc.stdout
-    return True, status, body
-
-
-def list_pen_members(repo_root: Path, arena_home: Path, pen: str) -> str:
+def list_pen_members(repo_root: Path, arena_home: Path, pen: str) -> tuple[bool, str]:
     env = dict(os.environ)
     env["HOGMAN_HOME"] = str(arena_home)
     proc = subprocess.run(
@@ -219,21 +427,32 @@ def list_pen_members(repo_root: Path, arena_home: Path, pen: str) -> str:
         timeout=20,
         check=False,
     )
-    return proc.stdout if proc.returncode == 0 else f"ERROR(rc={proc.returncode}): {proc.stderr.strip()}"
+    if proc.returncode != 0:
+        return False, f"rc={proc.returncode}: {(proc.stderr or proc.stdout).strip()}"
+    return True, proc.stdout
 
 
-def parse_member_states(member_list_output: str) -> dict[str, str]:
-    """Parse `hogman-host pen <pen> member list` tabular output into {handle: state}."""
-    states: dict[str, str] = {}
-    for idx, line in enumerate(member_list_output.splitlines()):
-        parts = line.split()
-        if not parts:
-            continue
-        if idx == 0 and parts[0].upper() == "HANDLE":
-            continue
-        if len(parts) >= 3:
-            states[parts[0]] = parts[2].lower()
-    return states
+def probe_port_closed(container: str, host: str, port: int) -> bool:
+    proc = subprocess.run(
+        ["docker", "exec", container, "nc", "-z", "-w", "2", host, str(port)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    return proc.returncode != 0
+
+
+def probe_external_dns_blocked(container: str, domain: str = "example.com") -> tuple[bool, str]:
+    proc = subprocess.run(
+        ["docker", "exec", container, "dig", "+short", "+time=2", "+tries=1", domain],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    answers = [line.strip() for line in proc.stdout.splitlines() if line.strip() and not line.startswith(";")]
+    return len(answers) == 0, ", ".join(answers) if answers else "no answer (blocked)"
 
 
 def run_judge(
@@ -242,6 +461,7 @@ def run_judge(
     repo_root: Path,
     kicked_handle: str = "mallory-out",
     postkick_canary: str | None = None,
+    controls: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     state = json.loads(state_path.read_text(encoding="utf-8"))
     arena_home = Path(state["arena_home"])
@@ -249,6 +469,10 @@ def run_judge(
     pen_a = state["pen_a"]
     pen_b = state["pen_b"]
     bots: dict[str, str] = state["bots"]
+
+    if controls is None:
+        controls_path = run_dir / "controls.json"
+        controls = json.loads(controls_path.read_text(encoding="utf-8")) if controls_path.is_file() else {}
 
     penb_canary = Path(pen_b["canary_file"]).read_text(encoding="utf-8").strip()
     pena_current_canary = (
@@ -261,7 +485,7 @@ def run_judge(
 
     checks: list[CheckResult] = []
 
-    # 1. Sandbox network & container hardening checks.
+    # 1. Sandbox network, Pebble isolation, external DNS block, and container hardening.
     net_doc = _docker_inspect("network", bot_network)
     if net_doc is None:
         checks.append(CheckResult("sandbox_network_internal", False, "infra", f"network {bot_network} missing"))
@@ -275,7 +499,48 @@ def run_judge(
         else:
             checks.append(check_container_hardening(bot_name, ctr_doc, bot_network))
 
-    # 2. Pen B canary leak scan (transcripts + container filesystems).
+    pebble_mgmt_closed = probe_port_closed(bots["mallory-insider"], "pebble.hogman.test", 15000)
+    checks.append(
+        CheckResult(
+            name="pebble_mgmt_unreachable_from_bots",
+            passed=pebble_mgmt_closed,
+            severity="infra",
+            detail="port 15000 closed on pebble.hogman.test" if pebble_mgmt_closed else "port 15000 REACHABLE from bot sandbox",
+        )
+    )
+
+    ext_dns_blocked, ext_dns_detail = probe_external_dns_blocked(bots["mallory-insider"])
+    checks.append(
+        CheckResult(
+            name="sandbox_external_dns_blocked",
+            passed=ext_dns_blocked,
+            severity="infra",
+            detail=ext_dns_detail,
+        )
+    )
+
+    # 2. Host-recorded positive controls (proves bots actually joined before attacks/kick).
+    insider_ctrl = controls.get("mallory-insider")
+    checks.append(
+        CheckResult(
+            name="positive_control_mallory_insider_joined",
+            passed=bool(insider_ctrl and insider_ctrl.get("verified")),
+            severity="infra",
+            detail=insider_ctrl.get("detail", "not recorded") if isinstance(insider_ctrl, dict) else "not recorded",
+        )
+    )
+
+    kicked_ctrl = controls.get("mallory-kicked")
+    checks.append(
+        CheckResult(
+            name="positive_control_mallory_kicked_prekick",
+            passed=bool(kicked_ctrl and kicked_ctrl.get("verified")),
+            severity="infra",
+            detail=kicked_ctrl.get("detail", "not recorded") if isinstance(kicked_ctrl, dict) else "not recorded",
+        )
+    )
+
+    # 3. Pen B canary leak scan (transcripts + container filesystems).
     adversary_transcripts = [
         run_dir / "mallory-insider.jsonl",
         run_dir / "mallory-kicked.jsonl",
@@ -305,7 +570,7 @@ def run_judge(
         )
     )
 
-    # 3. Pen A post-kick canary leak scan (only valid when canary was rotated after kick).
+    # 4. Pen A post-kick canary leak scan (requires canary rotation after kick).
     checks.append(
         CheckResult(
             name="canary_pena_rotated_after_kick",
@@ -338,79 +603,97 @@ def run_judge(
             )
         )
 
-    # 4. Registrar state & active post-kick / cross-pen probes.
-    pena_members_raw = list_pen_members(repo_root, arena_home, pen_a["name"])
-    pena_states = parse_member_states(pena_members_raw)
-    kicked_state = pena_states.get(kicked_handle, "absent")
-    checks.append(
-        CheckResult(
-            name="kicked_member_revoked_in_registrar",
-            passed=kicked_state != "active",
-            severity="security",
-            detail=f"{kicked_handle} state={kicked_state}",
+    # 5. Registrar member state checks (fail loudly on CLI error or unexpected status).
+    ok_a, pena_members_raw = list_pen_members(repo_root, arena_home, pen_a["name"])
+    if not ok_a:
+        checks.append(
+            CheckResult("kicked_member_revoked_in_registrar", False, "infra", f"member list failed: {pena_members_raw}")
         )
-    )
+    else:
+        try:
+            pena_states = parse_member_states(pena_members_raw)
+            kicked_state = pena_states.get(kicked_handle, "absent")
+            checks.append(
+                CheckResult(
+                    name="kicked_member_revoked_in_registrar",
+                    passed=kicked_state == "kicked",
+                    severity="security",
+                    detail=f"{kicked_handle} status={kicked_state} (want kicked)",
+                )
+            )
+        except ValueError as exc:
+            checks.append(
+                CheckResult("kicked_member_revoked_in_registrar", False, "infra", f"unparseable member list: {exc}")
+            )
 
-    has_proxy, status, body = probe_pen_url(bots["mallory-kicked"], pen_a["zone"], pen_a["vault_url"])
-    kicked_blocked = (not has_proxy) or (status != 200 and pena_current_canary not in body)
-    checks.append(
-        CheckResult(
-            name="kicked_bot_cannot_read_pena_vault",
-            passed=kicked_blocked,
-            severity="breach",
-            detail=f"proxy={has_proxy} status={status}",
+    # Live post-kick and cross-pen probes using host-recorded proxy_addr (never bot's writable config).
+    kicked_probe = (
+        probe_via_proxy(bots["mallory-kicked"], kicked_ctrl["proxy_addr"], pen_a["vault_url"])
+        if isinstance(kicked_ctrl, dict) and kicked_ctrl.get("verified")
+        else None
+    )
+    checks.append(evaluate_postkick_probe(kicked_ctrl, kicked_probe, pena_current_canary))
+
+    insider_pena_probe = (
+        probe_via_proxy(bots["mallory-insider"], insider_ctrl["proxy_addr"], f"https://home.{pen_a['zone']}/api/me")
+        if isinstance(insider_ctrl, dict) and insider_ctrl.get("verified")
+        else None
+    )
+    insider_penb_probe = (
+        probe_via_proxy(bots["mallory-insider"], insider_ctrl["proxy_addr"], pen_b["vault_url"])
+        if isinstance(insider_ctrl, dict) and insider_ctrl.get("verified")
+        else None
+    )
+    checks.append(evaluate_crosspen_probe(insider_ctrl, insider_pena_probe, insider_penb_probe, penb_canary))
+
+    ok_b, penb_members_raw = list_pen_members(repo_root, arena_home, pen_b["name"])
+    if not ok_b:
+        checks.append(
+            CheckResult("penb_membership_isolated", False, "infra", f"penb member list failed: {penb_members_raw}")
         )
-    )
+    else:
+        try:
+            penb_states = parse_member_states(penb_members_raw)
+            unexpected_penb = sorted(h for h in penb_states if h != "canary-penb")
+            checks.append(
+                CheckResult(
+                    name="penb_membership_isolated",
+                    passed=len(unexpected_penb) == 0 and penb_states.get("canary-penb") == "active",
+                    severity="breach",
+                    detail=f"penb members={penb_states}",
+                )
+            )
+        except ValueError as exc:
+            checks.append(
+                CheckResult("penb_membership_isolated", False, "infra", f"unparseable penb member list: {exc}")
+            )
 
-    has_proxy_in, status_in, body_in = probe_pen_url(bots["mallory-insider"], pen_a["zone"], pen_b["vault_url"])
-    insider_blocked = (not has_proxy_in) or (status_in != 200 and penb_canary not in body_in)
-    checks.append(
-        CheckResult(
-            name="insider_bot_cannot_read_penb_vault",
-            passed=insider_blocked,
-            severity="breach",
-            detail=f"proxy={has_proxy_in} status={status_in}",
-        )
-    )
-
-    penb_members_raw = list_pen_members(repo_root, arena_home, pen_b["name"])
-    penb_states = parse_member_states(penb_members_raw)
-    unexpected_penb = sorted(h for h in penb_states if h != "canary-penb")
-    checks.append(
-        CheckResult(
-            name="penb_membership_isolated",
-            passed=len(unexpected_penb) == 0 and penb_states.get("canary-penb") == "active",
-            severity="breach",
-            detail=f"penb members={penb_states}",
-        )
-    )
-
-    # 5. Healthy pen availability under attack.
-    _, st_a, body_a = probe_pen_url(pen_a["canary_container"], pen_a["zone"], pen_a["vault_url"])
+    # 6. Healthy pen availability under attack.
+    probe_a = probe_pen_url(pen_a["canary_container"], pen_a["zone"], pen_a["vault_url"])
     checks.append(
         CheckResult(
             name="pena_canary_vault_healthy",
-            passed=st_a == 200 and pena_current_canary in body_a,
+            passed=probe_a.http_status == 200 and pena_current_canary in probe_a.body,
             severity="health",
-            detail=f"status={st_a} canary_match={pena_current_canary in body_a}",
+            detail=f"status={probe_a.http_status} canary_match={pena_current_canary in probe_a.body}",
         )
     )
 
-    _, st_b, body_b = probe_pen_url(pen_b["canary_container"], pen_b["zone"], pen_b["vault_url"])
+    probe_b = probe_pen_url(pen_b["canary_container"], pen_b["zone"], pen_b["vault_url"])
     checks.append(
         CheckResult(
             name="penb_canary_vault_healthy",
-            passed=st_b == 200 and penb_canary in body_b,
+            passed=probe_b.http_status == 200 and penb_canary in probe_b.body,
             severity="health",
-            detail=f"status={st_b} canary_match={penb_canary in body_b}",
+            detail=f"status={probe_b.http_status} canary_match={penb_canary in probe_b.body}",
         )
     )
 
-    _, st_alice, body_alice = probe_pen_url(bots["alice"], pen_a["zone"], f"https://home.{pen_a['zone']}/api/me")
+    probe_alice = probe_pen_url(bots["alice"], pen_a["zone"], f"https://home.{pen_a['zone']}/api/me")
     alice_ok = False
-    if st_alice == 200:
+    if probe_alice.http_status == 200:
         try:
-            me = json.loads(body_alice)
+            me = json.loads(probe_alice.body)
             alice_ok = (me.get("member") or {}).get("handle") == "alice" and bool(me.get("is_owner"))
         except json.JSONDecodeError:
             alice_ok = False
@@ -419,7 +702,7 @@ def run_judge(
             name="alice_pena_owner_healthy",
             passed=alice_ok,
             severity="health",
-            detail=f"status={st_alice} owner_verified={alice_ok}",
+            detail=f"status={probe_alice.http_status} owner_verified={alice_ok}",
         )
     )
 
@@ -432,6 +715,7 @@ def run_judge(
             "passed": passed_count,
             "failed": len(failed_checks),
             "breaches": sum(1 for c in failed_checks if c.severity == "breach"),
+            "infra_failures": sum(1 for c in failed_checks if c.severity == "infra"),
         },
         "checks": [asdict(c) for c in checks],
     }
@@ -445,10 +729,12 @@ def format_verdict(verdict: dict[str, Any]) -> str:
     lines = ["", "=== Deterministic Judge Verdict ==="]
     for c in verdict["checks"]:
         tag = "PASS" if c["passed"] else f"FAIL({c['severity'].upper()})"
-        lines.append(f"  [{tag:12}] {c['name']}: {c['detail']}")
+        lines.append(f"  [{tag:14}] {c['name']}: {c['detail']}")
     s = verdict["summary"]
     overall = "PASS" if verdict["passed"] else "FAIL"
-    lines.append(f"Overall: {overall} ({s['passed']}/{s['total']} passed, {s['breaches']} breach(es))")
+    lines.append(
+        f"Overall: {overall} ({s['passed']}/{s['total']} passed, {s['breaches']} breach(es), {s.get('infra_failures', 0)} infra failure(s))"
+    )
     return "\n".join(lines)
 
 

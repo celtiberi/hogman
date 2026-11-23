@@ -48,7 +48,17 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+check_not_production() {
+  if command -v tailscale >/dev/null 2>&1 || [ -S /var/run/tailscale/tailscaled.sock ]; then
+    die "Tailscale detected on this host; refusing to run Bot Arena outside a disposable sandbox droplet"
+  fi
+  if [ -d /opt/hogman ]; then
+    die "/opt/hogman detected; refusing to run Bot Arena on a Hogman host"
+  fi
+}
+
 check_prereqs() {
+  check_not_production
   [ "$(uname -s)" = Linux ] || die "arena.sh requires Linux (Unix socket mounts for challenge-dns do not work on macOS Docker Desktop)"
   need_cmd docker
   need_cmd jq
@@ -168,6 +178,10 @@ start_canary() {
 }
 
 cmd_down() {
+  check_not_production
+  if [ ! -f "$ARENA_HOME/.arena-marker" ]; then
+    die "no arena marker at ${ARENA_HOME}/.arena-marker; refusing to touch hogman-front or pens that were not created by arena.sh"
+  fi
   log "Tearing down arena containers and state (${ARENA_HOME})"
   local c p
   for c in "${BOT_NAMES[@]}"; do
@@ -199,11 +213,19 @@ cmd_down() {
 
 cmd_up() {
   check_prereqs
-  if [ -f "$ARENA_HOME/arena-state.json" ]; then
+  if [ -f "$ARENA_HOME/arena-state.json" ] || [ -f "$ARENA_HOME/.arena-marker" ]; then
     die "arena already appears initialized at ${ARENA_HOME}; run 'arena.sh reset' or 'arena.sh down' first"
+  fi
+  if [ -n "$(docker ps -aq --filter 'name=^/hogman-front-front-1$')" ]; then
+    die "hogman-front-front-1 already exists outside this arena; refusing to touch an existing Hogman host"
+  fi
+  if docker network inspect hogman-front >/dev/null 2>&1; then
+    die "Docker network hogman-front already exists outside this arena; refusing to reuse it"
   fi
 
   mkdir -p "$ARENA_HOME/src"
+  : > "$ARENA_HOME/.arena-marker"
+  chmod 0600 "$ARENA_HOME/.arena-marker"
   rsync -a --exclude data --exclude .env "$REPO/core/" "$ARENA_HOME/src/"
 
   log "Initializing Hogman front door (test mode)"
@@ -244,7 +266,10 @@ cmd_up() {
   openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
     -keyout "$acme/certs/server.key" -out "$acme/certs/server.csr" \
     -subj "/CN=pebble.hogman.test" >/dev/null 2>&1
-  printf 'basicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:pebble,DNS:pebble.hogman.test\n' \
+  # Bind Pebble's management API strictly to loopback (127.0.0.1:15000) so
+  # bots on hogman-arena-bots can never reach /intermediate-keys/0 and mint
+  # arbitrary certificates trusted by the arena CA bundle.
+  printf 'basicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:pebble,DNS:pebble.hogman.test,IP:127.0.0.1\n' \
     > "$acme/certs/ext.cnf"
   openssl x509 -req -in "$acme/certs/server.csr" \
     -CA "$acme/certs/ca.crt" -CAkey "$acme/certs/ca.key" -CAcreateserial \
@@ -255,7 +280,7 @@ cmd_up() {
 {
   "pebble": {
     "listenAddress": "0.0.0.0:14000",
-    "managementListenAddress": "0.0.0.0:15000",
+    "managementListenAddress": "127.0.0.1:15000",
     "certificate": "/certs/server.crt",
     "privateKey": "/certs/server.key",
     "httpPort": 5002,
@@ -277,8 +302,8 @@ JSON
     nicolaka/netshoot:v0.14 curl -sf --cacert /c/ca.crt https://pebble:14000/dir \
     || die "Pebble directory did not come up"
 
-  docker run --rm --network hogman-front -v "$acme/certs:/c:ro" \
-    nicolaka/netshoot:v0.14 curl -sf --cacert /c/ca.crt https://pebble:15000/roots/0 \
+  docker run --rm --network "container:${PEBBLE_CTR}" -v "$acme/certs:/c:ro" \
+    nicolaka/netshoot:v0.14 curl -sf --cacert /c/ca.crt https://127.0.0.1:15000/roots/0 \
     > "$acme/issued-root.crt"
   grep -q 'BEGIN CERTIFICATE' "$acme/issued-root.crt" || die "failed to fetch Pebble issuing root"
 

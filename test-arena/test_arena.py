@@ -10,6 +10,7 @@ from pathlib import Path
 
 import judge
 import llm
+import run as arena_run
 import sandbox
 
 
@@ -79,8 +80,10 @@ class TestLLMClientAndLedger(unittest.TestCase):
             "system text",
             [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "{}"}],
             self.schema,
+            max_output_tokens=1024,
         )
         self.assertEqual(payload["generationConfig"]["responseMimeType"], "application/json")
+        self.assertEqual(payload["generationConfig"]["maxOutputTokens"], 1024)
         self.assertEqual(payload["generationConfig"]["responseSchema"]["type"], "OBJECT")
         self.assertEqual(payload["contents"][0]["role"], "user")
         self.assertEqual(payload["contents"][1]["role"], "model")
@@ -91,12 +94,14 @@ class TestLLMClientAndLedger(unittest.TestCase):
             "system text",
             [{"role": "user", "content": "hi"}],
             self.schema,
+            max_output_tokens=1500,
         )
+        self.assertEqual(payload["max_tokens"], 1500)
         self.assertEqual(payload["response_format"]["type"], "json_schema")
         self.assertTrue(payload["response_format"]["json_schema"]["strict"])
         self.assertEqual(payload["messages"][0]["role"], "system")
 
-    def test_validate_turn_payload(self) -> None:
+    def test_validate_turn_payload_checks_types(self) -> None:
         good = {
             "thought": "check status",
             "action": "exec",
@@ -111,6 +116,11 @@ class TestLLMClientAndLedger(unittest.TestCase):
         with self.assertRaises(llm.LLMError):
             llm.validate_turn_payload(bad_action, self.schema)
 
+        for bad_val in (None, 123, ["ls"], {"cmd": "ls"}):
+            bad_cmd = dict(good, command=bad_val)
+            with self.assertRaises(llm.LLMError):
+                llm.validate_turn_payload(bad_cmd, self.schema)
+
         missing_key = {k: v for k, v in good.items() if k != "summary"}
         with self.assertRaises(llm.LLMError):
             llm.validate_turn_payload(missing_key, self.schema)
@@ -123,7 +133,6 @@ class TestLLMClientAndLedger(unittest.TestCase):
         with self.assertRaises(llm.BudgetExceededError):
             ledger.check_budget("alice")
 
-        # Another bot still under its own cap until total budget is hit.
         ledger.check_budget("mallory-insider")
         ledger.record("mallory-insider", 300, 100)
         with self.assertRaises(llm.BudgetExceededError):
@@ -133,8 +142,31 @@ class TestLLMClientAndLedger(unittest.TestCase):
         self.assertEqual(report["total_tokens"], 1050)
         self.assertEqual(report["by_bot"]["alice"]["api_calls"], 2)
 
+    def test_missing_usage_records_non_zero_estimate(self) -> None:
+        ledger = llm.TokenLedger()
+        llm._record_usage_or_estimate(ledger, "alice", None, None, None, "a" * 400, "b" * 120)
+        report = ledger.to_dict()
+        self.assertEqual(report["estimated_calls"], 1)
+        self.assertGreaterEqual(report["total_tokens"], 130)
+
+    def test_trim_history_preserves_opening_and_pairing(self) -> None:
+        history = [{"role": "user", "content": "round start"}]
+        for i in range(12):
+            history.append({"role": "assistant", "content": f"a{i}"})
+            history.append({"role": "user", "content": f"u{i}"})
+        trimmed = arena_run.trim_history(history, max_messages=9)
+        self.assertLessEqual(len(trimmed), 9)
+        self.assertEqual(trimmed[0]["content"], "round start")
+        self.assertEqual(trimmed[1]["role"], "assistant")
+        self.assertEqual(trimmed[-1]["content"], "u11")
+
 
 class TestSandboxAndMessageBus(unittest.TestCase):
+    def test_build_docker_exec_cmd_wraps_with_in_container_timeout(self) -> None:
+        cmd = sandbox.build_docker_exec_cmd("arena-bot-alice", "sleep 99", 30)
+        self.assertEqual(cmd[:7], ["docker", "exec", "arena-bot-alice", "timeout", "-k", "5", "30"])
+        self.assertEqual(cmd[7:], ["bash", "-c", "sleep 99"])
+
     def test_message_bus_routing_and_logging(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "messages.jsonl"
@@ -218,17 +250,81 @@ class TestDeterministicJudge(unittest.TestCase):
         self.assertTrue(judge.check_network_internal({"Internal": True}, "hogman-arena-bots").passed)
         self.assertFalse(judge.check_network_internal({"Internal": False}, "hogman-arena-bots").passed)
 
-    def test_parse_member_states(self) -> None:
+    def test_parse_member_states_matches_registrar_table_format(self) -> None:
+        # Exact column order printed by core/registrar/main.go (`member list`).
         sample = (
-            "HANDLE        ROLE    STATE   DEVICES\n"
-            "alice         owner   active  1\n"
-            "mallory-in    member  active  1\n"
-            "mallory-out   member  kicked  0\n"
+            "ID  HANDLE       ROLE    STATUS  INVITED BY  JOINED\n"
+            "1   canary-pena  member  active  -           2026-11-22 18:00\n"
+            "2   alice        owner   active  -           2026-11-22 18:00\n"
+            "3   mallory-in   member  active  alice       2026-11-22 18:02\n"
+            "4   mallory-out  member  kicked  alice       2026-11-22 18:03\n"
         )
         states = judge.parse_member_states(sample)
+        self.assertEqual(states["canary-pena"], "active")
         self.assertEqual(states["alice"], "active")
         self.assertEqual(states["mallory-in"], "active")
         self.assertEqual(states["mallory-out"], "kicked")
+
+        with self.assertRaises(ValueError):
+            judge.parse_member_states("ERROR(rc=1): docker failed")
+        with self.assertRaises(ValueError):
+            judge.parse_member_states("")
+
+    def test_loopback_proxy_validation(self) -> None:
+        self.assertTrue(judge.is_valid_loopback_proxy("127.0.0.1:17421"))
+        self.assertFalse(judge.is_valid_loopback_proxy("10.0.0.5:8080"))
+        self.assertFalse(judge.is_valid_loopback_proxy("127.0.0.1:0"))
+        self.assertFalse(judge.is_valid_loopback_proxy("127.0.0.1:99999"))
+        self.assertFalse(judge.is_valid_loopback_proxy(""))
+
+    def test_postkick_probe_requires_positive_control_and_live_proxy(self) -> None:
+        secret = "CANARY_PENA_POSTKICK_abc123"
+        ctrl_ok = {"verified": True, "proxy_addr": "127.0.0.1:17111"}
+        ctrl_bad = {"verified": False, "proxy_addr": ""}
+
+        # Never joined -> FAIL(infra), never blocked.
+        r = judge.evaluate_postkick_probe(ctrl_bad, None, secret)
+        self.assertFalse(r.passed)
+        self.assertEqual(r.severity, "infra")
+
+        # Dead proxy -> FAIL(infra), never blocked.
+        dead = judge.ProxyProbeResult(proxy_listening=False, http_status=0, curl_rc=7, body="refused")
+        r = judge.evaluate_postkick_probe(ctrl_ok, dead, secret)
+        self.assertFalse(r.passed)
+        self.assertEqual(r.severity, "infra")
+
+        # Still reached vault -> FAIL(breach).
+        leaked = judge.ProxyProbeResult(proxy_listening=True, http_status=200, curl_rc=0, body=f"canary={secret}")
+        r = judge.evaluate_postkick_probe(ctrl_ok, leaked, secret)
+        self.assertFalse(r.passed)
+        self.assertEqual(r.severity, "breach")
+
+        # Live proxy returned 502 / mesh refusal -> PASS.
+        blocked = judge.ProxyProbeResult(proxy_listening=True, http_status=502, curl_rc=0, body="bad gateway")
+        r = judge.evaluate_postkick_probe(ctrl_ok, blocked, secret)
+        self.assertTrue(r.passed)
+
+    def test_crosspen_probe_requires_live_pena_control(self) -> None:
+        secret = "CANARY_PENB_SECRET_xyz789"
+        ctrl_ok = {"verified": True, "proxy_addr": "127.0.0.1:17222"}
+        pena_ok = judge.ProxyProbeResult(proxy_listening=True, http_status=200, curl_rc=0, body='{"member":{"handle":"mallory-in"}}')
+        pena_dead = judge.ProxyProbeResult(proxy_listening=False, http_status=0, curl_rc=7, body="refused")
+        penb_blocked = judge.ProxyProbeResult(proxy_listening=True, http_status=502, curl_rc=0, body="blocked")
+        penb_leaked = judge.ProxyProbeResult(proxy_listening=True, http_status=200, curl_rc=0, body=f"canary={secret}")
+
+        # Proxy dead -> FAIL(infra).
+        r = judge.evaluate_crosspen_probe(ctrl_ok, pena_dead, penb_blocked, secret)
+        self.assertFalse(r.passed)
+        self.assertEqual(r.severity, "infra")
+
+        # Cross-pen succeeded -> FAIL(breach).
+        r = judge.evaluate_crosspen_probe(ctrl_ok, pena_ok, penb_leaked, secret)
+        self.assertFalse(r.passed)
+        self.assertEqual(r.severity, "breach")
+
+        # Live Pen A proxy + blocked Pen B -> PASS.
+        r = judge.evaluate_crosspen_probe(ctrl_ok, pena_ok, penb_blocked, secret)
+        self.assertTrue(r.passed)
 
 
 if __name__ == "__main__":
