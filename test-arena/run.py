@@ -29,6 +29,35 @@ from sandbox import MessageBus, exec_in_container, utc_now
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_MAX_HISTORY_CHARS = 24_000
+DEFAULT_MAX_CMD_HISTORY_CHARS = 3_000
+
+
+def _truncate_for_history(text: str, limit: int = DEFAULT_MAX_CMD_HISTORY_CHARS) -> str:
+    """Keep head + tail of bulky command output (e.g. inline SVG QR codes) in LLM history.
+
+    Full stdout/stderr is always written untouched to the audit JSONL transcript on disk.
+    """
+    if not text or len(text) <= limit:
+        return text
+    head = int(limit * 0.7)
+    tail = limit - head
+    omitted = len(text) - limit
+    return f"{text[:head]}\n...[{omitted} chars omitted for context budget]...\n{text[-tail:]}"
+
+
+def _is_schema_validation_error(err: str) -> bool:
+    low = err.lower()
+    return any(
+        tok in low
+        for tok in (
+            "unexpected fields",
+            "missing required fields",
+            "invalid json",
+            "expected json object",
+            "invalid model action",
+            "must be a ",
+        )
+    )
 
 
 def load_prompts(path: Path) -> dict[str, Any]:
@@ -166,26 +195,47 @@ def run_bot_round(
     status = "max_turns_reached"
 
     for turn in range(1, max_turns + 1):
-        window = trim_history(history, round_start_idx=round_start_idx, max_chars=max_history_chars)
-        try:
-            decision = client.next_turn(bot, system_prompt, window, response_schema)
-        except BudgetExceededError as exc:
-            status = "budget_exceeded"
-            summary = str(exc)
-            append_jsonl(
-                transcript_path,
-                {"ts": utc_now(), "round": round_id, "turn": turn, "bot": bot, "event": "budget_exceeded", "error": str(exc)},
-            )
-            print(f"[{round_id}] {bot} halted: {exc}")
-            break
-        except LLMError as exc:
-            status = "llm_error"
-            summary = str(exc)
-            append_jsonl(
-                transcript_path,
-                {"ts": utc_now(), "round": round_id, "turn": turn, "bot": bot, "event": "llm_error", "error": str(exc)},
-            )
-            print(f"[{round_id}] {bot} LLM error: {exc}", file=sys.stderr)
+        decision: dict[str, Any] | None = None
+        halted = False
+        for attempt in range(3):
+            window = trim_history(history, round_start_idx=round_start_idx, max_chars=max_history_chars)
+            try:
+                decision = client.next_turn(bot, system_prompt, window, response_schema)
+                break
+            except BudgetExceededError as exc:
+                status = "budget_exceeded"
+                summary = str(exc)
+                append_jsonl(
+                    transcript_path,
+                    {"ts": utc_now(), "round": round_id, "turn": turn, "bot": bot, "event": "budget_exceeded", "error": str(exc)},
+                )
+                print(f"[{round_id}] {bot} halted: {exc}")
+                halted = True
+                break
+            except LLMError as exc:
+                if _is_schema_validation_error(str(exc)) and attempt < 2:
+                    append_jsonl(
+                        transcript_path,
+                        {"ts": utc_now(), "round": round_id, "turn": turn, "bot": bot, "event": "schema_retry", "attempt": attempt + 1, "error": str(exc)},
+                    )
+                    print(f"[{round_id}] {bot} schema retry ({attempt + 1}/2): {exc}", file=sys.stderr)
+                    history.append(
+                        {
+                            "role": "user",
+                            "content": f"Your last response failed schema validation ({exc}). Retry using only the declared schema fields.",
+                        }
+                    )
+                    continue
+                status = "llm_error"
+                summary = str(exc)
+                append_jsonl(
+                    transcript_path,
+                    {"ts": utc_now(), "round": round_id, "turn": turn, "bot": bot, "event": "llm_error", "error": str(exc)},
+                )
+                print(f"[{round_id}] {bot} LLM error: {exc}", file=sys.stderr)
+                halted = True
+                break
+        if halted or decision is None:
             break
 
         history.append({"role": "assistant", "content": json.dumps(decision)})
@@ -267,8 +317,8 @@ def run_bot_round(
                     "role": "user",
                     "content": (
                         f"exit_code={res.exit_code} timed_out={res.timed_out}\n"
-                        f"stdout:\n{res.stdout or '(empty)'}\n"
-                        f"stderr:\n{res.stderr or '(empty)'}"
+                        f"stdout:\n{_truncate_for_history(res.stdout) or '(empty)'}\n"
+                        f"stderr:\n{_truncate_for_history(res.stderr, 1500) or '(empty)'}"
                         f"{inbox_note}"
                     ),
                 }
@@ -285,8 +335,8 @@ def main() -> int:
     parser.add_argument("--provider", default=os.environ.get("ARENA_LLM_PROVIDER", "gemini"), choices=["gemini", "openai-compat"])
     parser.add_argument("--model", default=os.environ.get("ARENA_LLM_MODEL"))
     parser.add_argument("--base-url", default=os.environ.get("ARENA_LLM_BASE_URL"))
-    parser.add_argument("--max-total-tokens", type=int, default=150_000)
-    parser.add_argument("--max-bot-tokens", type=int, default=60_000)
+    parser.add_argument("--max-total-tokens", type=int, default=300_000)
+    parser.add_argument("--max-bot-tokens", type=int, default=120_000)
     parser.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS)
     parser.add_argument("--max-history-chars", type=int, default=DEFAULT_MAX_HISTORY_CHARS)
     parser.add_argument("--cmd-timeout", type=int, default=45)

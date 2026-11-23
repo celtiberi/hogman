@@ -56,8 +56,8 @@ class BotTokenUsage:
 
 @dataclass
 class TokenLedger:
-    max_total_tokens: int = 150_000
-    max_bot_tokens: int = 60_000
+    max_total_tokens: int = 300_000
+    max_bot_tokens: int = 120_000
     by_bot: dict[str, BotTokenUsage] = field(default_factory=dict)
 
     def _entry(self, bot: str) -> BotTokenUsage:
@@ -191,8 +191,14 @@ def build_openai_compat_payload(
     chat_messages = [{"role": "system", "content": system_prompt}] + [
         {"role": m["role"], "content": m["content"]} for m in messages
     ]
+    base: dict[str, Any] = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_output_tokens,
+        "messages": chat_messages,
+    }
     if use_json_schema:
-        response_format: dict[str, Any] = {
+        base["response_format"] = {
             "type": "json_schema",
             "json_schema": {
                 "name": "arena_bot_turn",
@@ -201,17 +207,31 @@ def build_openai_compat_payload(
             },
         }
     else:
-        response_format = {"type": "json_object"}
-    return {
-        "model": model,
-        "temperature": temperature,
-        "max_tokens": max_output_tokens,
-        "messages": chat_messages,
-        "response_format": response_format,
-    }
+        # Provider does not support response_format=json_schema (e.g. DeepSeek):
+        # translate the declarative schema into a forced OpenAI function call.
+        base["tools"] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "arena_bot_turn",
+                    "description": "Submit the next structured arena action.",
+                    "parameters": response_schema,
+                },
+            }
+        ]
+        base["tool_choice"] = {
+            "type": "function",
+            "function": {"name": "arena_bot_turn"},
+        }
+    return base
 
 
-def validate_turn_payload(data: Any, response_schema: dict[str, Any]) -> dict[str, Any]:
+def validate_turn_payload(
+    data: Any,
+    response_schema: dict[str, Any],
+    *,
+    allow_extra_fields: bool = False,
+) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise LLMError(f"expected JSON object from model, got {type(data).__name__}")
     required = response_schema.get("required", [])
@@ -222,14 +242,16 @@ def validate_turn_payload(data: Any, response_schema: dict[str, Any]) -> dict[st
     props = response_schema.get("properties") or {}
     if response_schema.get("additionalProperties") is False:
         extra = sorted(k for k in data if k not in props)
-        if extra:
+        if extra and not allow_extra_fields:
             raise LLMError(f"model response included unexpected fields: {extra}")
 
+    cleaned = {k: data[k] for k in props if k in data} if allow_extra_fields else data
+
     for key, spec in props.items():
-        if key not in data:
+        if key not in cleaned:
             continue
         expected_type = spec.get("type")
-        val = data[key]
+        val = cleaned[key]
         if expected_type == "string" and not isinstance(val, str):
             raise LLMError(f"field {key!r} must be a string, got {type(val).__name__}")
         if expected_type == "integer" and (isinstance(val, bool) or not isinstance(val, int)):
@@ -238,9 +260,9 @@ def validate_turn_payload(data: Any, response_schema: dict[str, Any]) -> dict[st
             raise LLMError(f"field {key!r} must be a boolean, got {type(val).__name__}")
 
     allowed_actions = set(props["action"]["enum"])
-    if data.get("action") not in allowed_actions:
-        raise LLMError(f"invalid model action {data.get('action')!r}; expected one of {sorted(allowed_actions)}")
-    return data
+    if cleaned.get("action") not in allowed_actions:
+        raise LLMError(f"invalid model action {cleaned.get('action')!r}; expected one of {sorted(allowed_actions)}")
+    return cleaned
 
 
 def _http_post_json(
@@ -313,6 +335,7 @@ class LLMClient:
         self.ledger = ledger or TokenLedger()
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
+        self._openai_use_json_schema = True
 
         if self.provider == "gemini":
             self.model = model or os.environ.get("ARENA_LLM_MODEL", "gemini-2.5-flash")
@@ -415,12 +438,18 @@ class LLMClient:
             response_schema,
             self.temperature,
             self.max_output_tokens,
-            use_json_schema=True,
+            use_json_schema=self._openai_use_json_schema,
         )
         try:
             raw = _http_post_json(url, headers, payload, api_key_for_redaction=self.api_key)
         except LLMError as exc:
-            if "HTTP 400" in str(exc) and "json_schema" in str(exc):
+            err_lower = str(exc).lower()
+            if (
+                self._openai_use_json_schema
+                and "http 400" in err_lower
+                and ("json_schema" in err_lower or "response_format" in err_lower)
+            ):
+                self._openai_use_json_schema = False
                 fallback_payload = build_openai_compat_payload(
                     self.model,
                     system_prompt,
@@ -435,7 +464,12 @@ class LLMClient:
                 raise
 
         choices = raw.get("choices") or []
-        text = (((choices[0].get("message") or {}).get("content")) or "").strip() if choices else ""
+        msg = (choices[0].get("message") or {}) if choices else {}
+        tool_calls = msg.get("tool_calls") or []
+        if tool_calls:
+            text = (((tool_calls[0].get("function") or {}).get("arguments")) or "").strip()
+        else:
+            text = (msg.get("content") or "").strip()
 
         usage = raw.get("usage") or {}
         prompt_text = system_prompt + "\n" + "\n".join(m["content"] for m in messages)
@@ -455,4 +489,8 @@ class LLMClient:
             parsed = json.loads(text)
         except json.JSONDecodeError as exc:
             raise LLMError(f"OpenAI-compatible endpoint returned invalid JSON: {exc}: {text[:400]}") from exc
-        return validate_turn_payload(parsed, response_schema)
+        return validate_turn_payload(
+            parsed,
+            response_schema,
+            allow_extra_fields=not self._openai_use_json_schema,
+        )

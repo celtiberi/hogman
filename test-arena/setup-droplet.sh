@@ -69,6 +69,7 @@ apt-get install -y -qq \
   ca-certificates \
   curl \
   docker.io \
+  docker-buildx \
   docker-compose-v2 \
   git \
   iptables \

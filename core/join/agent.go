@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/net/netns"
 	"tailscale.com/tsnet"
 )
 
@@ -118,6 +119,15 @@ func inMeshRanges(ip netip.Addr) bool {
 }
 
 func newNode(dir string, c *agentConfig, authKey string) *tsnet.Server {
+	// On Linux 5.7+ inside containers or isolated networks with no default
+	// route (such as Docker --internal bridges), tailscale's netns bindToDevice
+	// falls back to SO_BINDTODEVICE("lo") unprivileged and blackholes outbound
+	// dials. Opting out via HOGMAN_DISABLE_NETNS=1 keeps isolated test harnesses
+	// working without weakening container network isolation or changing normal
+	// host VPN bypass behavior.
+	if os.Getenv("HOGMAN_DISABLE_NETNS") == "1" {
+		netns.SetEnabled(false)
+	}
 	s := &tsnet.Server{
 		Dir:        filepath.Join(dir, "node"),
 		Hostname:   c.Hostname,

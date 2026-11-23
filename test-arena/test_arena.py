@@ -110,6 +110,22 @@ class TestLLMClientAndLedger(unittest.TestCase):
         self.assertTrue(payload["response_format"]["json_schema"]["strict"])
         self.assertEqual(payload["messages"][0]["role"], "system")
 
+        tool_payload = llm.build_openai_compat_payload(
+            "deepseek-chat",
+            "system text",
+            [{"role": "user", "content": "hi"}],
+            self.schema,
+            max_output_tokens=2048,
+            use_json_schema=False,
+        )
+        self.assertNotIn("response_format", tool_payload)
+        self.assertEqual(tool_payload["tools"][0]["function"]["name"], "arena_bot_turn")
+        self.assertEqual(tool_payload["tools"][0]["function"]["parameters"], self.schema)
+        self.assertEqual(
+            tool_payload["tool_choice"],
+            {"type": "function", "function": {"name": "arena_bot_turn"}},
+        )
+
     def test_validate_turn_payload_checks_types_and_extra_keys(self) -> None:
         good = {
             "thought": "check status",
@@ -133,10 +149,88 @@ class TestLLMClientAndLedger(unittest.TestCase):
         extra = dict(good, unexpected_key="nope")
         with self.assertRaises(llm.LLMError):
             llm.validate_turn_payload(extra, self.schema)
+        self.assertEqual(llm.validate_turn_payload(extra, self.schema, allow_extra_fields=True), good)
 
         missing_key = {k: v for k, v in good.items() if k != "summary"}
         with self.assertRaises(llm.LLMError):
             llm.validate_turn_payload(missing_key, self.schema)
+
+    def test_truncate_for_history_and_schema_error_classifier(self) -> None:
+        short = "hello world"
+        self.assertEqual(arena_run._truncate_for_history(short, limit=100), short)
+        big = "HEAD" * 500 + "TAIL" * 500
+        truncated = arena_run._truncate_for_history(big, limit=200)
+        self.assertTrue(truncated.startswith("HEAD"))
+        self.assertTrue(truncated.endswith("TAIL"))
+        self.assertIn("chars omitted for context budget", truncated)
+
+        self.assertTrue(arena_run._is_schema_validation_error("model response included unexpected fields: ['x']"))
+        self.assertTrue(arena_run._is_schema_validation_error("OpenAI-compatible endpoint returned invalid JSON"))
+        self.assertFalse(arena_run._is_schema_validation_error("HTTP 500: internal server error"))
+
+    def test_openai_compat_tool_call_fallback_and_caching(self) -> None:
+        calls: list[dict] = []
+
+        def fake_post(url: str, headers: dict, payload: dict, api_key_for_redaction: str = "", timeout: int = 90) -> dict:
+            calls.append(payload)
+            if "response_format" in payload:
+                raise llm.LLMError('HTTP 400: {"error":{"message":"This response_format type is unavailable now"}}')
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "arena_bot_turn",
+                                        "arguments": json.dumps(
+                                            {
+                                                "thought": "all good",
+                                                "action": "done",
+                                                "command": "",
+                                                "to": "",
+                                                "message": "",
+                                                "summary": "finished",
+                                                "command_note": "extra ignored in non-strict tool mode",
+                                            }
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+            }
+
+        orig_post = llm._http_post_json
+        llm._http_post_json = fake_post
+        try:
+            client = llm.LLMClient(
+                provider="openai-compat",
+                model="deepseek-chat",
+                api_key="test-key",
+                base_url="https://api.example.test/v1",
+            )
+            turn1 = client.next_turn("alice", "sys", [{"role": "user", "content": "go"}], self.schema)
+            self.assertEqual(turn1["action"], "done")
+            self.assertNotIn("command_note", turn1)
+            self.assertFalse(client._openai_use_json_schema)
+            self.assertEqual(len(calls), 2)
+            self.assertIn("response_format", calls[0])
+            self.assertIn("tools", calls[1])
+
+            # Second turn should skip the failing json_schema request directly.
+            turn2 = client.next_turn("alice", "sys", [{"role": "user", "content": "again"}], self.schema)
+            self.assertEqual(turn2["action"], "done")
+            self.assertEqual(len(calls), 3)
+            self.assertIn("tools", calls[2])
+        finally:
+            llm._http_post_json = orig_post
 
     def test_redact_secret(self) -> None:
         self.assertEqual(llm.redact_secret("key=secret123 failed", "secret123"), "key=[REDACTED] failed")

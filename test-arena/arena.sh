@@ -225,7 +225,7 @@ run_sandbox_container() {
     --read-only \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
     --tmpfs /dev/shm:rw,noexec,nosuid,nodev,size=4m \
-    --tmpfs /home/bot:rw,nosuid,nodev,size=128m,uid=1000,gid=1000 \
+    --tmpfs /home/bot:rw,exec,nosuid,nodev,size=128m,uid=1000,gid=1000 \
     --cap-drop ALL \
     --security-opt no-new-privileges:true \
     --pids-limit "$ARENA_BOT_PIDS" \
@@ -239,6 +239,8 @@ run_sandbox_container() {
     -e HOGMAN_ACME_CA_URL="https://pebble.hogman.test:14000/dir" \
     -e HOGMAN_ACME_FALLBACK_CA_URL="" \
     -e HOGMAN_ACME_CA_ROOT="/etc/hogman-arena/ca-bundle.crt" \
+    -e HOGMAN_DISABLE_NETNS=1 \
+    -e TS_NO_LOGS_NO_SUPPORT=true \
     -e HOGMAN_ACME_RESOLVERS="${dns_ip}:53" \
     -e HOGMAN_ACME_PROPAGATION_DELAY="1s" \
     -e HOGMAN_ACME_PROPAGATION_TIMEOUT="30s" \
@@ -345,6 +347,21 @@ cmd_up() {
   chmod 0600 "$ARENA_HOME/.arena-marker"
   rsync -a --exclude data --exclude .env "$REPO/core/" "$ARENA_HOME/src/"
 
+  log "Prebuilding registrar binary for arena pens"
+  local goarch
+  case "$(uname -m)" in
+    x86_64|amd64)  goarch=amd64 ;;
+    aarch64|arm64) goarch=arm64 ;;
+    *)             die "unsupported architecture $(uname -m)" ;;
+  esac
+  mkdir -p "$ARENA_HOME/src/prebuilt/registrar"
+  docker run --rm \
+    -v "$REPO/core/registrar:/src:ro" \
+    -v "$ARENA_HOME/src/prebuilt/registrar:/out" \
+    -w /src \
+    -e CGO_ENABLED=0 -e GOFLAGS=-buildvcs=false \
+    golang:1.27-alpine go build -trimpath -ldflags="-s -w" -o "/out/registrar-linux-${goarch}" .
+
   log "Initializing Hogman front door (test mode)"
   "$HOST" init --test
 
@@ -368,6 +385,7 @@ cmd_up() {
     --read-only \
     --cap-drop ALL \
     --cap-add NET_BIND_SERVICE \
+    --cap-add CHOWN \
     --security-opt no-new-privileges:true \
     --memory 128m \
     --memory-swap 128m \
