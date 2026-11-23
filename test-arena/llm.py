@@ -52,15 +52,16 @@ class TokenLedger:
     def total_tokens(self) -> int:
         return sum(u.total_tokens for u in self.by_bot.values())
 
-    def check_budget(self, bot: str) -> None:
-        if self.total_tokens >= self.max_total_tokens:
+    def check_budget(self, bot: str, projected_tokens: int = 0) -> None:
+        proj = max(0, int(projected_tokens))
+        if self.total_tokens >= self.max_total_tokens or (proj > 0 and self.total_tokens + proj > self.max_total_tokens):
             raise BudgetExceededError(
-                f"run token budget exceeded ({self.total_tokens} >= {self.max_total_tokens})"
+                f"run token budget exceeded (used={self.total_tokens}, projected={proj}, max={self.max_total_tokens})"
             )
         bot_total = self._entry(bot).total_tokens
-        if bot_total >= self.max_bot_tokens:
+        if bot_total >= self.max_bot_tokens or (proj > 0 and bot_total + proj > self.max_bot_tokens):
             raise BudgetExceededError(
-                f"bot '{bot}' token budget exceeded ({bot_total} >= {self.max_bot_tokens})"
+                f"bot '{bot}' token budget exceeded (used={bot_total}, projected={proj}, max={self.max_bot_tokens})"
             )
 
     def record(
@@ -315,7 +316,9 @@ class LLMClient:
         messages: list[dict[str, str]],
         response_schema: dict[str, Any],
     ) -> dict[str, Any]:
-        self.ledger.check_budget(bot)
+        prompt_text = system_prompt + "\n" + "\n".join(m["content"] for m in messages)
+        projected = estimate_tokens(prompt_text) + self.max_output_tokens
+        self.ledger.check_budget(bot, projected_tokens=projected)
 
         if self.provider == "gemini":
             return self._call_gemini(bot, system_prompt, messages, response_schema)

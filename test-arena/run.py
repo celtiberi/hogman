@@ -27,30 +27,77 @@ from sandbox import MessageBus, exec_in_container, utc_now
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
-DEFAULT_MAX_HISTORY_MESSAGES = 16
+DEFAULT_MAX_HISTORY_CHARS = 24_000
 
 
 def load_prompts(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def trim_history(history: list[dict[str, str]], max_messages: int = DEFAULT_MAX_HISTORY_MESSAGES) -> list[dict[str, str]]:
-    """Keep the opening user message plus the most recent turns within `max_messages`.
+def normalize_message_roles(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Merge consecutive messages with the same role so APIs never see user->user runs."""
+    out: list[dict[str, str]] = []
+    for msg in messages:
+        role = msg["role"]
+        content = msg["content"]
+        if out and out[-1]["role"] == role:
+            out[-1] = {"role": role, "content": out[-1]["content"] + "\n\n" + content}
+        else:
+            out.append({"role": role, "content": content})
+    return out
 
-    Drops oldest turns in pairs after index 0 so alternating user/assistant
-    roles remain valid for Gemini and OpenAI-compatible APIs.
+
+def trim_history(
+    history: list[dict[str, str]],
+    round_start_idx: int = 0,
+    max_chars: int = DEFAULT_MAX_HISTORY_CHARS,
+) -> list[dict[str, str]]:
+    """Trim conversation history by character size while always preserving the current round's prompt.
+
+    Keeps the message at `round_start_idx` (the current round's assignment), plus
+    as many of the most recent messages after it as fit within `max_chars`, and
+    merges any consecutive same-role messages (e.g. if a previous round ended at
+    max_turns).
     """
-    if len(history) <= max_messages or max_messages < 3:
-        return list(history)
-    head = history[0]
-    tail = history[1:]
-    keep_tail = max_messages - 1
-    # Drop from the front of tail, preferring even drops to preserve assistant/user pairing.
-    drop = len(tail) - keep_tail
-    if drop % 2 == 1 and len(tail) - (drop + 1) >= 1:
-        drop += 1
-    trimmed = [head] + tail[drop:]
-    return trimmed
+    if not history:
+        return []
+    anchor_idx = max(0, min(round_start_idx, len(history) - 1))
+    anchor = history[anchor_idx]
+    recent: list[dict[str, str]] = []
+    used = len(anchor["content"])
+
+    # Walk backward from newest turn back to anchor_idx + 1, keeping what fits.
+    for msg in reversed(history[anchor_idx + 1 :]):
+        msg_len = len(msg["content"])
+        if recent and used + msg_len > max_chars:
+            break
+        recent.append(msg)
+        used += msg_len
+    recent.reverse()
+
+    # If the newest message alone blew past max_chars, truncate it defensively so
+    # a single call cannot exceed the per-call budget window.
+    if recent and used > max_chars:
+        budget_for_last = max(256, max_chars - len(anchor["content"]))
+        last = recent[-1]
+        if len(last["content"]) > budget_for_last:
+            recent[-1] = {
+                "role": last["role"],
+                "content": last["content"][:budget_for_last] + "\n...[trimmed for history budget]",
+            }
+
+    # Include compact pre-anchor context only if headroom remains.
+    prefix: list[dict[str, str]] = []
+    if anchor_idx > 0 and used < max_chars:
+        for msg in reversed(history[:anchor_idx]):
+            msg_len = len(msg["content"])
+            if used + msg_len > max_chars:
+                break
+            prefix.append(msg)
+            used += msg_len
+        prefix.reverse()
+
+    return normalize_message_roles(prefix + [anchor] + recent)
 
 
 def rotate_pen_canary(arena_home: Path, pen: str, phase: str = "POSTKICK") -> str:
@@ -89,7 +136,7 @@ def run_bot_round(
     bus: MessageBus,
     transcript_path: Path,
     cmd_timeout_s: int,
-    max_history_messages: int = DEFAULT_MAX_HISTORY_MESSAGES,
+    max_history_chars: int = DEFAULT_MAX_HISTORY_CHARS,
 ) -> dict[str, Any]:
     round_id = round_cfg["id"]
     max_turns = int(round_cfg.get("max_turns", 10))
@@ -99,13 +146,14 @@ def run_bot_round(
     if inbox:
         formatted = "\n".join(f"- From {m['from']}: {m['message']}" for m in inbox)
         initial_user_msg = f"{round_prompt}\n\nInbox messages received before this round:\n{formatted}"
+    round_start_idx = len(history)
     history.append({"role": "user", "content": initial_user_msg})
 
     summary = ""
     status = "max_turns_reached"
 
     for turn in range(1, max_turns + 1):
-        window = trim_history(history, max_messages=max_history_messages)
+        window = trim_history(history, round_start_idx=round_start_idx, max_chars=max_history_chars)
         try:
             decision = client.next_turn(bot, system_prompt, window, response_schema)
         except BudgetExceededError as exc:
@@ -225,7 +273,7 @@ def main() -> int:
     parser.add_argument("--max-total-tokens", type=int, default=150_000)
     parser.add_argument("--max-bot-tokens", type=int, default=60_000)
     parser.add_argument("--max-output-tokens", type=int, default=2048)
-    parser.add_argument("--max-history-messages", type=int, default=DEFAULT_MAX_HISTORY_MESSAGES)
+    parser.add_argument("--max-history-chars", type=int, default=DEFAULT_MAX_HISTORY_CHARS)
     parser.add_argument("--cmd-timeout", type=int, default=45)
     parser.add_argument("--kicked-handle", default="mallory-out")
     args = parser.parse_args()
@@ -297,7 +345,7 @@ def main() -> int:
                 bus=bus,
                 transcript_path=run_dir / f"{bot}.jsonl",
                 cmd_timeout_s=args.cmd_timeout,
-                max_history_messages=args.max_history_messages,
+                max_history_chars=args.max_history_chars,
             )
             round_results.append(res)
 

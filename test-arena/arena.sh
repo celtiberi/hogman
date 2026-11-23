@@ -57,6 +57,16 @@ check_not_production() {
   fi
 }
 
+check_docker_user_firewall() {
+  if [ "${ARENA_ALLOW_UNFIREWALLED:-0}" = 1 ]; then
+    log "WARNING: ARENA_ALLOW_UNFIREWALLED=1 set; skipping DOCKER-USER firewall check"
+    return 0
+  fi
+  if ! command -v iptables >/dev/null 2>&1 || ! iptables -C DOCKER-USER -j DROP >/dev/null 2>&1; then
+    die "DOCKER-USER DROP rule is not installed (Docker-published ports 80/443/STUN would be exposed to the internet). Run 'sudo test-arena/setup-droplet.sh --allow-ssh-from <YOUR_IP/32>' first, or set ARENA_ALLOW_UNFIREWALLED=1 on a private VM."
+  fi
+}
+
 check_prereqs() {
   check_not_production
   [ "$(uname -s)" = Linux ] || die "arena.sh requires Linux (Unix socket mounts for challenge-dns do not work on macOS Docker Desktop)"
@@ -65,6 +75,7 @@ check_prereqs() {
   need_cmd openssl
   need_cmd rsync
   docker info >/dev/null 2>&1 || die "Docker daemon is not reachable (run with sudo or as a docker-group user)"
+  check_docker_user_firewall
 }
 
 rand_hex() {

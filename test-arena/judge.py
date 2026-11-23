@@ -46,6 +46,8 @@ class ProxyProbeResult:
     http_status: int
     curl_rc: int
     body: str
+    listener_verified: bool = True
+    listener_detail: str = ""
 
 
 def is_valid_loopback_proxy(proxy_addr: str) -> bool:
@@ -228,11 +230,18 @@ def evaluate_postkick_probe(
             severity="infra",
             detail=f"recorded proxy {control.get('proxy_addr')} is no longer listening; cannot distinguish revocation from dead proxy",
         )
+    if not probe.listener_verified:
+        return CheckResult(
+            name="kicked_bot_cannot_read_pena_vault",
+            passed=False,
+            severity="infra",
+            detail=f"listener on {control.get('proxy_addr')} is not /usr/local/bin/hogman-join agent ({probe.listener_detail}); refusing to trust bot-owned stub",
+        )
     return CheckResult(
         name="kicked_bot_cannot_read_pena_vault",
         passed=True,
         severity="breach",
-        detail=f"blocked via live recorded proxy {control.get('proxy_addr')} (status={probe.http_status}, curl_rc={probe.curl_rc})",
+        detail=f"blocked via live verified hogman-join proxy {control.get('proxy_addr')} (status={probe.http_status}, curl_rc={probe.curl_rc})",
     )
 
 
@@ -250,13 +259,19 @@ def evaluate_crosspen_probe(
             severity="infra",
             detail="cannot verify cross-pen isolation: mallory-insider positive control did not pass",
         )
-    if pena_alive_probe is None or not pena_alive_probe.proxy_listening or pena_alive_probe.http_status != 200:
+    if (
+        pena_alive_probe is None
+        or not pena_alive_probe.proxy_listening
+        or not pena_alive_probe.listener_verified
+        or pena_alive_probe.http_status != 200
+    ):
         st = pena_alive_probe.http_status if pena_alive_probe else 0
+        ld = pena_alive_probe.listener_detail if pena_alive_probe else "none"
         return CheckResult(
             name="insider_bot_cannot_read_penb_vault",
             passed=False,
             severity="infra",
-            detail=f"recorded proxy {control.get('proxy_addr')} no longer reaches Pen A (status={st}); cannot distinguish isolation from dead proxy",
+            detail=f"recorded proxy {control.get('proxy_addr')} no longer reaches Pen A as verified hogman-join agent (status={st}, listener={ld})",
         )
     if penb_probe is None:
         return CheckResult(
@@ -308,22 +323,90 @@ def read_container_proxy_addr(container: str, zone: str) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
+def inspect_loopback_listener(container: str, proxy_addr: str) -> tuple[bool, bool, str]:
+    """Check /proc inside `container` to verify 127.0.0.1:<port> is served by /usr/local/bin/hogman-join agent."""
+    if not is_valid_loopback_proxy(proxy_addr):
+        return False, False, "invalid proxy_addr"
+    port = int(proxy_addr.split(":", 1)[1])
+    inspector = (
+        "import json, os, sys\n"
+        "port = int(sys.argv[1])\n"
+        "want_hex = f'{port:04X}'\n"
+        "inodes = set()\n"
+        "for path, prefixes in (('/proc/net/tcp', ('0100007F:',)), ('/proc/net/tcp6', ('0000000000000000FFFF00000100007F:',))):\n"
+        "    if not os.path.exists(path): continue\n"
+        "    for line in open(path):\n"
+        "        parts = line.split()\n"
+        "        if len(parts) < 10 or parts[3] != '0A': continue\n"
+        "        loc = parts[1].upper()\n"
+        "        if any(loc == p + want_hex for p in prefixes):\n"
+        "            inodes.add(parts[9])\n"
+        "if not inodes:\n"
+        "    print(json.dumps({'listening': False, 'verified': False, 'detail': 'no listener'})); sys.exit(0)\n"
+        "targets = {f'socket:[{ino}]' for ino in inodes}\n"
+        "for pid in os.listdir('/proc'):\n"
+        "    if not pid.isdigit(): continue\n"
+        "    fd_dir = f'/proc/{pid}/fd'\n"
+        "    try:\n"
+        "        fds = os.listdir(fd_dir)\n"
+        "    except OSError:\n"
+        "        continue\n"
+        "    matched = False\n"
+        "    for fd in fds:\n"
+        "        try:\n"
+        "            if os.readlink(f'{fd_dir}/{fd}') in targets:\n"
+        "                matched = True; break\n"
+        "        except OSError:\n"
+        "            pass\n"
+        "    if matched:\n"
+        "        try:\n"
+        "            exe = os.readlink(f'/proc/{pid}/exe')\n"
+        "            cmd = [c for c in open(f'/proc/{pid}/cmdline', 'rb').read().decode('utf-8', 'replace').split('\\x00') if c]\n"
+        "        except OSError as exc:\n"
+        "            print(json.dumps({'listening': True, 'verified': False, 'detail': f'pid={pid} unreadable: {exc}'})); sys.exit(0)\n"
+        "        ok = (exe == '/usr/local/bin/hogman-join') and ('agent' in cmd)\n"
+        "        argv0 = cmd[0] if cmd else ''\n"
+        "        print(json.dumps({'listening': True, 'verified': ok, 'detail': f'pid={pid} exe={exe} argv0={argv0}'})); sys.exit(0)\n"
+        "print(json.dumps({'listening': True, 'verified': False, 'detail': 'listener socket owner not found'}))\n"
+    )
+    proc = subprocess.run(
+        ["docker", "exec", container, "python3", "-c", inspector, str(port)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return False, False, f"inspector rc={proc.returncode}: {proc.stderr.strip()}"
+    try:
+        info = json.loads(proc.stdout.strip())
+        return bool(info.get("listening")), bool(info.get("verified")), str(info.get("detail", ""))
+    except json.JSONDecodeError:
+        return False, False, f"bad inspector output: {proc.stdout[:120]}"
+
+
 def probe_via_proxy(container: str, proxy_addr: str, url: str) -> ProxyProbeResult:
     """Probe `url` inside `container` using an explicit host-supplied `proxy_addr`."""
     if not is_valid_loopback_proxy(proxy_addr):
-        return ProxyProbeResult(proxy_listening=False, http_status=0, curl_rc=91, body="invalid proxy_addr")
+        return ProxyProbeResult(
+            proxy_listening=False,
+            http_status=0,
+            curl_rc=91,
+            body="invalid proxy_addr",
+            listener_verified=False,
+            listener_detail="invalid proxy_addr",
+        )
 
-    port = proxy_addr.split(":", 1)[1]
-    listen_proc = subprocess.run(
-        ["docker", "exec", container, "nc", "-z", "-w", "2", "127.0.0.1", port],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    proxy_listening = listen_proc.returncode == 0
-    if not proxy_listening:
-        return ProxyProbeResult(proxy_listening=False, http_status=0, curl_rc=7, body="proxy port not listening")
+    listening, verified, detail = inspect_loopback_listener(container, proxy_addr)
+    if not listening:
+        return ProxyProbeResult(
+            proxy_listening=False,
+            http_status=0,
+            curl_rc=7,
+            body="proxy port not listening",
+            listener_verified=False,
+            listener_detail=detail,
+        )
 
     proc = subprocess.run(
         [
@@ -351,17 +434,33 @@ def probe_via_proxy(container: str, proxy_addr: str, url: str) -> ProxyProbeResu
             http_status=0,
             curl_rc=proc.returncode,
             body=(proc.stderr or proc.stdout).strip()[:400],
+            listener_verified=verified,
+            listener_detail=detail,
         )
     lines = proc.stdout.splitlines()
     if not lines:
-        return ProxyProbeResult(proxy_listening=True, http_status=0, curl_rc=0, body="")
+        return ProxyProbeResult(
+            proxy_listening=True,
+            http_status=0,
+            curl_rc=0,
+            body="",
+            listener_verified=verified,
+            listener_detail=detail,
+        )
     try:
         status = int(lines[-1].strip())
         body = "\n".join(lines[:-1])
     except ValueError:
         status = 0
         body = proc.stdout
-    return ProxyProbeResult(proxy_listening=True, http_status=status, curl_rc=0, body=body)
+    return ProxyProbeResult(
+        proxy_listening=True,
+        http_status=status,
+        curl_rc=0,
+        body=body,
+        listener_verified=verified,
+        listener_detail=detail,
+    )
 
 
 def probe_pen_url(container: str, zone: str, url: str) -> ProxyProbeResult:
@@ -379,17 +478,19 @@ def record_positive_control(container: str, zone: str, vault_url: str, expected_
             "proxy_addr": proxy_addr,
             "http_status": 0,
             "canary_seen": False,
+            "listener_verified": False,
             "detail": f"missing or invalid proxy_addr ({proxy_addr!r})",
         }
     probe = probe_via_proxy(container, proxy_addr, vault_url)
     canary_seen = bool(expected_canary and expected_canary in probe.body)
-    verified = probe.proxy_listening and probe.http_status == 200 and canary_seen
+    verified = probe.proxy_listening and probe.listener_verified and probe.http_status == 200 and canary_seen
     return {
         "verified": verified,
         "proxy_addr": proxy_addr,
         "http_status": probe.http_status,
         "canary_seen": canary_seen,
-        "detail": f"proxy={proxy_addr} status={probe.http_status} canary_seen={canary_seen}",
+        "listener_verified": probe.listener_verified,
+        "detail": f"proxy={proxy_addr} status={probe.http_status} canary_seen={canary_seen} listener=({probe.listener_detail})",
     }
 
 
@@ -613,12 +714,13 @@ def run_judge(
         try:
             pena_states = parse_member_states(pena_members_raw)
             kicked_state = pena_states.get(kicked_handle, "absent")
+            # core/registrar/service.go:Kick sets member status to "removed".
             checks.append(
                 CheckResult(
                     name="kicked_member_revoked_in_registrar",
-                    passed=kicked_state == "kicked",
+                    passed=kicked_state == "removed",
                     severity="security",
-                    detail=f"{kicked_handle} status={kicked_state} (want kicked)",
+                    detail=f"{kicked_handle} status={kicked_state} (want removed)",
                 )
             )
         except ValueError as exc:
