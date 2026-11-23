@@ -1,0 +1,66 @@
+<h1 class="docs-h1">Managing access &amp; offboarding</h1>
+<p class="lede">For pen owners and admins. Manage staff, outside contractors, invites, and active
+  bridges from your pen's management portal at
+  <code>https://home.&lt;yourpen&gt;.pens.hogman.network</code>.</p>
+
+<h2 class="docs-h2" id="roles">Roles and permissions</h2>
+<table class="docs-table">
+  <thead><tr><th>Role</th><th>Permissions</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Owner</strong></td><td>Full administrative control. Cannot be suspended or
+      removed. Every operational pen should have <strong>at least two owners</strong>: if one owner
+      loses every enrolled device, only another owner can invite them back. Owners can demote one
+      another, so grant Owner only to fully trusted principals.</td></tr>
+    <tr><td><strong>Admin</strong></td><td>Create and revoke invites; suspend, resume, and remove
+      regular members. Cannot modify owners or other admins.</td></tr>
+    <tr><td><strong>Member</strong></td><td>Enroll personal workstations and register HTTPS bridges
+      or internal apps. Creating invites is restricted to owners and admins unless explicitly
+      enabled for members.</td></tr>
+  </tbody>
+</table>
+
+<h2 class="docs-h2" id="invites">Inviting staff and contractors</h2>
+<p>Under <strong>Invite someone</strong>, add a short tracking note (for example, <em>"Jordan —
+  refrigeration contractor, Store North"</em>) and press <strong>Make an invite</strong>. The portal
+  generates a single-use link and QR code valid for 7 days. Treat every invite link like a physical
+  key — whoever opens it first enrolls.</p>
+<p>Unused links appear under <strong>Open invites</strong> and can be revoked at any time before
+  redemption.</p>
+
+<h2 class="docs-h2" id="members">Suspending and offboarding (~2 seconds)</h2>
+<p>The <strong>Members</strong> directory lists every enrolled person with their role, status, and
+  device count (paginated with search):</p>
+<ul>
+  <li><strong>Suspend (~2 s):</strong> immediately cuts off all of a person's devices while keeping
+    their account, device slots, and site names intact. Ideal for outside service vendors between
+    work orders or temporary leave.</li>
+  <li><strong>Resume (&lt;1 s):</strong> restores access immediately when a contractor or employee
+    needs access again.</li>
+  <li><strong>Remove (~2 s):</strong> ends membership, deletes every device from the mesh, revokes
+    unused keys and invites, rewrites ACLs, and <strong>permanently retires their handle and site
+    names</strong> so nobody can impersonate them later. Re-entry requires a new invite.</li>
+  <li><strong>Promote / demote:</strong> grant or revoke Admin access on a member, or promote an
+    Admin to Owner (owner-only).</li>
+</ul>
+
+<div class="callout">
+  <p><strong>Zero account recovery — appoint a second owner:</strong> there is no support backdoor
+    or password reset. If someone loses every enrolled device, issue a new invite, restore their
+    role, and remove the old account (demote an old owner to Admin first). Always keep at least two
+    owners on every production pen.</p>
+</div>
+
+<h2 class="docs-h2" id="devices">Devices and active services</h2>
+<p>Each member manages their own devices from the portal: <strong>Add a device</strong> creates a
+  1-hour personal join link for a second laptop, and <strong>Get a share link</strong> creates a
+  1-hour server link for an on-site bridge or always-on host
+  (<a href="./share.html">Bridging equipment &amp; apps</a>). Active dashboards and bridged
+  controllers appear under <strong>Sites in this pen</strong> with their owner and optional note.</p>
+
+<h2 class="docs-h2" id="visibility">Audit visibility and privacy boundaries</h2>
+<p>Owners and admins can see who belongs to the pen, their enrolled devices, online status, and
+  which pen hostnames are queried. Neither pen owners nor Hogman's control plane can passively read
+  application traffic (WireGuard + TLS 1.3 end to end) or any browsing outside the pen. Remind staff
+  that bridged hostnames appear in public Certificate Transparency logs (names only, never contents)
+  and to use a separate browser profile for any pen they do not fully trust. See the full
+  <a href="./security.html#threat-model">threat model</a>.</p>

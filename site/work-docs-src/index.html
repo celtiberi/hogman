@@ -1,0 +1,61 @@
+<h1 class="docs-h1">Quickstart</h1>
+<p class="lede">Take equipment controllers and internal web tools off the open internet in four
+  steps — reachable by authorized staff in ordinary browsers over standard HTTPS, with zero public
+  IP addresses.</p>
+
+<h2 class="docs-h2" id="plan">1. Plan pens by site or region</h2>
+<p>Before creating your first pen, decide how to group locations. For multi-site businesses, create
+  a separate pen per region or store group (for example, <code>region-north</code> and
+  <code>region-south</code>, or <code>store-north</code>) rather than putting every location in one
+  shared network. Separate pens limit blast radius if a laptop is lost or an account is
+  compromised.</p>
+
+<h2 class="docs-h2" id="create">2. Create a pen</h2>
+<p>Request access or create your pen at <a href="{{WORK_SIGNUP_URL}}">{{WORK_SIGNUP_LABEL}}</a>
+  and claim a neutral name for your network (for example, <code>store-north</code>). Hogman spins
+  up an isolated private DNS zone (<code>store-north.pens.hogman.network</code>) and a web
+  management portal where owners and admins control access.</p>
+<p>When setup finishes, the sign-up page gives you your first single-use join link.</p>
+
+<h2 class="docs-h2" id="bridge">3. Join a workstation and bridge an internal service</h2>
+<p>Open your join link on a Mac or Linux computer and run the short command it displays in
+  Terminal:</p>
+<pre class="term"><span class="p">$</span> curl -fsSL https://store-north.gate.hogman.network/start | sh</pre>
+<p>The script prompts for your invite link, verifies <code>hogman-join</code> against its published
+  SHA-256 checksum, saves it to <code>~/hogman-join</code>, and connects your browser to the pen.
+  Ordinary internet browsing stays untouched.</p>
+<p>Next, close any public router port-forwarding pointing at your internal device or web app, then
+  bridge its local web interface into the pen:</p>
+<pre class="term"><span class="p">$</span> ~/hogman-join share cooler-1 http://192.168.1.40 --background
+
+<span class="ok">✓ https://cooler-1.store-north.pens.hogman.network is up.</span>
+  Everyone in the pen can open it.</pre>
+<p>The local upstream can speak plain HTTP on your LAN while staff always connect over standard
+  HTTPS (port 443) with a publicly trusted Let's Encrypt certificate and zero open firewall ports.
+  For headless Raspberry Pi or mini PC site bridges, see
+  <a href="./share.html">Bridging equipment &amp; apps</a>.</p>
+
+<h2 class="docs-h2" id="team">4. Onboard staff and appoint a second owner</h2>
+<p>Open your pen's management portal
+  (<code>https://home.&lt;yourpen&gt;.pens.hogman.network</code>) to create single-use invite links
+  for employees and outside contractors, suspend temporary access, or offboard someone from every
+  device in ~2 seconds.</p>
+<div class="callout">
+  <p><strong>Appoint a backup owner right away:</strong> Hogman has zero account recovery and no
+    support backdoor. If a pen's only owner loses every enrolled device, nobody can administer that
+    pen again. Promote a second trusted owner under <em>Members</em> as soon as they join.</p>
+</div>
+<p>Full details: <a href="./join.html">Onboarding staff &amp; devices</a> and
+  <a href="./keeper.html">Managing access &amp; offboarding</a>.</p>
+
+<h2 class="docs-h2" id="reference">Going deeper</h2>
+<div class="docs-links">
+  <a class="docs-mini-card" href="./security.html">
+    <strong>Architecture &amp; security</strong>
+    <span>Packet flow, WireGuard + TLS 1.3, split-horizon DNS-01, threat model, and SLSA verification.</span>
+  </a>
+  <a class="docs-mini-card" href="./faq.html">
+    <strong>FAQ &amp; troubleshooting</strong>
+    <span>Firmware boundaries, multi-site design, contractor access, corporate VPNs, and common fixes.</span>
+  </a>
+</div>

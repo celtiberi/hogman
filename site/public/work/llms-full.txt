@@ -10,274 +10,266 @@ License: AGPL-3.0
 
 # Quickstart
 
-Go from zero to a private HTTPS server reachable from anywhere by your guest list — and invisible to everyone else on Earth.
+Take equipment controllers and internal web tools off the open internet in four steps — reachable by authorized staff in ordinary browsers over standard HTTPS, with zero public IP addresses.
 
-## 1. Create a pen
+## 1. Plan pens by site or region
 
-Sign up at [get.hogman.network](https://get.hogman.network/#wait) and claim a name for your network (for example, `store-north`). Hogman spins up an isolated private DNS zone (`store-north.pens.hogman.network`) and a keeper page where you control the guest list.
+Before creating your first pen, decide how to group locations. For multi-site businesses, create a separate pen per region or store group (for example, `region-north` and `region-south`, or `store-north`) rather than putting every location in one shared network. Separate pens limit blast radius if a laptop is lost or an account is compromised.
 
-Once your pen is ready, the sign-up page gives you your first single-use join link.
+## 2. Create a pen
 
-## 2. Join from your computer
+Request access or create your pen at [get.hogman.network](https://get.hogman.network/#wait#wait) and claim a neutral name for your network (for example, `store-north`). Hogman spins up an isolated private DNS zone (`store-north.pens.hogman.network`) and a web management portal where owners and admins control access.
 
-Open your join link on a Mac or Linux computer and run the short command it shows in Terminal:
+When setup finishes, the sign-up page gives you your first single-use join link.
+
+## 3. Join a workstation and bridge an internal service
+
+Open your join link on a Mac or Linux computer and run the short command it displays in Terminal:
 
 ```text
 $ curl -fsSL https://store-north.gate.hogman.network/start | sh
 ```
 
-The script asks for your invite link, verifies `hogman-join` against its published SHA-256 checksum, saves it to `~/hogman-join`, and connects your browser to the pen. Your normal internet browsing stays untouched.
+The script prompts for your invite link, verifies `hogman-join` against its published SHA-256 checksum, saves it to `~/hogman-join`, and connects your browser to the pen. Ordinary internet browsing stays untouched.
 
-Full details (macOS prompts, VPNs, Linux browsers, extra devices, leaving): [Joining a pen](https://work.hogman.network/docs/join.html).
-
-## 3. Put an HTTPS server inside it
-
-Anything that speaks HTTPS (port 443) works inside a pen. Share a local web server by port — or a directory of static files — with one command:
+Next, close any public router port-forwarding pointing at your internal device or web app, then bridge its local web interface into the pen:
 
 ```text
-$ ~/hogman-join share cooler-1 3000
+$ ~/hogman-join share cooler-1 http://192.168.1.40 --background
 
 ✓ https://cooler-1.store-north.pens.hogman.network is up.
   Everyone in the pen can open it.
 ```
 
-Your server gets a real name and a standard Let's Encrypt padlock in any ordinary browser, with zero open router ports and zero public IP addresses. Add `--background` to keep it running after reboot.
+The local upstream can speak plain HTTP on your LAN while staff always connect over standard HTTPS (port 443) with a publicly trusted Let's Encrypt certificate and zero open firewall ports. For headless Raspberry Pi or mini PC site bridges, see [Bridging equipment & apps](https://work.hogman.network/docs/share.html).
 
-Full details (always-on servers, LAN targets, dev servers, stopping): [Hosting HTTPS servers](https://work.hogman.network/docs/share.html).
+## 4. Onboard staff and appoint a second owner
 
-## 4. Invite your people (or kick them out)
+Open your pen's management portal (`https://home.<yourpen>.pens.hogman.network`) to create single-use invite links for employees and outside contractors, suspend temporary access, or offboard someone from every device in ~2 seconds.
 
-Open your pen's keeper page (`https://home.<yourpen>.pens.hogman.network`) to mint single-use invite links, appoint admins or a backup owner, suspend someone temporarily, or kick a member off every device in ~2 seconds.
+**Appoint a backup owner right away:** Hogman has zero account recovery and no support backdoor. If a pen's only owner loses every enrolled device, nobody can administer that pen again. Promote a second trusted owner under *Members* as soon as they join.
 
-Full details: [Running a pen](https://work.hogman.network/docs/keeper.html).
+Full details: [Onboarding staff & devices](https://work.hogman.network/docs/join.html) and [Managing access & offboarding](https://work.hogman.network/docs/keeper.html).
 
 ## Going deeper
-  [**Architecture & security** Packet flow, WireGuard + TLS 1.3, split-horizon DNS-01, threat model, and SLSA verification.](https://work.hogman.network/docs/security.html) [**FAQ & troubleshooting** Tailscale comparison, self-hosting policy, VPN coexistence, and fixes for common errors.](https://work.hogman.network/docs/faq.html)
+  [**Architecture & security** Packet flow, WireGuard + TLS 1.3, split-horizon DNS-01, threat model, and SLSA verification.](https://work.hogman.network/docs/security.html) [**FAQ & troubleshooting** Firmware boundaries, multi-site design, contractor access, corporate VPNs, and common fixes.](https://work.hogman.network/docs/faq.html)
 
 ---
 
-<!-- Page: Joining a pen (https://work.hogman.network/docs/join.html) -->
+<!-- Page: Onboarding staff & devices (https://work.hogman.network/docs/join.html) -->
 
-# Joining a pen
+# Onboarding staff & devices
 
-You need a single-use invite link from a pen's keeper and a Mac or Linux computer.
+How employees and contractors connect a Mac or Linux laptop to a pen using a single-use invite link — without routing ordinary browsing through a VPN.
 
-## Your first computer
+## Connecting a first workstation
 
-1. **Open your invite link** on the computer you want to join. Invites work once and expire after 7 days.
-2. **Paste the command it shows** into Terminal — it's the same short command for everyone in the pen:
+1. **Open the invite link** on the workstation that needs access. Invite links work once and expire after 7 days.
+2. **Run the setup command** shown on the page in Terminal — it is the same short command for everyone in the pen:
 
 ```text
 $ curl -fsSL https://store-north.gate.hogman.network/start | sh
 ```
- It asks for your invite link (the page has a *Copy my invite link* button), downloads `hogman-join` for your platform, verifies its published SHA-256 checksum, saves it as `~/hogman-join`, and runs it. Your invite token never appears in your shell command or history. [Read the script](https://github.com/celtiberi/hogman/blob/main/core/join-page/start.sh) first, or expand the manual download steps on the join page.
-3. **Pick your handle** when asked (lowercase letters, digits, and dashes, 2–32 characters).
-4. **You're in.** `hogman-join` verifies the gate using your OS's built-in HTTPS trust store, confirms your pen's home page loads over HTTPS, configures your browser proxy, and opens it. Keep `~/hogman-join` — you'll use it to host servers, update, and leave.
+ The script prompts for the invite link (use the page's *Copy my invite link* button), downloads `hogman-join` for the platform, verifies its published SHA-256 checksum, saves it as `~/hogman-join`, and runs it. The invite token never appears in shell arguments or history. [Inspect the script](https://github.com/celtiberi/hogman/blob/main/core/join-page/start.sh) first, or expand the manual download steps on the join page.
+3. **Choose a handle** when prompted (lowercase letters, digits, and dashes, 2–32 characters — for example, `alex-ops`).
+4. **Confirm access.** `hogman-join` verifies the gate against the operating system's built-in HTTPS trust store, confirms the pen portal loads over HTTPS, configures the browser proxy, and opens it. Keep `~/hogman-join` on the machine for updates, hosting, and disconnecting later.
 
-**On a Mac, two prompts may pop up — both are expected:**
+**Expected macOS prompts during first setup:**
 
-- **"Allow hogman-join to find devices on local networks?"** Either answer works. *Allow* lets devices on the same LAN talk directly (faster); *Don't Allow* routes encrypted traffic over the internet instead. Nothing on your LAN is exposed either way.
-- **Your Mac's password**, once, to set the system automatic proxy URL so browsers find pen names. If you skip it, `hogman-join` prints the URL to set by hand.
+- **"Allow hogman-join to find devices on local networks?"** Either choice works. *Allow* lets devices on the same LAN connect directly over WireGuard; *Don't Allow* routes encrypted traffic through the relay instead. Nothing on the local LAN is exposed either way.
+- **Your Mac's password**, once, to configure the system automatic proxy URL so browsers resolve pen hostnames. If skipped, `hogman-join` prints the PAC URL to configure manually.
 
-**If setup stops part way** (offline, DNS still propagating), fix the cause and run the same command again. If it stopped before redeeming the invite, the link is still unused; if after, the rerun detects the enrolled device and finishes setup.
+**If setup is interrupted partway** (offline or DNS still propagating), resolve the issue and run the same command again. If it stopped before redeeming the invite, the link remains unused; if after, the rerun detects the enrolled workstation and finishes setup.
 
 ## Manual downloads
 
-If you'd rather fetch the binary yourself, downloads and `SHA256SUMS` live under `/join/dl/` on your pen's gate host:
+For environments where IT stages binaries directly, platform binaries and `SHA256SUMS` are hosted under `/join/dl/` on the pen's gate host:
 | Platform | Binary |
 | --- | --- |
 | macOS, Apple silicon | `hogman-join-Darwin-arm64` |
 | macOS, Intel | `hogman-join-Darwin-x86_64` |
 | Linux, x86-64 | `hogman-join-Linux-x86_64` |
 | Linux, ARM64 (Raspberry Pi 4/5, ARM servers) | `hogman-join-Linux-aarch64` |
-| Windows (untested) | `hogman-join-windows-amd64.exe` |
+| Windows (built, untested) | `hogman-join-windows-amd64.exe` |
 
-## Using a VPN
+## Using alongside a corporate VPN
 
-On macOS, Network Extension VPN apps (ProtonVPN, Mullvad, WireGuard, corporate VPNs) override the system automatic proxy setting while connected, so browsers stop seeing pen names even though `hogman-join` stays connected.
+On macOS, Network Extension VPN clients (corporate VPNs, WireGuard, ProtonVPN, Mullvad) override the system automatic proxy setting while connected, so browsers stop resolving pen hostnames even though `hogman-join` stays connected.
 
-- **Firefox (works today, no extension needed):** set Firefox's built-in *Settings → Network Settings → Automatic proxy configuration URL* to the `http://127.0.0.1:<port>/proxy.pac` URL printed by `hogman-join`. Pen names route to `hogman-join` while ordinary browsing stays on your VPN.
-- **Chrome, Brave, Edge, and Firefox extension (developer preview):** the companion extension in `browser-ext/` is not yet published on the Chrome Web Store or Mozilla Add-ons. Developers can load it manually from `browser-ext/dist/` (see `browser-ext/README.md`; note that Firefox removes temporary add-ons on restart, and Firefox Private Windows send pen names to public DNS unless *Run in Private Windows* is enabled for the extension).
-- **Safari:** Apple does not expose proxy APIs to Safari extensions, so pause your VPN while visiting pen sites in Safari.
+- **Firefox (works today, no extension required):** set Firefox's built-in *Settings → Network Settings → Automatic proxy configuration URL* to the `http://127.0.0.1:<port>/proxy.pac` URL printed by `hogman-join`. Pen hostnames route through `hogman-join` while ordinary browsing stays on the VPN.
+- **Chrome, Brave, Edge, and Firefox extension (developer preview):** the companion extension in `browser-ext/` is not yet published on the Chrome Web Store or Mozilla Add-ons. Teams can load it manually from `browser-ext/dist/` (see `browser-ext/README.md`; note that Firefox removes temporary add-ons on restart, and Firefox Private Windows send pen names to public DNS unless *Run in Private Windows* is enabled for the extension).
+- **Safari:** Apple does not expose proxy APIs to Safari extensions, so pause the VPN while accessing pen dashboards in Safari.
 
-## How it connects
+## How the client connects
 
-`hogman-join` runs a small userspace background process as your user (no `TUN` interface, no root daemon) that starts at login. It carries **HTTPS (port 443) to pen names and nothing else** (plain `http://` requests redirect locally to HTTPS). Your regular internet, LAN, and any existing Tailscale setup stay untouched. See [what Hogman deliberately doesn't do](https://work.hogman.network/docs/faq.html#not).
+`hogman-join` runs a small unprivileged userspace process as the logged-in user (no `TUN` interface, no root daemon) that starts at login. It carries **HTTPS (port 443) to pen servers and nothing else** (plain `http://` requests redirect locally to HTTPS). Regular internet browsing, local LAN access, and any existing Tailscale installation remain untouched. See [what Hogman deliberately does not do](https://work.hogman.network/docs/faq.html#not).
 
-## Browsers & CLI tools
+## Browsers and command-line tools
 
-Only programs using the pen's local proxy (e.g. `http://127.0.0.1:21234`) reach pen sites:
+Only applications configured to use the pen's loopback proxy (e.g. `http://127.0.0.1:21234`) can reach pen sites:
 
-- **Browsers:** on macOS, `hogman-join` sets the automatic proxy URL (never replacing a non-Hogman proxy). Joining multiple pens updates the combined `proxy.pac` automatically. On Linux, point your browser or desktop automatic proxy setting to the printed `proxy.pac` URL (one URL covers all joined pens; reload proxy settings after joining or leaving a pen).
+- **Browsers:** on macOS, `hogman-join` sets the automatic proxy URL (never overwriting an existing non-Hogman proxy). Joining multiple site pens updates one combined `proxy.pac` automatically. On Linux, point the browser or desktop automatic proxy setting to the printed `proxy.pac` URL (one URL covers all joined pens; reload proxy settings after joining or leaving a pen).
 - **curl (per command):**
 
 ```text
 $ https_proxy=http://127.0.0.1:21234 curl https://cooler-1.store-north.pens.hogman.network
 ```
- Don't export `https_proxy` for your whole shell — the proxy refuses every non-pen hostname.
+ Do not export `https_proxy` globally in your shell — the proxy refuses all non-pen hostnames.
 - **git (per host):**
 
 ```text
 $ git config --global http.https://git.store-north.pens.hogman.network/.proxy http://127.0.0.1:21234
 ```
 
-## Adding more devices
+## Adding a second workstation
 
-On your pen's home page, press **Add a device** for a single-use link and QR code (valid for 1 hour). Open it on the second computer and run the command; it joins under your handle. Phone support is in progress.
+From the pen's portal, press **Add a device** to generate a single-use link and QR code (valid for 1 hour). Open it on the second laptop and run the setup command; it enrolls under the same member account. Mobile support is in progress.
 
-To host a web server in the pen, you don't need a personal device link — see [Hosting HTTPS servers](https://work.hogman.network/docs/share.html).
+For an always-on on-site bridge or server, do not use a personal device link — use a share link as documented in [Bridging equipment & apps](https://work.hogman.network/docs/share.html).
 
-## Updating & leaving
+## Updating and disconnecting
 
 ```text
 $ ~/hogman-join update
 ```
 
-Downloads the latest binary from your pen's gate (or a host you pass), verifies its SHA-256 against `SHA256SUMS` over HTTPS, restarts your pen's background agent and service-managed shares, and cleans up any legacy state. Use `--pen ZONE` if you're in more than one pen, or `--dry-run` to preview.
+Fetches the latest binary from the pen's gate (or a specified host), verifies its SHA-256 against `SHA256SUMS` over HTTPS, restarts the background agent and service-managed bridges, and cleans up legacy state. Pass `--pen ZONE` when connected to multiple pens, or `--dry-run` to preview.
 
 ```text
 $ ~/hogman-join leave '<your pen link or zone>'
 ```
 
-Stops any shares on this computer, shuts down the background connection, and clears its proxy config. Your membership stays active — keepers remove members.
+Stops any bridges running on that machine, shuts down the background connection, and clears its proxy configuration. Membership remains active — owners and admins remove accounts from the portal.
 
 ## CLI options
 
 | Flag | Effect |
 | --- | --- |
-| `--handle NAME` | Set your handle without prompting. |
-| `--hostname NAME` | Override this device's name (default: computer hostname). |
+| `--handle NAME` | Set the member handle without interactive prompting. |
+| `--hostname NAME` | Override the enrolled device label (default: computer hostname). |
 | `--no-service` | Run in the background without installing a login service. |
-| `--no-system-proxy` | Skip changing the macOS system proxy setting. |
-| `--dry-run` | Validate the link and pen without changing anything. |
-| `--no-open` | Don't open the pen home page in a browser when done. |
+| `--no-system-proxy` | Skip modifying the macOS system automatic proxy setting. |
+| `--dry-run` | Validate the link and pen without making changes. |
+| `--no-open` | Do not launch a browser when finished (useful on headless Linux). |
 | `--pen ZONE` | Target a specific pen for `share` or `update`. |
 
-Run `~/hogman-join --help` for the full flag list.
+Run `~/hogman-join --help` for the complete flag list.
 
 ---
 
-<!-- Page: Hosting HTTPS servers (https://work.hogman.network/docs/share.html) -->
+<!-- Page: Bridging equipment & apps (https://work.hogman.network/docs/share.html) -->
 
-# Hosting HTTPS servers
+# Bridging equipment & apps
 
-Anything that runs over HTTPS (port 443) works inside a pen. One command attaches a local web app, dev server, LAN service, or static directory with its own private name and a real Let's Encrypt padlock.
+Keep refrigeration controllers, HVAC/BMS panels, cameras, and internal web apps strictly on your local network, and bridge only their web interfaces into a pen over standard HTTPS (port 443).
 
 ```text
-$ ~/hogman-join share cooler-1 3000
+$ ~/hogman-join share cooler-1 http://192.168.1.40 --background
 
-• Adding a server for cooler-1.store-north.pens.hogman.network (gary)
-• Proxying http://127.0.0.1:3000 as https://cooler-1.store-north.pens.hogman.network
+• Adding a server for cooler-1.store-north.pens.hogman.network (ops-north)
+• Proxying http://192.168.1.40 as https://cooler-1.store-north.pens.hogman.network
 
 ✓ https://cooler-1.store-north.pens.hogman.network is up.
   Everyone in the pen can open it.
   Take it down and free the name: hogman-join share stop cooler-1
 ```
 
-## What you can share
+## What you can bridge
 
 | Target | Command | Behavior |
 | --- | --- | --- |
-| **Local web server / app** | `share blog 3000` | Reverse-proxies `http://127.0.0.1:3000` over HTTPS (WebSockets supported). |
-| **Static site / directory** | `share archive ~/site` | Serves `index.html` (or a directory listing) over HTTPS inside Go's `os.Root` sandbox. |
-| **Service on your LAN** | `share media http://192.168.1.20:8096` | Proxies an internal LAN HTTP service (NAS, media server, Home Assistant) into the pen without opening router ports. |
+| **On-site LAN equipment** | `share cooler-1 http://192.168.1.40` | Bridges a local controller, HVAC/BMS panel, camera NVR, or NAS web UI into the pen over HTTPS with zero open router ports. The local device can speak plain HTTP while staff always connect over HTTPS (`:443`). |
+| **Internal web application** | `share inventory 8080` | Reverse-proxies `http://127.0.0.1:8080` over HTTPS (WebSockets supported; forwards `X-Forwarded-For`, `-Host`, and `-Proto` while preserving the upstream `Host` header). |
+| **Static manuals or reports** | `share sops ~/site-manuals` | Serves `index.html` (or a directory listing) over HTTPS inside Go's `os.Root` sandbox with no symlink escape. |
 
-## Local dev servers with real HTTPS
+Already running Caddy or nginx on site with multiple internal apps behind it? Bridge its local port (`share ops 8080`) and let Hogman handle the private hostname and TLS.
 
-Share a local dev server straight from your laptop so teammates or testers can hit it from anywhere without deploying publicly:
+## Dedicated on-site bridge setup
 
-```text
-$ npm run dev
-$ ~/hogman-join share demo 5173
-```
+Equipment controllers cannot install client software themselves. Keep them on your local LAN and place a small always-on Linux or Mac computer (such as a Raspberry Pi 4/5 or mini PC) on the same network. The bridge machine does **not** need to enroll as a personal member device:
 
-Because the share terminates real TLS with a publicly trusted certificate, browser features that require HTTPS (service workers, secure cookies, camera/mic permissions) behave just like production. Requests forward `X-Forwarded-For`, `-Host`, and `-Proto` while preserving the upstream `Host` header so dev servers like Vite and Next.js accept them out of the box.
-
-Already running Caddy or nginx with multiple sites behind it? Share its port (`share app 8080`) and let Hogman handle the pen name and TLS.
-
-## Keeping servers running
-
-Foreground shares stop when you press Ctrl-C (keeping your name reserved until you stop it). To run persistently across logouts and reboots, add `--background`:
+1. **Close public router ports:** remove any public IP mapping or router port-forwarding pointing at the controller. Verify its web panel answers only on the local LAN (for example, `http://192.168.1.40`).
+2. **Generate a share link:** on your pen's management portal, press **Get a share link** and copy the single-use server link (valid for 1 hour). Always use a *share link* for bridges and servers — not a member invite link.
+3. **Start the bridge in the background:** download `hogman-join` on the bridge box (Raspberry Pi 4/5 uses `hogman-join-Linux-aarch64`) and pass the share link with `--background`:
 
 ```text
-$ ~/hogman-join share blog 3000 --background
+$ ./hogman-join share cooler-1 http://192.168.1.40 'https://store-north.gate.hogman.network/join#k=…' --background
 ```
 
-On macOS (launchd) and Linux (systemd user services), `--background` registers a login service automatically. On a headless Linux server where no user logs in at boot, run `sudo loginctl enable-linger $USER` once so user services start on boot. Pass `--no-service` if you only want a temporary background process until reboot.
-
-## Dedicated / always-on servers
-
-A VPS, mini PC, or home server does not need to join as a personal member device to host sites:
-
-1. On your pen's home page, press **Get a share link** and copy the single-use server link (valid for 1 hour).
-2. On the server machine, download `hogman-join` and pass the link at the end of the share command:
+4. **Enable boot startup on headless Linux:** on macOS (launchd) and Linux (systemd user services), `--background` installs a login service automatically. On a headless Linux bridge where nobody logs in after a power cycle, run once:
 
 ```text
-$ ./hogman-join share forum 8080 'https://store-north.gate.hogman.network/join#k=…' --background
+$ sudo loginctl enable-linger $USER
 ```
+ Pass `--no-service` only if you want a temporary background process until reboot. (Windows is built but untested and does not yet register a reboot service.)
 
-Always use a *share link* for servers, not a member invite link (an invite creates a new member).
+You can run multiple `share` commands from the same on-site bridge machine — for example, one for `cooler-1` and one for `hvac-main` — and each gets its own isolated server identity and hostname. Nothing else on your LAN is exposed.
 
-## Listing & taking down
+## Multi-site separation and naming
+
+- **Separate pens per site or region:** put distinct store groups or facilities in separate pens (e.g. `region-north.pens.hogman.network` and `region-south.pens.hogman.network`) so a lost laptop or contractor account only ever reaches the locations it is assigned to.
+- **Use neutral, non-sensitive hostnames:** standard public HTTPS certificates mean issued hostnames appear in public Certificate Transparency logs (names only — traffic and site contents never leave the encrypted mesh). Prefer generic operational names like `cooler-1` or `panel-b2` instead of customer names, street addresses, or sensitive model numbers.
+- **Naming rules & rollback:** each share name is a single label (lowercase letters, digits, dashes) becoming `https://NAME.<pen>.pens.hogman.network`. First come, first served; up to 50 names per member. If a brand-new share fails to obtain its first certificate, it tears down its server node and releases the name automatically.
+
+**Operational security checklist — what a bridge does and does not cover:**
+
+- **Keep vendor firmware updates enabled:** a pen removes equipment from the public internet and restricts reachability to invited members, but **it does not patch firmware vulnerabilities**.
+- **Change default device passwords:** pen membership is a strong network perimeter, not a substitute for changing factory credentials on controllers.
+- **Web interfaces only (HTTPS :443):** devices that only speak raw non-HTTP protocols (such as raw Modbus, BACnet, RDP, or SSH) without a web UI are not a fit.
+- **Isolated server nodes:** every share runs its own embedded `tsnet` server identity (`tag:server`) with its own local CertMagic TLS keypair. Staff laptops accept zero inbound connections, and your bridge opens zero inbound firewall ports.
+
+## Listing and taking down bridges
 
 ```text
 $ ~/hogman-join share list
-https://cooler-1.store-north.pens.hogman.network   http://127.0.0.1:3000  (running in the background)
+https://cooler-1.store-north.pens.hogman.network   http://192.168.1.40  (running in the background)
 
 $ ~/hogman-join share stop cooler-1
 ✓ https://cooler-1.store-north.pens.hogman.network is down, and the name is free again.
 ```
 
-`share stop` shuts down the server node and releases the name. Leaving a pen stops all shares running on that computer first. In more than one pen? Pass `--pen <zone>`.
-
-## Names & how shares are isolated
-
-- **Format:** single label (lowercase letters, digits, dashes) becoming `https://NAME.<pen>.pens.hogman.network`. First come, first served; up to 50 names per member.
-- **Separate server node:** every share runs its own embedded `tsnet` server identity (`tag:server`) with its own local CertMagic TLS keypair. Your laptop itself still accepts zero inbound connections and opens zero host firewall ports.
-- **Clean rollback on failure:** if a brand-new share fails to obtain its first certificate, it tears down its server node and releases the name automatically.
-- **Certificate Transparency:** issued share hostnames appear in public CT logs; site contents never leave the encrypted mesh.
-- **Platform note:** Windows is built but untested and does not yet register a reboot service for background shares.
+`share stop` shuts down that server node and releases the hostname. Disconnecting a machine with `leave` stops all shares running on it first. Connected to more than one pen? Pass `--pen <zone>`.
 
 ---
 
-<!-- Page: Running a pen (https://work.hogman.network/docs/keeper.html) -->
+<!-- Page: Managing access & offboarding (https://work.hogman.network/docs/keeper.html) -->
 
-# Running a pen
+# Managing access & offboarding
 
-For keepers (owners) and admins. Everything here lives on your pen's home page at `https://home.<yourpen>.pens.hogman.network`.
+For pen owners and admins. Manage staff, outside contractors, invites, and active bridges from your pen's management portal at `https://home.<yourpen>.pens.hogman.network`.
 
-## Roles
+## Roles and permissions
 
 | Role | Permissions |
 | --- | --- |
-| **Owner (keeper)** | Full control. Cannot be suspended or kicked. A pen can — and should — have more than one owner: if an owner loses every device, only another owner can invite them back. Owners can demote each other, so appoint only people you trust completely. |
-| **Admin** | Create and revoke invites; suspend, resume, and kick regular members. Cannot act on owners or other admins. |
-| **Member** | Enroll personal devices and host HTTPS servers. Creating invites is keepers-only unless enabled for members. |
+| **Owner** | Full administrative control. Cannot be suspended or removed. Every operational pen should have **at least two owners**: if one owner loses every enrolled device, only another owner can invite them back. Owners can demote one another, so grant Owner only to fully trusted principals. |
+| **Admin** | Create and revoke invites; suspend, resume, and remove regular members. Cannot modify owners or other admins. |
+| **Member** | Enroll personal workstations and register HTTPS bridges or internal apps. Creating invites is restricted to owners and admins unless explicitly enabled for members. |
 
-## Inviting people
+## Inviting staff and contractors
 
-Under **Invite someone**, add a short note for yourself (e.g. *"Gary, from the climbing club"*) and press **Make an invite**. You get a single-use link and QR code valid for 7 days. Treat the link like a key — anyone who opens it first gets in.
+Under **Invite someone**, add a short tracking note (for example, *"Jordan — refrigeration contractor, Store North"*) and press **Make an invite**. The portal generates a single-use link and QR code valid for 7 days. Treat every invite link like a physical key — whoever opens it first enrolls.
 
-**Open invites** lists unused links so you can revoke any before they're redeemed.
+Unused links appear under **Open invites** and can be revoked at any time before redemption.
 
-## The herd: suspend & kick
+## Suspending and offboarding (~2 seconds)
 
-**The herd** lists every member with their role, status, and device count (paginated with search):
+The **Members** directory lists every enrolled person with their role, status, and device count (paginated with search):
 
-- **Suspend (~2 s):** cuts off all of a member's devices while keeping their account, devices, and site names intact. Use when you want a reversible timeout.
-- **Resume (<1 s):** restores access immediately.
-- **Kick / the boot (~2 s):** ends membership, deletes every device from the mesh, revokes their unused keys and invites, rewrites ACLs, and **permanently retires their handle and site names** so nobody can impersonate them. Coming back requires a fresh invite.
-- **Promote / demote:** make a member an admin (or back to member), or promote an admin to owner (owner-only).
+- **Suspend (~2 s):** immediately cuts off all of a person's devices while keeping their account, device slots, and site names intact. Ideal for outside service vendors between work orders or temporary leave.
+- **Resume (<1 s):** restores access immediately when a contractor or employee needs access again.
+- **Remove (~2 s):** ends membership, deletes every device from the mesh, revokes unused keys and invites, rewrites ACLs, and **permanently retires their handle and site names** so nobody can impersonate them later. Re-entry requires a new invite.
+- **Promote / demote:** grant or revoke Admin access on a member, or promote an Admin to Owner (owner-only).
 
-**No account recovery:** if a member loses every device, invite them again, restore their role, and kick the old account (demote an old owner to admin first). Appoint a second owner so your pen can never be locked out.
+**Zero account recovery — appoint a second owner:** there is no support backdoor or password reset. If someone loses every enrolled device, issue a new invite, restore their role, and remove the old account (demote an old owner to Admin first). Always keep at least two owners on every production pen.
 
-## Devices & site names
+## Devices and active services
 
-Every member manages their own devices from the home page: **Add a device** creates a 1-hour personal join link, and **Get a share link** creates a 1-hour server link for hosting from an always-on machine ([Hosting HTTPS servers](https://work.hogman.network/docs/share.html)). Active sites appear under **Sites in this pen** with their owner and optional note.
+Each member manages their own devices from the portal: **Add a device** creates a 1-hour personal join link for a second laptop, and **Get a share link** creates a 1-hour server link for an on-site bridge or always-on host ([Bridging equipment & apps](https://work.hogman.network/docs/share.html)). Active dashboards and bridged controllers appear under **Sites in this pen** with their owner and optional note.
 
-## What keepers can (and can't) see
+## Audit visibility and privacy boundaries
 
-As keeper, you can see who is in the pen, their devices, online status, and which pen names are queried. You cannot passively read what members send each other (WireGuard + TLS 1.3 end to end) or any browsing outside the pen. Let members know that site hostnames appear in public Certificate Transparency logs and to use a separate browser profile for pens they don't fully trust. See the full [threat model](https://work.hogman.network/docs/security.html#threat-model).
+Owners and admins can see who belongs to the pen, their enrolled devices, online status, and which pen hostnames are queried. Neither pen owners nor Hogman's control plane can passively read application traffic (WireGuard + TLS 1.3 end to end) or any browsing outside the pen. Remind staff that bridged hostnames appear in public Certificate Transparency logs (names only, never contents) and to use a separate browser profile for any pen they do not fully trust. See the full [threat model](https://work.hogman.network/docs/security.html#threat-model).
 
 ---
 
@@ -411,82 +403,94 @@ Full self-audit (OWASP ASVS, CIS Docker/Linux, SLSA): [audit-2026-11.md](https:/
 
 # FAQ & troubleshooting
 
-Straight answers to the questions people ask first, plus fixes for the errors you might actually hit.
+Direct answers to operational, security, and deployment questions, plus fixes for common client and bridge errors.
 
 ## Frequently asked questions
 
-### Why not just use Tailscale?
+### Does a Hogman pen patch vulnerabilities in our equipment?
 
-If you only want your own devices connected, do — Hogman is built on Tailscale's open-source `tsnet` and runs cleanly alongside it. Hogman is for running a private web for a *group of people*: guests join from a single-use link, you manage the herd from a web page, and every site gets real domain names and standard HTTPS with zero public IPs.
+No. A pen removes equipment controllers and internal dashboards from the open internet and restricts reachability to invited pen members, which eliminates drive-by scanning and external opportunistic attacks. **It does not patch device firmware or fix bugs inside web apps.** Keep vendor security updates enabled and replace default device passwords.
 
-### Can I self-host a Hogman pen server?
+### Can an equipment controller that can't install software join a pen?
 
-Hogman runs pen control planes hosted-only on `hogman.network` (we don't support self-hosted pen servers or custom pen domains). Your web apps and files still run on your own machines via [`hogman-join share`](https://work.hogman.network/docs/share.html) over end-to-end encrypted WireGuard. The entire codebase is AGPL-3.0 on [GitHub](https://github.com/celtiberi/hogman) with SLSA-attested releases (`gh attestation verify hogman-join --repo celtiberi/hogman`), and operators can read the [operator guide](https://github.com/celtiberi/hogman/blob/main/deploy/README.md) to see exactly how our host runs.
+Yes — keep the controller strictly on your local LAN with no router port-forwarding, and run `hogman-join share` on a small always-on Linux or Mac computer (such as a Raspberry Pi or mini PC) on the same local network. The local upstream can speak plain HTTP while staff always connect over standard HTTPS (`:443`). See [Dedicated on-site bridge setup](https://work.hogman.network/docs/share.html#bridge).
 
-### Is it a VPN?
+### Should all of our locations share one pen?
 
-No. A VPN sends all of your browsing through someone else's server. A pen is a private web with its own names, HTTPS sites, and guest list — your regular internet keeps going straight out as usual.
+For multi-site operations, no. Create a separate pen per region or store group (for example, `region-north` and `region-south`) so a single lost laptop or compromised contractor account cannot reach every facility.
+
+### How should we manage outside contractors and service vendors?
+
+Create a single-use invite link in the specific site pen they service and tag it with their name and work order. When the visit ends, press **Suspend** (~2 s, reversible for recurring vendors) or **Remove** (~2 s, permanent, retires their handle and site names). See [Suspending and offboarding](https://work.hogman.network/docs/keeper.html#members).
+
+### Why not just use a corporate VPN or Tailscale?
+
+Traditional VPNs route ordinary browsing through a central gateway and often expose whole LAN subnets by default. Tailscale is excellent for personal and engineering meshes — Hogman is built on Tailscale's open-source `tsnet` and runs cleanly alongside it. Hogman is purpose-built for small teams and operations that need zero-IT browser access to specific web panels: single-use invite links, HTTPS-only (`:443`) to explicitly shared servers, standard public HTTPS certificates without a custom root CA, and a built-in web portal for ~2 s revocation.
+
+### Can we self-host a Hogman pen control plane?
+
+Hogman runs pen control planes hosted-only on `hogman.network` (we do not support self-hosted pen servers or custom pen domains). Your equipment, bridges, and internal web apps stay on your own machines over end-to-end encrypted WireGuard. The entire codebase is AGPL-3.0 on [GitHub](https://github.com/celtiberi/hogman) with SLSA-attested releases (`gh attestation verify hogman-join --repo celtiberi/hogman`), and teams can read the [operator guide](https://github.com/celtiberi/hogman/blob/main/deploy/README.md) to inspect how the hosted platform runs.
 
 ### What does Hogman deliberately not do?
 
-Anything other than HTTPS (port 443). No SSH, no raw TCP/UDP ports, no exit nodes, and no inbound connections to personal laptops. Every extra protocol is another attack surface on everyone's computer, so they don't exist and there's no toggle to turn them on. Web servers join as separate isolated [share](https://work.hogman.network/docs/share.html) nodes.
+Anything other than HTTPS (port 443) to explicitly shared server nodes. There is no SSH, no raw TCP/UDP (such as raw Modbus, BACnet, or RDP without a web UI), no exit nodes, no LAN subnet routing, and zero inbound connections to staff laptops. Every extra protocol expands attack surface on employee machines, so there is no toggle to enable them.
 
-### Can strangers, AI crawlers, or data brokers find my pen?
+### Can internet scanners, bots, or AI crawlers find our bridged devices?
 
-No. Pen names have zero public `A`/`AAAA` records (`ns1.hogman.network` returns empty `NODATA` except for temporary ACME challenge tokens), and mesh IPs aren't routable from the internet. Hogman adds zero ads, trackers, or analytics anywhere. What a pen can't stop: a member screenshotting or pasting content out, a third-party app you run phoning home, or site hostnames appearing in public Certificate Transparency logs (names only, never site contents).
+No. Pen hostnames have zero public `A`/`AAAA` records (`ns1.hogman.network` returns empty `NODATA` except for temporary ACME challenge tokens), and mesh IPs are not routable from the public internet. Hogman adds zero ads, trackers, or analytics anywhere. What a pen cannot prevent: an authorized user screenshotting or exporting data, an internal app phoning home on its own, or site hostnames appearing in public Certificate Transparency logs (names only — never site contents or IPs).
 
-### Can the keeper or Hogman read what we send?
+### Can Hogman or a pen owner read our internal traffic?
 
-Not passively. Traffic between devices is encrypted end to end with WireGuard + TLS 1.3. The keeper and our control plane can see membership, devices, and mesh DNS lookups, and control admission/DNS-01 — see the full [threat model](https://work.hogman.network/docs/security.html#threat-model).
+Not passively. Traffic between staff browsers and bridged servers is encrypted end to end with WireGuard + inner TLS 1.3. Owners and the hosted control plane can see membership, enrolled devices, and mesh DNS lookups, and control admission/DNS-01 — see the full [threat model](https://work.hogman.network/docs/security.html#threat-model).
 
-### Can I be in more than one pen?
+### Can a manager belong to multiple site pens?
 
-Yes — join each with its own invite link. Their local proxies run side by side and share one combined `proxy.pac`. Until `pens.hogman.network` is listed on the Public Suffix List, use a separate browser profile for any pen you don't fully trust so cookies stay isolated.
+Yes — join each site pen with its own invite link. Local proxies run side by side and share one combined `proxy.pac`. Until `pens.hogman.network` is listed on the Public Suffix List, use a separate browser profile for any pen you do not fully trust so cookies remain isolated.
 
-### What if I lose my laptop?
+### What if an employee loses a laptop?
 
-If you have another device in the pen, remove the lost one under *Your devices* immediately (pen credentials live in user-readable state files on disk). If you lose **every** device, your account is gone: **there is no account recovery** and no support backdoor. Ask a keeper for a new invite, restore your role, and kick the old account. **If you own a pen, appoint a second owner.**
+An owner or admin should immediately suspend or remove the account (or the employee can remove the lost laptop under *Your devices* from another enrolled workstation) — pen credentials live in user-readable state files on disk. If someone loses **every** enrolled device, **there is no account recovery** and no support backdoor: issue a fresh invite, restore their role, and remove the old account. **Always appoint a second owner on every production pen.**
 
-### Phones, Windows, and cost?
+### Platform support, pricing, and security audit status?
 
-Free while we test. macOS and Linux work today; Windows is built but untested, and a phone app is in the works.
+Hogman is currently an invite-only testbed while commercial plans are prepared. macOS and Linux work today; Windows is built but untested, and mobile apps are in progress. The software is open source (AGPL-3.0) and has **not yet had an independent security audit** — evaluate carefully before relying on it for safety-critical systems.
 
 ## Troubleshooting
 
-### Pen sites say "DNS address could not be found" while my VPN is on
+### Pen dashboards say "DNS address could not be found" while a corporate VPN is active
 
-On macOS, Network Extension VPNs (ProtonVPN, Mullvad, WireGuard, corporate VPNs) replace the system automatic proxy setting while connected, so browsers fall back to public DNS — where pen names intentionally do not exist. Your `hogman-join` connection is still up. Either pause your VPN while visiting pen sites, or configure Firefox's built-in *Automatic proxy configuration URL* to the address printed by `hogman-join` so pen names route straight to `hogman-join` while ordinary browsing stays on your VPN. (A companion browser extension for Chrome, Brave, Edge, and Firefox is available in `browser-ext/` for manual developer install while store listings are prepared.)
+On macOS, Network Extension VPNs (corporate VPNs, WireGuard, ProtonVPN, Mullvad) override the system automatic proxy setting while connected, causing browsers to fall back to public DNS — where pen hostnames intentionally do not exist. The `hogman-join` connection is still up. Pause the VPN while checking pen dashboards, or set Firefox's built-in *Automatic proxy configuration URL* to the address printed by `hogman-join` so pen names route to `hogman-join` while ordinary traffic stays on the VPN. (A companion browser extension for Chrome, Brave, Edge, and Firefox is in `browser-ext/` for manual developer install while store listings are prepared.)
 
 ### The browser can't find pen sites (no VPN running)
 
-Only programs using the pen's local proxy reach the pen. On macOS, `hogman-join` sets the automatic proxy URL automatically unless another non-Hogman proxy is already set (in which case it prints the URL for you to configure). On Linux, point your browser's automatic proxy setting to the printed `http://127.0.0.1:<port>/proxy.pac` URL and reload proxy settings after joining or leaving a pen. For CLI tools, see [Browsers & CLI tools](https://work.hogman.network/docs/join.html#side).
+Only applications using the pen's local proxy can resolve pen names. On macOS, `hogman-join` sets the automatic proxy URL automatically unless another non-Hogman proxy is already configured (in which case it prints the URL to set manually). On Linux, point the browser's automatic proxy setting to the printed `http://127.0.0.1:<port>/proxy.pac` URL and reload proxy settings after joining or leaving a pen. For CLI tools, see [Browsers and command-line tools](https://work.hogman.network/docs/join.html#side).
 
 ### "This computer cannot find the network's names yet"
 
-Run the same join command again. Your invite was already used to enroll this device, so the rerun skips invite redemption and finishes verifying your home page. (That invite won't work on a second computer — use *Add a device* instead.)
+Run the same join command again. The invite already enrolled this workstation, so the rerun skips invite redemption and finishes verifying the portal. (That invite will not work on a second computer — use *Add a device* instead.)
 
-### The join tool tried to open a browser on a headless server
+### The setup tool tried to open a browser on a headless bridge server
 
-Pass `--no-open`. The home page URL is still printed to the terminal.
+Pass `--no-open`. The portal URL is still printed to the terminal.
 
 ### "is already being shared from this computer"
 
-That share is already running in the background or another terminal. Inspect with `~/hogman-join share list` and stop with `~/hogman-join share stop NAME`.
+That bridge is already running in the background or another terminal. Inspect active bridges with `~/hogman-join share list` and stop one with `~/hogman-join share stop NAME`.
 
-### A shared site says "the app isn't answering right now"
+### A bridged dashboard says "the app isn't answering right now"
 
-The share node is up, but nothing is listening on the local port you specified. Start your web server (or double-check the port) and reload.
+The Hogman bridge node is up, but the local controller or web app is unreachable at the configured LAN address or port. Verify the equipment is powered on and reachable from the bridge machine (for example, `curl -I http://192.168.1.40`) and reload.
 
 ### "the invite was not accepted"
 
-Invites work once and expire after 7 days; device and share links expire after 1 hour. Ask for a fresh link.
+Member invites work once and expire after 7 days; personal device links and server share links expire after 1 hour. Issue a fresh link from the portal.
 
-### I left, and want back in
+### A workstation ran `leave` and needs access again
 
-`leave` removes your device, not your membership. Ask a keeper for a device link (or generate one from another device you still have in the pen) and join again.
+`leave` removes the device, not the person's membership. Generate a 1-hour device link from another enrolled device (or ask an owner/admin for a fresh invite if no devices remain) and rejoin.
 
 ### "this link is from an older release (carries fp=)"
 
-Links from early private-CA test builds (before public certificates) are rejected. Ask the keeper for a fresh link; pre-switchover `.hogman` pens must be recreated.
+Links from early private-CA test builds (before public certificates) are rejected. Issue a fresh link; pre-switchover `.hogman` pens must be recreated.
 
-Still stuck? Open an issue on [GitHub](https://github.com/celtiberi/hogman/issues) with what you ran and the exact output.
+Still stuck? Open an issue on [GitHub](https://github.com/celtiberi/hogman/issues) with the command you ran and the exact output.
