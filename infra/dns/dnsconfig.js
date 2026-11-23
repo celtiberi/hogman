@@ -21,6 +21,8 @@ D("hogman.network", REG_NONE, DnsProvider(DSP_CLOUDFLARE),
   AAAA("@", "2a09:8280:1::213:c8aa:0"),
   A("www", "66.241.125.85"),
   AAAA("www", "2a09:8280:1::213:c8aa:0"),
+  A("work", "66.241.125.85"),    // Hogman for Work (D-27), same site
+  AAAA("work", "2a09:8280:1::213:c8aa:0"),
 
   // The hosting server.
   A("get", "159.65.78.95"),    // sign-up page
