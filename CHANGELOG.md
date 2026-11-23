@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- `core/join` and `test-arena/`: live-sandbox deployment fixes discovered during the first end-to-end Bot Arena run on Ubuntu 24.04 (Linux 6.8, Docker 29):
+  - `core/join`: allow opting out of Tailscale's `netns` `SO_BINDTODEVICE` hook via `HOGMAN_DISABLE_NETNS=1` so `hogman-join` works inside `--internal` Docker networks with no default route (where `netns` otherwise binds sockets to `lo` unprivileged on Linux 5.7+ and blackholes outbound dials).
+  - `test-arena/setup-droplet.sh` & `test-arena/arena.sh`: install `docker-buildx`, grant `CAP_CHOWN` to `hogman-arena-cdns` for its API socket, mount `/home/bot` tmpfs with `exec` while keeping `/tmp` and `/dev/shm` `noexec`, prebuild `registrar` once for both pens, and pass `HOGMAN_DISABLE_NETNS=1` + `TS_NO_LOGS_NO_SUPPORT=true` to sandbox containers.
+  - `test-arena/llm.py` & `test-arena/run.py`: fall back from OpenAI-compatible `response_format=json_schema` to forced function calling (`tools`/`tool_choice`) and cache the fallback mode for endpoints like DeepSeek, truncate bulky command outputs (such as inline SVG QR codes) in LLM prompt history while keeping full transcripts on disk, add schema-validation retries, and raise default run/bot token budgets to `300,000` / `120,000`.
+
 ### Added
 - `test-arena/`: added the Hogman Bot Arena v1 testing and red-team harness for disposable Linux sandboxes (`arena.sh`, `setup-droplet.sh`, `Dockerfile.bot`, `Dockerfile.dns`, `canary_server.py`, `prompts.json`, `llm.py`, `sandbox.py`, `judge.py`, `run.py`, `test_arena.py`):
   - Boots a self-contained Pebble + `challenge-dns` + `hogman-front` + two-pen (`.hogman.test`) stack with rotatable Pen A / Pen B canary vaults and per-sandbox isolated `--internal` bot containers (zero internet egress, zero bot-to-bot ICC, Pebble strictly `--internal`, dedicated `dnsmasq`, `--init`, `--read-only`, `--cap-drop ALL`, `no-new-privileges`, memory/PID/ulimit caps, zero API keys inside containers).
