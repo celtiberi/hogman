@@ -156,17 +156,31 @@ run_ids() {   # prints "UID GID"
   echo "${HOGMAN_PEN_UID:-65532} ${HOGMAN_PEN_GID:-65532}"
 }
 
-# Hand the runtime user what it reads and writes. Only does anything as root;
-# a person running their own pen already owns everything.
+# Hand the runtime user what it reads and writes. When running as root (hosted
+# servers), chown directly. When a non-root docker-group operator upgrades an
+# older self-hosted pen whose headscale/lib was previously written as root, do a
+# one-time ownership migration via the already-pulled core-mesh image so
+# non-root headscale can read its keys and database.
 own_runtime_files() {
-  [ "$(id -u)" = 0 ] || return 0
-  [ -n "${HOGMAN_UID:-}" ] && [ "$HOGMAN_UID" != 0 ] || return 0
-  local d
   chmod 755 "$DATA/join-dl" 2>/dev/null || true
-  chmod -R a+rX "$DATA/join-dl" 2>/dev/null || true
-  for d in "$DATA/headscale/lib" "$DATA/registrar" "$DATA/api" "$DATA/edge" "$DATA/portal" "$DATA/secrets/registrar" "$DATA/home-tls" "$DATA/caddy-admin"; do
-    [ -e "$d" ] && chown -R "$HOGMAN_UID:$HOGMAN_GID" "$d"
-  done
+  chmod -R a+rX "$DATA/join-dl" "$DATA/headscale/config" 2>/dev/null || true
+  [ -n "${HOGMAN_UID:-}" ] && [ "$HOGMAN_UID" != 0 ] || return 0
+  if [ "$(id -u)" = 0 ]; then
+    local d
+    for d in "$DATA/headscale/lib" "$DATA/registrar" "$DATA/api" "$DATA/edge" "$DATA/portal" "$DATA/secrets/registrar" "$DATA/home-tls" "$DATA/caddy-admin"; do
+      [ -e "$d" ] && chown -R "$HOGMAN_UID:$HOGMAN_GID" "$d"
+    done
+    return 0
+  fi
+  if [ -d "$DATA/headscale/lib" ] && [ -n "$(find "$DATA/headscale/lib" ! -user "$HOGMAN_UID" -print -quit 2>/dev/null)" ]; then
+    local helper_img
+    helper_img="$(awk '/^[[:space:]]*image:[[:space:]]*tailscale\// {print $2; exit}' compose.yaml)"
+    if [ -n "$helper_img" ]; then
+      docker run --rm --user 0:0 --entrypoint /bin/chown \
+        -v "$(pwd)/$DATA/headscale/lib:/lib" "$helper_img" \
+        -R "$HOGMAN_UID:$HOGMAN_GID" /lib >/dev/null 2>&1 || true
+    fi
+  fi
   return 0
 }
 

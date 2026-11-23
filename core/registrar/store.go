@@ -245,6 +245,11 @@ func (s *Store) InsertMember(m *Member) error {
 	return nil
 }
 
+func (s *Store) ClearMemberHSUserID(id int64) error {
+	_, err := s.db.Exec(`UPDATE members SET hs_user_id = '' WHERE id = ?`, id)
+	return err
+}
+
 func (s *Store) SetMemberStatus(id int64, status string) error {
 	var removed any
 	if status == "removed" {

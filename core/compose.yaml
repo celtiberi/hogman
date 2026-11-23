@@ -7,7 +7,7 @@ x-mesh-node: &mesh-node
   image: tailscale/tailscale:v1.104.7@sha256:72c1e19e0aedca96b8533bbb0b4368564410ff20b17e53b804eb6c1f04a31be4
   restart: unless-stopped
   cap_drop: [ALL]
-  cap_add: [NET_ADMIN, NET_RAW]
+  cap_add: [NET_ADMIN, NET_RAW, CHOWN, DAC_OVERRIDE]
   security_opt: [no-new-privileges:true]
   devices: [/dev/net/tun:/dev/net/tun]
   mem_limit: 128m

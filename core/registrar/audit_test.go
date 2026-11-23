@@ -290,3 +290,65 @@ func TestAuditCrossOriginGETBlockedAndSanitization(t *testing.T) {
 		}
 	}
 }
+
+func TestAuditKickAndSyncClearHSUserIDWithoutRetryLoop(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+
+	if _, err := e.svc.AddMember(ctx, cli, "owner", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	bob, err := e.svc.AddMember(ctx, cli, "bob", "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Kick(ctx, cli, "bob", "bye"); err != nil {
+		t.Fatalf("Kick bob: %v", err)
+	}
+	e.hs.mu.Lock()
+	afterKick := e.hs.deleteUserCalls
+	e.hs.mu.Unlock()
+	if afterKick != 1 {
+		t.Fatalf("deleteUserCalls after Kick = %d, want 1", afterKick)
+	}
+
+	// Five subsequent Syncs (and a restarted Service) must make zero extra DeleteUser calls.
+	for i := 0; i < 5; i++ {
+		if err := e.svc.Sync(ctx); err != nil {
+			t.Fatalf("Sync %d: %v", i, err)
+		}
+	}
+	svc2, err := NewService(e.svc.cfg, e.st, e.svc.hs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc2.Sync(ctx); err != nil {
+		t.Fatalf("restarted Sync: %v", err)
+	}
+	e.hs.mu.Lock()
+	afterSyncs := e.hs.deleteUserCalls
+	e.hs.mu.Unlock()
+	if afterSyncs != 1 {
+		t.Fatalf("deleteUserCalls after 5 Syncs + restart = %d, want 1", afterSyncs)
+	}
+
+	// Simulate an upgraded DB where a previously removed member still has a stale
+	// hs_user_id whose Headscale user is already gone (404): first Sync clears it,
+	// subsequent Syncs make zero further calls.
+	if _, err := e.st.db.Exec(`UPDATE members SET hs_user_id = '99999' WHERE id = ?`, bob.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc2.Sync(ctx); err != nil {
+		t.Fatalf("Sync stale 404: %v", err)
+	}
+	if err := svc2.Sync(ctx); err != nil {
+		t.Fatalf("Sync after clear: %v", err)
+	}
+	e.hs.mu.Lock()
+	finalCalls := e.hs.deleteUserCalls
+	e.hs.mu.Unlock()
+	if finalCalls != 2 {
+		t.Fatalf("deleteUserCalls after 404 clear + follow-up Sync = %d, want 2", finalCalls)
+	}
+}

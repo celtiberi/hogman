@@ -97,10 +97,9 @@ type Service struct {
 	hs   *Headscale
 	acme ACMEBackend
 
-	mu             sync.Mutex // serialises changes that touch Headscale or policy
-	lastPolicy     string
-	orphans        map[string]bool
-	deletedHSUsers map[int64]bool
+	mu         sync.Mutex // serialises changes that touch Headscale or policy
+	lastPolicy string
+	orphans    map[string]bool
 
 	acmeMu        sync.Mutex
 	serverEABHits map[int64][]time.Time
@@ -116,9 +115,9 @@ func (s *Service) clock() time.Time {
 	return time.Now()
 }
 
-// allowWindow checks and records a hit inside a sliding window for key,
-// returning (true, 0) if permitted or (false, retryAfterSeconds) if capped.
-func allowWindow(m map[int64][]time.Time, key int64, limit int, window time.Duration, ts time.Time) (bool, int) {
+// checkWindow prunes expired entries for key and reports whether another hit is
+// permitted without recording one (so failed upstream calls do not burn budget).
+func checkWindow(m map[int64][]time.Time, key int64, limit int, window time.Duration, ts time.Time) (bool, int) {
 	if limit <= 0 {
 		return true, 0
 	}
@@ -129,8 +128,8 @@ func allowWindow(m map[int64][]time.Time, key int64, limit int, window time.Dura
 			kept = append(kept, t)
 		}
 	}
+	m[key] = kept
 	if len(kept) >= limit {
-		m[key] = kept
 		rem := kept[0].Add(window).Sub(ts)
 		secs := int((rem + time.Second - 1) / time.Second)
 		if secs < 1 {
@@ -138,8 +137,11 @@ func allowWindow(m map[int64][]time.Time, key int64, limit int, window time.Dura
 		}
 		return false, secs
 	}
-	m[key] = append(kept, ts)
 	return true, 0
+}
+
+func recordWindow(m map[int64][]time.Time, key int64, ts time.Time) {
+	m[key] = append(m[key], ts)
 }
 
 func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
@@ -167,18 +169,17 @@ func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
 		cfg.MaxMemberEABPerDay = 4
 	}
 	if cfg.MaxMemberACMETXTPerHour <= 0 {
-		cfg.MaxMemberACMETXTPerHour = 20
+		cfg.MaxMemberACMETXTPerHour = 60
 	}
 	return &Service{
-		cfg:            cfg,
-		st:             st,
-		hs:             hs,
-		acme:           cfg.ACMEBackend,
-		orphans:        map[string]bool{},
-		deletedHSUsers: map[int64]bool{},
-		serverEABHits:  map[int64][]time.Time{},
-		memberEABHits:  map[int64][]time.Time{},
-		memberTXTHits:  map[int64][]time.Time{},
+		cfg:           cfg,
+		st:            st,
+		hs:            hs,
+		acme:          cfg.ACMEBackend,
+		orphans:       map[string]bool{},
+		serverEABHits: map[int64][]time.Time{},
+		memberEABHits: map[int64][]time.Time{},
+		memberTXTHits: map[int64][]time.Time{},
 	}, nil
 }
 
@@ -542,8 +543,12 @@ func (s *Service) Kick(ctx context.Context, a Actor, handle, reason string) (*Ki
 		rep.Devices++
 	}
 	// 5. Their Headscale user. Fails harmlessly if a device deletion failed; sync retries the devices.
-	if err := s.hs.DeleteUser(ctx, m.HSUserID); err != nil {
-		log.Printf("kick %s: delete user: %v", handle, err)
+	if m.HSUserID != "" {
+		if err := s.hs.DeleteUser(ctx, m.HSUserID); err == nil || isHSNotFound(err) {
+			_ = s.st.ClearMemberHSUserID(m.ID)
+		} else {
+			log.Printf("kick %s: delete user: %v", handle, err)
+		}
 	}
 	// 6. Withdraw their names and retire them permanently so nobody can impersonate their sites.
 	retired, err := s.st.RetireNames(m.ID)
@@ -1215,7 +1220,7 @@ func (s *Service) ServerSetACMETXT(ctx context.Context, d *Device, rawName, valu
 		return "", err
 	}
 	s.acmeMu.Lock()
-	ok, retry := allowWindow(s.memberTXTHits, d.MemberID, s.cfg.MaxMemberACMETXTPerHour, time.Hour, s.clock())
+	ok, retry := checkWindow(s.memberTXTHits, d.MemberID, s.cfg.MaxMemberACMETXTPerHour, time.Hour, s.clock())
 	s.acmeMu.Unlock()
 	if !ok {
 		return "", &Problem{Status: 429, Msg: "too many ACME challenge writes for this member in the last hour", RetryAfter: retry}
@@ -1224,6 +1229,9 @@ func (s *Service) ServerSetACMETXT(ctx context.Context, d *Device, rawName, valu
 	if err := s.acme.SetTXT(ctx, fqdn, value); err != nil {
 		return "", err
 	}
+	s.acmeMu.Lock()
+	recordWindow(s.memberTXTHits, d.MemberID, s.clock())
+	s.acmeMu.Unlock()
 	return fqdn, nil
 }
 
@@ -1265,27 +1273,25 @@ func (s *Service) ServerMintACMEEAB(ctx context.Context, d *Device) (*EABPair, e
 	}
 	s.acmeMu.Lock()
 	nowTS := s.clock()
-	// Check member quota without consuming server quota if member is already capped.
-	memberOK, memberRetry := allowWindow(s.memberEABHits, d.MemberID, s.cfg.MaxMemberEABPerDay, 24*time.Hour, nowTS)
+	memberOK, memberRetry := checkWindow(s.memberEABHits, d.MemberID, s.cfg.MaxMemberEABPerDay, 24*time.Hour, nowTS)
 	if !memberOK {
 		s.acmeMu.Unlock()
 		return nil, &Problem{Status: 429, Msg: "too many fallback account keys for this member today", RetryAfter: memberRetry}
 	}
-	serverOK, serverRetry := allowWindow(s.serverEABHits, d.ID, s.cfg.MaxServerEABPerDay, 24*time.Hour, nowTS)
+	serverOK, serverRetry := checkWindow(s.serverEABHits, d.ID, s.cfg.MaxServerEABPerDay, 24*time.Hour, nowTS)
+	s.acmeMu.Unlock()
 	if !serverOK {
-		// Roll back the member hit we just appended.
-		hits := s.memberEABHits[d.MemberID]
-		if len(hits) > 0 {
-			s.memberEABHits[d.MemberID] = hits[:len(hits)-1]
-		}
-		s.acmeMu.Unlock()
 		return nil, &Problem{Status: 429, Msg: "too many fallback account keys for this server today", RetryAfter: serverRetry}
 	}
-	s.acmeMu.Unlock()
 	pair, err := s.acme.MintEAB(ctx)
 	if err != nil {
 		return nil, err
 	}
+	s.acmeMu.Lock()
+	recTS := s.clock()
+	recordWindow(s.memberEABHits, d.MemberID, recTS)
+	recordWindow(s.serverEABHits, d.ID, recTS)
+	s.acmeMu.Unlock()
 	s.st.Audit(d.Member, "acme.eab", fmt.Sprintf("device#%d", d.ID), "")
 	return pair, nil
 }
@@ -1460,9 +1466,9 @@ func (s *Service) Sync(ctx context.Context) error {
 			}
 		}
 		for _, m := range allMembers {
-			if m.Status == "removed" && m.HSUserID != "" && !liveByMember[m.ID] && !s.deletedHSUsers[m.ID] {
-				if err := s.hs.DeleteUser(ctx, m.HSUserID); err == nil {
-					s.deletedHSUsers[m.ID] = true
+			if m.Status == "removed" && m.HSUserID != "" && !liveByMember[m.ID] {
+				if err := s.hs.DeleteUser(ctx, m.HSUserID); err == nil || isHSNotFound(err) {
+					_ = s.st.ClearMemberHSUserID(m.ID)
 				}
 			}
 		}
