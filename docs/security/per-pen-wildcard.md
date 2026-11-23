@@ -1,6 +1,13 @@
 # Per-pen wildcard certificates: design proposal
 
-Status: **draft for review** (2026-11-22). Nothing is built. Raised by Patrick; reviewer: @hogman.
+Status: **parked** (2026-11-22, Patrick's call after @hogman's red-team on PR #112). Nothing is built.
+
+**Why parked:** with the hosted registrar holding each pen's wildcard key, a compromised hosted server could impersonate any site in any pen *silently*. Today a compromised server can mint certificates through DNS-01, but every one lands in CT, so it is detectable. That trades a detectable attack for an undetectable one, which is the wrong default. The mitigations are also weaker than this draft claimed:
+- short-lived certificates carry no OCSP or CRL, so a kicked member keeps a working key for up to about 6 days;
+- reissuing on every kick hits Let's Encrypt's 5-per-week duplicate-certificate limit, and a sharer can force it;
+- the GTS fallback has no short-lived profile.
+
+**If revisited:** only as a keeper opt-in ("private site names") where the pen key is generated on the keeper's device and passed between the pen's share hosts end-to-end encrypted, so the hosted server never holds it. Until then, the docs keep stating that site names are public in CT.
 
 ## Problem
 
