@@ -174,13 +174,13 @@ hogman-host signup-work-host get.work.example.com    # optional Work sign-up hos
 hogman-host theme <pen> work                         # toggle an existing pen's UI theme (work|default)
 ```
 
-**Cloudflare Proxy rollout order:** deploy this release first, run `hogman-host signup-cloudflare on`,
-and only then turn on Cloudflare Proxy (`CF_PROXY_ON`) in DNS. If DNS is proxied while
-`signup-cloudflare` is off, every visitor collapses onto a handful of Cloudflare edge IPs and the
-per-IP rate limits (checks, creates, waits, checkouts, webhooks) throttle everyone together. In the
-Cloudflare dashboard, set **SSL/TLS encryption mode** to **Full (strict)**, and keep **Bot Fight
-Mode** off (or add a WAF skip rule for `/api/stripe/webhook`) so Cloudflare does not block Stripe's
-webhook deliveries.
+**Cloudflare Proxy rollout order:** deploy this release first, apply the DNS change (`CF_PROXY_ON`),
+wait for the old record's TTL (~5 minutes) to expire so resolvers switch to Cloudflare, and then run
+`hogman-host signup-cloudflare on`. (Running `signup-cloudflare on` before DNS propagates returns
+`403` to direct visitors; leaving `signup-cloudflare` off indefinitely collapses all visitors onto
+Cloudflare edge IPs for per-IP rate limiting.) In the Cloudflare dashboard, set **SSL/TLS encryption
+mode** to **Full (strict)**, and keep **Bot Fight Mode** off (or add a WAF skip rule for
+`/api/stripe/webhook`) so Cloudflare does not block Stripe's webhook deliveries.
 
 When `signup-work-host` is configured, the front door serves the same `signup-web` container on both
 hosts (with the same Cloudflare Proxy CIDR lock when `signup-cloudflare on` is active), Turnstile
