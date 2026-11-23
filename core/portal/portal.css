@@ -439,7 +439,86 @@ ul.devices li:last-child { padding-bottom: 0.15rem; }
 
 #members li {
   content-visibility: auto;
-  contain-intrinsic-size: auto 46px;
+  contain-intrinsic-size: auto 48px;
+}
+
+#members li.member-row {
+  display: block;
+  padding: 0.72rem 0;
+}
+
+#members li.member-row:first-child { padding-top: 0.2rem; }
+#members li.member-row:last-child { padding-bottom: 0.15rem; }
+
+.member-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem 1rem;
+  flex-wrap: wrap;
+}
+
+.member-id {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.member-name {
+  font-weight: 600;
+  color: var(--bone);
+  overflow-wrap: anywhere;
+}
+
+.member-right {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-left: auto;
+  flex: none;
+}
+
+.member-devices { white-space: nowrap; }
+
+.manage-btn[aria-expanded="true"] {
+  border-color: var(--gold);
+  color: var(--gold);
+}
+
+.member-drawer {
+  margin-top: 0.65rem;
+  padding: 0.72rem 0.9rem;
+  background: rgba(10, 6, 9, 0.55);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1.35rem;
+  align-items: center;
+}
+
+.drawer-group {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.drawer-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ash);
+  margin-right: 0.15rem;
+}
+
+button.link.armed {
+  color: #ffd3cc;
+  border-color: var(--danger);
+  background: rgba(209, 40, 28, 0.22);
 }
 
 .grow {
@@ -838,6 +917,28 @@ html[data-theme="work"] button.link.danger:hover:not(:disabled) {
   color: #7f1d1d;
   background: #fee2e2;
 }
+
+html[data-theme="work"] button.link.armed {
+  color: #7f1d1d;
+  border-color: var(--danger-w);
+  background: #fee2e2;
+}
+
+html[data-theme="work"] .member-name { color: var(--ink); }
+
+html[data-theme="work"] .manage-btn[aria-expanded="true"] {
+  border-color: var(--ink);
+  color: var(--ink);
+  background: var(--surface-alt);
+}
+
+html[data-theme="work"] .member-drawer {
+  background: var(--surface-alt);
+  border-color: var(--line);
+  border-radius: 8px;
+}
+
+html[data-theme="work"] .drawer-label { color: var(--muted); }
 
 html[data-theme="work"] form.row input {
   color: var(--ink);

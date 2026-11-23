@@ -245,11 +245,12 @@
 
   // Two presses instead of a browser dialog.
   const pressTwice = (key, btn, warn, onErr) => {
-    if (armed.has(key)) { armed.delete(key); return true; }
+    if (armed.has(key)) { armed.delete(key); btn.classList.remove('armed'); return true; }
     armed.add(key);
     const was = btn.textContent;
     btn.textContent = warn;
-    setTimeout(() => { armed.delete(key); btn.textContent = was; }, 5000);
+    btn.classList.add('armed');
+    setTimeout(() => { armed.delete(key); btn.textContent = was; btn.classList.remove('armed'); }, 5000);
     onErr && onErr(null);
     return false;
   };
@@ -313,15 +314,44 @@
 
   const soloOwner = () => { $('solo-owner').hidden = !(me.is_owner && me.owners === 1); };
 
+  const closeOtherDrawers = except => {
+    for (const row of $('members').children) {
+      if (row === except) continue;
+      const d = row.querySelector('.member-drawer');
+      const b = row.querySelector('.manage-btn');
+      if (d && !d.hidden) {
+        d.hidden = true;
+        if (b) { b.setAttribute('aria-expanded', 'false'); b.textContent = 'Manage'; }
+      }
+    }
+  };
+
   const memberRow = m => {
-    const li = el('li');
-    li.append(el('span', 'grow', m.handle));
-    if (m.role !== 'member') li.append(el('span', 'tag', m.role));
-    if (m.status === 'suspended') li.append(el('span', 'tag warn', 'suspended'));
-    li.append(el('span', 'muted small', `${m.devices} device${m.devices === 1 ? '' : 's'}`));
-    if (m.id === me.member.id) { li.append(el('span', 'here', 'you')); return li; }
-    const act = (label, action, body, confirmText, after) => {
-      const b = el('button', confirmText ? 'link danger' : 'link', label); b.type = 'button';
+    const li = el('li', 'member-row');
+    const main = el('div', 'member-main');
+    const idCol = el('div', 'member-id');
+    idCol.append(el('span', 'member-name', m.handle));
+    if (m.role !== 'member') idCol.append(el('span', 'tag', m.role));
+    if (m.status === 'suspended') idCol.append(el('span', 'tag warn', 'suspended'));
+
+    const rightCol = el('div', 'member-right');
+    rightCol.append(el('span', 'muted small member-devices', `${m.devices} device${m.devices === 1 ? '' : 's'}`));
+    main.append(idCol, rightCol);
+    li.append(main);
+
+    if (m.id === me.member.id) {
+      rightCol.append(el('span', 'here', 'you'));
+      return li;
+    }
+    // An admin can't act on an owner or another admin; the API refuses if tried.
+    if (!me.is_owner && m.role !== 'member') return li;
+
+    const drawer = el('div', 'member-drawer');
+    drawer.hidden = true;
+
+    const makeBtn = (label, danger, action, body, confirmText, after) => {
+      const b = el('button', danger ? 'link danger' : 'link', label);
+      b.type = 'button';
       b.onclick = async () => {
         if (confirmText && !pressTwice(action + m.id, b, confirmText)) return;
         b.disabled = true;
@@ -331,31 +361,60 @@
           after();
         } catch (e) { b.disabled = false; errIn('herd-err')(e); }
       };
-      li.append(b);
+      return b;
     };
     const redraw = () => li.replaceWith(memberRow(m));
-    // An admin can't act on an owner or another admin; the API refuses if tried.
+
+    const accessGroup = el('div', 'drawer-group');
+    accessGroup.append(el('span', 'drawer-label', 'Access'));
+    if (m.status === 'suspended') {
+      accessGroup.append(makeBtn('Resume', false, 'resume', null, null, () => { m.status = 'active'; redraw(); }));
+    } else {
+      accessGroup.append(makeBtn('Suspend', false, 'suspend',
+        { reason: isWork ? 'suspended from the portal' : 'suspended from the home page' },
+        `Suspend ${m.handle}?`, () => { m.status = 'suspended'; redraw(); }));
+    }
+    accessGroup.append(makeBtn(isWork ? 'Remove' : 'Kick', true, 'kick',
+      { reason: isWork ? 'removed from the portal' : 'kicked from the home page' },
+      isWork ? `Remove ${m.handle} permanently?` : `Kick ${m.handle} for good?`,
+      () => { li.remove(); herd.total--; herd.offset--; herdCount(); }));
+    drawer.append(accessGroup);
+
+    const roleBtns = [];
     if (me.is_owner && m.role !== 'owner') {
       const to = m.role === 'admin' ? 'member' : 'admin';
-      act(`Make ${to}`, 'role', { role: to }, null, () => { m.role = to; redraw(); });
+      roleBtns.push(makeBtn(`Make ${to}`, false, 'role', { role: to }, null, () => { m.role = to; redraw(); }));
     }
     // A second owner is how a pen survives a lost laptop (D-16). Owners are
     // fully trusted: they can do everything, including demoting other owners.
     if (me.is_owner && m.role === 'admin') {
-      act('Make owner', 'role', { role: 'owner' },
+      roleBtns.push(makeBtn('Make owner', false, 'role', { role: 'owner' },
         `Make ${m.handle} an owner? Owners can do everything you can, including demoting you.`,
-        () => { m.role = 'owner'; me.owners++; redraw(); soloOwner(); });
+        () => { m.role = 'owner'; me.owners++; redraw(); soloOwner(); }));
     }
     if (me.is_owner && m.role === 'owner') {
-      act('Make admin', 'role', { role: 'admin' }, `Make ${m.handle} an admin instead of an owner?`,
-        () => { m.role = 'admin'; me.owners--; redraw(); soloOwner(); });
+      roleBtns.push(makeBtn('Make admin', false, 'role', { role: 'admin' },
+        `Make ${m.handle} an admin instead of an owner?`,
+        () => { m.role = 'admin'; me.owners--; redraw(); soloOwner(); }));
     }
-    if (m.status === 'suspended') act('Resume', 'resume', null, null, () => { m.status = 'active'; redraw(); });
-    else act('Suspend', 'suspend', { reason: isWork ? 'suspended from the portal' : 'suspended from the home page' }, `Suspend ${m.handle}?`,
-      () => { m.status = 'suspended'; redraw(); });
-    act(isWork ? 'Remove' : 'Kick', 'kick', { reason: isWork ? 'removed from the portal' : 'kicked from the home page' },
-      isWork ? `Remove ${m.handle} permanently?` : `Kick ${m.handle} for good?`,
-      () => { li.remove(); herd.total--; herd.offset--; herdCount(); });
+    if (roleBtns.length) {
+      const roleGroup = el('div', 'drawer-group');
+      roleGroup.append(el('span', 'drawer-label', 'Role'), ...roleBtns);
+      drawer.append(roleGroup);
+    }
+
+    const toggle = el('button', 'link manage-btn', 'Manage');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.onclick = () => {
+      const opening = drawer.hidden;
+      if (opening) closeOtherDrawers(li);
+      drawer.hidden = !opening;
+      toggle.setAttribute('aria-expanded', String(opening));
+      toggle.textContent = opening ? 'Close' : 'Manage';
+    };
+    rightCol.append(toggle);
+    li.append(drawer);
     return li;
   };
 
