@@ -1480,3 +1480,19 @@ func TestFallbackContact(t *testing.T) {
 		}
 	}
 }
+
+func TestShareCertManagerCloseIdempotent(t *testing.T) {
+	cm, err := newShareCertManager(shareACMEConfig{
+		Zone:       "bobo.pens.example.com",
+		Host:       "photos.bobo.pens.example.com",
+		StorageDir: filepath.Join(t.TempDir(), "acme"),
+		HTTPClient: &http.Client{Timeout: 5 * time.Second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fresh share failure calls cm.Close() before undoFreshShare while defer
+	// cm.Close() also runs on return; Close must be idempotent.
+	cm.Close()
+	cm.Close()
+}
