@@ -790,7 +790,8 @@ func statusCmd() error {
 		if len(configs) == 0 {
 			say("  Clear it with: hogman-join uninstall")
 		} else {
-			say("  It's cleared the next time you leave or update a pen; or run: hogman-join update")
+			say("  It's replaced the next time this computer joins a pen. To turn it off now (System Settings → Network → Proxies,")
+			say("  or: sudo networksetup -setautoproxystate \"<network>\" off), then re-join a pen to set the right one.")
 		}
 	}
 	if sys.VPNOverride {

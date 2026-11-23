@@ -24,6 +24,9 @@ type leaveTarget struct {
 	zone string
 	host string
 	cfg  *agentConfig // nil when only shares are on this pen
+	// legacyTS: joined through this computer's Tailscale app (the old way),
+	// so its ownership can't be checked through Hogman's own connection.
+	legacyTS bool
 }
 
 // hostOf returns the bare host name of a control URL ("" if it has none).
@@ -110,7 +113,12 @@ func leaveCmd(args []string, o options) error {
 		return errorf("%s matches more than one pen here (%s); give the full name", key, zoneList(targets))
 	}
 	if len(targets) == 0 {
-		// Not known here by that name: ask the server which zone it is.
+		// Not known here by that name. A full host name may be a pen joined
+		// the old way, through this computer's Tailscale app: ask its server
+		// which zone it is. A bare word is just not a pen here.
+		if !strings.Contains(key, ".") {
+			return errorf("this computer isn't in a pen called %s (pens here: %s)", key, zoneList(local))
+		}
 		client, err := controlClient(o.controlCA)
 		if err != nil {
 			return err
@@ -120,7 +128,10 @@ func leaveCmd(args []string, o options) error {
 			return errorf("this computer isn't in a pen called %s (pens here: %s)", key, zoneList(local))
 		}
 		if targets = matchLeaveTargets(local, n.Zone); len(targets) == 0 {
-			return errorf("this computer isn't in %s (pens here: %s)", n.Zone, zoneList(local))
+			if !onTailscaleAppFn(n.Zone) {
+				return errorf("this computer isn't in %s (pens here: %s)", n.Zone, zoneList(local))
+			}
+			targets = []leaveTarget{{zone: n.Zone, host: key, legacyTS: true}}
 		}
 	}
 	for _, t := range targets {
@@ -151,12 +162,31 @@ func leaveAll(args []string, o options, question string) (kept int, err error) {
 		say("This computer isn't in any pen.")
 		return 0, nil
 	}
-	var go_, stay []leaveTarget
-	var why []string
+	go_, stay := planLeave(local, o)
+	if len(go_) == 0 {
+		return len(stay), errorf("nothing to leave")
+	}
+	if !o.yes && !confirmFn("\n"+question+"?") {
+		return len(stay), errorf("nothing changed")
+	}
+	if err := leaveTargets(go_); err != nil {
+		return len(stay), err
+	}
+	return len(stay), nil
+}
+
+// keptPen is a pen that stays, with why.
+type keptPen struct {
+	t   leaveTarget
+	why string
+}
+
+// planLeave decides, once, which pens can be left (asking for --force typed
+// names here and only here) and shows the plan.
+func planLeave(local []leaveTarget, o options) (go_ []leaveTarget, stay []keptPen) {
 	for _, t := range local {
 		if err := checkCanLeave(t, o); err != nil {
-			stay = append(stay, t)
-			why = append(why, err.Error())
+			stay = append(stay, keptPen{t, err.Error()})
 			continue
 		}
 		go_ = append(go_, t)
@@ -165,22 +195,24 @@ func leaveAll(args []string, o options, question string) (kept int, err error) {
 	for _, t := range go_ {
 		note("will leave  %s", t.zone)
 	}
-	for i, t := range stay {
-		note("will KEEP   %s: %s", t.zone, firstLine(why[i]))
+	for _, k := range stay {
+		note("will KEEP   %s:", k.t.zone)
+		for _, line := range strings.Split(k.why, "\n") {
+			note("    %s", strings.TrimSpace(line))
+		}
 	}
-	if len(go_) == 0 {
-		return len(stay), errorf("nothing to leave")
-	}
-	if !o.yes && !confirmFn("\n"+question+"?") {
-		return len(stay), errorf("nothing changed")
-	}
-	for _, t := range go_ {
+	return go_, stay
+}
+
+// leaveTargets leaves each pen, then clears any stale proxy setting.
+func leaveTargets(ts []leaveTarget) error {
+	for _, t := range ts {
 		if err := leaveOneFn(t); err != nil {
-			return len(stay), err
+			return err
 		}
 	}
 	sweepStaleProxyFn()
-	return len(stay), nil
+	return nil
 }
 
 // sweepStaleProxyFn clears any automatic-proxy setting an old Hogman pen left
@@ -210,10 +242,16 @@ func firstZoneOr(ts []leaveTarget, def string) string {
 // typing the pen's name exactly (like deleting a repository); --yes never
 // skips that, and without a person at the keyboard it refuses.
 func checkCanLeave(t leaveTarget, o options) error {
-	if t.cfg == nil {
+	var owner, known bool
+	switch {
+	case t.legacyTS:
+		// joined through the Tailscale app: Hogman can't ask the pen as this
+		// computer, so ownership is unknown and --force with the name is needed.
+	case t.cfg == nil:
 		return nil // only shares here: no device, no membership to lose
+	default:
+		owner, known = ownsPenFn(t.cfg)
 	}
-	owner, known := ownsPenFn(t.cfg)
 	var warning string
 	switch {
 	case known && owner:
@@ -257,6 +295,11 @@ func typedConfirm(zone, warning string) bool {
 // ownsPen asks the pen, as this computer, whether its person is an owner.
 // known is false when the pen can't be asked.
 func ownsPen(cfg *agentConfig) (owner, known bool) {
+	// Already removed from the pen (the agent proves it and the pen says log
+	// in again): nothing left to protect.
+	if state, d := verifyAgentEndpointDetail(stateDir(cfg.Zone), cfg); state == agentEndpointDown && d.verified && d.needsLogin {
+		return false, true
+	}
 	c, err := penClient(cfg)
 	if err != nil {
 		return false, false
@@ -265,7 +308,27 @@ func ownsPen(cfg *agentConfig) (owner, known bool) {
 	if _, err := homeAPI(c, cfg.Zone, "GET", "/me", nil, &me); err != nil || me.Member.Handle == "" {
 		return false, false
 	}
-	return me.IsOwner, true
+	return ownerFromMe(me)
+}
+
+// ownerFromMe reads ownership from /api/me, failing closed: a pen that
+// doesn't say (an older registrar) counts as unknown, never as "not owner".
+func ownerFromMe(me meView) (owner, known bool) {
+	if me.IsOwner == nil {
+		return false, false
+	}
+	return *me.IsOwner, true
+}
+
+// onTailscaleAppFn: is this computer on zone through its Tailscale app? A
+// seam for tests.
+var onTailscaleAppFn = func(zone string) bool {
+	ts, err := findTailscale()
+	if err != nil {
+		return false
+	}
+	st, err := ts.Status()
+	return err == nil && st.OnNetwork(zone)
 }
 
 func zoneList(ts []leaveTarget) string {
@@ -334,27 +397,35 @@ func leaveOne(t leaveTarget) error {
 }
 
 // uninstallCmd takes Hogman off this computer: every pen, then its settings.
-// It's all or nothing. If this person owns any pen here (owners have no
-// account recovery), or a pen can't be checked, it refuses before asking or
-// changing anything. Otherwise it lists the pens and asks first. The program
-// file itself is left for the person to delete, since it may live anywhere.
+// It's all or nothing. The plan is made once (any --force typed names are
+// asked for there, once); if any pen would stay (one this person owns, or one
+// that can't be checked), nothing changes. Otherwise it asks, even with no
+// pens left, then leaves, clears a stale proxy setting and removes settings.
+// The program file itself is left for the person to delete.
 func uninstallCmd(args []string, o options) error {
 	if len(args) != 0 {
 		return errorf("usage: hogman-join uninstall")
 	}
-	var blocked []string
-	for _, t := range localLeaveTargets() {
-		if err := checkCanLeave(t, o); err != nil {
-			blocked = append(blocked, "  "+t.zone+": "+firstLine(err.Error()))
+	local := localLeaveTargets()
+	go_, stay := planLeave(local, o)
+	if len(stay) > 0 {
+		names := make([]string, len(stay))
+		for i, k := range stay {
+			names[i] = k.t.zone
 		}
+		return errorf("Hogman can't be removed from this computer yet, so nothing was changed: %s stays.\n"+
+			"  Sort that out (make someone else an owner first), or run hogman-join uninstall --force and type each pen's name.",
+			strings.Join(names, ", "))
 	}
-	if len(blocked) > 0 {
-		return errorf("Hogman can't be removed from this computer yet, so nothing was changed:\n%s\n"+
-			"  Sort those out (make someone else an owner first), or run hogman-join uninstall --force and type each pen's name.",
-			strings.Join(blocked, "\n"))
+	question := "Leave these pens and remove Hogman from this computer?"
+	if len(local) == 0 {
+		question = "Remove Hogman's settings from this computer?"
 	}
-	if _, err := leaveAll(nil, o, "Leave these pens and remove Hogman from this computer"); err != nil {
-		return err // declined, or a pen failed to leave: remove nothing
+	if !o.yes && !confirmFn("\n"+question) {
+		return errorf("nothing changed")
+	}
+	if err := leaveTargets(go_); err != nil {
+		return err // a pen failed to leave: remove nothing
 	}
 	step("Removing Hogman's settings from this computer")
 	removeNativeHost(hogmanConfigBase())
@@ -368,7 +439,11 @@ func uninstallCmd(args []string, o options) error {
 	self, _ := os.Executable()
 	say("\n✓ Hogman is off this computer.")
 	if self != "" {
-		say("  Last step: delete the program itself:  rm '%s'", self)
+		if runtime.GOOS == "windows" {
+			say("  Last step: delete the program itself:  del \"%s\"", self)
+		} else {
+			say("  Last step: delete the program itself:  rm '%s'", self)
+		}
 	}
 	say("  If you added the Hogman browser extension, remove it from your browser's extensions page.")
 	return nil

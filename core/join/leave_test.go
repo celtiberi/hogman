@@ -421,3 +421,96 @@ func TestLeaveShortName(t *testing.T) {
 		t.Fatalf("a prefix of a short name must not match: %v", got)
 	}
 }
+
+// uninstall --force asks for each pen's name exactly once, and if a pen would
+// stay, removes nothing (no second pass that could disagree with the first).
+func TestUninstallForceAsksOnceAndNeverRemovesForAKeptPen(t *testing.T) {
+	f := newLeaveFixture(t)
+	f.answer = true
+	f.typed["own.pens.example.network"] = "own.pens.example.network"
+	if err := uninstallCmd(nil, options{force: true}); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, z := range f.prompts {
+		if z == "own.pens.example.network" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("owned pen's name asked %d times, want once", n)
+	}
+
+	g := newLeaveFixture(t)
+	g.answer = true
+	g.typed["own.pens.example.network"] = "wrong"
+	if err := uninstallCmd(nil, options{force: true}); err == nil {
+		t.Fatal("uninstall went ahead with a kept pen")
+	}
+	if len(g.left) != 0 || g.asked != 0 || !g.settingsExist() {
+		t.Fatalf("kept pen: left %v, asked %d, settings exist %v; want nothing touched", g.left, g.asked, g.settingsExist())
+	}
+}
+
+// uninstall with no pens still asks first, and clears a stale proxy setting.
+func TestUninstallWithNoPensAsksAndSweeps(t *testing.T) {
+	f := newLeaveFixture(t)
+	for _, d := range []string{hogmanConfigBase(), sharesBase()} {
+		_ = os.RemoveAll(d)
+	}
+	if err := os.MkdirAll(hogmanConfigBase(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.answer = false
+	if err := uninstallCmd(nil, options{}); err == nil {
+		t.Fatal("declined uninstall should report nothing changed")
+	}
+	if f.asked != 1 || f.swept != 0 || !f.settingsExist() {
+		t.Fatalf("declined: asked %d, swept %d, settings exist %v", f.asked, f.swept, f.settingsExist())
+	}
+	f.answer = true
+	if err := uninstallCmd(nil, options{}); err != nil {
+		t.Fatal(err)
+	}
+	if f.swept != 1 || f.settingsExist() {
+		t.Fatalf("accepted: swept %d, settings exist %v; want swept and removed", f.swept, f.settingsExist())
+	}
+}
+
+// A pen that doesn't say whether this person is an owner (an older registrar)
+// counts as unknown, never as "not an owner".
+func TestOwnerFromMeFailsClosed(t *testing.T) {
+	yes, no := true, false
+	if o, k := ownerFromMe(meView{}); o || k {
+		t.Fatalf("missing is_owner = (%v,%v), want unknown", o, k)
+	}
+	if o, k := ownerFromMe(meView{IsOwner: &yes}); !o || !k {
+		t.Fatalf("is_owner true = (%v,%v)", o, k)
+	}
+	if o, k := ownerFromMe(meView{IsOwner: &no}); o || !k {
+		t.Fatalf("is_owner false = (%v,%v)", o, k)
+	}
+}
+
+// A pen joined the old way (Tailscale app) can't be checked, so leaving it
+// needs --force and the typed name.
+func TestLegacyTailscalePenNeedsForce(t *testing.T) {
+	f := newLeaveFixture(t)
+	lt := leaveTarget{zone: "old.pens.example.network", legacyTS: true}
+	if err := checkCanLeave(lt, options{}); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("legacy pen without --force: %v", err)
+	}
+	f.typed["old.pens.example.network"] = "old.pens.example.network"
+	if err := checkCanLeave(lt, options{force: true}); err != nil {
+		t.Fatalf("legacy pen with --force and name: %v", err)
+	}
+}
+
+// A bare word that isn't a pen here is refused without asking any server.
+func TestLeaveBareTypoNoNetwork(t *testing.T) {
+	newLeaveFixture(t)
+	err := leaveCmd([]string{"typo"}, options{})
+	if err == nil || !strings.Contains(err.Error(), "isn't in a pen called typo") {
+		t.Fatalf("leave typo: %v", err)
+	}
+}

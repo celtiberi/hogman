@@ -22,9 +22,11 @@ var staleHogmanPAC = func(raw string) bool {
 	if !hogmanShapedPACURL(raw) {
 		return false
 	}
+	tr := &http.Transport{Proxy: nil, DisableKeepAlives: true}
+	defer tr.CloseIdleConnections()
 	c := &http.Client{
 		Timeout:   1500 * time.Millisecond,
-		Transport: &http.Transport{Proxy: nil},
+		Transport: tr,
 		// Judge only what answers at that address: an unrelated local server
 		// mustn't be able to point the check somewhere else.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -49,7 +51,7 @@ func hogmanShapedPACURL(raw string) bool {
 		return false
 	}
 	p, err := strconv.Atoi(u.Port())
-	if err != nil || p < 1024 || p > 65535 {
+	if err != nil || p < hogmanPortMin || p > hogmanPortMax { // only ports Hogman hands out
 		return false
 	}
 	for k := range u.Query() {
