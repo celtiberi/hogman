@@ -1,6 +1,6 @@
 # Per-pen wildcard certificates: design proposal
 
-Status: **parked** (2026-11-22, Patrick's call after @hogman's red-team on PR #112). Nothing is built.
+Status: **parked** (2026-11-22, maintainer's call after @hogman's red-team on PR #112). Nothing is built.
 
 **Why parked:** with the hosted registrar holding each pen's wildcard key, a compromised hosted server could impersonate any site in any pen *silently*. Today a compromised server can mint certificates through DNS-01, but every one lands in CT, so it is detectable. That trades a detectable attack for an undetectable one, which is the wrong default. The mitigations are also weaker than this draft claimed:
 - short-lived certificates carry no OCSP or CRL, so a kicked member keeps a working key for up to about 6 days;
