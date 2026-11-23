@@ -229,29 +229,30 @@ func statusHasPeerIP(st *ipnstate.Status, want netip.Addr) bool {
 }
 
 // evaluateLiveNodeStatus translates a running tsnet node's current Status into
-// (up, reason). Once an agent has joined, this catches post-kick revocations
-// (BackendState leaving Running, expired session, or losing the pen's DNS peer).
-func evaluateLiveNodeStatus(st *ipnstate.Status, dnsServer string) (bool, string) {
+// (up, needsLogin, reason). needsLogin is true only when the control plane
+// explicitly reports BackendState == "NeedsLogin"; missing peers or other
+// transient states report down without claiming the device was removed.
+func evaluateLiveNodeStatus(st *ipnstate.Status, dnsServer string) (up bool, needsLogin bool, reason string) {
 	if st == nil {
-		return false, "no node status"
+		return false, false, "no node status"
 	}
 	switch st.BackendState {
 	case "Running":
 		if st.Self != nil && st.Self.Expired {
-			return false, "device session expired"
+			return false, false, "device session expired"
 		}
 		if dnsServer != "" {
 			if dnsIP, err := netip.ParseAddr(dnsServer); err == nil && !statusHasPeerIP(st, dnsIP) {
-				return false, "device removed from pen"
+				return false, false, "not connected to pen"
 			}
 		}
-		return true, ""
+		return true, false, ""
 	case "NeedsLogin":
-		return false, "device removed from pen"
+		return false, true, "device removed from pen"
 	case "":
-		return false, "not connected"
+		return false, false, "not connected"
 	default:
-		return false, "not connected (" + st.BackendState + ")"
+		return false, false, "not connected (" + st.BackendState + ")"
 	}
 }
 
@@ -346,7 +347,7 @@ type agent struct {
 	// network for anything else, so a pen whose DNS answered 127.0.0.1, a LAN
 	// address or another tailnet's 100.x address would otherwise reach it.
 	isPeer     func(ctx context.Context, ip netip.Addr) bool
-	liveStatus func(ctx context.Context) (bool, string)
+	liveStatus func(ctx context.Context) (up bool, needsLogin bool, reason string, ok bool)
 
 	mu     sync.Mutex
 	up     bool
@@ -392,16 +393,17 @@ func newAgent(c *agentConfig, node *tsnet.Server) *agent {
 			}
 			return peerIPsForHost(st, host), nil
 		}
-		a.liveStatus = func(ctx context.Context) (bool, string) {
+		a.liveStatus = func(ctx context.Context) (bool, bool, string, bool) {
 			lc, err := node.LocalClient()
 			if err != nil {
-				return false, err.Error()
+				return false, false, "", false
 			}
 			st, err := lc.Status(ctx)
 			if err != nil {
-				return false, err.Error()
+				return false, false, "", false
 			}
-			return evaluateLiveNodeStatus(st, c.DNSServer)
+			up, needsLogin, reason := evaluateLiveNodeStatus(st, c.DNSServer)
+			return up, needsLogin, reason, true
 		}
 	}
 	return a
@@ -450,11 +452,12 @@ func orderIPs(ips []string) []string {
 }
 
 type agentStatus struct {
-	Zone   string   `json:"zone"`
-	Up     bool     `json:"up"`
-	Error  string   `json:"error,omitempty"`
-	IPs    []string `json:"ips,omitempty"`
-	Server bool     `json:"server,omitempty"` // the pen tagged this device a server (refused)
+	Zone       string   `json:"zone"`
+	Up         bool     `json:"up"`
+	NeedsLogin bool     `json:"needs_login,omitempty"`
+	Error      string   `json:"error,omitempty"`
+	IPs        []string `json:"ips,omitempty"`
+	Server     bool     `json:"server,omitempty"` // the pen tagged this device a server (refused)
 }
 
 // dial opens a connection to a pen host. Anything outside the pen is refused:
@@ -556,10 +559,11 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.mu.Unlock()
 		if st.Up && a.liveStatus != nil {
 			ctx, cancel := context.WithTimeout(r.Context(), 200*time.Millisecond)
-			liveUp, liveErr := a.liveStatus(ctx)
+			liveUp, needsLogin, liveErr, ok := a.liveStatus(ctx)
 			cancel()
-			if !liveUp {
+			if ok && !liveUp {
 				st.Up = false
+				st.NeedsLogin = needsLogin
 				st.Error = liveErr
 			}
 		}

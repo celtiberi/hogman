@@ -762,13 +762,13 @@ func TestEvaluateLiveNodeStatus(t *testing.T) {
 			peerKey: {TailscaleIPs: []netip.Addr{dnsIP}},
 		},
 	}
-	if up, reason := evaluateLiveNodeStatus(running, dnsIP.String()); !up || reason != "" {
-		t.Fatalf("running with DNS peer: got (%v, %q), want (true, \"\")", up, reason)
+	if up, nl, reason := evaluateLiveNodeStatus(running, dnsIP.String()); !up || nl || reason != "" {
+		t.Fatalf("running with DNS peer: got (%v, %v, %q), want (true, false, \"\")", up, nl, reason)
 	}
 
 	needsLogin := &ipnstate.Status{BackendState: "NeedsLogin"}
-	if up, reason := evaluateLiveNodeStatus(needsLogin, dnsIP.String()); up || !strings.Contains(reason, "removed") {
-		t.Fatalf("NeedsLogin: got (%v, %q), want (false, removed)", up, reason)
+	if up, nl, reason := evaluateLiveNodeStatus(needsLogin, dnsIP.String()); up || !nl || !strings.Contains(reason, "removed") {
+		t.Fatalf("NeedsLogin: got (%v, %v, %q), want (false, true, removed)", up, nl, reason)
 	}
 
 	expired := &ipnstate.Status{
@@ -778,8 +778,8 @@ func TestEvaluateLiveNodeStatus(t *testing.T) {
 			peerKey: {TailscaleIPs: []netip.Addr{dnsIP}},
 		},
 	}
-	if up, reason := evaluateLiveNodeStatus(expired, dnsIP.String()); up || !strings.Contains(reason, "expired") {
-		t.Fatalf("expired self: got (%v, %q), want (false, expired)", up, reason)
+	if up, nl, reason := evaluateLiveNodeStatus(expired, dnsIP.String()); up || nl || !strings.Contains(reason, "expired") {
+		t.Fatalf("expired self: got (%v, %v, %q), want (false, false, expired)", up, nl, reason)
 	}
 
 	noDNSPeer := &ipnstate.Status{
@@ -787,13 +787,13 @@ func TestEvaluateLiveNodeStatus(t *testing.T) {
 		Self:         &ipnstate.PeerStatus{TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.2")}},
 		Peer:         map[key.NodePublic]*ipnstate.PeerStatus{},
 	}
-	if up, reason := evaluateLiveNodeStatus(noDNSPeer, dnsIP.String()); up || !strings.Contains(reason, "removed") {
-		t.Fatalf("missing DNS peer: got (%v, %q), want (false, removed)", up, reason)
+	if up, nl, reason := evaluateLiveNodeStatus(noDNSPeer, dnsIP.String()); up || nl || strings.Contains(reason, "removed") || reason != "not connected to pen" {
+		t.Fatalf("missing DNS peer: got (%v, %v, %q), want (false, false, 'not connected to pen')", up, nl, reason)
 	}
 
 	stopped := &ipnstate.Status{BackendState: "Stopped"}
-	if up, reason := evaluateLiveNodeStatus(stopped, dnsIP.String()); up || !strings.Contains(reason, "Stopped") {
-		t.Fatalf("Stopped: got (%v, %q), want (false, Stopped)", up, reason)
+	if up, nl, reason := evaluateLiveNodeStatus(stopped, dnsIP.String()); up || nl || !strings.Contains(reason, "Stopped") {
+		t.Fatalf("Stopped: got (%v, %v, %q), want (false, false, Stopped)", up, nl, reason)
 	}
 }
 
@@ -803,12 +803,16 @@ func TestAgentStatusReflectsPostKickRevocation(t *testing.T) {
 	a.up = true
 	a.ips = []string{"100.64.0.2"}
 
-	kicked := false
-	a.liveStatus = func(context.Context) (bool, string) {
-		if kicked {
-			return false, "device removed from pen"
+	mode := "up"
+	a.liveStatus = func(context.Context) (bool, bool, string, bool) {
+		switch mode {
+		case "timeout":
+			return false, false, "", false
+		case "kicked":
+			return false, true, "device removed from pen", true
+		default:
+			return true, false, "", true
 		}
-		return true, ""
 	}
 
 	getStatus := func() agentStatus {
@@ -826,11 +830,16 @@ func TestAgentStatusReflectsPostKickRevocation(t *testing.T) {
 		return st
 	}
 
-	if st := getStatus(); !st.Up || st.Error != "" {
+	if st := getStatus(); !st.Up || st.NeedsLogin || st.Error != "" {
 		t.Fatalf("before kick: got %+v, want Up=true", st)
 	}
-	kicked = true
-	if st := getStatus(); st.Up || st.Error != "device removed from pen" {
-		t.Fatalf("after kick: got %+v, want Up=false Error='device removed from pen'", st)
+	// A transient liveStatus error/timeout must keep the latched Up=true state.
+	mode = "timeout"
+	if st := getStatus(); !st.Up || st.NeedsLogin || st.Error != "" {
+		t.Fatalf("on liveStatus timeout: got %+v, want latched Up=true", st)
+	}
+	mode = "kicked"
+	if st := getStatus(); st.Up || !st.NeedsLogin || st.Error != "device removed from pen" {
+		t.Fatalf("after kick: got %+v, want Up=false NeedsLogin=true Error='device removed from pen'", st)
 	}
 }

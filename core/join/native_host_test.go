@@ -447,19 +447,47 @@ func TestVerifyAgentEndpointReportsRemovedReason(t *testing.T) {
 	a := newAgent(cfg, nil)
 	a.up = true
 	a.statusToken = tok
-	a.liveStatus = func(context.Context) (bool, string) {
-		return false, "device removed from pen"
+	a.liveStatus = func(context.Context) (bool, bool, string, bool) {
+		return false, true, "device removed from pen", true
 	}
 	srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: a}}
 	srv.Start()
 	defer srv.Close()
 
-	state, reason := verifyAgentEndpointWithReason(dir, cfg)
-	if state != agentEndpointDown || reason != "device removed from pen" {
-		t.Fatalf("verifyAgentEndpointWithReason = (%v, %q), want (down, 'device removed from pen')", state, reason)
+	state, detail := verifyAgentEndpointDetail(dir, cfg)
+	if state != agentEndpointDown || !detail.verified || !detail.needsLogin || detail.reason != "device removed from pen" {
+		t.Fatalf("verifyAgentEndpointDetail = (%v, %+v), want (down, verified=true, needsLogin=true)", state, detail)
 	}
 	pens, _ := collectNativePens(base)
 	if len(pens) != 1 || pens[0].Up || pens[0].Squatted || pens[0].statusReason != "device removed from pen" {
 		t.Fatalf("collectNativePens = %+v, want Up=false Squatted=false statusReason='device removed from pen'", pens)
+	}
+
+	// Unverified/forged listener claiming NeedsLogin must be flagged squatted (verified=false).
+	lnBad, portBad := listenInHogmanRange(t)
+	zoneBad := "forged1.pens.hogman.network"
+	dirBad := filepath.Join(base, zoneBad)
+	if err := os.MkdirAll(dirBad, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgBad := &agentConfig{Zone: zoneBad, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", portBad)}
+	if err := cfgBad.save(dirBad); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirBad, statusTokenFilename), []byte(tok), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	badSrv := &httptest.Server{
+		Listener: lnBad,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(agentStatus{Zone: zoneBad, Up: false, NeedsLogin: true, Error: "device removed from pen"})
+		})},
+	}
+	badSrv.Start()
+	defer badSrv.Close()
+
+	badState, badDetail := verifyAgentEndpointDetail(dirBad, cfgBad)
+	if badState != agentEndpointSquatted || badDetail.verified || badDetail.needsLogin {
+		t.Fatalf("forged NeedsLogin: got (%v, %+v), want (squatted, verified=false, needsLogin=false)", badState, badDetail)
 	}
 }

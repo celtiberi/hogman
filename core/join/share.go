@@ -886,7 +886,7 @@ func removeShareWithOptions(dir string, c *shareConfig, timeout time.Duration, c
 			return os.RemoveAll(dir)
 		}
 		if cleanupOnUnreachable {
-			note("could not reach the pen for %s (%v); cleaned up local files", c.url(), firstLine(err.Error()))
+			note("could not reach the pen for %s (%v); cleaned up local files (check your home page to remove the server if it is still listed)", c.url(), firstLine(err.Error()))
 			return os.RemoveAll(dir)
 		}
 		return errorf("could not reach the pen (%v).\n  Remove the server on your home page instead, then delete %s", err, dir)

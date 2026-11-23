@@ -298,13 +298,14 @@ func pollPortal(c *http.Client, portal string, d time.Duration) (string, error) 
 // device. Best effort: leaving still works if the pen can't be reached. It
 // reports whether the pen accepted that.
 func removeOwnDevice(zone string) bool {
-	cfg, err := loadAgentConfig(stateDir(zone))
+	dir := stateDir(zone)
+	cfg, err := loadAgentConfig(dir)
 	if err != nil {
 		return false
 	}
-	// If the running agent already knows this device was removed from the pen,
-	// skip both the doomed /api/me probe and the redundant __agent-logout retry.
-	if st, err := agentState(cfg); err == nil && !st.Up && strings.Contains(strings.ToLower(st.Error), "removed") {
+	// Only skip device removal / logout when the running agent passes HMAC
+	// status.token verification AND the control plane explicitly reports NeedsLogin.
+	if state, detail := verifyAgentEndpointDetail(dir, cfg); state == agentEndpointDown && detail.verified && detail.needsLogin {
 		note("this computer was already removed from the pen")
 		return true
 	}
