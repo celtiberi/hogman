@@ -15,13 +15,14 @@
 <header class="top">
   <div class="top-inner">
     <div class="top-brand">
-      <a class="brand" href="https://hogman.network/" target="_blank" rel="noopener noreferrer" aria-label="Hogman">
-        <img class="brand-icon" src="/join/assets/hogman-icon.webp" width="28" height="28" alt="">
-        <span>H&Ouml;GMAN</span>
+      <a class="brand" id="brand-link" href="https://hogman.network/" target="_blank" rel="noopener noreferrer" aria-label="Hogman">
+        <img class="brand-icon" id="brand-icon" src="/join/assets/hogman-icon.webp" width="28" height="28" alt="">
+        <span id="brand-name">H&Ouml;GMAN</span>
+        <span class="brand-tag" id="brand-tag" hidden>Work</span>
       </a>
-      <span class="gate-pill">Pen gate</span>
+      <span class="gate-pill" id="gate-pill">Pen gate</span>
     </div>
-    <nav aria-label="Help links">
+    <nav id="nav-links" aria-label="Help links">
       <a href="https://hogman.network/docs/join.html" target="_blank" rel="noopener noreferrer">Join guide</a>
       <a href="https://hogman.network/docs/faq.html" target="_blank" rel="noopener noreferrer">FAQ</a>
       <a href="https://hogman.network/" target="_blank" rel="noopener noreferrer">hogman.network</a>
@@ -101,7 +102,7 @@
     </div>
 
     <div class="meta-foot">
-      <p class="muted" id="join-details">The <code>hogman-join</code> tool verifies <span id="redeem"></span>
+      <p class="muted" id="join-details">The <code>hogman-join</code> tool <span id="redeem"></span>
         the pen using your computer's built-in HTTPS trust store and connects you.</p>
       <p class="muted" id="share-details" hidden>The <code>hogman-join</code> tool verifies the network
         using your computer's built-in HTTPS trust store and publishes only that port or folder on
@@ -112,8 +113,8 @@
 </main>
 
 <footer class="foot">
-  <p>Keep a clean pen.</p>
-  <p class="foot-links">
+  <p id="foot-tagline">Keep a clean pen.</p>
+  <p class="foot-links" id="foot-links">
     <a href="https://hogman.network/" target="_blank" rel="noopener noreferrer">hogman.network</a> &middot;
     <a href="https://hogman.network/docs/join.html" target="_blank" rel="noopener noreferrer">Join guide</a> &middot;
     <a href="https://hogman.network/docs/security.html" target="_blank" rel="noopener noreferrer">Security</a> &middot;

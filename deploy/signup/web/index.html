@@ -14,11 +14,12 @@
 
 <header class="top">
   <div class="top-inner">
-    <a class="brand" href="https://hogman.network/" aria-label="Hogman home">
-      <img class="brand-icon" src="/hogman-icon.webp" width="28" height="28" alt="">
-      <span>H&Ouml;GMAN</span>
+    <a class="brand" id="brand-link" href="https://hogman.network/" aria-label="Hogman home">
+      <img class="brand-icon" id="brand-icon" src="/hogman-icon.webp" width="28" height="28" alt="">
+      <span id="brand-name">H&Ouml;GMAN</span>
+      <span class="brand-tag" id="brand-tag" hidden>Work</span>
     </a>
-    <nav aria-label="Site navigation">
+    <nav id="nav-links" aria-label="Site navigation">
       <a href="https://hogman.network/#why">Why a pen?</a>
       <a href="https://hogman.network/#tech">Under the hood</a>
       <a href="https://hogman.network/docs/">Docs</a>
@@ -31,8 +32,8 @@
 
 <main class="shell">
   <section class="hero">
-    <h1>Get a pen</h1>
-    <p class="sub">Your own private internet — real domain names, standard HTTPS, and nobody gets in unless you let them.</p>
+    <h1 id="hero-title">Get a pen</h1>
+    <p class="sub" id="hero-sub">Your own private internet — real domain names, standard HTTPS, and nobody gets in unless you let them.</p>
   </section>
 
   <p class="callout warn" id="closed" hidden>The farm is full right now. Join the waiting list and we'll email you a code when there's room.</p>
@@ -42,14 +43,19 @@
     <div class="field">
       <label for="code">Sign-up code</label>
       <input id="code" name="code" placeholder="PIG-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="13" required>
-      <p class="hint">Sign-ups are by invitation while we test. Got a link? The code is already filled in.
-        No code? <a href="#wait" id="to-wait">Join the waiting list</a>.</p>
-      <p class="hint" id="buy-line" hidden>Or buy one: <button class="btn small" id="buy" type="button">Buy a pen</button>
-        <span id="buy-err" class="error" role="alert" hidden></span></p>
+      <p class="hint"><span id="code-hint-lead">Sign-ups are by invitation while we test. Got a link? The code is already filled in.
+        No code?</span> <a href="#wait" id="to-wait">Join the waiting list</a>.</p>
+      <div class="buy-box" id="buy-line" hidden>
+        <div class="buy-row">
+          <span class="buy-copy" id="buy-copy">Want a custom bare pen name without waiting?</span>
+          <button class="btn small" id="buy" type="button">Buy a pen</button>
+        </div>
+        <p id="buy-err" class="error" role="alert" hidden></p>
+      </div>
     </div>
 
     <div class="field">
-      <label for="pen">Network name (your pen)</label>
+      <label for="pen" id="pen-label">Network name (your pen)</label>
       <div class="suffix">
         <input id="pen" name="pen" placeholder="your-network" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30" required>
         <span><span id="rand-suffix">-xxxx</span>.<span class="sites">pens.hogman.network</span></span>
@@ -58,16 +64,16 @@
     </div>
 
     <div class="field">
-      <label for="handle">Your personal name in it</label>
+      <label for="handle" id="handle-label">Your personal name in it</label>
       <div class="suffix">
         <input id="handle" name="handle" placeholder="your-name" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" required>
         <span>.<span class="penname">&lt;network&gt;-xxxx</span>.<span class="sites">pens.hogman.network</span></span>
       </div>
-      <p class="hint">For you as the pen's keeper: you invite people and can remove anyone.</p>
+      <p class="hint" id="handle-hint">For you as the pen's keeper: you invite people and can remove anyone.</p>
     </div>
 
     <div class="disclosure">
-      <p class="hint"><strong>Before you pick a name:</strong> free sign-ups add a random 4-character ending (like <code>coffee-7k2m</code>) so common names aren't squatted or collided on; pen names are permanent (a used name is never given out again). Pen and site names appear in public Certificate Transparency logs (contents stay private), and hosted pens currently share <code>pens.hogman.network</code> so use a separate browser profile for any pen you don't fully trust.</p>
+      <p class="hint" id="disclosure-text"><strong>Before you pick a name:</strong> free sign-ups add a random 4-character ending (like <code>coffee-7k2m</code>) so common names aren't squatted or collided on; pen names are permanent (a used name is never given out again). Pen and site names appear in public Certificate Transparency logs (contents stay private), and hosted pens currently share <code>pens.hogman.network</code> so use a separate browser profile for any pen you don't fully trust.</p>
     </div>
 
     <div class="turnstile" id="ts-form" hidden></div>
@@ -79,8 +85,8 @@
   </form>
 
   <form id="wait" class="panel" novalidate hidden>
-    <h2>The waiting list</h2>
-    <p class="panel-intro">Leave your email and we'll send you a sign-up code when there's room.</p>
+    <h2 id="wait-title">The waiting list</h2>
+    <p class="panel-intro" id="wait-intro">Leave your email and we'll send you a sign-up code when there's room.</p>
 
     <div class="field">
       <label for="w-email">Email</label>
@@ -88,7 +94,7 @@
     </div>
 
     <div class="field">
-      <label for="w-pen">The pen name you'd like <span class="opt">(optional)</span></label>
+      <label for="w-pen" id="w-pen-label">The pen name you'd like <span class="opt">(optional)</span></label>
       <div class="suffix">
         <input id="w-pen" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30">
         <span>.<span class="sites">pens.hogman.network</span></span>
@@ -96,7 +102,7 @@
     </div>
 
     <div class="field">
-      <label for="w-note">Anything you'd like us to know <span class="opt">(optional)</span></label>
+      <label for="w-note" id="w-note-label">Anything you'd like us to know <span class="opt">(optional)</span></label>
       <input id="w-note" maxlength="280" autocomplete="off" placeholder="who it's for, how you heard of us">
     </div>
 
@@ -120,15 +126,15 @@
   </section>
 
   <section id="working" class="panel" hidden aria-live="polite">
-    <h2>Raising your pen</h2>
+    <h2 id="working-title">Raising your pen</h2>
     <p class="panel-intro">Setting up your isolated control plane and HTTPS certificate. You can reload this page — it picks up where it left off.</p>
     <p class="stage" id="stage" aria-live="polite">Building the fence&hellip;</p>
     <div class="bar"><div id="bar"></div></div>
   </section>
 
   <section id="done" class="panel" hidden>
-    <h2>Your pen is up</h2>
-    <p class="panel-intro"><strong id="done-zone"></strong> is yours. Once your laptop joins, your pen's home page will be <code id="done-home"></code>.</p>
+    <h2 id="done-title">Your pen is up</h2>
+    <p class="panel-intro"><strong id="done-zone"></strong> <span id="done-intro-rest">is yours. Once your laptop joins, your pen's home page will be</span> <code id="done-home"></code>.</p>
     <ol class="done-steps">
       <li>
         <p>Open this setup link <strong>on your laptop</strong> (macOS or Linux):</p>
@@ -137,8 +143,8 @@
       </li>
       <li>The link opens a page with one command to paste into a terminal. It downloads <code>hogman-join</code>,
         sets up a local connection for your pen, and joins.</li>
-      <li>You land on <code id="done-home-step"></code>, where you add other devices, invite
-        people, and run the herd.</li>
+      <li id="done-step-3">You land on <code id="done-home-step"></code>, <span id="done-step-3-rest">where you add other devices, invite
+        people, and run the herd.</span></li>
     </ol>
     <div class="qr">
       <img id="qr" alt="QR code of the same link">
@@ -146,15 +152,15 @@
     </div>
     <p class="callout warn">This link carries a <strong>one-time key — treat it like a password</strong> and don't share it.
       It works once within an hour, and this page is the only place it's shown, so keep it open until your laptop is in.</p>
-    <p class="callout warn"><strong>Back up your keeper access once you're in:</strong> make a friend you
+    <p class="callout warn" id="done-backup-warn"><strong>Back up your keeper access once you're in:</strong> make a friend you
       trust a second owner in <em>The herd</em>. There is no account recovery and we never recover
       a pen on request: lose every device and another owner is the only way back in.</p>
   </section>
 </main>
 
 <footer class="foot">
-  <p>Free while we test. Experimental and not independently audited — don't trust it with anything high-stakes yet.</p>
-  <p class="foot-links">
+  <p id="foot-note">Free while we test. Experimental and not independently audited — don't trust it with anything high-stakes yet.</p>
+  <p class="foot-links" id="foot-links">
     <a href="https://hogman.network/">Home</a> &middot;
     <a href="https://hogman.network/docs/">Docs</a> &middot;
     <a href="https://hogman.network/docs/security.html">Security</a> &middot;

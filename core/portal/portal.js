@@ -12,10 +12,113 @@
 
   let me = null;
   let timer = null;
+  let isWork = false;
+  let workApplied = false;
   const armed = new Set();
 
+  const setFavicon = href => {
+    document.querySelectorAll('link[rel="icon"]').forEach(el => el.remove());
+    const link = document.createElement('link');
+    link.rel = 'icon';
+    link.type = 'image/svg+xml';
+    link.href = href;
+    document.head.appendChild(link);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', '#14181f');
+  };
+
+  const applyWorkTheme = () => {
+    if (workApplied) return;
+    workApplied = true;
+    document.documentElement.dataset.theme = 'work';
+    document.title = 'Portal · Hogman for Work';
+    setFavicon('/work-favicon.svg');
+
+    $('brand-icon').src = '/work-favicon.svg';
+    $('brand-name').textContent = 'Hogman';
+    $('brand-tag').hidden = false;
+
+    $('nav-herd').textContent = 'Members';
+    $('nav-host').textContent = 'Bridge';
+    $('nav-docs').href = 'https://work.hogman.network/docs/';
+    $('status-pill-text').textContent = 'Connected to private network \u00b7 HTTPS only';
+
+    $('sites-host-link').textContent = 'Bridge a device or app \u2193';
+    $('sites-empty').replaceChildren(
+      document.createTextNode('No bridged devices or apps yet. Add one with '),
+      Object.assign(document.createElement('code'), { textContent: '~/hogman-join share cooler-1 http://192.168.1.40 --background' }),
+      document.createTextNode(' (see '),
+      Object.assign(document.createElement('a'), { href: '#host', textContent: 'Bridge equipment or host an app' }),
+      document.createTextNode(' below).')
+    );
+
+    $('device-card-hint').textContent = 'Generate a one-time link for another workstation (works once, expires in 1 hour). Use Get a share link for an always-on on-site bridge computer such as a Raspberry Pi or mini PC.';
+    $('invite-note').placeholder = 'Who is it for? (e.g. Jordan \u2014 HVAC contractor, Store North)';
+
+    $('herd-title').textContent = 'Members';
+    $('herd-intro').textContent = 'Everyone with access to this pen. Suspending cuts off all their devices in ~2 seconds and is reversible. Removing ends membership permanently and retires their handle and site names.';
+    $('herd-recovery').textContent = 'Someone lost every enrolled device? There is no account recovery: issue a new invite, restore their role, then remove the old account (demote an old owner to admin first).';
+
+    $('host-title').textContent = 'Bridge equipment or host an app';
+    $('host-guide-link').textContent = 'Bridging guide \u2192';
+    $('host-guide-link').href = 'https://work.hogman.network/docs/share.html';
+    $('host-intro').replaceChildren(
+      document.createTextNode('Bridge a local LAN controller (plain HTTP is fine on the LAN) or an internal web app into this pen over standard HTTPS (port 443) with '),
+      Object.assign(document.createElement('code'), { textContent: 'hogman-join' }),
+      document.createTextNode(':')
+    );
+    $('host-code').textContent =
+      '~/hogman-join share cooler-1 http://192.168.1.40 --background\n' +
+      '~/hogman-join share inventory 8080 --note "Warehouse inventory"';
+
+    const zoneSpan = document.createElement('span');
+    zoneSpan.className = 'zone';
+    zoneSpan.textContent = me ? me.zone : '<network>.pens.hogman.network';
+    const hostUrl = document.createElement('code');
+    hostUrl.append(document.createTextNode('https://cooler-1.'), zoneSpan);
+    $('host-hint-1').replaceChildren(
+      document.createTextNode('Everyone in the pen can then open '),
+      hostUrl,
+      document.createTextNode('. Add '),
+      Object.assign(document.createElement('code'), { textContent: '--background' }),
+      document.createTextNode(' to keep it running across reboots; '),
+      Object.assign(document.createElement('code'), { textContent: '~/hogman-join share stop cooler-1' }),
+      document.createTextNode(' takes it down and frees the name.')
+    );
+    $('host-hint-2').replaceChildren(
+      document.createTextNode('Running on a dedicated on-site bridge computer (Raspberry Pi or mini PC)? Press '),
+      Object.assign(document.createElement('em'), { textContent: 'Get a share link' }),
+      document.createTextNode(' above and pass the link at the end: '),
+      Object.assign(document.createElement('code'), { textContent: "./hogman-join share cooler-1 http://192.168.1.40 '<share link>' --background" }),
+      document.createTextNode('. Remember: a pen hides devices from the internet, it does not patch firmware.')
+    );
+
+    $('foot-tagline').textContent = 'Hogman for Work \u00b7 Open source (AGPL-3.0)';
+    const fl = $('foot-links');
+    fl.replaceChildren();
+    [
+      ['work.hogman.network', 'https://work.hogman.network/'],
+      ['Docs', 'https://work.hogman.network/docs/'],
+      ['Bridging guide', 'https://work.hogman.network/docs/share.html'],
+      ['Security', 'https://work.hogman.network/docs/security.html'],
+      ['FAQ', 'https://work.hogman.network/docs/faq.html'],
+    ].forEach(([label, href], idx) => {
+      if (idx > 0) fl.append(document.createTextNode(' \u00b7 '));
+      const a = document.createElement('a');
+      a.href = href;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.textContent = label;
+      fl.append(a);
+    });
+  };
+
   const render = () => {
-    $('hello').textContent = `You're in, ${me.member.handle}.`;
+    if (me.network && me.network.theme === 'work') {
+      isWork = true;
+      applyWorkTheme();
+    }
+    $('hello').textContent = isWork ? `Signed in as ${me.member.handle}` : `You're in, ${me.member.handle}.`;
     $('whoami').textContent = `On ${me.zone} from ${me.this_device.name}. This page is only reachable from inside the network.`;
     document.querySelectorAll('.zone').forEach(e => { e.textContent = me.zone; });
     if (!me.devices) return;   // servers get a short answer and no device controls
@@ -98,7 +201,9 @@
       $('qr').hidden = !r.join_qr_svg || kind === 'server';
       $('phone-line').hidden = kind === 'server';
       $('computer-line').textContent = kind === 'server'
-        ? 'Share link: on the computer that runs the thing you want to share, open this link (it shows the command), or run ./hogman-join share NAME PORT-or-FOLDER \'<this link>\':'
+        ? (isWork
+            ? 'Share link: on the on-site bridge computer, open this link (it shows the command), or run ./hogman-join share NAME URL-or-PORT \'<this link>\' --background:'
+            : 'Share link: on the computer that runs the thing you want to share, open this link (it shows the command), or run ./hogman-join share NAME PORT-or-FOLDER \'<this link>\':')
         : 'Computer: open this link on it and follow the steps:';
       $('linktext').textContent = r.join_link;
       $('newlink').hidden = false;
@@ -135,7 +240,6 @@
     if (text !== undefined) e.textContent = text;
     return e;
   };
-  const day = t => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   const when = t => new Date(t * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
   const errIn = id => e => { const p = $(id); p.textContent = e.message; p.hidden = false; };
 
@@ -203,7 +307,7 @@
     const shown = $('members').children.length;
     $('herd-count').textContent = herd.q
       ? `${herd.total} match${herd.total === 1 ? '' : 'es'} for “${herd.q}”`
-      : `${herd.total} in the pen${shown < herd.total ? `, showing ${shown}` : ''}`;
+      : `${herd.total} ${isWork ? (herd.total === 1 ? 'member' : 'members') : 'in the pen'}${shown < herd.total ? `, showing ${shown}` : ''}`;
     $('herd-more').hidden = shown >= herd.total;
   };
 
@@ -247,9 +351,10 @@
         () => { m.role = 'admin'; me.owners--; redraw(); soloOwner(); });
     }
     if (m.status === 'suspended') act('Resume', 'resume', null, null, () => { m.status = 'active'; redraw(); });
-    else act('Suspend', 'suspend', { reason: 'suspended from the home page' }, `Suspend ${m.handle}?`,
+    else act('Suspend', 'suspend', { reason: isWork ? 'suspended from the portal' : 'suspended from the home page' }, `Suspend ${m.handle}?`,
       () => { m.status = 'suspended'; redraw(); });
-    act('Kick', 'kick', { reason: 'kicked from the home page' }, `Kick ${m.handle} for good?`,
+    act(isWork ? 'Remove' : 'Kick', 'kick', { reason: isWork ? 'removed from the portal' : 'kicked from the home page' },
+      isWork ? `Remove ${m.handle} permanently?` : `Kick ${m.handle} for good?`,
       () => { li.remove(); herd.total--; herd.offset--; herdCount(); });
     return li;
   };

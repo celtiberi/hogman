@@ -24,7 +24,119 @@
   const setSites = () => document.querySelectorAll('.sites').forEach(e => { e.textContent = sites; });
 
   // Optional pen UI theme ("work" when on the work signup host or ?theme=work).
-  let penTheme = new URLSearchParams(location.search).get('theme') === 'work' ? 'work' : '';
+  const queryTheme = new URLSearchParams(location.search).get('theme') === 'work';
+  let penTheme = (queryTheme || /^get\.work\./i.test(location.hostname)) ? 'work' : '';
+  let workApplied = false;
+
+  const setFavicon = href => {
+    document.querySelectorAll('link[rel="icon"]').forEach(el => el.remove());
+    const link = document.createElement('link');
+    link.rel = 'icon';
+    link.type = 'image/svg+xml';
+    link.href = href;
+    document.head.appendChild(link);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', '#14181f');
+  };
+
+  const replaceLinks = (container, items, sep) => {
+    if (!container) return;
+    container.replaceChildren();
+    items.forEach(([label, href, current], idx) => {
+      if (sep && idx > 0) container.append(document.createTextNode(sep));
+      const a = document.createElement('a');
+      a.href = href;
+      a.textContent = label;
+      if (current) a.setAttribute('aria-current', 'true');
+      container.append(a);
+    });
+  };
+
+  const applyWorkTheme = () => {
+    if (workApplied) return;
+    workApplied = true;
+    document.documentElement.dataset.theme = 'work';
+    document.title = 'Create a pen · Hogman for Work';
+    setFavicon('/work-favicon.svg');
+
+    $('brand-link').href = 'https://work.hogman.network/';
+    $('brand-link').setAttribute('aria-label', 'Hogman for Work home');
+    $('brand-icon').src = '/work-favicon.svg';
+    $('brand-name').textContent = 'Hogman';
+    $('brand-tag').hidden = false;
+
+    replaceLinks($('nav-links'), [
+      ['Overview', 'https://work.hogman.network/'],
+      ['How it works', 'https://work.hogman.network/#how'],
+      ['Security limits', 'https://work.hogman.network/#honest'],
+      ['Docs', 'https://work.hogman.network/docs/'],
+      ['Create a pen', '/', true],
+    ]);
+
+    $('hero-title').textContent = 'Create a pen';
+    $('hero-sub').textContent = 'Private HTTPS network for your equipment controllers and internal web tools — standard browser certificates, zero public IP addresses, and ~2-second offboarding.';
+
+    $('closed').textContent = 'Capacity is currently full. Join the waiting list and we\u2019ll email a sign-up code as room opens.';
+    $('down').textContent = 'The sign-up service is temporarily unavailable. Please try again shortly.';
+
+    $('code-hint-lead').textContent = 'Sign-ups are invite-only during the testbed. Opened a link? Your code is already filled in. Need access?';
+    $('buy-copy').textContent = 'Need a custom bare pen name without waiting?';
+    $('pen-label').textContent = 'Network name (pen)';
+    $('pen').placeholder = 'store-north';
+    $('handle-label').textContent = 'Your admin handle';
+    $('handle').placeholder = 'alex-ops';
+    $('handle-hint').textContent = 'You\u2019ll be the initial owner — able to invite staff, manage devices, and offboard accounts.';
+
+    const disc = $('disclosure-text');
+    disc.replaceChildren(
+      Object.assign(document.createElement('strong'), { textContent: 'Before you choose a name: ' }),
+      document.createTextNode('free sign-ups add a random 4-character suffix (such as '),
+      Object.assign(document.createElement('code'), { textContent: 'store-north-7k2m' }),
+      document.createTextNode(') so common names stay available; pen names are retired permanently once used. Pen and site hostnames appear in public Certificate Transparency logs (contents stay private), and hosted pens currently share '),
+      Object.assign(document.createElement('code'), { textContent: sites }),
+      document.createTextNode(' — use a separate browser profile for any pen you don\u2019t fully trust.')
+    );
+
+    $('go').textContent = 'Create pen';
+    $('wait-title').textContent = 'Request early access';
+    $('wait-intro').textContent = 'Leave your work email and we\u2019ll send a sign-up code as capacity opens.';
+    $('w-pen-label').replaceChildren(
+      document.createTextNode('Preferred pen name '),
+      Object.assign(document.createElement('span'), { className: 'opt', textContent: '(optional)' })
+    );
+    $('w-pen').placeholder = 'store-north';
+    $('w-note-label').replaceChildren(
+      document.createTextNode('What are you protecting? '),
+      Object.assign(document.createElement('span'), { className: 'opt', textContent: '(optional)' })
+    );
+    $('w-note').placeholder = 'e.g. refrigeration controllers, HVAC panels, internal tools';
+    $('w-go').textContent = 'Request access';
+    $('w-leave').textContent = 'Remove my email';
+
+    $('working-title').textContent = 'Creating your pen';
+    $('stage').textContent = 'Provisioning isolated network\u2026';
+
+    $('done-title').textContent = 'Your pen is ready';
+    $('done-intro-rest').textContent = 'is ready. Once your workstation joins, your management portal will be';
+    $('done-step-3-rest').textContent = 'where you can add workstations, bridge on-site equipment, and manage members.';
+    $('done-backup-warn').replaceChildren(
+      Object.assign(document.createElement('strong'), { textContent: 'Appoint a backup owner right away: ' }),
+      document.createTextNode('promote a second trusted person to Owner under '),
+      Object.assign(document.createElement('em'), { textContent: 'Members' }),
+      document.createTextNode('. There is no account recovery and no support backdoor — if the only owner loses every device, nobody can administer this pen again.')
+    );
+
+    $('foot-note').textContent = 'Invite-only testbed. Open source (AGPL-3.0), experimental, and not yet independently audited — evaluate carefully before relying on it for safety-critical systems.';
+    replaceLinks($('foot-links'), [
+      ['Overview', 'https://work.hogman.network/'],
+      ['Docs', 'https://work.hogman.network/docs/'],
+      ['Security', 'https://work.hogman.network/docs/security.html'],
+      ['FAQ', 'https://work.hogman.network/docs/faq.html'],
+      ['GitHub', 'https://github.com/celtiberi/hogman'],
+    ], ' \u00b7 ');
+  };
+
+  if (penTheme === 'work') applyWorkTheme();
 
   // Optional Cloudflare Turnstile widget (loaded only when server advertises a site key).
   let tsSiteKey = '';
@@ -40,10 +152,11 @@
     tsSiteKey = siteKey;
     const render = () => {
       if (!window.turnstile) return;
+      const widgetTheme = penTheme === 'work' ? 'light' : 'dark';
       if ($('ts-form') && tsFormWidget === null) {
         $('ts-form').hidden = false;
         tsFormWidget = window.turnstile.render('#ts-form', {
-          sitekey: tsSiteKey, theme: 'dark',
+          sitekey: tsSiteKey, theme: widgetTheme,
           callback: t => { tsFormToken = t; },
           'expired-callback': () => { tsFormToken = ''; },
           'error-callback': () => { tsFormToken = ''; },
@@ -52,7 +165,7 @@
       if ($('ts-wait') && tsWaitWidget === null) {
         $('ts-wait').hidden = false;
         tsWaitWidget = window.turnstile.render('#ts-wait', {
-          sitekey: tsSiteKey, theme: 'dark',
+          sitekey: tsSiteKey, theme: widgetTheme,
           callback: t => { tsWaitToken = t; },
           'expired-callback': () => { tsWaitToken = ''; },
           'error-callback': () => { tsWaitToken = ''; },
@@ -113,12 +226,13 @@
 
   let activeView = 'form';
   const show = id => { activeView = id; for (const s of ['form', 'wait', 'waited', 'working', 'done']) $(s).hidden = s !== id; };
+  const cleanURL = () => location.pathname + location.search;
 
-  // The waiting list: for when the farm is full, or there's no code.
+  // The waiting list: for when capacity is full, or there's no code.
   $('to-wait').addEventListener('click', ev => { ev.preventDefault(); show('wait'); $('w-email').focus(); });
   $('to-form').addEventListener('click', ev => { ev.preventDefault(); show('form'); });
-  $('waited-back').addEventListener('click', ev => { ev.preventDefault(); history.replaceState(null, '', location.pathname); show('wait'); });
-  $('waited-code').addEventListener('click', ev => { ev.preventDefault(); history.replaceState(null, '', location.pathname); show('form'); });
+  $('waited-back').addEventListener('click', ev => { ev.preventDefault(); history.replaceState(null, '', cleanURL()); show('wait'); });
+  $('waited-code').addEventListener('click', ev => { ev.preventDefault(); history.replaceState(null, '', cleanURL()); show('form'); });
   $('w-leave').addEventListener('click', async () => {
     $('w-err').hidden = true;
     const email = $('w-email').value.trim();
@@ -153,8 +267,10 @@
   // (including while on the final setup-link screen during the 5-minute window).
   const JOB = 'hogman-signup-job';
   const JOB_DONE = 'hogman-signup-job-done';
-  const stages = [[0, 'Building the fence'], [8, 'Getting your HTTPS certificate'],
-                  [20, 'Opening the gate'], [35, 'Raking the last of the straw'], [90, 'Taking longer than usual; hang on']];
+  const defaultStages = [[0, 'Building the fence'], [8, 'Getting your HTTPS certificate'],
+                         [20, 'Opening the gate'], [35, 'Raking the last of the straw'], [90, 'Taking longer than usual; hang on']];
+  const workStages = [[0, 'Provisioning isolated network'], [8, 'Issuing HTTPS certificate'],
+                      [20, 'Opening pen gate'], [35, 'Finalizing setup'], [90, 'Taking longer than usual; still working']];
   const showDone = r => {
     $('done-zone').textContent = r.zone;
     const homeURL = 'https://home.' + r.zone;
@@ -165,7 +281,7 @@
     else $('qr').closest('.qr').hidden = true;
     $('copy').onclick = async () => { await navigator.clipboard.writeText(r.join_link); $('copy').textContent = 'Copied'; };
     sessionStorage.setItem(JOB_DONE, '1');
-    history.replaceState(null, '', location.pathname);   // the code is used up
+    history.replaceState(null, '', cleanURL());   // the code is used up
     show('done');
   };
   const fail = msg => {
@@ -196,6 +312,7 @@
       if (j && j.state === 'done') return showDone(j.result);
       if (j && j.state === 'failed') return fail(j.error);
       const secs = j ? j.seconds : Math.round((Date.now() - t0) / 1000);
+      const stages = penTheme === 'work' ? workStages : defaultStages;
       const stage = stages.filter(([at]) => secs >= at).pop()[1];
       $('stage').textContent = `${stage}… ${secs}s`;
       $('bar').style.width = Math.min(95, 5 + secs * 1.5) + '%';   // only ever moves forward
@@ -232,7 +349,7 @@
   }
   api('GET', '/status').then(s => {
     if (/^[a-z0-9.-]+$/.test(s.sites_domain || '')) { sites = s.sites_domain; setSites(); }
-    if (s.theme === 'work') penTheme = 'work';
+    if (s.theme === 'work') { penTheme = 'work'; applyWorkTheme(); }
     if (s.turnstile_site_key) mountTurnstile(s.turnstile_site_key);
     if (s.for_sale && s.open) {
       $('buy-line').hidden = false;
