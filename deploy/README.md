@@ -166,6 +166,14 @@ hogman-host signup-cloudflare on             # trust CF-Connecting-IP + block di
 hogman-host signup-turnstile <site-key> < ts-secret  # require Cloudflare Turnstile on signup/waitlist
 ```
 
+**Cloudflare Proxy rollout order:** deploy this release first, run `hogman-host signup-cloudflare on`,
+and only then turn on Cloudflare Proxy (`CF_PROXY_ON`) in DNS. If DNS is proxied while
+`signup-cloudflare` is off, every visitor collapses onto a handful of Cloudflare edge IPs and the
+per-IP rate limits (checks, creates, waits, checkouts, webhooks) throttle everyone together. In the
+Cloudflare dashboard, set **SSL/TLS encryption mode** to **Full (strict)**, and keep **Bot Fight
+Mode** off (or add a WAF skip rule for `/api/stripe/webhook`) so Cloudflare does not block Stripe's
+webhook deliveries.
+
 The `web` container runs read-only and unprivileged (`65534:65534`), speaking over an internal
 network to `broker` (which runs `hogman-host provision` and has outbound internet only if
 `hogman-host signup-notify` is configured). Failed provisions automatically clean up containers and

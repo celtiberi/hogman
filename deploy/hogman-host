@@ -18,6 +18,10 @@ PENS="$HOGMAN_HOME/pens"
 HOSTENV="$HOGMAN_HOME/host.env"
 CADDY_IMAGE="caddy:2.11.9"
 STUN_BASE=3478
+# Official Cloudflare edge IPv4/IPv6 ranges (cloudflare.com/ips-v4, /ips-v6).
+# Single list shared by the front door's @not_cf origin lock and signup-web's
+# TRUSTED_PROXY_CIDRS when signup-cloudflare is on.
+CLOUDFLARE_CIDRS="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32"
 
 die()  { echo "hogman-host: $*" >&2; exit 1; }
 info() { echo "==> $*" >&2; }
@@ -143,8 +147,6 @@ write_front() {
     fi
     chown -R "$fuid:$fgid" "$FRONT/data" "$FRONT/config"
   fi
-# Official Cloudflare edge IPv4/IPv6 ranges (cloudflare.com/ips-v4, /ips-v6).
-CLOUDFLARE_CIDRS="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32"
 
   local caddy="$FRONT/Caddyfile.new" compose="$FRONT/compose.yaml.new" aliases="" n host
   {
@@ -775,6 +777,11 @@ cmd_signup_setup() {
       PUBLIC_URL: https://$SIGNUP_HOST"
     broker_stripe="      STRIPE_WEBHOOK_SECRET_FILE: $SIGNUP/stripe_webhook_secret"
   fi
+  local cf_env=""
+  if [ "${SIGNUP_CLOUDFLARE:-}" = 1 ]; then
+    cf_env="      TRUST_CLOUDFLARE: \"1\"
+      TRUSTED_PROXY_CIDRS: \"$CLOUDFLARE_CIDRS\""
+  fi
   local ts_env=""
   if [ -n "${SIGNUP_TURNSTILE_SITE_KEY:-}" ] && [ -s "$SIGNUP/turnstile.secret" ]; then
     ts_env="      TURNSTILE_SITE_KEY: $SIGNUP_TURNSTILE_SITE_KEY
@@ -803,7 +810,7 @@ services:
       BROKER_TOKEN_FILE: /run/secrets/token
       PENS_DOMAIN: $PENS_DOMAIN
       SITES_DOMAIN: $PENS_ZONE
-      TRUST_CLOUDFLARE: "${SIGNUP_CLOUDFLARE:-}"
+$cf_env
 $web_stripe
 $ts_env
     volumes:
@@ -1111,9 +1118,9 @@ cmd_signup_turnstile() {
   [ -t 0 ] && die "pipe the Turnstile secret key in on standard input, e.g. < secret-file"
   local sec; sec="$(tr -d ' \r\n' | head -c 256)"
   [[ "$sec" =~ ^[0-9A-Za-z_-]{8,256}$ ]] || die "that doesn't look like a Turnstile secret key"
-  # Readable inside the unprivileged web container (65534:65534); $SIGNUP is 0700.
-  printf '%s' "$sec" > "$SIGNUP/turnstile.secret"
-  chmod 0644 "$SIGNUP/turnstile.secret"
+  # Readable only by the unprivileged web container (65534:65534); matches stripe_key.
+  ( umask 077; printf '%s' "$sec" > "$SIGNUP/turnstile.secret" )
+  chown 65534:65534 "$SIGNUP/turnstile.secret"; chmod 0400 "$SIGNUP/turnstile.secret"
   set_host_var SIGNUP_TURNSTILE_SITE_KEY "$sk"
   cmd_signup_setup
   info "Sign-up Cloudflare Turnstile is on (site key $sk)"
