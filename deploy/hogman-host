@@ -46,6 +46,7 @@ usage: hogman-host <command>
   waitlist [invite|remove <id>]  who's waiting for a pen; invite emails them a code
   signup-mail "<from>" < key     email waiting-list codes through Resend (signup-mail test <addr>)
   signup-notify <ntfy-url>|off   a push when someone joins the waiting list or gets a pen
+  signup-stripe <price> [tax]|off  sell pens with Stripe Checkout (keys on stdin)
   capacity                       how many pens this server holds, and its limit
   provision <pen> <owner>        raise a hosted pen (what the sign-up page runs)
 
@@ -754,6 +755,17 @@ cmd_signup_setup() {
   # Docker itself pulls images and builds; the broker only asks it to.
   local broker_nets="[signup]" out_net=""
   if [ -n "${SIGNUP_NTFY:-}" ]; then broker_nets="[signup, out]"; out_net="  out: {}"; fi
+  # Selling pens (signup-stripe): the page gets the Stripe key, the broker the
+  # webhook secret it checks Stripe's events with.
+  local web_vols='["./token:/run/secrets/token:ro"]' web_stripe="" broker_stripe=""
+  if [ -n "${SIGNUP_STRIPE_PRICE:-}" ] && [ -s "$SIGNUP/stripe_key" ] && [ -s "$SIGNUP/stripe_webhook_secret" ]; then
+    web_vols='["./token:/run/secrets/token:ro", "./stripe_key:/run/secrets/stripe_key:ro"]'
+    web_stripe="      STRIPE_SECRET_KEY_FILE: /run/secrets/stripe_key
+      STRIPE_PRICE: $SIGNUP_STRIPE_PRICE
+      STRIPE_AUTOMATIC_TAX: \"${SIGNUP_STRIPE_TAX:-}\"
+      PUBLIC_URL: https://$SIGNUP_HOST"
+    broker_stripe="      STRIPE_WEBHOOK_SECRET_FILE: $SIGNUP/stripe_webhook_secret"
+  fi
   cat > "$SIGNUP/compose.yaml" <<EOF
 # Written by hogman-host signup-setup.
 name: hogman-signup
@@ -774,7 +786,8 @@ services:
       BROKER_TOKEN_FILE: /run/secrets/token
       PENS_DOMAIN: $PENS_DOMAIN
       SITES_DOMAIN: $PENS_ZONE
-    volumes: ["./token:/run/secrets/token:ro"]
+$web_stripe
+    volumes: $web_vols
     networks:
       hogman-front: { aliases: [signup] }
       signup: {}
@@ -793,6 +806,7 @@ services:
       HOGMAN_HOST_TOOL: /usr/local/bin/hogman-host
       BROKER_TOKEN_FILE: $SIGNUP/token
       NTFY_URL: ${SIGNUP_NTFY:-}
+$broker_stripe
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - $HOGMAN_HOME:$HOGMAN_HOME
@@ -1002,6 +1016,45 @@ cmd_signup_notify() {
   set_host_var SIGNUP_NTFY "$u"
   cmd_signup_setup
   info "Sign-up pushes ${u:+go to $u}${u:-are off}"
+}
+
+# signup-stripe <price-id> [tax] < keys: sell pens on the sign-up page with
+# Stripe Checkout (D-28). Standard input: the Stripe API key (best a restricted
+# key that can only write Checkout Sessions), then the webhook signing secret
+# (whsec_...), one per line. "tax" turns on Stripe Tax. "off" stops selling.
+# Webhook endpoint (in Stripe): https://<signup-host>/api/stripe/webhook, events
+# checkout.session.completed, checkout.session.async_payment_succeeded and
+# customer.subscription.deleted.
+cmd_signup_stripe() {
+  load_host
+  local price="${1:-}" tax="${2:-}"
+  if [ "$price" = off ]; then
+    rm -f "$SIGNUP/stripe_key" "$SIGNUP/stripe_webhook_secret"
+    set_host_var SIGNUP_STRIPE_PRICE ""
+    set_host_var SIGNUP_STRIPE_TAX ""
+    cmd_signup_setup
+    info "Pens aren't for sale on the sign-up page any more"
+    return
+  fi
+  [[ "$price" =~ ^price_[A-Za-z0-9]{6,64}$ ]] || die "usage: hogman-host signup-stripe <price_...> [tax] < keys   |   hogman-host signup-stripe off"
+  case "$tax" in "") ;; tax) tax=1 ;; *) die "the second argument is 'tax' or nothing" ;; esac
+  [ -t 0 ] && die "pipe the keys in on standard input: the API key, then the webhook secret, one per line"
+  local key whsec
+  IFS= read -r key || true
+  IFS= read -r whsec || true
+  key="$(printf '%s' "$key" | tr -d ' \r\n')"; whsec="$(printf '%s' "$whsec" | tr -d ' \r\n')"
+  [[ "$key" =~ ^(sk|rk)_(test|live)_[A-Za-z0-9]{10,200}$ ]] || die "the first line isn't a Stripe secret or restricted key (sk_... or rk_...)"
+  [[ "$whsec" =~ ^whsec_[A-Za-z0-9]{10,200}$ ]] || die "the second line isn't a Stripe webhook signing secret (whsec_...)"
+  [ -d "$SIGNUP" ] || die "set up the sign-up page first: hogman-host signup-setup"
+  # The page runs as nobody (65534) and reads the key; only root reads the secret.
+  ( umask 077; printf '%s' "$key" > "$SIGNUP/stripe_key"; printf '%s' "$whsec" > "$SIGNUP/stripe_webhook_secret" )
+  chown 65534:65534 "$SIGNUP/stripe_key"; chmod 0400 "$SIGNUP/stripe_key"
+  set_host_var SIGNUP_STRIPE_PRICE "$price"
+  set_host_var SIGNUP_STRIPE_TAX "$tax"
+  cmd_signup_setup
+  local mode=test; case "$key" in *_live_*) mode=live ;; esac
+  info "Pens are for sale on https://$SIGNUP_HOST ($mode mode${tax:+, Stripe Tax on})."
+  info "Stripe webhook: https://$SIGNUP_HOST/api/stripe/webhook"
 }
 
 # challenge-dns-setup <public-ip> [gcp-key.json]: install and run the DNS-01
@@ -1327,6 +1380,7 @@ case "${1:-}" in
   waitlist) shift; cmd_waitlist "$@" ;;
   signup-mail) shift; cmd_signup_mail "$@" ;;
   signup-notify) shift; cmd_signup_notify "$@" ;;
+  signup-stripe) shift; cmd_signup_stripe "$@" ;;
   capacity) cmd_capacity ;;
   provision) shift; cmd_provision "$@" ;;
   signup-setup) shift; cmd_signup_setup "$@" ;;

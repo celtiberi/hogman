@@ -183,6 +183,28 @@ hogman-host signup-notify https://ntfy.sh/<topic>
 
 Link directly to the waitlist with `https://<signup-host>/#wait`.
 
+**Selling pens (Stripe, D-28):** a paid checkout buys one sign-up code, which then works like a
+`--vanity` code: the buyer picks a bare pen name, with no random ending. Stripe's hosted Checkout takes the card, so card details never reach this server.
+
+1. In Stripe (test mode first): make a Product with a recurring Price, a **restricted key** that can
+   only write Checkout Sessions, and a webhook endpoint at
+   `https://<signup-host>/api/stripe/webhook` for `checkout.session.completed`,
+   `checkout.session.async_payment_succeeded` and `customer.subscription.deleted`.
+2. On the server, with the key and the webhook signing secret one per line on standard input:
+
+```bash
+hogman-host signup-stripe price_123 < stripe-keys      # add "tax" to turn on Stripe Tax
+hogman-host signup-stripe off
+```
+
+The page shows **Buy a pen** while the server has room. After paying, Stripe sends the buyer to
+`/paid.html`, which shows their code once Stripe's event arrives. The broker checks every event's
+signature itself (the page only passes it on), so a compromised page can't fake a payment, and a
+session gets one code however often Stripe retries. Paid sessions are listed in
+`/opt/hogman/signup/payments` (session, code, Stripe customer and subscription IDs; no names,
+emails or card details). A cancelled subscription is logged in `raised.log` and pushed, and the
+operator acts on it by hand for now.
+
 ## Everyday
 
 ```bash

@@ -22,17 +22,18 @@ import (
 // broker raises pens. One at a time: a small server should not build two
 // pens at once, and it makes a sign-up code impossible to use twice.
 type broker struct {
-	home        string // HOGMAN_HOME
-	tool        string // hogman-host
-	token       string
-	ntfy        string // optional: ntfy topic URL for the operator's pushes
-	mu          sync.Mutex
-	limitMu     sync.Mutex
-	waitJoins   *limiter
-	waitNotify  *limiter
-	raiseNotify *limiter
-	ntfySem     chan struct{}
-	suffixFn    func() (string, error) // nil uses randomPenSuffix (tests override)
+	home          string // HOGMAN_HOME
+	tool          string // hogman-host
+	token         string
+	ntfy          string // optional: ntfy topic URL for the operator's pushes
+	mu            sync.Mutex
+	limitMu       sync.Mutex
+	waitJoins     *limiter
+	waitNotify    *limiter
+	raiseNotify   *limiter
+	ntfySem       chan struct{}
+	suffixFn      func() (string, error) // nil uses randomPenSuffix (tests override)
+	webhookSecret string                 // Stripe's webhook signing secret; empty: payments off
 }
 
 func (b *broker) nextSuffix() (string, error) {
@@ -49,6 +50,7 @@ func runBroker() {
 		token: readToken(),
 		ntfy:  env("NTFY_URL", ""),
 	}
+	b.webhookSecret = readWebhookSecret("STRIPE_WEBHOOK_SECRET_FILE")
 	addr := env("BROKER_ADDR", ":9090")
 	log.Printf("broker on %s", addr)
 	srv := &http.Server{Addr: addr, Handler: b.handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
@@ -93,6 +95,8 @@ func (b *broker) handler() http.Handler {
 	mux.HandleFunc("POST /provision", b.provision)
 	mux.HandleFunc("POST /waitlist", b.waitlist)
 	mux.HandleFunc("POST /waitlist/leave", b.leaveWaitlist)
+	mux.HandleFunc("POST /stripe/event", b.stripeEvent)
+	mux.HandleFunc("GET /paid-code", b.paidCode)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(got), []byte(b.token)) != 1 {

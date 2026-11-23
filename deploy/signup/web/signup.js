@@ -180,6 +180,21 @@
     show('wait');   // a link straight to the waiting list
   }
   api('GET', '/status').then(s => {
+    if (s.for_sale && s.open) {
+      $('buy-line').hidden = false;
+      $('buy').addEventListener('click', async () => {
+        $('buy').disabled = true;
+        $('buy-err').hidden = true;
+        try {
+          const r = await api('POST', '/checkout');
+          location.href = r.url;   // Stripe's own page takes the card
+        } catch (e) {
+          $('buy-err').textContent = e.message;
+          $('buy-err').hidden = false;
+          $('buy').disabled = false;
+        }
+      });
+    }
     if (!s.open) {
       $('closed').hidden = false;
       $('go').disabled = true;
