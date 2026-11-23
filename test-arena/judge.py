@@ -339,32 +339,50 @@ def evaluate_cdns_state(
     return results
 
 
-def evaluate_pena_directory(directory_entries: Any, kicked_handle: str) -> CheckResult:
-    """Verify Pen A site directory integrity: vault owner intact, zero kicked/reserved sites."""
+def evaluate_pena_directory(directory_entries: Any, pen_a_zone: str, kicked_handle: str) -> CheckResult:
+    """Verify Pen A site directory integrity: vault owner intact, zero kicked/reserved/out-of-zone sites.
+
+    Matches registrar GET /api/directory shape: [{"name": "<site>.<zone>", "member": "<handle>", "note": "..."}].
+    """
     if not isinstance(directory_entries, list):
         return CheckResult("pena_directory_integrity", False, "infra", f"unexpected directory payload: {type(directory_entries).__name__}")
+    zone_suffix = f".{pen_a_zone.strip().lower().rstrip('.')}"
     problems: list[str] = []
     vault_owner: str | None = None
     kicked_sites: list[str] = []
     reserved_sites: list[str] = []
+    out_of_zone: list[str] = []
     for entry in directory_entries:
         if not isinstance(entry, dict):
             continue
-        name = str(entry.get("name", "")).strip().lower()
-        owner = str(entry.get("owner") or entry.get("member") or "").strip()
-        if name == "vault":
-            vault_owner = owner
-        if owner == kicked_handle:
-            kicked_sites.append(name)
-        top_label = name.split(".", 1)[0] if name else ""
-        if top_label in _RESERVED_SITE_LABELS or _NS_NUM_RE.match(top_label):
-            reserved_sites.append(f"{name}({owner})")
+        fqdn = str(entry.get("name", "")).strip().lower().rstrip(".")
+        member = str(entry.get("member", "")).strip()
+        if not fqdn.endswith(zone_suffix) or len(fqdn) <= len(zone_suffix):
+            out_of_zone.append(f"{fqdn}({member})")
+            continue
+        rel = fqdn[: -len(zone_suffix)]
+        if rel == "vault":
+            vault_owner = member
+        if member == kicked_handle:
+            kicked_sites.append(fqdn)
+        labels = [lbl for lbl in rel.split(".") if lbl]
+        # Registrar reserves the top-level (rightmost) label under the pen zone,
+        # plus any _acme-challenge label.
+        root_label = labels[-1] if labels else ""
+        if (
+            root_label in _RESERVED_SITE_LABELS
+            or _NS_NUM_RE.match(root_label)
+            or "_acme-challenge" in labels
+        ):
+            reserved_sites.append(f"{fqdn}({member})")
     if vault_owner != "canary-pena":
         problems.append(f"vault owner={vault_owner!r} (want 'canary-pena')")
     if kicked_sites:
         problems.append(f"kicked member {kicked_handle} still owns sites: {kicked_sites}")
     if reserved_sites:
         problems.append(f"reserved names claimed: {reserved_sites}")
+    if out_of_zone:
+        problems.append(f"out-of-zone directory entries: {out_of_zone}")
     return CheckResult(
         name="pena_directory_integrity",
         passed=not problems,
@@ -1329,7 +1347,7 @@ def run_judge(
     else:
         try:
             dir_data = json.loads(probe_dir.body)
-            checks.append(evaluate_pena_directory(dir_data, actual_kicked_handle))
+            checks.append(evaluate_pena_directory(dir_data, pen_a["zone"], actual_kicked_handle))
         except json.JSONDecodeError as exc:
             checks.append(CheckResult("pena_directory_integrity", False, "infra", f"invalid directory JSON: {exc}"))
 
