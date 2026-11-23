@@ -42,7 +42,7 @@ usage: hogman-host <command>
   signup-setup <front-door-domain> <signup-host> [max-pens]
                                  a sign-up page that raises pens for other people
                                  (no arguments: rebuild it with the saved settings)
-  signup-code [note]             a single-use sign-up code (sign-ups are invite-only)
+  signup-code [--vanity] [note]  a single-use sign-up code (--vanity: allow a bare name without -xxxx)
   waitlist [invite|remove <id>]  who's waiting for a pen; invite emails them a code
   signup-mail "<from>" < key     email waiting-list codes through Resend (signup-mail test <addr>)
   signup-notify <ntfy-url>|off   a push when someone joins the waiting list or gets a pen
@@ -841,15 +841,31 @@ with_lock() {
   if command -v flock >/dev/null; then flock "$l" "$@"; else "$@"; fi
 }
 
-# signup-code [note]: a single-use code for the sign-up page (invite-only
-# sign-ups). Prints a link that fills it in.
+# signup-code [--vanity] [note]: a single-use code for the sign-up page
+# (invite-only sign-ups). Standard codes add a random 4-character suffix to the
+# pen name; --vanity tags the code to allow a bare vanity name.
 cmd_signup_code() {
   load_host
   [ -n "${SIGNUP_HOST:-}" ] && [ -f "$SIGNUP/codes" ] || die "sign-ups are not set up: hogman-host signup-setup"
-  local code; code="$(make_code "${*:-}")"
+  local vanity=0
+  if [ "${1:-}" = "--vanity" ]; then vanity=1; shift; fi
+  local note="${*:-}"
+  if [ "$vanity" = 1 ]; then
+    note="vanity${note:+ $note}"
+  else
+    case "$note" in
+      vanity|vanity\ *) die "notes cannot start with 'vanity' unless --vanity is passed" ;;
+    esac
+  fi
+  local code; code="$(make_code "$note")"
   echo "code: $code"
-  echo "link: https://$SIGNUP_HOST/#code=$code"
-  echo "works once"
+  if [ "$vanity" = 1 ]; then
+    echo "link: https://$SIGNUP_HOST/#code=$code&vanity=1"
+    echo "works once (vanity pen name — no random ending)"
+  else
+    echo "link: https://$SIGNUP_HOST/#code=$code"
+    echo "works once (pen gets a 4-character random ending)"
+  fi
 }
 
 # --------------------------------------------------------- waiting list ----

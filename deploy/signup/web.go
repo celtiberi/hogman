@@ -123,8 +123,18 @@ func (wb *web) check(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pen := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("pen")))
-	if why, ok := validPen(pen); !ok {
-		jsonOut(w, 200, map[string]any{"free": false, "reason": why})
+	vanity := r.URL.Query().Get("vanity") == "1"
+	if vanity {
+		if why, ok := validPen(pen); !ok {
+			jsonOut(w, 200, map[string]any{"free": false, "vanity": true, "reason": why})
+			return
+		}
+		code, out := wb.ask(r.Context(), "GET", "/check?pen="+pen+"&vanity=1", nil)
+		jsonOut(w, code, out)
+		return
+	}
+	if why, ok := validPenPrefix(pen); !ok {
+		jsonOut(w, 200, map[string]any{"free": false, "vanity": false, "reason": why})
 		return
 	}
 	code, out := wb.ask(r.Context(), "GET", "/check?pen="+pen, nil)

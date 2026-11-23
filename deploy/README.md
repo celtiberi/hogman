@@ -160,7 +160,8 @@ NTFY_TOPIC=<topic> WATCH_URLS="https://get.hogman.network/api/status" \
 ```bash
 hogman-host backup-setup age1...
 hogman-host signup-setup gate.hogman.network get.hogman.network 8
-hogman-host signup-code "for alice"
+hogman-host signup-code "for alice"          # standard code: appends -xxxx random ending
+hogman-host signup-code --vanity "for alice" # vanity code: allows a bare pen name
 ```
 
 The `web` container runs read-only and unprivileged (`65534:65534`), speaking over an internal

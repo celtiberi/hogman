@@ -12,20 +12,28 @@
   };
 
   // A link from the keeper fills the code in: https://.../#code=PIG-XXXX-XXXX
+  // Vanity links may also carry &vanity=1 as a preview hint (the server enforces
+  // whether the code is vanity or suffixed regardless of the URL hash).
   const m = location.hash.match(/code=([A-Za-z0-9-]+)/);
   if (m) $('code').value = m[1].toUpperCase();
+  const vanityHint = /(?:^|[#&])vanity=1(?:&|$)/.test(location.hash);
+  if (vanityHint && $('rand-suffix')) $('rand-suffix').hidden = true;
 
   // What pens' names end in (<pen>.pens.hogman.network), from the server.
   let sites = 'pens.hogman.network';
   const setSites = () => document.querySelectorAll('.sites').forEach(e => { e.textContent = sites; });
   api('GET', '/status').then(r => { if (/^[a-z0-9.-]+$/.test(r.sites_domain || '')) { sites = r.sites_domain; setSites(); } }).catch(() => {});
 
+  const penDisplay = raw => {
+    const base = raw || '<network>';
+    return vanityHint ? base : base + '-xxxx';
+  };
   const setNames = () => {
-    const p = $('pen').value.trim().toLowerCase() || '<network>';
+    const p = penDisplay($('pen').value.trim().toLowerCase());
     document.querySelectorAll('.penname').forEach(e => { e.textContent = p; });
   };
 
-  // Is the pen name free? Asked as you type, gently.
+  // Check syntax (and availability for vanity links) as you type, gently.
   let checkTimer = null, checkSeq = 0;
   $('pen').addEventListener('input', () => {
     setNames();
@@ -36,16 +44,26 @@
     checkTimer = setTimeout(async () => {
       const seq = ++checkSeq;
       try {
-        const r = await api('GET', '/check?pen=' + encodeURIComponent(pen));
+        const q = '/check?pen=' + encodeURIComponent(pen) + (vanityHint ? '&vanity=1' : '');
+        const r = await api('GET', q);
         if (seq !== checkSeq) return;
         hint.className = r.free ? 'hint ok' : 'hint bad';
-        hint.textContent = r.free ? `✓ ${pen}.${sites} is free` : `✗ ${r.reason}`;
+        if (r.free) {
+          hint.textContent = r.vanity
+            ? `✓ ${pen}.${sites} is free`
+            : `✓ Your pen will be ${pen}-xxxx.${sites} (4 random characters added at setup)`;
+        } else {
+          hint.textContent = `✗ ${r.reason}`;
+        }
       } catch (e) { if (seq === checkSeq) { hint.className = 'hint bad'; hint.textContent = e.message; } }
     }, 350);
   });
   const defaultHint = () => {
-    const s = document.createElement('span'); s.className = 'penname'; s.textContent = '<network>';
-    return [document.createTextNode('For your private network itself. Sites and addresses will end in .'), s, document.createTextNode('.' + sites)];
+    const s = document.createElement('span'); s.className = 'penname'; s.textContent = penDisplay('');
+    const lead = vanityHint
+      ? 'For your private network itself. Sites and addresses will end in .'
+      : 'We add a random 4-character ending so names stay available. Sites and addresses will end in .';
+    return [document.createTextNode(lead), s, document.createTextNode('.' + sites)];
   };
   $('handle').addEventListener('input', setNames);
   for (const f of ['pen', 'handle']) $(f).addEventListener('change', setNames);   // autofill, paste, scripts
@@ -168,5 +186,9 @@
       if (activeView !== 'working' && activeView !== 'done') show('wait');
     }
   }).catch(() => { $('down').hidden = false; });
+  if (vanityHint) {
+    $('pen-hint').textContent = '';
+    $('pen-hint').append(...defaultHint());
+  }
   setNames();
 })();
