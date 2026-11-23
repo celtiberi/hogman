@@ -192,6 +192,7 @@ type signupInput struct {
 	Code  string `json:"code"`
 	Pen   string `json:"pen"`
 	Owner string `json:"owner"`
+	Theme string `json:"theme,omitempty"`
 }
 
 func decodeSignupInput(w http.ResponseWriter, r *http.Request) (signupInput, bool) {
@@ -206,6 +207,12 @@ func decodeSignupInput(w http.ResponseWriter, r *http.Request) (signupInput, boo
 	in.Code = normCode(in.Code)
 	in.Pen = strings.ToLower(strings.TrimSpace(in.Pen))
 	in.Owner = strings.ToLower(strings.TrimSpace(in.Owner))
+	theme, ok := normaliseTheme(in.Theme)
+	if !ok {
+		jsonOut(w, 400, map[string]string{"error": "unknown theme"})
+		return signupInput{}, false
+	}
+	in.Theme = theme
 	if why, ok := validPen(in.Pen); !ok {
 		jsonOut(w, 400, map[string]string{"error": "pen name: " + why})
 		return signupInput{}, false
@@ -319,7 +326,11 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	start := time.Now()
-	out, code, stderr := b.run(ctx, "provision", targetPen, in.Owner)
+	args := []string{"provision", targetPen, in.Owner}
+	if in.Theme != "" {
+		args = append(args, "--theme", in.Theme)
+	}
+	out, code, stderr := b.run(ctx, args...)
 	switch code {
 	case 0:
 	case 2:
@@ -355,7 +366,10 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 	}
 	tag := ""
 	if vanity {
-		tag = " [vanity]"
+		tag += " [vanity]"
+	}
+	if in.Theme != "" {
+		tag += " [theme=" + in.Theme + "]"
 	}
 	b.ledger(fmt.Sprintf("%s raised %s for %s with %s (%s)%s in %s",
 		time.Now().UTC().Format(time.RFC3339), targetPen, in.Owner, in.Code, note, tag, time.Since(start).Round(time.Second)))

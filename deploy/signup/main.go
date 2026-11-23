@@ -14,6 +14,7 @@ import (
 	"crypto/rand"
 	"log"
 	"math/big"
+	"net"
 	"os"
 	"regexp"
 	"strings"
@@ -102,6 +103,28 @@ func validHandle(h string) (string, bool) {
 }
 
 func normCode(c string) string { return strings.ToUpper(strings.TrimSpace(c)) }
+
+// normaliseTheme checks a pen UI theme against the strict allowlist:
+// empty or "default" -> "" (default theme); "work" -> "work".
+func normaliseTheme(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "default":
+		return "", true
+	case "work":
+		return "work", true
+	default:
+		return "", false
+	}
+}
+
+// stripHostPort extracts a lowercased bare hostname from a Host header or URL host.
+func stripHostPort(raw string) string {
+	s := strings.TrimSpace(raw)
+	if h, _, err := net.SplitHostPort(s); err == nil {
+		s = h
+	}
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), ".")
+}
 
 func env(k, def string) string {
 	if v := os.Getenv(k); v != "" {

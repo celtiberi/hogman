@@ -31,10 +31,12 @@ usage() {
 usage: hogman-host <command>
 
   init [--test]                  set up the front door (--test: self-signed certificates, for local trials)
-  add <pen>                      create a pen with public certificates: its front door is
+  add <pen> [--theme work|default]
+                                 create a pen with public certificates: its front door is
                                  <pen>.<gate-domain>, its sites <site>.<pen>.<pens-zone>
   list                           pens on this host
   pen <network> <args...>        run ./hogman in a pen, e.g.  pen bobo member list
+  theme <network> work|default   switch a pen's UI theme (updates .env and reloads registrar)
   upgrade <network>              update a pen's code from src/ and restart it
   routes                         rewrite the front door's routes and reload it
   remove <network>               stop a pen (its folder is kept; delete it yourself to destroy it)
@@ -53,8 +55,10 @@ usage: hogman-host <command>
   signup-stripe <price> [tax]|off  sell pens with Stripe Checkout (keys on stdin)
   signup-cloudflare on|off       trust CF-Connecting-IP and require Cloudflare Proxy on the sign-up host
   signup-turnstile <site-key>|off  require Cloudflare Turnstile on sign-up/waitlist (secret on stdin)
+  signup-work-host <host>|off    serve a Work sign-up host (e.g. get.work.hogman.network) on the same page
   capacity                       how many pens this server holds, and its limit
-  provision <pen> <owner>        raise a hosted pen (what the sign-up page runs)
+  provision <pen> <owner> [--theme work|default]
+                                 raise a hosted pen (what the sign-up page runs)
 
   challenge-dns-setup <public-ip> [gcp-key.json]
                                  run the DNS-01 challenge server (public certificates, D-18)
@@ -244,14 +248,17 @@ $(gate_tls_line "$host")
 
 EOF
     done
-    if [ -n "${SIGNUP_HOST:-}" ]; then
-      valid_host "$SIGNUP_HOST" || die "invalid SIGNUP_HOST: $SIGNUP_HOST"
+    local shost
+    for shost in "${SIGNUP_HOST:-}" "${SIGNUP_WORK_HOST:-}"; do
+      [ -n "$shost" ] || continue
+      if [ "$shost" = "${SIGNUP_WORK_HOST:-}" ] && [ "$shost" = "${SIGNUP_HOST:-}" ]; then continue; fi
+      valid_host "$shost" || die "invalid signup host: $shost"
       cat <<EOF
 # the sign-up page
-http://$SIGNUP_HOST {
+http://$shost {
 	redir https://{host}{uri} permanent
 }
-$SIGNUP_HOST {
+$shost {
 $(if [ "${SIGNUP_CLOUDFLARE:-}" = 1 ]; then
   printf '\t@not_cf not remote_ip %s\n\trespond @not_cf 403\n' "$CLOUDFLARE_CIDRS"
 fi)
@@ -262,7 +269,7 @@ fi)
 }
 
 EOF
-    fi
+    done
   } > "$caddy"
   # The front door joins "hogman-front" (for the sign-up page) and each live
   # pen's own private network, addressing each pen by its unique container names
@@ -398,10 +405,24 @@ next_stun_port() {
 
 cmd_add() {
   load_host
-  # add <pen>: a pen with public certificates (D-18 / D-22). Its front door is
-  #   <pen>.<GATE_DOMAIN> and its sites live under <pen>.<PENS_ZONE>.
-  local n="${1:-}"
-  [ -n "$n" ] && [ $# -eq 1 ] || die "usage: hogman-host add <pen>"
+  # add <pen> [--theme work|default]: a pen with public certificates (D-18 / D-22).
+  # Its front door is <pen>.<GATE_DOMAIN> and its sites live under <pen>.<PENS_ZONE>.
+  local n="${1:-}" theme=""
+  shift || true
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --theme)
+        [ $# -ge 2 ] || die "usage: hogman-host add <pen> [--theme work|default]"
+        case "$2" in
+          default|"") theme="" ;;
+          work) theme="work" ;;
+          *) die "unknown theme: $2 (want default or work)" ;;
+        esac
+        shift 2 ;;
+      *) die "usage: hogman-host add <pen> [--theme work|default]" ;;
+    esac
+  done
+  [ -n "$n" ] || die "usage: hogman-host add <pen> [--theme work|default]"
   [ -n "${PENS_ZONE:-}" ] && [ -n "${GATE_DOMAIN:-}" ] || die "public pens aren't set up here yet: hogman-host gate-cert-setup, then hogman-host pens-zone"
   [[ "$n" =~ $HOSTED_RE ]] || die "pen names are 3-30 lowercase letters, digits and dashes, starting with a letter"
   local host="$n.$GATE_DOMAIN" zone="$n.$PENS_ZONE"
@@ -433,6 +454,9 @@ FRONT_DOOR=true
 STUN_PORT=$stun
 COMPOSE_PROJECT_NAME=pen-$n
 EOF
+  if [ -n "$theme" ]; then
+    echo "THEME=$theme" >> "$PENS/$n/.env"
+  fi
   # This pen's challenge DNS credential: it can write only this pen's
   # challenge records. The token goes straight into the registrar's secrets.
   install -d -m 0700 "$PENS/$n/data/secrets/registrar"
@@ -471,6 +495,32 @@ cmd_pen() {
   valid_name "$n" || die "invalid network name: $n"
   [ -d "$PENS/$n" ] || die "no pen $n"
   (cd "$PENS/$n" && ./hogman "$@")
+}
+
+cmd_theme() {
+  load_host
+  local n="${1:-}" want="${2:-}"
+  [ -n "$n" ] && [ -n "$want" ] && [ $# -eq 2 ] || die "usage: hogman-host theme <network> work|default"
+  valid_name "$n" || die "invalid network name: $n"
+  [ -d "$PENS/$n" ] || die "no pen $n"
+  [ ! -f "$PENS/$n/.removed" ] || die "pen $n is stopped"
+  [ -f "$PENS/$n/.env" ] || die "pen $n has no .env"
+  local val=""
+  case "$want" in
+    default) val="" ;;
+    work) val="work" ;;
+    *) die "unknown theme: $want (want default or work)" ;;
+  esac
+  local tmp; tmp="$(mktemp)"
+  grep -v '^THEME=' "$PENS/$n/.env" > "$tmp" || true
+  if [ -n "$val" ]; then
+    printf 'THEME=%s\n' "$val" >> "$tmp"
+  fi
+  install -m 0600 "$tmp" "$PENS/$n/.env"; rm -f "$tmp"
+  local front_ca=""
+  [ -n "${FRONT_TLS_MODE:-}" ] && front_ca="$FRONT/data/caddy/pki/authorities/local/root.crt"
+  (cd "$PENS/$n" && FRONT_CA="$front_ca" FRONT_JOIN_DL="$FRONT/join-dl" ./hogman up)
+  info "Pen $n theme set to ${val:-default}"
 }
 
 cmd_upgrade() {
@@ -668,7 +718,21 @@ cmd_capacity() {
 # Exit 2: the name is taken. Exit 3: the server is full.
 cmd_provision() {
   load_host
-  local n="${1:-}" owner="${2:-}"
+  local n="${1:-}" owner="${2:-}" theme=""
+  shift 2 || die "usage: hogman-host provision <pen> <owner> [--theme work|default]"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --theme)
+        [ $# -ge 2 ] || die "usage: hogman-host provision <pen> <owner> [--theme work|default]"
+        case "$2" in
+          default|"") theme="" ;;
+          work) theme="work" ;;
+          *) die "unknown theme: $2 (want default or work)" ;;
+        esac
+        shift 2 ;;
+      *) die "usage: hogman-host provision <pen> <owner> [--theme work|default]" ;;
+    esac
+  done
   [ -n "${PENS_DOMAIN:-}" ] || die "sign-ups are not set up: hogman-host signup-setup"
   [ -n "${PENS_ZONE:-}" ] && [ -n "${GATE_DOMAIN:-}" ] || die "public pens aren't set up here yet: hogman-host gate-cert-setup, then hogman-host pens-zone"
   [[ "$n" =~ $HOSTED_RE ]] || die "pen names are 3-30 lowercase letters, digits and dashes, starting with a letter"
@@ -682,7 +746,7 @@ cmd_provision() {
   # (Not `if ! ( ... )`: bash ignores set -e inside a subshell used as a condition.)
   local res rc; res="$(mktemp)"
   set +e
-  ( set -e; provision_steps "$n" "$owner" ) > "$res"
+  ( set -e; provision_steps "$n" "$owner" "$theme" ) > "$res"
   rc=$?
   set -e
   if [ "$rc" -ne 0 ]; then
@@ -690,18 +754,23 @@ cmd_provision() {
     provision_rollback "$n"
     die "raising $n failed; rolled back (its folder is in $HOGMAN_HOME/failed/)"
   fi
-  local link exp zone="$n.$PENS_ZONE" host="$n.$GATE_DOMAIN"
+  local link exp zone="$n.$PENS_ZONE" host="$n.$GATE_DOMAIN" theme_json=""
   link="$(sed -n 1p "$res")"; exp="$(sed -n 2p "$res")"; rm -f "$res"
+  [ -n "$theme" ] && theme_json="$(printf ',"theme":"%s"' "$theme")"
   info "pen $n raised for $owner"
-  printf '{"pen":"%s","zone":"%s","host":"%s","owner":"%s","join_link":"%s","valid_until":"%s"}\n' \
-    "$n" "$zone" "$host" "$owner" "$link" "$exp"
+  printf '{"pen":"%s","zone":"%s","host":"%s","owner":"%s","join_link":"%s","valid_until":"%s"%s}\n' \
+    "$n" "$zone" "$host" "$owner" "$link" "$exp" "$theme_json"
 }
 
 # signup-setup <pens-domain> <signup-host> [max-pens]: turn on the sign-up page.
 # Pens get <name>.<pens-domain>; point *.<pens-domain> and <signup-host> here.
 provision_steps() {  # in a subshell: prints the join link, then its expiry
-  local n="$1" owner="$2" out link
-  cmd_add "$n" >&2
+  local n="$1" owner="$2" theme="${3:-}" out link
+  if [ -n "$theme" ]; then
+    cmd_add "$n" --theme "$theme" >&2
+  else
+    cmd_add "$n" >&2
+  fi
   echo "HOSTED=true" >> "$PENS/$n/.env"
   (cd "$PENS/$n" && ./hogman member add "$owner" --role owner) >&2
   out="$(cd "$PENS/$n" && ./hogman device key "$owner" personal)"
@@ -782,11 +851,14 @@ cmd_signup_setup() {
     cf_env="      TRUST_CLOUDFLARE: \"1\"
       TRUSTED_PROXY_CIDRS: \"$CLOUDFLARE_CIDRS\""
   fi
-  local ts_env=""
+  local ts_env="" ts_hosts="$SIGNUP_HOST"
+  if [ -n "${SIGNUP_WORK_HOST:-}" ] && [ "$SIGNUP_WORK_HOST" != "$SIGNUP_HOST" ]; then
+    ts_hosts="$SIGNUP_HOST,$SIGNUP_WORK_HOST"
+  fi
   if [ -n "${SIGNUP_TURNSTILE_SITE_KEY:-}" ] && [ -s "$SIGNUP/turnstile.secret" ]; then
     ts_env="      TURNSTILE_SITE_KEY: $SIGNUP_TURNSTILE_SITE_KEY
       TURNSTILE_SECRET_FILE: /run/secrets/turnstile
-      TURNSTILE_EXPECTED_HOST: $SIGNUP_HOST"
+      TURNSTILE_EXPECTED_HOSTS: $ts_hosts"
     web_extra_vols="${web_extra_vols}      - ./turnstile.secret:/run/secrets/turnstile:ro
 "
   fi
@@ -810,6 +882,7 @@ services:
       BROKER_TOKEN_FILE: /run/secrets/token
       PENS_DOMAIN: $PENS_DOMAIN
       SITES_DOMAIN: $PENS_ZONE
+      WORK_SIGNUP_HOST: "${SIGNUP_WORK_HOST:-}"
 $cf_env
 $web_stripe
 $ts_env
@@ -1124,6 +1197,26 @@ cmd_signup_turnstile() {
   set_host_var SIGNUP_TURNSTILE_SITE_KEY "$sk"
   cmd_signup_setup
   info "Sign-up Cloudflare Turnstile is on (site key $sk)"
+}
+
+# signup-work-host <host>|off: serve the same sign-up page on a Work hostname
+# (e.g. get.work.hogman.network), defaulting pens raised there to THEME=work
+# and keeping Stripe Checkout redirects on that host.
+cmd_signup_work_host() {
+  load_host
+  [ -n "${SIGNUP_HOST:-}" ] && [ -d "$SIGNUP" ] || die "sign-ups are not set up: hogman-host signup-setup"
+  local h="${1:-}"
+  if [ "$h" = off ]; then
+    set_host_var SIGNUP_WORK_HOST ""
+    cmd_signup_setup
+    info "Work sign-up host is off"
+    return
+  fi
+  valid_host "$h" || die "usage: hogman-host signup-work-host <host>|off"
+  [ "$h" != "$SIGNUP_HOST" ] || die "work sign-up host must differ from $SIGNUP_HOST"
+  set_host_var SIGNUP_WORK_HOST "$h"
+  cmd_signup_setup
+  info "Work sign-up host is on: https://$h"
 }
 
 # challenge-dns-setup <public-ip> [gcp-key.json]: install and run the DNS-01
@@ -1452,6 +1545,7 @@ case "${1:-}" in
   signup-stripe) shift; cmd_signup_stripe "$@" ;;
   signup-cloudflare) shift; cmd_signup_cloudflare "$@" ;;
   signup-turnstile) shift; cmd_signup_turnstile "$@" ;;
+  signup-work-host) shift; cmd_signup_work_host "$@" ;;
   capacity) cmd_capacity ;;
   provision) shift; cmd_provision "$@" ;;
   signup-setup) shift; cmd_signup_setup "$@" ;;
@@ -1459,6 +1553,7 @@ case "${1:-}" in
   add)     shift; cmd_add "$@" ;;
   list)    cmd_list ;;
   pen)     shift; cmd_pen "$@" ;;
+  theme)   shift; cmd_theme "$@" ;;
   upgrade) shift; cmd_upgrade "$@" ;;
   routes)  load_host; write_front; reload_front; info "routes rewritten" ;;
   remove)  shift; cmd_remove "$@" ;;

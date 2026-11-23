@@ -91,6 +91,7 @@ func setup() *Service {
 		Zone:             mustEnv("ZONE"),
 		PublicHost:       mustEnv("PUBLIC_HOST"),
 		CoreIP:           coreIP,
+		Theme:            env("THEME", ""),
 		InviteTTL:        durEnv("INVITE_TTL", 7*24*time.Hour),
 		DeviceKeyTTL:     durEnv("DEVICE_KEY_TTL", time.Hour),
 		MembersCanInvite: env("MEMBERS_CAN_INVITE", "false") == "true",
