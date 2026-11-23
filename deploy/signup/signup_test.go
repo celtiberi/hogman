@@ -689,3 +689,127 @@ func TestJobStoreDeliveryWindow(t *testing.T) {
 		t.Fatalf("late-delivered job %s still in store past 30m ceiling", id3)
 	}
 }
+
+func TestCloudflareTrustedProxyAndAntiSpoofing(t *testing.T) {
+	prefixes, err := parseCIDRs(defaultCloudflareCIDRs)
+	if err != nil || len(prefixes) < 20 {
+		t.Fatalf("defaultCloudflareCIDRs failed: len=%d err=%v", len(prefixes), err)
+	}
+	wb := newWeb("http://127.0.0.1:0", testToken, "pens.test")
+	wb.trustedProxies = prefixes
+
+	// 1. Request arriving from a real Cloudflare edge IP: trusts CF-Connecting-IP.
+	reqCF := httptest.NewRequest("GET", "/api/check?pen=coffee", nil)
+	reqCF.Header.Set("X-Forwarded-For", "172.70.1.5")
+	reqCF.Header.Set("CF-Connecting-IP", "203.0.113.42")
+	if got := wb.clientIP(reqCF); got != "203.0.113.42" {
+		t.Fatalf("from Cloudflare IP: got %q, want 203.0.113.42", got)
+	}
+
+	// 2. Request arriving directly from an attacker bypassing Cloudflare with forged CF-Connecting-IP: IGNORED.
+	reqDirect := httptest.NewRequest("GET", "/api/check?pen=coffee", nil)
+	reqDirect.Header.Set("X-Forwarded-For", "198.51.100.77")
+	reqDirect.Header.Set("CF-Connecting-IP", "203.0.113.42")
+	if got := wb.clientIP(reqDirect); got != "198.51.100.77" {
+		t.Fatalf("forged CF-Connecting-IP from non-CF peer: got %q, want 198.51.100.77", got)
+	}
+
+	// 3. When trustedProxies is empty (default), CF-Connecting-IP is NEVER trusted even from Cloudflare IPs.
+	wbOff := newWeb("http://127.0.0.1:0", testToken, "pens.test")
+	if got := wbOff.clientIP(reqCF); got != "172.70.1.5" {
+		t.Fatalf("with trustedProxies off: got %q, want 172.70.1.5", got)
+	}
+
+	// 4. Two different visitors behind the same Cloudflare edge IP get separate rate-limit buckets.
+	wb.creates = newLimiter(1, time.Hour)
+	b, _ := newTestBroker(t, "PIG-AAAA-BBBB x\n")
+	srv := httptest.NewServer(b.handler())
+	defer srv.Close()
+	wb.brokerURL = srv.URL
+	h := wb.handler()
+	hdr1 := map[string]string{"Content-Type": "application/json", "X-Forwarded-For": "172.70.1.5", "CF-Connecting-IP": "203.0.113.1"}
+	hdr2 := map[string]string{"Content-Type": "application/json", "X-Forwarded-For": "172.70.1.5", "CF-Connecting-IP": "203.0.113.2"}
+	if code, _ := call(h, "POST", "/api/create", `{"code":"PIG-ZZZZ-ZZZZ","pen":"coffee","handle":"alice"}`, hdr1); code != 403 {
+		t.Fatalf("visitor 1 first try: %d, want 403", code)
+	}
+	if code, _ := call(h, "POST", "/api/create", `{"code":"PIG-ZZZZ-ZZZZ","pen":"coffee","handle":"alice"}`, hdr1); code != 429 {
+		t.Fatalf("visitor 1 second try: %d, want 429", code)
+	}
+	if code, _ := call(h, "POST", "/api/create", `{"code":"PIG-ZZZZ-ZZZZ","pen":"coffee","handle":"bob"}`, hdr2); code != 403 {
+		t.Fatalf("visitor 2 behind same CF IP was rate-limited: %d, want 403", code)
+	}
+}
+
+func TestTurnstileVerificationCSPAndGlobalWaitlistProtection(t *testing.T) {
+	b, _ := newTestBroker(t, "PIG-AAAA-BBBB x\n")
+	brokerSrv := httptest.NewServer(b.handler())
+	defer brokerSrv.Close()
+
+	var lastRemoteIP string
+	var down atomic.Bool
+	tsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			w.WriteHeader(502)
+			return
+		}
+		_ = r.ParseForm()
+		lastRemoteIP = r.FormValue("remoteip")
+		switch r.FormValue("response") {
+		case "good-token":
+			jsonOut(w, 200, map[string]any{"success": true, "hostname": "get.example"})
+		case "wrong-host-token":
+			jsonOut(w, 200, map[string]any{"success": true, "hostname": "evil.example"})
+		default:
+			jsonOut(w, 200, map[string]any{"success": false, "error-codes": []string{"invalid-input-response"}})
+		}
+	}))
+	defer tsSrv.Close()
+
+	wb := newWeb(brokerSrv.URL, testToken, "pens.test")
+	wb.turnstile = newTurnstileVerifier("0x4AAAAAAATESTKEY", "secret-key", tsSrv.URL, "get.example")
+	wb.globalWaits = newLimiterWithCap(1, time.Hour, 4)
+	h := wb.handler()
+
+	// 1. CSP widens minimally to challenges.cloudflare.com only when Turnstile is enabled,
+	//    and /api/status advertises turnstile_site_key.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "https://challenges.cloudflare.com") {
+		t.Fatalf("CSP missing Turnstile origin: %q", csp)
+	}
+	if code, out := call(h, "GET", "/api/status", "", nil); code != 200 || out["turnstile_site_key"] != "0x4AAAAAAATESTKEY" {
+		t.Fatalf("status missing turnstile_site_key: %d %v", code, out)
+	}
+
+	// 2. Bots without valid Turnstile tokens are rejected (403) and NEVER consume globalWaits!
+	for i := 0; i < 3; i++ {
+		hdr := map[string]string{"Content-Type": "application/json", "X-Forwarded-For": "198.51.100." + strconv.Itoa(i+1)}
+		if code, _ := call(h, "POST", "/api/waitlist", `{"email":"bot@example.com"}`, hdr); code != 403 {
+			t.Fatalf("missing token waitlist %d: %d, want 403", i, code)
+		}
+		if code, _ := call(h, "POST", "/api/waitlist", `{"email":"bot@example.com","turnstile_token":"wrong-host-token"}`, hdr); code != 403 {
+			t.Fatalf("wrong-host token waitlist %d: %d, want 403", i, code)
+		}
+	}
+	// Real human with valid token still succeeds because bots didn't burn globalWaits (limit=1)!
+	humanHdr := map[string]string{"Content-Type": "application/json", "X-Forwarded-For": "203.0.113.9"}
+	if code, out := call(h, "POST", "/api/waitlist", `{"email":"human@example.com","turnstile_token":"good-token"}`, humanHdr); code != 200 || out["place"] != float64(1) {
+		t.Fatalf("human waitlist after bot attempts: %d %v, want 200 place=1", code, out)
+	}
+	if lastRemoteIP != "203.0.113.9" {
+		t.Fatalf("remoteip passed to Turnstile = %q, want 203.0.113.9", lastRemoteIP)
+	}
+
+	// 3. /api/create enforces Turnstile (403 on missing/bad, 503 fail-closed when Turnstile is down, 202 on good).
+	if code, _ := call(h, "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"coffee","handle":"alice"}`, humanHdr); code != 403 {
+		t.Fatalf("create without token: %d, want 403", code)
+	}
+	down.Store(true)
+	if code, _ := call(h, "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"coffee","handle":"alice","turnstile_token":"good-token"}`, humanHdr); code != 503 {
+		t.Fatalf("create when Turnstile down: %d, want 503", code)
+	}
+	down.Store(false)
+	if code, out := call(h, "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"coffee","handle":"alice","turnstile_token":"good-token"}`, humanHdr); code != 202 || out["job"] == nil {
+		t.Fatalf("create with good token: %d %v, want 202", code, out)
+	}
+}

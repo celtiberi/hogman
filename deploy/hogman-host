@@ -47,6 +47,8 @@ usage: hogman-host <command>
   signup-mail "<from>" < key     email waiting-list codes through Resend (signup-mail test <addr>)
   signup-notify <ntfy-url>|off   a push when someone joins the waiting list or gets a pen
   signup-stripe <price> [tax]|off  sell pens with Stripe Checkout (keys on stdin)
+  signup-cloudflare on|off       trust CF-Connecting-IP and require Cloudflare Proxy on the sign-up host
+  signup-turnstile <site-key>|off  require Cloudflare Turnstile on sign-up/waitlist (secret on stdin)
   capacity                       how many pens this server holds, and its limit
   provision <pen> <owner>        raise a hosted pen (what the sign-up page runs)
 
@@ -141,6 +143,9 @@ write_front() {
     fi
     chown -R "$fuid:$fgid" "$FRONT/data" "$FRONT/config"
   fi
+# Official Cloudflare edge IPv4/IPv6 ranges (cloudflare.com/ips-v4, /ips-v6).
+CLOUDFLARE_CIDRS="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32"
+
   local caddy="$FRONT/Caddyfile.new" compose="$FRONT/compose.yaml.new" aliases="" n host
   {
     echo "# Written by hogman-host. Edit pens, not this file."
@@ -245,6 +250,9 @@ http://$SIGNUP_HOST {
 	redir https://{host}{uri} permanent
 }
 $SIGNUP_HOST {
+$(if [ "${SIGNUP_CLOUDFLARE:-}" = 1 ]; then
+  printf '\t@not_cf not remote_ip %s\n\trespond @not_cf 403\n' "$CLOUDFLARE_CIDRS"
+fi)
 	header Strict-Transport-Security "max-age=31536000"
 	reverse_proxy signup:8080 {
 		header_up X-Forwarded-For {remote_host}
@@ -757,14 +765,23 @@ cmd_signup_setup() {
   if [ -n "${SIGNUP_NTFY:-}" ]; then broker_nets="[signup, out]"; out_net="  out: {}"; fi
   # Selling pens (signup-stripe): the page gets the Stripe key, the broker the
   # webhook secret it checks Stripe's events with.
-  local web_vols='["./token:/run/secrets/token:ro"]' web_stripe="" broker_stripe=""
+  local web_extra_vols="" web_stripe="" broker_stripe=""
   if [ -n "${SIGNUP_STRIPE_PRICE:-}" ] && [ -s "$SIGNUP/stripe_key" ] && [ -s "$SIGNUP/stripe_webhook_secret" ]; then
-    web_vols='["./token:/run/secrets/token:ro", "./stripe_key:/run/secrets/stripe_key:ro"]'
+    web_extra_vols="${web_extra_vols}      - ./stripe_key:/run/secrets/stripe_key:ro
+"
     web_stripe="      STRIPE_SECRET_KEY_FILE: /run/secrets/stripe_key
       STRIPE_PRICE: $SIGNUP_STRIPE_PRICE
       STRIPE_AUTOMATIC_TAX: \"${SIGNUP_STRIPE_TAX:-}\"
       PUBLIC_URL: https://$SIGNUP_HOST"
     broker_stripe="      STRIPE_WEBHOOK_SECRET_FILE: $SIGNUP/stripe_webhook_secret"
+  fi
+  local ts_env=""
+  if [ -n "${SIGNUP_TURNSTILE_SITE_KEY:-}" ] && [ -s "$SIGNUP/turnstile.secret" ]; then
+    ts_env="      TURNSTILE_SITE_KEY: $SIGNUP_TURNSTILE_SITE_KEY
+      TURNSTILE_SECRET_FILE: /run/secrets/turnstile
+      TURNSTILE_EXPECTED_HOST: $SIGNUP_HOST"
+    web_extra_vols="${web_extra_vols}      - ./turnstile.secret:/run/secrets/turnstile:ro
+"
   fi
   cat > "$SIGNUP/compose.yaml" <<EOF
 # Written by hogman-host signup-setup.
@@ -786,8 +803,12 @@ services:
       BROKER_TOKEN_FILE: /run/secrets/token
       PENS_DOMAIN: $PENS_DOMAIN
       SITES_DOMAIN: $PENS_ZONE
+      TRUST_CLOUDFLARE: "${SIGNUP_CLOUDFLARE:-}"
 $web_stripe
-    volumes: $web_vols
+$ts_env
+    volumes:
+      - ./token:/run/secrets/token:ro
+$web_extra_vols
     networks:
       hogman-front: { aliases: [signup] }
       signup: {}
@@ -1055,6 +1076,47 @@ cmd_signup_stripe() {
   local mode=test; case "$key" in *_live_*) mode=live ;; esac
   info "Pens are for sale on https://$SIGNUP_HOST ($mode mode${tax:+, Stripe Tax on})."
   info "Stripe webhook: https://$SIGNUP_HOST/api/stripe/webhook"
+}
+
+# signup-cloudflare on|off: when get.<domain> sits behind Cloudflare Proxy
+# (CF_PROXY_ON), trust CF-Connecting-IP strictly from Cloudflare edge CIDRs
+# and reject direct-to-origin bypasses at the front door with 403.
+cmd_signup_cloudflare() {
+  load_host
+  [ -n "${SIGNUP_HOST:-}" ] && [ -d "$SIGNUP" ] || die "sign-ups are not set up: hogman-host signup-setup"
+  case "${1:-}" in
+    on)  set_host_var SIGNUP_CLOUDFLARE 1 ;;
+    off) set_host_var SIGNUP_CLOUDFLARE "" ;;
+    *)   die "usage: hogman-host signup-cloudflare on|off" ;;
+  esac
+  cmd_signup_setup
+  info "Sign-up Cloudflare proxy lock is ${1}"
+}
+
+# signup-turnstile <site-key>|off: require Cloudflare Turnstile on sign-up and
+# waiting-list forms. The secret key is read from standard input so it never
+# sits in shell history.
+cmd_signup_turnstile() {
+  load_host
+  [ -n "${SIGNUP_HOST:-}" ] && [ -d "$SIGNUP" ] || die "sign-ups are not set up: hogman-host signup-setup"
+  local sk="${1:-}"
+  if [ "$sk" = off ]; then
+    rm -f "$SIGNUP/turnstile.secret"
+    set_host_var SIGNUP_TURNSTILE_SITE_KEY ""
+    cmd_signup_setup
+    info "Sign-up Cloudflare Turnstile is off"
+    return
+  fi
+  [[ "$sk" =~ ^[0-9A-Za-z_-]{8,128}$ ]] || die "usage: hogman-host signup-turnstile <site-key> < secret-file  (or: off)"
+  [ -t 0 ] && die "pipe the Turnstile secret key in on standard input, e.g. < secret-file"
+  local sec; sec="$(tr -d ' \r\n' | head -c 256)"
+  [[ "$sec" =~ ^[0-9A-Za-z_-]{8,256}$ ]] || die "that doesn't look like a Turnstile secret key"
+  # Readable inside the unprivileged web container (65534:65534); $SIGNUP is 0700.
+  printf '%s' "$sec" > "$SIGNUP/turnstile.secret"
+  chmod 0644 "$SIGNUP/turnstile.secret"
+  set_host_var SIGNUP_TURNSTILE_SITE_KEY "$sk"
+  cmd_signup_setup
+  info "Sign-up Cloudflare Turnstile is on (site key $sk)"
 }
 
 # challenge-dns-setup <public-ip> [gcp-key.json]: install and run the DNS-01
@@ -1381,6 +1443,8 @@ case "${1:-}" in
   signup-mail) shift; cmd_signup_mail "$@" ;;
   signup-notify) shift; cmd_signup_notify "$@" ;;
   signup-stripe) shift; cmd_signup_stripe "$@" ;;
+  signup-cloudflare) shift; cmd_signup_cloudflare "$@" ;;
+  signup-turnstile) shift; cmd_signup_turnstile "$@" ;;
   capacity) cmd_capacity ;;
   provision) shift; cmd_provision "$@" ;;
   signup-setup) shift; cmd_signup_setup "$@" ;;

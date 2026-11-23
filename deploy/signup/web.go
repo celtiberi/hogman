@@ -25,27 +25,45 @@ import (
 var webFiles embed.FS
 
 type web struct {
-	brokerURL   string
-	token       string
-	domain      string
-	sitesDomain string // what pens' names end in: the pens zone (e.g. pens.hogman.network)
-	client      *http.Client
-	checks      *limiter // name checks while typing
-	creates     *limiter // sign-up attempts, which also bounds guessing codes
-	jobPolls    *limiter // status polls for /api/job
-	waits       *limiter // waiting-list joins
-	globalWaits *limiter // server-wide cap on waiting-list joins
-	leaves      *limiter // taking yourself off the list (its own allowance)
-	checkouts   *limiter // starting a payment
-	webhooks    *limiter // Stripe's calls (it retries what we refuse)
-	jobs        *jobStore
-	stripe      *stripeCheckout // nil: pens aren't for sale
+	brokerURL      string
+	token          string
+	domain         string
+	sitesDomain    string // what pens' names end in: the pens zone (e.g. pens.hogman.network)
+	client         *http.Client
+	checks         *limiter // name checks while typing
+	creates        *limiter // sign-up attempts, which also bounds guessing codes
+	jobPolls       *limiter // status polls for /api/job
+	waits          *limiter // waiting-list joins
+	globalWaits    *limiter // server-wide cap on waiting-list joins
+	leaves         *limiter // taking yourself off the list (its own allowance)
+	checkouts      *limiter // starting a payment
+	webhooks       *limiter // Stripe's calls (it retries what we refuse)
+	jobs           *jobStore
+	stripe         *stripeCheckout // nil: pens aren't for sale
+	trustedProxies []netip.Prefix
+	turnstile      *turnstileVerifier
 }
 
 func runWeb() {
 	wb := newWeb(env("BROKER_URL", "http://broker:9090"), readToken(), env("PENS_DOMAIN", ""))
 	wb.sitesDomain = env("SITES_DOMAIN", "pens.hogman.network")
 	wb.stripe = loadStripeCheckout()
+	proxies, err := trustedProxiesFromEnv()
+	if err != nil {
+		log.Fatalf("trusted proxies: %v", err)
+	}
+	wb.trustedProxies = proxies
+	tv, err := turnstileFromEnv()
+	if err != nil {
+		log.Fatalf("turnstile: %v", err)
+	}
+	wb.turnstile = tv
+	if len(wb.trustedProxies) > 0 {
+		log.Printf("trusting CF-Connecting-IP from %d proxy CIDRs", len(wb.trustedProxies))
+	}
+	if wb.turnstile != nil {
+		log.Printf("Cloudflare Turnstile enabled (expected host: %q)", wb.turnstile.expectedHost)
+	}
 	addr := env("LISTEN", ":8080")
 	log.Printf("sign-up page on %s", addr)
 	srv := &http.Server{Addr: addr, Handler: wb.handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
@@ -86,7 +104,11 @@ func (wb *web) handler() http.Handler {
 	mux.HandleFunc("GET /api/paid", wb.paid)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		csp := "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+		if wb.turnstile != nil {
+			csp = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+		}
+		h.Set("Content-Security-Policy", csp)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Origin-Agent-Cluster", "?1")
@@ -123,11 +145,31 @@ func (wb *web) status(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, code, out)
 		return
 	}
-	jsonOut(w, 200, map[string]any{"open": out["open"], "pens_domain": wb.domain, "sites_domain": wb.sitesDomain, "for_sale": wb.stripe != nil})
+	res := map[string]any{"open": out["open"], "pens_domain": wb.domain, "sites_domain": wb.sitesDomain, "for_sale": wb.stripe != nil}
+	if wb.turnstile != nil {
+		res["turnstile_site_key"] = wb.turnstile.siteKey
+	}
+	jsonOut(w, 200, res)
+}
+
+func (wb *web) verifyTurnstile(w http.ResponseWriter, r *http.Request, token, ip string) bool {
+	if wb.turnstile == nil {
+		return true
+	}
+	err := wb.turnstile.verify(r.Context(), token, ip)
+	if err == nil {
+		return true
+	}
+	if err == errTurnstileDown {
+		jsonOut(w, 503, map[string]string{"error": err.Error()})
+		return false
+	}
+	jsonOut(w, 403, map[string]string{"error": err.Error()})
+	return false
 }
 
 func (wb *web) check(w http.ResponseWriter, r *http.Request) {
-	if !wb.checks.allow(rateLimitKey(clientIP(r)), time.Now()) {
+	if !wb.checks.allow(rateLimitKey(wb.clientIP(r)), time.Now()) {
 		jsonOut(w, 429, map[string]string{"error": "slow down a little"})
 		return
 	}
@@ -151,14 +193,16 @@ func (wb *web) check(w http.ResponseWriter, r *http.Request) {
 }
 
 func (wb *web) create(w http.ResponseWriter, r *http.Request) {
-	if !wb.creates.allow(rateLimitKey(clientIP(r)), time.Now()) {
+	ip := wb.clientIP(r)
+	if !wb.creates.allow(rateLimitKey(ip), time.Now()) {
 		jsonOut(w, 429, map[string]string{"error": "too many tries from here; wait an hour"})
 		return
 	}
 	var in struct {
-		Code   string `json:"code"`
-		Pen    string `json:"pen"`
-		Handle string `json:"handle"`
+		Code           string `json:"code"`
+		Pen            string `json:"pen"`
+		Handle         string `json:"handle"`
+		TurnstileToken string `json:"turnstile_token"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -178,6 +222,9 @@ func (wb *web) create(w http.ResponseWriter, r *http.Request) {
 	}
 	if !codeRE.MatchString(in.Code) {
 		jsonOut(w, 403, map[string]string{"error": "that sign-up code isn't right"})
+		return
+	}
+	if !wb.verifyTurnstile(w, r, in.TurnstileToken, ip) {
 		return
 	}
 	code, out := wb.ask(r.Context(), "POST", "/validate", map[string]string{"code": in.Code, "pen": in.Pen, "owner": in.Handle})
@@ -212,7 +259,7 @@ func (wb *web) create(w http.ResponseWriter, r *http.Request) {
 // 5 minutes after first delivery within the 30-minute unread TTL, to whoever
 // holds the job's id, which only the page that started it knows).
 func (wb *web) job(w http.ResponseWriter, r *http.Request) {
-	if !wb.jobPolls.allow(rateLimitKey(clientIP(r)), time.Now()) {
+	if !wb.jobPolls.allow(rateLimitKey(wb.clientIP(r)), time.Now()) {
 		jsonOut(w, 429, map[string]string{"error": "slow down a little"})
 		return
 	}
@@ -381,6 +428,23 @@ func (s *jobStore) take(id string) (job, bool) {
 	return *j, true
 }
 
+// clientIP returns the immediate peer IP set by Caddy (X-Forwarded-For),
+// unwrapping CF-Connecting-IP only when the immediate peer is inside a
+// configured trusted proxy CIDR (Cloudflare's edge ranges).
+func (wb *web) clientIP(r *http.Request) string {
+	peer := clientIP(r)
+	if len(wb.trustedProxies) > 0 {
+		if peerAddr, err := netip.ParseAddr(peer); err == nil && ipInPrefixes(peerAddr, wb.trustedProxies) {
+			if cf := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); cf != "" {
+				if a, err := netip.ParseAddr(cf); err == nil {
+					return a.Unmap().String()
+				}
+			}
+		}
+	}
+	return peer
+}
+
 // clientIP: the front door sets X-Forwarded-For to the real client, and is
 // the only thing that can reach this page.
 func clientIP(r *http.Request) string {
@@ -513,14 +577,16 @@ func itoa(i int) string { return strconv.Itoa(i) }
 
 func (wb *web) waitlist(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
-	if !wb.waits.allow(rateLimitKey(clientIP(r)), now) || !wb.globalWaits.allow("*", now) {
+	ip := wb.clientIP(r)
+	if !wb.waits.allow(rateLimitKey(ip), now) {
 		jsonOut(w, 429, map[string]string{"error": "too many tries right now; try again later"})
 		return
 	}
 	var in struct {
-		Email string `json:"email"`
-		Pen   string `json:"pen"`
-		Note  string `json:"note"`
+		Email          string `json:"email"`
+		Pen            string `json:"pen"`
+		Note           string `json:"note"`
+		TurnstileToken string `json:"turnstile_token"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -532,13 +598,22 @@ func (wb *web) waitlist(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "that doesn't look like an email address"})
 		return
 	}
+	// Verify Turnstile before consuming the global waitlist quota so bots
+	// cannot exhaust globalWaits and lock out legitimate visitors.
+	if !wb.verifyTurnstile(w, r, in.TurnstileToken, ip) {
+		return
+	}
+	if !wb.globalWaits.allow("*", now) {
+		jsonOut(w, 429, map[string]string{"error": "too many tries right now; try again later"})
+		return
+	}
 	code, out := wb.ask(r.Context(), "POST", "/waitlist", map[string]string{
 		"email": in.Email, "pen": strings.ToLower(strings.TrimSpace(in.Pen)), "note": cleanField(in.Note, 280)})
 	jsonOut(w, code, out)
 }
 
 func (wb *web) leaveWaitlist(w http.ResponseWriter, r *http.Request) {
-	if !wb.leaves.allow(rateLimitKey(clientIP(r)), time.Now()) {
+	if !wb.leaves.allow(rateLimitKey(wb.clientIP(r)), time.Now()) {
 		jsonOut(w, 429, map[string]string{"error": "too many tries from here; wait an hour"})
 		return
 	}

@@ -162,6 +162,8 @@ hogman-host backup-setup age1...
 hogman-host signup-setup gate.hogman.network get.hogman.network 8
 hogman-host signup-code "for alice"          # standard code: appends -xxxx random ending
 hogman-host signup-code --vanity "for alice" # vanity code: allows a bare pen name
+hogman-host signup-cloudflare on             # trust CF-Connecting-IP + block direct-to-origin bypasses
+hogman-host signup-turnstile <site-key> < ts-secret  # require Cloudflare Turnstile on signup/waitlist
 ```
 
 The `web` container runs read-only and unprivileged (`65534:65534`), speaking over an internal
