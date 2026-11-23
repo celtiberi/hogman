@@ -5,6 +5,10 @@
     <priority>1.0</priority>
   </url>
   <url>
+    <loc>https://hogman.network/work/</loc>
+    <priority>0.9</priority>
+  </url>
+  <url>
     <loc>https://hogman.network/docs/</loc>
     <priority>0.9</priority>
   </url>

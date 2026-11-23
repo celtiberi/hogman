@@ -7,6 +7,11 @@
 :8080 {
 	@www host www.hogman.network
 	redir @www https://hogman.network{uri} permanent
+	@work_root {
+		host work.hogman.network
+		path /
+	}
+	rewrite @work_root /work/index.html
 	redir /docs/how-it-works.html /docs/security.html permanent
 	redir /docs/self-host.html /docs/faq.html#self-host permanent
 	redir /docs/use-cases.html /docs/share.html permanent

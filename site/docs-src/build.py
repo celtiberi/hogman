@@ -277,7 +277,10 @@ def html_to_markdown(fragment: str) -> str:
 
 
 def write_sitemap():
-    urls = [(BASE_URL + "/", "1.0")]
+    urls = [
+        (BASE_URL + "/", "1.0"),
+        (BASE_URL + "/work/", "0.9"),
+    ]
     for slug, *_ in PAGES:
         prio = "0.9" if slug == "index" else "0.8"
         urls.append((BASE_URL + page_href(slug), prio))
@@ -322,6 +325,7 @@ def write_llms_files(bodies: list[tuple[str, str, str, str, str]]):
 
 - [Complete documentation in one Markdown file]({BASE_URL}/llms-full.txt)
 - [Homepage]({BASE_URL}/)
+- [Hogman for Work (small businesses & operations)](https://work.hogman.network/)
 - [Create a pen](https://get.hogman.network/)
 - [Source code (AGPL-3.0) on GitHub](https://github.com/celtiberi/hogman)
 """
