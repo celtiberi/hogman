@@ -976,6 +976,12 @@ $broker_stripe
     # signup: the page reaches it here (internal: no internet). out, only with
     # push notifications on: nothing else is on it, so nothing reaches it there.
     networks: $broker_nets
+    healthcheck:
+      test: ["CMD", "hogman-signup", "health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 networks:
   hogman-front: { external: true }
   signup: { internal: true }
@@ -1421,6 +1427,7 @@ StateDirectory=challenge-dns
 StateDirectoryMode=0700
 RuntimeDirectory=challenge-dns
 RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 ReadWritePaths=/run/hogman-acme
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
@@ -1462,6 +1469,7 @@ UNIT
   fi
   sleep 1
   systemctl is-active --quiet hogman-challenge-dns.service || die "it didn't start: journalctl -u hogman-challenge-dns"
+  restart_signup_broker
   info "challenge-dns answers on $ip:53 (UDP and TCP)$( [ -n "$cred" ] && echo ", with the Google fallback CA")"
   [ -n "$cred" ] && [ ! -f "$CDNS_CONTACT_DROPIN" ] && info "Google needs a contact for its accounts: hogman-host fallback-contact <email>"
   info "Check from outside:  dig @$ip pens.hogman.network SOA   (and +tcp)"
@@ -1483,6 +1491,16 @@ gate_tls_line() {
   return 0
 }
 
+# Re-resolve host bind mounts ($CDNS_BIN and /run/challenge-dns) in the sign-up
+# broker whenever challenge-dns is reinstalled or restarted.
+restart_signup_broker() {
+  [ -f "$SIGNUP/compose.yaml" ] || return 0
+  if [ -n "$(docker ps -q --filter name=^/hogman-signup-broker-1$ 2>/dev/null)" ]; then
+    (cd "$SIGNUP" && docker compose restart broker >&2) || docker restart hogman-signup-broker-1 >/dev/null
+    info "sign-up broker restarted to refresh challenge-dns mounts"
+  fi
+}
+
 # refresh-services: after an update, put this release's compiled challenge DNS
 # server and gate-certificate keeper in place and restart them, but only the
 # ones this host already runs and only when the binary changed. install.sh
@@ -1499,6 +1517,9 @@ cmd_refresh_services() {
     systemctl restart "$svc.service"
     systemctl is-active --quiet "$svc.service" || die "$svc didn't come back: journalctl -u $svc"
     info "$svc: updated and restarted"
+    if [ "$svc" = hogman-challenge-dns ]; then
+      restart_signup_broker
+    fi
   }
   refresh_one "$CDNS_BIN" "$SRC/prebuilt/challenge-dns/challenge-dns-linux-$arch" hogman-challenge-dns
   refresh_one /usr/local/bin/hogman-registrar "$SRC/prebuilt/registrar/registrar-linux-$arch" hogman-gate-cert

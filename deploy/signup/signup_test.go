@@ -40,7 +40,7 @@ case "$1" in
     [ -n "$theme" ] && extra="$extra,\"theme\":\"$theme\""
     [ -n "$plan" ] && extra="$extra,\"plan\":\"$plan\""
     echo "{\"pen\":\"$pen\",\"zone\":\"$pen.pens.example.com\",\"host\":\"$pen.gate.example.com\",\"owner\":\"$owner\",\"join_link\":\"https://$pen.gate.example.com/join#k=abc\",\"valid_until\":\"x\"$extra}" ;;
-  name-free) [ -e "$HOGMAN_HOME/pens/$2" ] && exit 2; [ "$2" = burned ] && exit 2; exit 0 ;;
+  name-free) [ "${FAKE_CDNS_DOWN:-}" = 1 ] && { echo "admin.sock: no such file" >&2; exit 1; }; [ -e "$HOGMAN_HOME/pens/$2" ] && exit 2; [ "$2" = burned ] && exit 2; exit 0 ;;
   *) exit 9 ;;
 esac
 `
@@ -948,5 +948,138 @@ func TestWorkHostThemeAndMultiHostTurnstile(t *testing.T) {
 	}
 	if strings.Contains(string(ledger), "raised gamma for carol") && strings.Contains(strings.Split(string(ledger), "raised gamma for carol")[1], "[plan=work]") {
 		t.Fatalf("ledger unexpectedly tagged personal pen gamma with [plan=work]:\n%s", ledger)
+	}
+}
+
+func TestBrokerHealthAndChallengeDNSOutage(t *testing.T) {
+	// Verify loopback URL normalization for the `hogman-signup health` probe.
+	for in, want := range map[string]string{
+		":9090":          "http://127.0.0.1:9090/health",
+		"0.0.0.0:9090":   "http://127.0.0.1:9090/health",
+		"[::]:9090":      "http://127.0.0.1:9090/health",
+		"127.0.0.1:9091": "http://127.0.0.1:9091/health",
+		"[::1]:9092":     "http://[::1]:9092/health",
+	} {
+		if got := brokerHealthURL(in); got != want {
+			t.Fatalf("brokerHealthURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	var pushes atomic.Int32
+	var lastPushMu sync.Mutex
+	var lastPush string
+	ntfySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var buf [512]byte
+		n, _ := r.Body.Read(buf[:])
+		lastPushMu.Lock()
+		lastPush = string(buf[:n])
+		lastPushMu.Unlock()
+		pushes.Add(1)
+		w.WriteHeader(200)
+	}))
+	defer ntfySrv.Close()
+
+	b, home := newTestBroker(t, "PIG-AAAA-BBBB vanity for alice\nPIG-CCCC-DDDD for bob\n")
+	b.ntfy = ntfySrv.URL
+	h := b.handler()
+
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	// Auth required on /health.
+	if code, _ := call(h, "GET", "/health", "", nil); code != 401 {
+		t.Fatalf("unauthenticated /health: %d, want 401", code)
+	}
+	if err := checkBrokerHealth(t.Context(), srv.URL+"/health", "wrong-token"); err == nil {
+		t.Fatalf("checkBrokerHealth accepted wrong token")
+	}
+
+	// Healthy state: /health returns 200 ok=true, CLI helper succeeds, zero ntfy pushes.
+	if code, out := call(h, "GET", "/health", "", auth); code != 200 || out["ok"] != true {
+		t.Fatalf("healthy /health: %d %v", code, out)
+	}
+	if err := checkBrokerHealth(t.Context(), srv.URL+"/health", testToken); err != nil {
+		t.Fatalf("healthy checkBrokerHealth: %v", err)
+	}
+	if got := pushes.Load(); got != 0 {
+		t.Fatalf("healthy /health triggered %d ntfy pushes, want 0", got)
+	}
+
+	// Simulate stale challenge-dns bind-mount / unreachable admin socket.
+	t.Setenv("FAKE_CDNS_DOWN", "1")
+
+	// /health fails with 503, checkBrokerHealth returns an error, and ntfy alerts at most 1/hour.
+	code, out := call(h, "GET", "/health", "", auth)
+	if code != 503 || out["ok"] != false || !strings.Contains(out["error"].(string), "admin.sock") {
+		t.Fatalf("down /health: %d %v, want 503 mentioning admin.sock", code, out)
+	}
+	if err := checkBrokerHealth(t.Context(), srv.URL+"/health", testToken); err == nil {
+		t.Fatalf("down checkBrokerHealth succeeded, want error")
+	}
+	for i := 0; i < 3; i++ {
+		if code, _ := call(h, "GET", "/health", "", auth); code != 503 {
+			t.Fatalf("repeated down /health #%d: %d, want 503", i, code)
+		}
+	}
+
+	// Wait briefly for the async ntfy goroutine to complete and verify hourly cap = 1.
+	deadline := time.Now().Add(2 * time.Second)
+	for pushes.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := pushes.Load(); got != 1 {
+		t.Fatalf("health ntfy pushes = %d, want 1 (rate-limited to 1/hour)", got)
+	}
+	lastPushMu.Lock()
+	msg := lastPush
+	lastPushMu.Unlock()
+	if !strings.Contains(msg, "challenge-dns") || !strings.Contains(msg, "admin.sock") {
+		t.Fatalf("health ntfy message = %q, want mention of challenge-dns and admin.sock", msg)
+	}
+
+	// /check, /validate, and /provision (vanity) must return 503 instead of claiming "that name is taken".
+	if code, out := call(h, "GET", "/check?pen=fresh&vanity=1", "", auth); code != 503 || out["error"] != nameCheckUnavailableMsg {
+		t.Fatalf("down /check: %d %v, want 503 %q", code, out, nameCheckUnavailableMsg)
+	}
+	vanityBody := `{"code":"PIG-AAAA-BBBB","pen":"fresh","owner":"alice"}`
+	if code, out := call(h, "POST", "/validate", vanityBody, auth); code != 503 || out["error"] != nameCheckUnavailableMsg {
+		t.Fatalf("down /validate vanity: %d %v, want 503 %q", code, out, nameCheckUnavailableMsg)
+	}
+	if code, out := call(h, "POST", "/provision", vanityBody, auth); code != 503 || out["error"] != nameCheckUnavailableMsg {
+		t.Fatalf("down /provision vanity: %d %v, want 503 %q", code, out, nameCheckUnavailableMsg)
+	}
+
+	// Suffixed /provision must fail fast on the first suffix attempt with 503 (not retry 16 times).
+	suffixCalls := 0
+	b.suffixFn = func() (string, error) {
+		suffixCalls++
+		return "k7m2", nil
+	}
+	suffixedBody := `{"code":"PIG-CCCC-DDDD","pen":"coffee","owner":"bob"}`
+	if code, out := call(h, "POST", "/provision", suffixedBody, auth); code != 503 || out["error"] != nameCheckUnavailableMsg {
+		t.Fatalf("down /provision suffixed: %d %v, want 503 %q", code, out, nameCheckUnavailableMsg)
+	}
+	if suffixCalls != 1 {
+		t.Fatalf("pickSuffixedPen tried %d suffixes during challenge-dns outage, want 1 (fail fast)", suffixCalls)
+	}
+
+	// Both codes must remain unspent in signup/codes.
+	codesBytes, err := os.ReadFile(filepath.Join(home, "signup", "codes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(codesBytes), "PIG-AAAA-BBBB") || !strings.Contains(string(codesBytes), "PIG-CCCC-DDDD") {
+		t.Fatalf("codes were consumed during outage: %q", codesBytes)
+	}
+
+	// Public web layer forwards 503 cleanly on /api/check and /api/create.
+	wb := newWeb(srv.URL, testToken, "gate.example.com")
+	wh := wb.handler()
+	if code, out := call(wh, "GET", "/api/check?pen=fresh&vanity=1", "", nil); code != 503 || out["error"] != nameCheckUnavailableMsg {
+		t.Fatalf("web down /api/check: %d %v, want 503 %q", code, out, nameCheckUnavailableMsg)
+	}
+	if code, out := call(wh, "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"fresh","handle":"alice"}`, nil); code != 503 || out["error"] != nameCheckUnavailableMsg {
+		t.Fatalf("web down /api/create: %d %v, want 503 %q", code, out, nameCheckUnavailableMsg)
 	}
 }
