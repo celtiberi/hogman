@@ -4,56 +4,122 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>Join</title>
+<meta name="theme-color" content="#0e080c">
+<title>Join · Hogman</title>
+<link rel="icon" href="/join/assets/hogman-32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="/join/assets/hogman-48.png" type="image/png" sizes="48x48">
 <link rel="stylesheet" href="/join/assets/join.css">
 </head>
 <body>
-<h1 id="title">Join the network</h1>
-<p class="sub" id="what">Checking your link…</p>
 
-<div id="main" hidden>
-  <p id="lead">Open Terminal on the computer you want to join, and paste this:</p>
-  <div class="tabs">
-    <button data-os="unix" type="button">Mac / Linux</button>
-    <button data-os="win" type="button">Windows</button>
-  </div>
-  <div id="unix-panel">
-    <pre id="cmd"></pre>
-    <p><button id="copy" type="button">Copy</button> <span class="muted" id="copied"></span></p>
-    <div id="link-step">
-      <p>It asks for your invite link. Copy it here and paste it in:</p>
-      <p><button id="copy-link" type="button">Copy my invite link</button> <span class="muted" id="copied-link"></span></p>
-      <p class="warn">Your link works once. Treat it like a password and don't share it.</p>
+<header class="top">
+  <div class="top-inner">
+    <div class="top-brand">
+      <a class="brand" href="https://hogman.network/" target="_blank" rel="noopener noreferrer" aria-label="Hogman">
+        <img class="brand-icon" src="/join/assets/hogman-icon.webp" width="28" height="28" alt="">
+        <span>H&Ouml;GMAN</span>
+      </a>
+      <span class="gate-pill">Pen gate</span>
     </div>
-    <p class="warn" id="key-warn" hidden>This command embeds a one-time key — treat it like a password and don't share it.</p>
-    <details id="manual" class="muted">
-      <summary>Rather not pipe a script into <code>sh</code>?</summary>
-      <p><a href="/start">Read the script</a> first (it's short), or do the same steps by hand:</p>
-      <pre id="cmd-manual"></pre>
-    </details>
-    <p class="note"><b>On a Mac, two things may pop up. Both are expected.</b></p>
-    <ul class="note">
-      <li><b>“Allow hogman-join to find devices on local networks?”</b> Either answer works.
-        <b>Allow</b> lets your devices in the same home or office talk to each other directly, which is faster.
-        <b>Don't Allow</b> sends that traffic the long way, over the internet. Nothing on your network is shared with the pen either way.</li>
-      <li id="pw-note"><b>Your Mac's password</b>, once, so your browsers can find the pen's sites. It changes only that proxy
-        setting. If you skip it, the tool prints the one setting to change by hand.</li>
-    </ul>
-    <p class="note" id="vpn-note"><b>Using a VPN (ProtonVPN, Mullvad, or a work VPN)?</b> macOS VPN apps override the system proxy while connected.
-      Pause your VPN while visiting pen sites (or set Firefox's built-in <em>Automatic proxy configuration URL</em> to the address printed by <code>hogman-join</code>).</p>
+    <nav aria-label="Help links">
+      <a href="https://hogman.network/docs/join.html" target="_blank" rel="noopener noreferrer">Join guide</a>
+      <a href="https://hogman.network/docs/faq.html" target="_blank" rel="noopener noreferrer">FAQ</a>
+      <a href="https://hogman.network/" target="_blank" rel="noopener noreferrer">hogman.network</a>
+    </nav>
   </div>
-  <div id="win-panel" hidden>
-    <p class="warn">Windows support is coming soon (not available yet). For now, open this link on a macOS or Linux computer.</p>
-  </div>
+</header>
+<div class="studs" aria-hidden="true"></div>
 
-  <p class="muted" id="join-details">The <code>hogman-join</code> tool verifies <span id="redeem"></span>
-  the pen using your computer's built-in HTTPS trust store and connects you.</p>
-  <p class="muted" id="share-details" hidden>The <code>hogman-join</code> tool verifies the network
-  using your computer's built-in HTTPS trust store and publishes only that port or folder on
-  <b class="zone"></b> over HTTPS. No password is asked, and nothing else on the computer is exposed.</p>
-  <p class="muted" id="sums-line">Want to check the download first? <a href="/join/dl/SHA256SUMS">SHA-256 checksums</a> for every platform.</p>
-</div>
-<p class="warn" id="err" hidden></p>
+<main class="shell">
+  <section class="hero">
+    <h1 id="title">Join the network</h1>
+    <p class="sub" id="what">Checking your link&hellip;</p>
+  </section>
+
+  <p class="callout danger warn" id="err" role="alert" hidden></p>
+
+  <div id="main" class="panel" hidden>
+    <div class="tabs" role="group" aria-label="Operating system">
+      <button data-os="unix" type="button">Mac / Linux</button>
+      <button data-os="win" type="button">Windows</button>
+    </div>
+
+    <p id="lead" class="lead">Open Terminal on the computer you want to join, and paste this:</p>
+
+    <div id="unix-panel">
+      <div class="step-card">
+        <div class="step-head">
+          <span class="step-num" aria-hidden="true">1</span>
+          <span class="step-title">Run this command</span>
+        </div>
+        <pre id="cmd"></pre>
+        <p class="action-row">
+          <button id="copy" class="primary" type="button">Copy</button>
+          <span class="ok-msg" id="copied" aria-live="polite"></span>
+        </p>
+      </div>
+
+      <div id="link-step" class="step-card">
+        <div class="step-head">
+          <span class="step-num" aria-hidden="true">2</span>
+          <span class="step-title">Paste your invite link when prompted</span>
+        </div>
+        <p class="step-desc">The script asks for your invite link. Copy it here and paste it into Terminal:</p>
+        <p class="action-row">
+          <button id="copy-link" class="primary" type="button">Copy my invite link</button>
+          <span class="ok-msg" id="copied-link" aria-live="polite"></span>
+        </p>
+        <p class="callout warn">Your link works once. Treat it like a password and don't share it.</p>
+      </div>
+
+      <p class="callout warn" id="key-warn" hidden>This command embeds a one-time key — treat it like a password and don't share it.</p>
+
+      <details id="manual" class="manual-box">
+        <summary>Rather not pipe a script into <code>sh</code>?</summary>
+        <div class="manual-body">
+          <p><a href="/start" target="_blank" rel="noopener noreferrer">Read the script</a> first (it's short), or run the same steps by hand:</p>
+          <pre id="cmd-manual"></pre>
+        </div>
+      </details>
+
+      <div class="expect-box">
+        <p class="note-head">On a Mac, two things may pop up. Both are expected.</p>
+        <ul class="note">
+          <li><strong>&ldquo;Allow hogman-join to find devices on local networks?&rdquo;</strong> Either answer works.
+            <strong>Allow</strong> lets your devices in the same home or office talk to each other directly, which is faster.
+            <strong>Don't Allow</strong> sends that traffic the long way, over the internet. Nothing on your network is shared with the pen either way.</li>
+          <li id="pw-note"><strong>Your Mac's password</strong>, once, so your browsers can find the pen's sites. It changes only that proxy
+            setting. If you skip it, the tool prints the one setting to change by hand.</li>
+        </ul>
+        <p class="note vpn-callout" id="vpn-note"><strong>Using a VPN (ProtonVPN, Mullvad, or a work VPN)?</strong> macOS VPN apps override the system proxy while connected.
+          Pause your VPN while visiting pen sites, or set Firefox's built-in <em>Automatic proxy configuration URL</em> to the address printed by <code>hogman-join</code>.</p>
+      </div>
+    </div>
+
+    <div id="win-panel" hidden>
+      <p class="callout warn">Windows support is coming soon (not available yet). For now, open this link on a macOS or Linux computer.</p>
+    </div>
+
+    <div class="meta-foot">
+      <p class="muted" id="join-details">The <code>hogman-join</code> tool verifies <span id="redeem"></span>
+        the pen using your computer's built-in HTTPS trust store and connects you.</p>
+      <p class="muted" id="share-details" hidden>The <code>hogman-join</code> tool verifies the network
+        using your computer's built-in HTTPS trust store and publishes only that port or folder on
+        <strong class="zone"></strong> over HTTPS. No password is asked, and nothing else on the computer is exposed.</p>
+      <p class="muted" id="sums-line">Want to check the download first? <a href="/join/dl/SHA256SUMS" target="_blank" rel="noopener noreferrer">SHA-256 checksums</a> for every platform.</p>
+    </div>
+  </div>
+</main>
+
+<footer class="foot">
+  <p>Keep a clean pen.</p>
+  <p class="foot-links">
+    <a href="https://hogman.network/" target="_blank" rel="noopener noreferrer">hogman.network</a> &middot;
+    <a href="https://hogman.network/docs/join.html" target="_blank" rel="noopener noreferrer">Join guide</a> &middot;
+    <a href="https://hogman.network/docs/security.html" target="_blank" rel="noopener noreferrer">Security</a> &middot;
+    <a href="https://hogman.network/docs/faq.html" target="_blank" rel="noopener noreferrer">FAQ</a>
+  </p>
+</footer>
 
 <script src="/join/assets/join.js" defer></script>
 </body>
