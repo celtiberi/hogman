@@ -403,3 +403,21 @@ func TestExtensionHostLine(t *testing.T) {
 		}
 	}
 }
+
+// leave accepts a pen's short name, and refuses one that matches two pens.
+func TestLeaveShortName(t *testing.T) {
+	f := newLeaveFixture(t)
+	if err := leaveCmd([]string{"mem"}, options{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.left) != 1 || f.left[0] != "mem.pens.example.network" {
+		t.Fatalf("short name left %v, want mem", f.left)
+	}
+	local := []leaveTarget{{zone: "mem.pens.a.network"}, {zone: "mem.pens.b.network"}}
+	if got := matchLeaveTargets(local, "mem"); len(got) != 2 {
+		t.Fatalf("ambiguous short name matched %v", got)
+	}
+	if got := matchLeaveTargets(local, "me"); len(got) != 0 {
+		t.Fatalf("a prefix of a short name must not match: %v", got)
+	}
+}

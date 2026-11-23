@@ -53,7 +53,7 @@ device link (`https://<PUBLIC_HOST>/join#k=…`, or with `&for=share` for `hogma
 make one for someone else: there is no account recovery. `hogman-join update` verifies downloads
 against `SHA256SUMS` over HTTPS, cleans up any leftover legacy private-CA root certificates, and
 restarts background agents and service-managed shares. `hogman-join leave <pen>` (a join link
-with or without its key, the control host, or the pen zone) stops shares on that pen, cleans up any
+with or without its key, the control host, the pen zone, or its short name) stops shares on that pen, cleans up any
 legacy root cert, logs the device out, and removes its local settings. It works from saved settings,
 so a pen whose server is gone can still be left. `leave` with no pen does nothing and points to
 `leave-all`, which lists every pen and asks `[y/N]`. `hogman-join uninstall` leaves every pen

@@ -77,11 +77,15 @@ func leaveKey(arg string) string {
 	return strings.TrimSuffix(arg, ".")
 }
 
-// matchLeaveTargets picks the local pens a leave argument names.
+// matchLeaveTargets picks the local pens a leave argument names: the full
+// zone, the control host, or the pen's short name (the first label, as in
+// "store-north" for store-north.pens.hogman.network). A short name shared by
+// two pens (on different servers) matches both, and leaveCmd refuses it.
 func matchLeaveTargets(local []leaveTarget, key string) []leaveTarget {
 	var out []leaveTarget
 	for _, t := range local {
-		if key == t.zone || (t.host != "" && key == t.host) {
+		short := !strings.Contains(key, ".") && strings.HasPrefix(t.zone, key+".")
+		if key == t.zone || (t.host != "" && key == t.host) || short {
 			out = append(out, t)
 		}
 	}
@@ -102,6 +106,9 @@ func leaveCmd(args []string, o options) error {
 	local := localLeaveTargets()
 	key := leaveKey(args[0])
 	targets := matchLeaveTargets(local, key)
+	if len(targets) > 1 {
+		return errorf("%s matches more than one pen here (%s); give the full name", key, zoneList(targets))
+	}
 	if len(targets) == 0 {
 		// Not known here by that name: ask the server which zone it is.
 		client, err := controlClient(o.controlCA)
