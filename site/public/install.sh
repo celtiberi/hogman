@@ -97,6 +97,8 @@ EOF
 ✓ Hogman $ver is installed. Your pens are untouched until you upgrade them:
 EOF
     hogman-host list | sed 's/^/    /'
+    say "Updating the host's own services (challenge DNS, gate certificate)"
+    hogman-host refresh-services
     echo
     if ( . "$home/host.env" 2>/dev/null && [ -n "${SIGNUP_HOST:-}" ] ); then
       if ( . "$home/host.env" 2>/dev/null && [ -n "${PENS_ZONE:-}" ] && [ -n "${GATE_DOMAIN:-}" ] ); then

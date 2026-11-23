@@ -409,6 +409,7 @@ type HomeCertManager struct {
 	roots      *x509.CertPool
 	logger     *zap.Logger
 	cache      *certmagic.Cache
+	stopOnce   sync.Once // Run and Close both stop the cache; certmagic panics on a second Stop
 	primaryCfg *certmagic.Config
 	primaryIss *certmagic.ACMEIssuer
 
@@ -508,10 +509,13 @@ func NewHomeCertManager(cfg HomeConfig) (*HomeCertManager, error) {
 }
 
 // Close stops background CertMagic cache maintenance.
+// Close stops the certificate cache. Safe to call more than once, and after Run.
 func (m *HomeCertManager) Close() {
-	if m.cache != nil {
-		m.cache.Stop()
-	}
+	m.stopOnce.Do(func() {
+		if m.cache != nil {
+			m.cache.Stop()
+		}
+	})
 }
 
 func (m *HomeCertManager) newManagedConfig(caURL string, withEAB bool) (*certmagic.Config, *certmagic.ACMEIssuer) {
@@ -735,7 +739,7 @@ func (m *HomeCertManager) ForceRenew(ctx context.Context) error {
 
 // Run maintains home.<zone>'s certificate until ctx is canceled.
 func (m *HomeCertManager) Run(ctx context.Context) {
-	defer m.cache.Stop()
+	defer m.Close()
 
 	delay := 2 * time.Second
 	for {
