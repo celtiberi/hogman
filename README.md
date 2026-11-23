@@ -1,57 +1,51 @@
-<p align="center">
-  <a href="https://hogman.network"><img src="site/public/logo.webp" alt="HÖGMAN" width="520"></a>
-</p>
+# Hogman
 
-<p align="center"><strong>A PRIVATE INTERNET · BY INVITATION · NO MERCY</strong></p>
+**Private HTTPS networks ("pens") over WireGuard with real domain names and zero public IP addresses.**
 
-<p align="center">
-  <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-ff6a1a"></a>
-  <img alt="Status: experimental" src="https://img.shields.io/badge/status-experimental-d1281c">
-  <a href="https://hogman.network"><img alt="hogman.network" src="https://img.shields.io/badge/web-hogman.network-ffc233"></a>
-  <a href="https://hogman.network/docs/"><img alt="Docs" src="https://img.shields.io/badge/docs-hogman.network%2Fdocs-7b2d8b"></a>
-</p>
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-14181f)](LICENSE)
+[![Status: experimental](https://img.shields.io/badge/status-experimental-b45309)](#security-limits--status)
+[![Hogman for Work](https://img.shields.io/badge/work-work.hogman.network-15803d)](https://work.hogman.network)
+[![Docs](https://img.shields.io/badge/docs-work.hogman.network%2Fdocs-4b5563)](https://work.hogman.network/docs/)
 
-<p align="center">
-  <img src="site/public/hero.webp" alt="Hogman, a boar-headed farmer in a yellow HÖGMAN trucker cap, aviators, red flannel, denim overalls, and work boots, plants a boot on a wooden fence under a burning sunset. Clean pink pigs in sunglasses stand calmly inside the pen by a red barn reading Happy Hog Acres; a filthy horde claws at the rails outside. The sign reads: Clean Pigs Only!" width="100%">
-</p>
+Hogman lets small businesses, teams, and groups take internal web apps, dashboards, and operational
+equipment controllers off the open internet. Invited members reach private HTTPS (`:443`) sites in
+any ordinary browser (Chrome, Safari, Firefox) with standard browser certificates; to everyone else
+on Earth, there is no public IP address to scan.
 
-# Your pen. Your rules. Clean pigs only.
-
-**It's time to get your life off the public web.** Hogman gives you a private internet that works
-just like the open web: real domain names, standard browser HTTPS, any ordinary browser. Invite who
-you want and put whatever HTTPS (`:443`) web servers you like inside it — sites, chat, photo
-galleries, wikis, notes, forums. To everyone else on Earth, none of it exists.
-
-- **Get a pen:** [get.hogman.network](https://get.hogman.network) (free while we test)
-- **Docs:** [hogman.network/docs](https://hogman.network/docs/)
-- **Architecture & threat model:** [hogman.network/docs/security.html](https://hogman.network/docs/security.html)
+- **For businesses & operations:** [work.hogman.network](https://work.hogman.network)
+- **Consumer site:** [hogman.network](https://hogman.network)
+- **Create a pen:** [get.hogman.network](https://get.hogman.network) (invite-only testbed; free while testing)
+- **Documentation:** [work.hogman.network/docs](https://work.hogman.network/docs/)
+- **Architecture & threat model:** [Architecture & security](https://work.hogman.network/docs/security.html)
 
 Hogman runs pen control planes hosted-only on `hogman.network` (no self-hosted pen server support),
-while your sites and folders run on your own machines via `hogman-join share`. The entire codebase
-is open source under [AGPL-3.0](LICENSE) with SLSA-attested release binaries.
+while your sites, folders, and bridged local devices run on your own machines via
+`hogman-join share`. The entire codebase is open source under [AGPL-3.0](LICENSE) with
+SLSA-attested release binaries.
 
 ---
 
 ## How it works
 
 1. **Create a pen** at [get.hogman.network](https://get.hogman.network). You claim an isolated
-   private DNS zone (`<pen>.pens.hogman.network`) and a gate page where you control the guest list
-   — and can suspend or kick anyone across all their devices in about two seconds.
+   private DNS zone (`<pen>.pens.hogman.network`) and an in-pen management page where you control
+   membership — and can suspend or kick anyone across all their devices in about two seconds.
 2. **Invite your people.** Send each person a single-use invite link. They open it, run one
-   command, pick a name, and browse your pen in Chrome, Safari, or Firefox. Everyone without a link
-   sees nothing.
-3. **Put HTTPS web servers inside it.** Run one command to share a local port or static folder into
-   the pen with its own domain name and a real browser padlock.
+   command, pick a handle, and browse your pen in Chrome, Safari, or Firefox. Everyone without an
+   invite sees nothing.
+3. **Put HTTPS web servers inside it.** Run one command to share a local port, a static folder, or
+   a LAN device's web interface into the pen with its own domain name and a standard browser
+   padlock.
 
 ### Joining a pen
 
-Invited to someone's pen? Open the invite link and run the short command it gives you:
+Invited to a pen? Open the invite link and run the short command it shows:
 
 ```text
-$ curl -fsSL https://smith.gate.hogman.network/start | sh
-Paste your invite link: https://smith.gate.hogman.network/join#t=(your invite)
+$ curl -fsSL https://store-north.gate.hogman.network/start | sh
+Paste your invite link: https://store-north.gate.hogman.network/join#t=(your invite)
 
-• Downloading hogman-join for Darwin arm64 from smith.gate.hogman.network
+• Downloading hogman-join for Darwin arm64 from store-north.gate.hogman.network
   checked: SHA-256 matches
   saved as ~/hogman-join (keep it: it updates, shares and leaves later)
 
@@ -59,7 +53,7 @@ Paste your invite link: https://smith.gate.hogman.network/join#t=(your invite)
   Choose your name on the network: alice
   welcome, alice
 
-✓ You're in. You are alice on smith.pens.hogman.network.
+✓ You're in. You are alice on store-north.pens.hogman.network.
 ```
 
 - Runs unprivileged as your user (no `TUN` interface, no root daemon) and leaves your regular
@@ -71,26 +65,28 @@ Paste your invite link: https://smith.gate.hogman.network/join#t=(your invite)
 
 ### Hosting HTTPS servers (`share`)
 
-Anything that speaks HTTPS (port 443) works — a static folder, a web app on a local port, or a
-separate always-on host (using a share link from your pen's home page):
+Anything with a web interface works (the local upstream can be plain HTTP; members always connect
+over HTTPS on port 443) — a local port, a static directory, or a local LAN controller bridged from
+a small always-on computer on site (using a share link from your pen's home page):
 
 ```text
-$ ~/hogman-join share photos ~/holiday --note "Summer trip photos"
-$ ~/hogman-join share blog 3000 --background
+$ ~/hogman-join share cooler-1 http://192.168.1.40 --background '<share-link>'
+$ ~/hogman-join share photos ~/holiday --note "Shared archive"
+$ ~/hogman-join share app 3000 --background
 
-✓ https://blog.smith.pens.hogman.network is up.
+✓ https://app.store-north.pens.hogman.network is up.
   Everyone in the pen can open it.
 ```
 
 Each share joins as its own isolated server node (`tag:server`), so personal laptops accept zero
-inbound connections and nothing needs open router ports. Take a share down anytime with
-`~/hogman-join share stop blog`.
+inbound connections and zero inbound router ports are opened. Take a share down anytime with
+`~/hogman-join share stop app`.
 
-Full guides: [Quickstart](https://hogman.network/docs/) ·
-[Joining a pen](https://hogman.network/docs/join.html) ·
-[Hosting HTTPS servers](https://hogman.network/docs/share.html) ·
-[Running a pen](https://hogman.network/docs/keeper.html) ·
-[FAQ & troubleshooting](https://hogman.network/docs/faq.html)
+Full guides: [Quickstart](https://work.hogman.network/docs/) ·
+[Joining a pen](https://work.hogman.network/docs/join.html) ·
+[Hosting HTTPS servers](https://work.hogman.network/docs/share.html) ·
+[Running a pen](https://work.hogman.network/docs/keeper.html) ·
+[FAQ & troubleshooting](https://work.hogman.network/docs/faq.html)
 
 ---
 
@@ -115,13 +111,13 @@ stays up.
 
 ## Architecture & security
 
-What happens when Bob opens `https://photos.smith.pens.hogman.network`:
+What happens when Bob opens `https://cooler-1.store-north.pens.hogman.network`:
 
 ```text
-1 DNS     photos.smith.pens.hogman.network -> 100.80.12.7  (pen registrar, mesh-only :53)
-2 policy  bob's laptop -> alice's photos server            (allowed: member -> tag:server, :443 only)
-3 tunnel  WireGuard, bob -> alice, end to end              (direct, else pen relay ciphertext)
-4 TLS     standard CertMagic cert from alice's share       (verified by stock OS trust store)
+1 DNS     cooler-1.store-north.pens.hogman.network -> 100.80.12.7  (pen registrar, mesh-only :53)
+2 policy  bob's laptop -> cooler-1 share node                      (allowed: member -> tag:server, :443 only)
+3 tunnel  WireGuard, bob -> share node, end to end                 (direct, else pen relay ciphertext)
+4 TLS     standard CertMagic cert from the share node              (verified by stock OS trust store)
 ✓ page loads with a standard padlock
 
 A stranger looking up the same name publicly: NODATA from ns1. Zero A/AAAA records exist.
@@ -147,14 +143,18 @@ A stranger looking up the same name publicly: NODATA from ns1. Zero A/AAAA recor
   gh attestation verify hogman-join --repo celtiberi/hogman
   ```
 
-Read the full breakdown in [Architecture & security](https://hogman.network/docs/security.html).
+Read the full breakdown in [Architecture & security](https://work.hogman.network/docs/security.html).
 
 ---
 
-## The honest bit
+## Security limits & status
 
 - **Experimental & unaudited:** Hogman is young security software and has not had an independent
-  security audit. Try it, poke at it, and report bugs — don't bet anything high-stakes on it yet.
+  security audit. Evaluate carefully and do not rely on it for safety-critical or high-stakes
+  systems yet.
+- **Hides devices, does not patch them:** putting an equipment controller or web app in a pen
+  removes it from the open internet and narrows reachability to pen members, but it does **not**
+  patch firmware or application bugs. Keep vendor updates enabled and change default credentials.
 - **Private, not anonymous:** pen and site hostnames appear in public Certificate Transparency logs
   (names only, never site contents). Your pen's keeper and `hogman.network` (as control-plane host)
   can see membership, devices, and mesh DNS lookups, and a compromised host could in principle add a
@@ -162,9 +162,10 @@ Read the full breakdown in [Architecture & security](https://hogman.network/docs
   WireGuard + TLS 1.3.
 - **Zero account recovery:** lose every device in a pen and that account is gone — no support
   backdoor exists. **If you own a pen, appoint a second owner.**
-- **Shared parent suffix (`pens.hogman.network`):** until `pens.hogman.network` is listed on the
-  Public Suffix List, use a separate browser profile for any pen you don't fully trust so cookies
-  stay isolated.
+- **Shared parent suffix (`pens.hogman.network`):** for multi-site operations, use separate pens per
+  region or store group to limit blast radius. Until `pens.hogman.network` is listed on the Public
+  Suffix List, use a separate browser profile for any pen you don't fully trust so cookies stay
+  isolated.
 - **Current limits & platforms:** macOS and Linux work today; Windows is built but untested; a
   mobile app is in the works. Pens default to 5 new certificate names per 7 days (`home.<pen>` uses
   one slot). Pen names, member handles, and kicked site names are permanently retired.
@@ -186,8 +187,9 @@ Built on [Headscale](https://github.com/juanfont/headscale), [Tailscale `tsnet`]
 | [`browser-ext`](browser-ext) | Manifest V3 extension for Chrome, Brave, Edge, and Firefox (VPN coexistence + per-profile pen allowlists). |
 | [`deploy/challenge-dns`](deploy/challenge-dns) | Authoritative DNS-01 challenge server (`_acme-challenge.*` TXT, `SOA`, `NS`, `CAA`; never `A`/`AAAA`). |
 | [`deploy/hogman-host`](deploy/hogman-host) & [`deploy/signup`](deploy/signup) | Isolated hosted pens, shared `*.gate.hogman.network` front door, backups, monitoring (`hogman-watch.sh`), and web sign-ups. |
-| [`site`](site) | `hogman.network` website and `/docs/` generator (`site/docs-src/build.py`), deployed automatically via `.github/workflows/site-deploy.yml`. |
+| [`site`](site) | `hogman.network`, `work.hogman.network`, and single-source `/docs/` generator (`site/docs-src/build.py`), deployed automatically via `.github/workflows/site-deploy.yml`. |
 | [`infra`](infra) | DNS configuration as code (`dnscontrol`). |
+| [`test-arena`](test-arena) | Disposable sandbox testing and automated red-team harness. |
 
 More developer & operator docs:
 - [`core/README.md`](core/README.md) — core stack and Docker e2e test harness
@@ -206,5 +208,3 @@ offer them your changes under the same license.
 
 The artwork (the paintings, logo, and mascot icons in `site/public/`) is not covered by that
 license. All rights reserved.
-
-<p align="center"><strong>Keep a clean pen.</strong></p>
