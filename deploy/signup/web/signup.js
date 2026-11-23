@@ -354,12 +354,19 @@
     if (s.for_sale && s.open) {
       $('buy-line').hidden = false;
       $('buy').addEventListener('click', async () => {
-        $('buy').disabled = true;
         $('buy-err').hidden = true;
+        if (tsSiteKey && !tsFormToken) {
+          $('buy-err').textContent = 'Please complete the verification check below first.';
+          $('buy-err').hidden = false;
+          return;
+        }
+        $('buy').disabled = true;
         try {
-          const r = await api('POST', '/checkout', {});
+          const body = tsSiteKey ? { turnstile_token: tsFormToken } : {};
+          const r = await api('POST', '/checkout', body);
           location.href = r.url;   // Stripe's own page takes the card
         } catch (e) {
+          resetTurnstile('form');
           $('buy-err').textContent = e.message;
           $('buy-err').hidden = false;
           $('buy').disabled = false;

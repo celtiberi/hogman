@@ -101,7 +101,7 @@ func newWeb(brokerURL, token, domain string) *web {
 		globalWaits:     newLimiterWithCap(30, time.Hour, 4),
 		leaves:          newLimiter(5, time.Hour),
 		checkouts:       newLimiter(10, time.Hour),
-		globalCheckouts: newLimiterWithCap(40, time.Hour, 4),
+		globalCheckouts: newLimiterWithCap(300, time.Hour, 4),
 		webhooks:        newLimiter(120, time.Minute),
 		jobs:            newJobStore(defaultMaxOpenJobs, defaultMaxStoredJobs, defaultJobTTL, defaultDeliveredTTL),
 	}

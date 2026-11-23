@@ -159,18 +159,18 @@ func TestAuditStripeWebhookLivemodeCurrencyAndMinAmount(t *testing.T) {
 	if code, _ := sendEvent(t, h, ev, signed(ev, testWebhookSecret, time.Now())); code != 400 {
 		t.Fatalf("test-mode event with expectLivemode = %d, want 400", code)
 	}
-	// Non-USD currency is refused without minting a code (200 so Stripe stops retrying).
-	ev = makeEv("cs_live_wrongcurr123456", true, "eur", 1000, 1000, "personal")
+	// Non-USD paid sessions are NOT dropped (never 200-ignore a paid customer).
+	ev = makeEv("cs_live_eurpaid12345678", true, "eur", 1000, 1000, "personal")
 	if code, _ := sendEvent(t, h, ev, signed(ev, testWebhookSecret, time.Now())); code != 200 {
-		t.Fatalf("non-USD event = %d, want 200", code)
+		t.Fatalf("EUR paid event = %d, want 200", code)
 	}
-	if code, out := call(h, "GET", "/paid-code?session=cs_live_wrongcurr123456", "", auth); code != 200 || out["state"] != "pending" {
-		t.Fatalf("non-USD event minted code: %d %v", code, out)
+	if code, out := call(h, "GET", "/paid-code?session=cs_live_eurpaid12345678", "", auth); code != 200 || out["state"] != "ready" {
+		t.Fatalf("EUR paid event did not mint code: %d %v", code, out)
 	}
-	// Underpaid work plan is refused without minting a code.
+	// Underpaid work plan below configured min returns 500 (never 200-ignored) and does not mint a code.
 	ev = makeEv("cs_live_underpaid123456", true, "usd", 500, 500, "work")
-	if code, _ := sendEvent(t, h, ev, signed(ev, testWebhookSecret, time.Now())); code != 200 {
-		t.Fatalf("underpaid work event = %d, want 200", code)
+	if code, _ := sendEvent(t, h, ev, signed(ev, testWebhookSecret, time.Now())); code != 500 {
+		t.Fatalf("underpaid work event = %d, want 500", code)
 	}
 	if code, out := call(h, "GET", "/paid-code?session=cs_live_underpaid123456", "", auth); code != 200 || out["state"] != "pending" {
 		t.Fatalf("underpaid work event minted code: %d %v", code, out)
@@ -182,5 +182,27 @@ func TestAuditStripeWebhookLivemodeCurrencyAndMinAmount(t *testing.T) {
 	}
 	if code, out := call(h, "GET", "/paid-code?session=cs_live_validwork123456", "", auth); code != 200 || out["state"] != "ready" {
 		t.Fatalf("paid-code after valid live work event = %d %v", code, out)
+	}
+}
+
+func TestAuditCheckoutTurnstileGate(t *testing.T) {
+	b, _ := newTestBroker(t, "")
+	bsrv := httptest.NewServer(b.handler())
+	defer bsrv.Close()
+
+	wb := newWeb(bsrv.URL, testToken, "pens.test")
+	wb.stripe = &stripeCheckout{price: "price_test", publicURL: "https://get.example.com"}
+	wb.turnstile = &turnstileVerifier{
+		siteKey:       "0xSITEKEY",
+		secret:        "0xSECRET",
+		expectedHosts: []string{"get.example.com"},
+		verifyURL:     "http://127.0.0.1:1/unreachable",
+		client:        bsrv.Client(),
+	}
+	h := wb.handler()
+
+	// Missing Turnstile token must be rejected with 403 before consuming global checkout cap.
+	if code, _ := call(h, "POST", "/api/checkout", `{}`, map[string]string{"Content-Type": "application/json"}); code != 403 {
+		t.Fatalf("checkout without Turnstile token = %d, want 403", code)
 	}
 }

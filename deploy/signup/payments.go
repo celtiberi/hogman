@@ -19,6 +19,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -194,13 +195,37 @@ func (wb *web) checkout(w http.ResponseWriter, r *http.Request) {
 	if !wb.requireSameOriginJSON(w, r) {
 		return
 	}
+	var in struct {
+		TurnstileToken string `json:"turnstile_token"`
+	}
+	if r.Body != nil {
+		b, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+		if err != nil {
+			jsonOut(w, 400, map[string]string{"error": "bad request"})
+			return
+		}
+		if len(bytes.TrimSpace(b)) > 0 {
+			if err := json.Unmarshal(b, &in); err != nil {
+				jsonOut(w, 400, map[string]string{"error": "bad request"})
+				return
+			}
+		}
+	}
+	clientIP := wb.clientIP(r)
 	now := time.Now()
-	if !wb.checkouts.allow(rateLimitKey(wb.clientIP(r)), now) {
+	if !wb.checkouts.allow(rateLimitKey(clientIP), now) {
 		jsonOut(w, 429, map[string]string{"error": "too many tries from here; wait an hour"})
 		return
 	}
+	if wb.turnstile != nil {
+		if err := wb.turnstile.verify(r.Context(), in.TurnstileToken, clientIP); err != nil {
+			jsonOut(w, 403, map[string]string{"error": "verification check failed; please try again"})
+			return
+		}
+	}
 	if wb.globalCheckouts != nil && !wb.globalCheckouts.allow("*", now) {
-		jsonOut(w, 429, map[string]string{"error": "sign-up payments are busy right now; try again in a minute"})
+		log.Printf("checkout: global hourly cap reached")
+		jsonOut(w, 429, map[string]string{"error": "checkout is temporarily busy; try again in a few minutes"})
 		return
 	}
 	code, out := wb.ask(r.Context(), "GET", "/capacity", nil)
@@ -335,11 +360,6 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 			jsonOut(w, 200, map[string]string{"ok": "ignored"}) // not ours, or not paid yet
 			return
 		}
-		if s.Currency != "" && !strings.EqualFold(s.Currency, "usd") {
-			log.Printf("stripe %s refused: unexpected currency %q", s.ID, s.Currency)
-			jsonOut(w, 200, map[string]string{"ok": "ignored"})
-			return
-		}
 		plan := planFromMeta(s.Metadata)
 		minCents := b.minPersonalCents
 		if plan == planWork {
@@ -350,9 +370,10 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 			if paid <= 0 {
 				paid = s.AmountTotal
 			}
-			if !strings.EqualFold(s.Currency, "usd") || paid < minCents {
-				log.Printf("stripe %s refused: plan=%s paid=%d %q < min=%d", s.ID, plan, paid, s.Currency, minCents)
-				jsonOut(w, 200, map[string]string{"ok": "ignored"})
+			if paid < minCents {
+				log.Printf("stripe %s alert: plan=%s paid=%d %q < min=%d (returning 500 so Stripe retries)", s.ID, plan, paid, s.Currency, minCents)
+				b.notifyKind("health", fmt.Sprintf("Stripe paid session %s (%s) below configured minimum (%d < %d)", s.ID, plan, paid, minCents))
+				jsonOut(w, 500, map[string]string{"error": "payment below configured minimum"})
 				return
 			}
 		}

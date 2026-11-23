@@ -67,8 +67,26 @@
     .then(s => { if (s && s.theme === 'work') applyWorkTheme(); })
     .catch(() => {});
 
+  const PAID_CODE_KEY = 'hogman-paid-code';
+  const suffix = queryTheme ? '?theme=work' : '';
+  const showCode = code => {
+    $('waiting').hidden = true;
+    $('code').textContent = code;
+    $('go').href = '/' + suffix + '#code=' + encodeURIComponent(code) + '&vanity=1';   // paid pens get a bare name
+    $('copy-code').onclick = async () => {
+      await navigator.clipboard.writeText(code);
+      $('copy-code').textContent = 'Copied';
+    };
+    $('ready').hidden = false;
+  };
+
   const id = new URLSearchParams(location.search).get('session_id') || '';
   if (!/^cs_(test|live)_[A-Za-z0-9]{10,200}$/.test(id)) {
+    const saved = sessionStorage.getItem(PAID_CODE_KEY) || '';
+    if (/^PIG-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(saved)) {
+      showCode(saved);
+      return;
+    }
     $('waiting').hidden = true;
     $('bad').hidden = false;
     return;
@@ -82,17 +100,10 @@
       s = await r.json();
     } catch (e) { /* try again */ }
     if (s.state === 'ready') {
-      $('waiting').hidden = true;
-      $('code').textContent = s.code;
-      const suffix = queryTheme ? '?theme=work' : '';
-      $('go').href = '/' + suffix + '#code=' + encodeURIComponent(s.code) + '&vanity=1';   // paid pens get a bare name
-      $('copy-code').onclick = async () => {
-        await navigator.clipboard.writeText(s.code);
-        $('copy-code').textContent = 'Copied';
-      };
-      // Scrub ?session_id= from the URL bar/history once the code is shown.
+      sessionStorage.setItem(PAID_CODE_KEY, s.code);
+      // Scrub ?session_id= from the URL bar/history once the code is saved for this tab.
       history.replaceState(null, '', location.pathname + suffix);
-      $('ready').hidden = false;
+      showCode(s.code);
       return;
     }
     if (s.state === 'used') {

@@ -742,7 +742,7 @@ cmd_backup() {
     local ts out; ts="$(date -u +%Y%m%dT%H%M%SZ)"; out="$BACKUPS/challenge-dns-$ts.tar.gz.age"
     tar -C "$(dirname "$CDNS_STATE")" -czf - "$(basename "$CDNS_STATE")" | age -r "$(cat "$RECIPIENT")" > "$out.part" \
       && chown root:hogman-backup "$out.part" && chmod 0640 "$out.part" && mv "$out.part" "$out"
-    ls -1t "$BACKUPS"/challenge-dns-*.tar.gz.age 2>/dev/null | tail -n +$((KEEP_LOCAL + 1)) | xargs -r rm -f
+    ls -1t "$BACKUPS"/challenge-dns-[0-9]*.tar.gz.age 2>/dev/null | tail -n +$((KEEP_LOCAL + 1)) | xargs -r rm -f
   fi
 }
 
