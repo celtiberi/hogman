@@ -500,21 +500,23 @@ func MeshHandler(s *Service) http.Handler {
 		writeJSON(w, 200, log)
 	})
 
-	return identify(s, requireSameOriginAndJSON(s.cfg.Zone, mux))
+	return requireSameOriginAndJSON(s.cfg.Zone, identify(s, mux))
 }
 
-// requireSameOriginAndJSON blocks cross-site browser requests (CSRF) against the
-// IP-authenticated mesh API. Because .hogman is not on the Public Suffix List,
-// member sites like bob.<zone> share a "site" with home.<zone>, so Sec-Fetch-Site
-// "same-site" must also be rejected.
+// requireSameOriginAndJSON blocks cross-site browser requests (CSRF and
+// drive-by Headscale amplification) before identify() runs. Because .hogman
+// and pens.hogman.network are not on the Public Suffix List, member sites like
+// bob.<zone> share a "site" with home.<zone>, so Sec-Fetch-Site "same-site"
+// must also be rejected (including on browser GETs; non-browser CLI callers
+// omit Sec-Fetch-Site).
 func requireSameOriginAndJSON(zone string, next http.Handler) http.Handler {
 	portalOrigin := "https://home." + zone
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "none" {
+			fail(w, forbidden("cross-origin request refused"))
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
-			if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "none" {
-				fail(w, forbidden("cross-origin request refused"))
-				return
-			}
 			if origin := r.Header.Get("Origin"); origin != "" && origin != portalOrigin {
 				fail(w, forbidden("cross-origin request refused"))
 				return

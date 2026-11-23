@@ -21,15 +21,16 @@ import (
 )
 
 type fakeHeadscale struct {
-	mu            sync.Mutex
-	nextUserID    int
-	nextKeyID     int
-	users         map[string]HSUser
-	keys          map[string]HSPreAuthKey
-	nodes         []HSNode
-	policy        string
-	failCreateKey bool
-	srv           *httptest.Server
+	mu              sync.Mutex
+	nextUserID      int
+	nextKeyID       int
+	users           map[string]HSUser
+	keys            map[string]HSPreAuthKey
+	nodes           []HSNode
+	policy          string
+	failCreateKey   bool
+	deleteUserCalls int
+	srv             *httptest.Server
 }
 
 func newFakeHeadscale(t *testing.T) *fakeHeadscale {
@@ -64,7 +65,13 @@ func newFakeHeadscale(t *testing.T) *fakeHeadscale {
 	mux.HandleFunc("DELETE /api/v1/user/{id}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		delete(f.users, r.PathValue("id"))
+		f.deleteUserCalls++
+		id := r.PathValue("id")
+		if _, ok := f.users[id]; !ok {
+			http.Error(w, "user not found", http.StatusNotFound)
+			return
+		}
+		delete(f.users, id)
 		w.WriteHeader(200)
 	})
 	mux.HandleFunc("POST /api/v1/preauthkey", func(w http.ResponseWriter, r *http.Request) {

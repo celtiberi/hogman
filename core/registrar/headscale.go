@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -62,6 +64,14 @@ type HSError struct {
 }
 
 func (e *HSError) Error() string { return fmt.Sprintf("headscale: HTTP %d: %s", e.Status, e.Body) }
+
+func isHSNotFound(err error) bool {
+	var he *HSError
+	if !errors.As(err, &he) {
+		return false
+	}
+	return he.Status == http.StatusNotFound || strings.Contains(strings.ToLower(he.Body), "not found")
+}
 
 func (h *Headscale) do(ctx context.Context, method, path string, in, out any) error {
 	var body io.Reader

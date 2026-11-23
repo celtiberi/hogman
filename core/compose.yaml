@@ -6,7 +6,9 @@ name: hogman
 x-mesh-node: &mesh-node
   image: tailscale/tailscale:v1.104.7@sha256:72c1e19e0aedca96b8533bbb0b4368564410ff20b17e53b804eb6c1f04a31be4
   restart: unless-stopped
-  cap_add: [NET_ADMIN, NET_RAW]
+  cap_drop: [ALL]
+  cap_add: [NET_ADMIN, NET_RAW, CHOWN, DAC_OVERRIDE]
+  security_opt: [no-new-privileges:true]
   devices: [/dev/net/tun:/dev/net/tun]
   mem_limit: 128m
   pids_limit: 128
@@ -22,14 +24,19 @@ services:
   headscale:
     image: headscale/headscale:0.29.7@sha256:11f81665e842809db9fe3006a38c56a66e968baa5abd4bac498e86445572b970
     restart: unless-stopped
+    user: "${HOGMAN_UID:-1000}:${HOGMAN_GID:-1000}"
     command: serve
     read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     mem_limit: 256m
     pids_limit: 128
     environment:
       GOGC: "25"
       GOMEMLIMIT: 180MiB
-    tmpfs: [/var/run/headscale]
+    tmpfs:
+      - /var/run/headscale:uid=${HOGMAN_UID:-1000},gid=${HOGMAN_GID:-1000},mode=0700
+      - /tmp:uid=${HOGMAN_UID:-1000},gid=${HOGMAN_GID:-1000},mode=0700
     volumes:
       - ./data/headscale/config:/etc/headscale:ro
       - ./data/headscale/lib:/var/lib/headscale
@@ -133,6 +140,7 @@ services:
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     mem_limit: 128m
     pids_limit: 128
     network_mode: service:core-mesh
@@ -160,7 +168,7 @@ services:
       - ./data/home-tls:/home-tls    # home.<zone>'s certificate, for the portal
       - ./data/caddy-admin:/run/caddy-admin:ro     # the portal's admin socket, to reload on renewal
       - ./data/secrets/registrar:/secrets:ro
-      - ${HOGMAN_ACME_SOCK_DIR:-/run/hogman-acme}:/run/hogman-acme   # the host's challenge DNS API
+      - ${HOGMAN_ACME_SOCK_DIR:-/run/hogman-acme}:/run/hogman-acme:ro   # the host's challenge DNS API
     healthcheck:
       test: ["CMD", "registrar", "health"]
       interval: 5s

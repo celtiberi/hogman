@@ -39,9 +39,15 @@ http://{$PUBLIC_HOST} {
 		file_server
 	}
 	handle_path /join/assets/* {
-		root * /srv/join-page
-		header X-Content-Type-Options nosniff
-		file_server
+		@asset path /join.css /join.js /hogman-32.png /hogman-48.png /hogman-icon.webp /work-favicon.svg
+		handle @asset {
+			root * /srv/join-page
+			header X-Content-Type-Options nosniff
+			file_server
+		}
+		handle {
+			respond 404
+		}
 	}
 	handle_path /join/dl/* {
 		root * /srv/join-dl

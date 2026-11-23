@@ -245,13 +245,24 @@ func (s *Store) InsertMember(m *Member) error {
 	return nil
 }
 
+func (s *Store) ClearMemberHSUserID(id int64) error {
+	_, err := s.db.Exec(`UPDATE members SET hs_user_id = '' WHERE id = ?`, id)
+	return err
+}
+
 func (s *Store) SetMemberStatus(id int64, status string) error {
 	var removed any
 	if status == "removed" {
 		removed = now()
 	}
-	_, err := s.db.Exec(`UPDATE members SET status = ?, removed_at = ? WHERE id = ?`, status, removed, id)
-	return err
+	res, err := s.db.Exec(`UPDATE members SET status = ?, removed_at = ? WHERE id = ? AND status != 'removed'`, status, removed, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return conflict("member has already been removed")
+	}
+	return nil
 }
 
 func (s *Store) SetMemberRole(id int64, role string) error {
@@ -588,11 +599,30 @@ func (s *Store) UpdateDevice(id int64, name, v4, v6 string) error {
 	return err
 }
 
-// DeleteNamesOfDevice frees the active names pointing at a device. Names
-// under them that point at other devices are left alone.
+// DeleteNamesOfDevice frees active leaf names pointing at a device. If a name
+// on the removed device still has child subdomains (active on other devices,
+// unpointed, or retired), it is unpointed (device_id = NULL) rather than
+// deleted so another member cannot hijack the orphaned parent and release or
+// take over the child subdomains.
 func (s *Store) DeleteNamesOfDevice(deviceID int64) error {
-	_, err := s.db.Exec(`DELETE FROM names WHERE device_id = ? AND held_until IS NULL`, deviceID)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE names SET device_id = NULL
+		WHERE device_id = ? AND held_until IS NULL
+		AND EXISTS (
+			SELECT 1 FROM names c
+			WHERE c.name LIKE '%.' || names.name
+			AND (c.held_until IS NOT NULL OR c.device_id IS NULL OR c.device_id != ?)
+		)`, deviceID, deviceID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM names WHERE device_id = ? AND held_until IS NULL`, deviceID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // MarkDeviceRemoved retires a device and unpoints any names aimed at it.
@@ -614,13 +644,13 @@ func (s *Store) MarkDeviceRemoved(id int64) error {
 // ------------------------------------------------------------------ names --
 
 type Name struct {
-	Name      string `json:"name"`
-	MemberID  int64  `json:"member_id"`
-	Member    string `json:"member"`
-	DeviceID  *int64 `json:"device_id,omitempty"`
-	Note      string `json:"note,omitempty"`
-	IPv4      string `json:"ipv4,omitempty"`
-	IPv6      string `json:"ipv6,omitempty"`
+	Name     string `json:"name"`
+	MemberID int64  `json:"member_id"`
+	Member   string `json:"member"`
+	DeviceID *int64 `json:"device_id,omitempty"`
+	Note     string `json:"note,omitempty"`
+	IPv4     string `json:"ipv4,omitempty"`
+	IPv6     string `json:"ipv6,omitempty"`
 	// RetiredAt is stored in names.held_until for backward compatibility with existing DBs;
 	// any non-NULL value means the name is permanently retired and may never be reused.
 	RetiredAt *int64 `json:"retired_at,omitempty"`

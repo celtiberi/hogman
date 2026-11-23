@@ -55,10 +55,10 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 say ""
 say "• Downloading hogman-join for $os $arch from $host"
-curl -fsSL "https://$host/join/dl/SHA256SUMS" -o "$tmp/SHA256SUMS" || die "couldn't reach https://$host"
+curl -fsSL --proto =https --proto-redir =https "https://$host/join/dl/SHA256SUMS" -o "$tmp/SHA256SUMS" || die "couldn't reach https://$host"
 want="$(awk -v f="$file" '$2 == f || $2 == "*" f { print $1; exit }' "$tmp/SHA256SUMS")"
 [ -n "$want" ] || die "there's no hogman-join for $os $arch yet"
-curl -fsSL "https://$host/join/dl/$file" -o "$tmp/hogman-join" || die "the download failed; try again"
+curl -fsSL --proto =https --proto-redir =https "https://$host/join/dl/$file" -o "$tmp/hogman-join" || die "the download failed; try again"
 got="$(sum "$tmp/hogman-join")"
 [ "$got" = "$want" ] || die "the download doesn't match its published SHA-256 (want $want, got $got); not running it"
 say "  checked: SHA-256 matches"
