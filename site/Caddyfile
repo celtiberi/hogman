@@ -22,6 +22,11 @@
 		path /docs/*
 	}
 	rewrite @work_docs /work{uri}
+	@work_meta {
+		host work.hogman.network
+		path /robots.txt /sitemap.xml /llms.txt /llms-full.txt
+	}
+	rewrite @work_meta /work{uri}
 	redir /docs/how-it-works.html /docs/security.html permanent
 	redir /docs/self-host.html /docs/faq.html#self-host permanent
 	redir /docs/use-cases.html /docs/share.html permanent
@@ -42,7 +47,7 @@
 	# The installer and the release pointer must never be stale.
 	@fresh path /install.sh /dl/latest /dl/SHA256SUMS
 	header @fresh Cache-Control "no-cache"
-	@script path /install.sh /llms.txt /llms-full.txt
+	@script path /install.sh /llms.txt /llms-full.txt /work/llms.txt /work/llms-full.txt
 	header @script Content-Type "text/plain; charset=utf-8"
 	file_server
 }

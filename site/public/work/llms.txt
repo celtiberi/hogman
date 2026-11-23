@@ -1,0 +1,28 @@
+# Hogman for Work
+
+> Private HTTPS networks ("pens") over WireGuard for small businesses and operations teams that don't have a dedicated security department. Take refrigeration controllers, building dashboards, and internal web tools off the open internet — real domain names, standard browser HTTPS, zero public IP addresses, and ~2-second access revocation. Open source (AGPL-3.0).
+
+## Key facts for businesses & operations
+
+- **What it solves:** Removes equipment controllers (refrigeration, HVAC/BMS, cameras, local monitors) and internal web apps from the open internet so automated scanners and attackers have no public IP or login page to reach.
+- **How on-site equipment connects:** Devices that cannot run client software stay strictly on the local LAN (no open router ports); a small always-on Linux or Mac computer on site bridges only that device's web UI into the pen via `hogman-join share cooler-1 http://192.168.1.40 --background '<share-link>'`. The local upstream can speak plain HTTP while staff always connect over HTTPS (`:443`).
+- **Multi-site blast-radius isolation:** Create separate pens per region or store group so one lost laptop or compromised account cannot reach every location.
+- **What it deliberately is NOT:** Not a VPN (ordinary browsing stays direct), no SSH, no raw TCP/UDP ports, no exit nodes, and zero inbound connections to staff laptops. Devices without a web UI are not a fit.
+- **Honest security boundaries:** A pen hides vulnerable devices and narrows access to pen members — **it does not patch firmware** (keep vendor security updates enabled). Hostnames appear in public Certificate Transparency logs (names only, never site contents). There is zero account recovery (always appoint two owners per pen). Experimental software, not yet independently audited.
+- **Hosting & status:** Control planes are hosted-only on `hogman.network` (invite-only testbed today; commercial plans coming soon). macOS and Linux work today; Windows and mobile apps are in progress.
+
+## Documentation
+
+- [Quickstart](https://work.hogman.network/docs/): Create a pen, join with one command, and put an HTTPS server on your private network.
+- [Joining a pen](https://work.hogman.network/docs/join.html): Join a pen on Mac or Linux, handle VPNs and browsers, add devices, update, and leave.
+- [Hosting HTTPS servers](https://work.hogman.network/docs/share.html): Put any web app, local port, or static directory inside your pen over HTTPS (port 443).
+- [Running a pen](https://work.hogman.network/docs/keeper.html): Roles, invites, the herd, suspend and kick, and what keepers can and can't see.
+- [Architecture & security](https://work.hogman.network/docs/security.html): Packet flow, components, client isolation, DNS-01 HTTPS, threat model, host isolation, and known limits.
+- [FAQ & troubleshooting](https://work.hogman.network/docs/faq.html): Common questions (Tailscale, self-hosting, VPNs, limits) and fixes for common errors.
+
+## Full documentation & links
+
+- [Complete Hogman for Work documentation in one Markdown file](https://work.hogman.network/llms-full.txt)
+- [Hogman for Work overview](https://work.hogman.network/)
+- [Request early access](https://get.hogman.network/#wait)
+- [Source code (AGPL-3.0) on GitHub](https://github.com/celtiberi/hogman)
