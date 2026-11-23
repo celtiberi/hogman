@@ -839,3 +839,119 @@ func TestParseWorkCapsFromEnv(t *testing.T) {
 		t.Fatal("work hourly > global hourly accepted")
 	}
 }
+
+func TestRollbackReleaseIfUnused(t *testing.T) {
+	s, now := newTestStore(t)
+
+	// 1. Failed provision before any TXT challenge or EAB mint releases the name.
+	cFresh, _, err := s.AddCred("pen", "freshpen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.NameUsed("freshpen") {
+		t.Fatal("freshpen should be marked used while credential exists")
+	}
+	released, err := s.RemoveCredWithOptions(cFresh.ID, true)
+	if err != nil || !released {
+		t.Fatalf("RemoveCredWithOptions(freshpen, true) = (%v, %v), want (true, nil)", released, err)
+	}
+	if s.NameUsed("freshpen") {
+		t.Fatal("freshpen should be released after unchallenged rollback")
+	}
+	// Reload from disk and verify release persisted and name can be re-credentialed.
+	sReload, err := OpenStore(s.path, testZones)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sReload.NameUsed("freshpen") {
+		t.Fatal("freshpen should stay released after reload")
+	}
+	if _, _, err := s.AddCred("pen", "freshpen"); err != nil {
+		t.Fatalf("re-credentialing released freshpen failed: %v", err)
+	}
+
+	// 2. Normal RemoveCred (without releaseIfUnused) keeps D-21 permanent retirement even if unchallenged.
+	cNormal, _, err := s.AddCred("pen", "normalrm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RemoveCred(cNormal.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !s.NameUsed("normalrm") {
+		t.Fatal("normal RemoveCred must keep pen name permanently retired (D-21)")
+	}
+
+	// 3. Once any TXT challenge was written, releaseIfUnused must NOT release the name,
+	//    even after the 7-day Seen window expires and after store reload.
+	cChallenged, _, err := s.AddCred("pen", "certpen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutTXT(cChallenged, ch("home", "certpen"), val1); err != nil {
+		t.Fatal(err)
+	}
+	// Reload from disk so EverChallenged persistence is tested, and advance past 7d window.
+	s2, err := OpenStore(s.path, testZones)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tLater := now.Add(8 * 24 * time.Hour)
+	s2.now = func() time.Time { return tLater }
+	// Trigger pruning of expired Seen entries via another pen.
+	cOther, _, err := s2.AddCred("pen", "otherpen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.PutTXT(cOther, ch("home", "otherpen"), val1); err != nil {
+		t.Fatal(err)
+	}
+	released, err = s2.RemoveCredWithOptions(cChallenged.ID, true)
+	if err != nil || released {
+		t.Fatalf("RemoveCredWithOptions(certpen, true) = (%v, %v), want (false, nil)", released, err)
+	}
+	if !s2.NameUsed("certpen") {
+		t.Fatal("certpen must stay permanently retired once a TXT challenge occurred")
+	}
+
+	// 4. Once an EAB key was minted, releaseIfUnused must NOT release the name either.
+	cEAB, _, err := s2.AddCred("pen", "eabpen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.AllowEAB(cEAB); err != nil {
+		t.Fatal(err)
+	}
+	released, err = s2.RemoveCredWithOptions(cEAB.ID, true)
+	if err != nil || released {
+		t.Fatalf("RemoveCredWithOptions(eabpen, true) = (%v, %v), want (false, nil)", released, err)
+	}
+	if !s2.NameUsed("eabpen") {
+		t.Fatal("eabpen must stay permanently retired once EAB was minted")
+	}
+
+	// 5. Admin HTTP API: DELETE /admin/creds/{id}?release_if_unused=1 reports X-Name-Released.
+	adm := AdminHandler(s2)
+	cHTTPFree, _, err := s2.AddCred("pen", "httpfree")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	adm.ServeHTTP(rec, httptest.NewRequest("DELETE", "/admin/creds/"+cHTTPFree.ID+"?release_if_unused=1", nil))
+	if rec.Code != 204 || rec.Header().Get("X-Name-Released") != "true" || s2.NameUsed("httpfree") {
+		t.Fatalf("DELETE unchallenged: code=%d hdr=%q used=%v", rec.Code, rec.Header().Get("X-Name-Released"), s2.NameUsed("httpfree"))
+	}
+
+	cHTTPUsed, _, err := s2.AddCred("pen", "httpused")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.PutTXT(cHTTPUsed, ch("home", "httpused"), val1); err != nil {
+		t.Fatal(err)
+	}
+	rec2 := httptest.NewRecorder()
+	adm.ServeHTTP(rec2, httptest.NewRequest("DELETE", "/admin/creds/"+cHTTPUsed.ID+"?release_if_unused=1", nil))
+	if rec2.Code != 204 || rec2.Header().Get("X-Name-Released") != "false" || !s2.NameUsed("httpused") {
+		t.Fatalf("DELETE challenged: code=%d hdr=%q used=%v", rec2.Code, rec2.Header().Get("X-Name-Released"), s2.NameUsed("httpused"))
+	}
+}

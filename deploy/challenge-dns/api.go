@@ -232,9 +232,16 @@ func AdminHandler(s *Store) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]bool{"used": s.NameUsed(r.PathValue("name"))})
 	})
 	mux.HandleFunc("DELETE /admin/creds/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if err := s.RemoveCred(r.PathValue("id")); err != nil {
+		release := r.URL.Query().Get("release_if_unused") == "1"
+		released, err := s.RemoveCredWithOptions(r.PathValue("id"), release)
+		if err != nil {
 			fail(w, http.StatusNotFound, err.Error())
 			return
+		}
+		if released {
+			w.Header().Set("X-Name-Released", "true")
+		} else {
+			w.Header().Set("X-Name-Released", "false")
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -300,6 +307,11 @@ func adminClient(sock string) *http.Client {
 }
 
 func adminDo(sock, method, path string, body any) ([]byte, int, error) {
+	b, code, _, err := adminDoWithHeaders(sock, method, path, body)
+	return b, code, err
+}
+
+func adminDoWithHeaders(sock, method, path string, body any) ([]byte, int, http.Header, error) {
 	var rd io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
@@ -307,14 +319,14 @@ func adminDo(sock, method, path string, body any) ([]byte, int, error) {
 	}
 	req, err := http.NewRequest(method, "http://admin"+path, rd)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := adminClient(sock).Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("is the server running? %w", err)
+		return nil, 0, nil, fmt.Errorf("is the server running? %w", err)
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	return b, resp.StatusCode, nil
+	return b, resp.StatusCode, resp.Header, nil
 }

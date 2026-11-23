@@ -444,7 +444,7 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 	default:
 		log.Printf("provision %s for %s failed (exit %d): %s", targetPen, in.Owner, code, strings.TrimSpace(stderr))
 		if vanity {
-			jsonOut(w, 500, map[string]string{"error": "raising your pen failed. Your code still works — pick another pen name and try again."})
+			jsonOut(w, 500, map[string]string{"error": "raising your pen failed. Your code still works — try again (if this name is now unavailable, pick another pen name)."})
 		} else {
 			jsonOut(w, 500, map[string]string{"error": "raising your pen failed. Your code still works — try again."})
 		}

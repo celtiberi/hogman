@@ -43,7 +43,7 @@ const usage = `challenge-dns: DNS-01 challenge server for Hogman pens
   challenge-dns cred add host            the front door's credential (gate wildcard)
   challenge-dns cred plan <id-or-pen> personal|work
                                          change a pen credential's certificate cap plan
-  challenge-dns cred rm <id>
+  challenge-dns cred rm <id> [--release-if-unused]
   challenge-dns cred list
   challenge-dns name used <penname>      prints "used" (exit 0) if the name was ever given out
 
@@ -383,15 +383,23 @@ func credCmd(args []string) error {
 		}
 		_ = json.Unmarshal(b, &out)
 		fmt.Printf("%s (%s): plan=%s\n", out.PenID, out.ID, out.Plan)
-	case len(args) == 2 && args[0] == "rm":
-		b, code, err := adminDo(sock, "DELETE", "/admin/creds/"+args[1], nil)
+	case (len(args) == 2 || (len(args) == 3 && args[2] == "--release-if-unused")) && args[0] == "rm":
+		path := "/admin/creds/" + args[1]
+		if len(args) == 3 {
+			path += "?release_if_unused=1"
+		}
+		b, code, hdr, err := adminDoWithHeaders(sock, "DELETE", path, nil)
 		if err != nil {
 			return err
 		}
 		if err := show(b, code, http.StatusNoContent); err != nil {
 			return err
 		}
-		fmt.Println("removed", args[1])
+		if hdr.Get("X-Name-Released") == "true" {
+			fmt.Println("removed", args[1], "(name released)")
+		} else {
+			fmt.Println("removed", args[1])
+		}
 	case len(args) == 1 && args[0] == "list":
 		b, code, err := adminDo(sock, "GET", "/admin/creds", nil)
 		if err != nil {
@@ -420,7 +428,7 @@ func credCmd(args []string) error {
 			fmt.Printf("%-14s %-5s %-14s %-9s %s\n", c.ID, c.Kind, c.PenID, plan, c.Created.Format("2006-01-02 15:04"))
 		}
 	default:
-		return errors.New("usage: cred add pen <penname> [--plan personal|work] | cred add host | cred plan <id-or-pen> personal|work | cred rm <id> | cred list")
+		return errors.New("usage: cred add pen <penname> [--plan personal|work] | cred add host | cred plan <id-or-pen> personal|work | cred rm <id> [--release-if-unused] | cred list")
 	}
 	return nil
 }

@@ -207,7 +207,8 @@ Caddy can obtain its origin certificate immediately).
 The `web` container runs read-only and unprivileged (`65534:65534`), speaking over an internal
 network to `broker` (which runs `hogman-host provision` and has outbound internet only if
 `hogman-host signup-notify` is configured). Failed provisions automatically clean up containers and
-revoke their challenge-DNS credentials while preserving D-21 name reservations. Raised pens are
+revoke their challenge-DNS credentials, releasing the pen name if no ACME challenge was ever written
+(and keeping D-21 permanent retirement once any certificate challenge occurred). Raised pens are
 logged in `/opt/hogman/signup/raised.log`.
 
 **The waiting list:**
