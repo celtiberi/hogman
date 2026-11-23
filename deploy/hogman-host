@@ -55,6 +55,8 @@ usage: hogman-host <command>
   fallback-contact <email>       the operator address Google's fallback CA accounts carry
                                  (Google refuses accounts without one; never a member's)
   challenge-dns <args...>        talk to it, e.g.  challenge-dns cred list
+  refresh-services               after an update: restart the challenge DNS server and the
+                                 gate-certificate keeper on this release (install.sh runs it)
   gate-cert-setup <gate-domain>  keep the front door's *.<gate-domain> certificate
                                  (e.g. gate-cert-setup gate.hogman.network)
   pens-zone <zone>               where public pens live (e.g. pens.hogman.network); set it
@@ -1152,6 +1154,27 @@ gate_tls_line() {
   return 0
 }
 
+# refresh-services: after an update, put this release's compiled challenge DNS
+# server and gate-certificate keeper in place and restart them, but only the
+# ones this host already runs and only when the binary changed. install.sh
+# calls it, so a release reaches them like it reaches the pens.
+cmd_refresh_services() {
+  local arch
+  case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) die "unsupported CPU $(uname -m)" ;; esac
+  refresh_one() {  # refresh_one <installed path> <prebuilt path> <service>
+    local dst="$1" src="$2" svc="$3"
+    [ -x "$dst" ] && [ -f "/etc/systemd/system/$svc.service" ] || return 0
+    [ -f "$src" ] || { info "$svc: no compiled copy in this release; left as is"; return 0; }
+    if cmp -s "$src" "$dst"; then info "$svc: already current"; return 0; fi
+    install -m 0755 "$src" "$dst.new" && mv -f "$dst.new" "$dst"
+    systemctl restart "$svc.service"
+    systemctl is-active --quiet "$svc.service" || die "$svc didn't come back: journalctl -u $svc"
+    info "$svc: updated and restarted"
+  }
+  refresh_one "$CDNS_BIN" "$SRC/prebuilt/challenge-dns/challenge-dns-linux-$arch" hogman-challenge-dns
+  refresh_one /usr/local/bin/hogman-registrar "$SRC/prebuilt/registrar/registrar-linux-$arch" hogman-gate-cert
+}
+
 # gate-cert-setup <gate-domain>: keep the *.<gate-domain> wildcard for the
 # front door, e.g.  gate-cert-setup gate.hogman.network
 GATE_TOKEN=/etc/hogman/gate-challenge-token
@@ -1281,6 +1304,7 @@ case "${1:-}" in
   gate-cert-setup) shift; cmd_gate_cert_setup "$@" ;;
   challenge-dns-setup) shift; cmd_challenge_dns_setup "$@" ;;
   fallback-contact) shift; cmd_fallback_contact "$@" ;;
+  refresh-services) shift; load_host; cmd_refresh_services "$@" ;;
   challenge-dns) shift; load_host; [ -x "$CDNS_BIN" ] || die "not set up: hogman-host challenge-dns-setup"; CDNS_ADMIN_SOCK="$CDNS_ADMIN" exec "$CDNS_BIN" "$@" ;;
   pens-zone) shift; cmd_pens_zone "$@" ;;
   name-free) shift; load_host; [[ "${1:-}" =~ $HOSTED_RE ]] || die "usage: hogman-host name-free <pen>"; name_free "$1"; exit $? ;;

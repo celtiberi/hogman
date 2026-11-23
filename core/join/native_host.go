@@ -125,12 +125,13 @@ type nativeRequest struct {
 }
 
 type nativePenEntry struct {
-	Zone     string `json:"zone"`
-	Port     int    `json:"port"`
-	Up       bool   `json:"up"`
-	Hosted   bool   `json:"hosted"`
-	Legacy   bool   `json:"legacy,omitempty"`
-	Squatted bool   `json:"squatted,omitempty"`
+	Zone         string `json:"zone"`
+	Port         int    `json:"port"`
+	Up           bool   `json:"up"`
+	Hosted       bool   `json:"hosted"`
+	Legacy       bool   `json:"legacy,omitempty"`
+	Squatted     bool   `json:"squatted,omitempty"`
+	statusReason string
 }
 
 type nativeResponse struct {
@@ -382,13 +383,14 @@ func collectNativePens(configBase string) ([]nativePenEntry, []*agentConfig) {
 		seen[cfg.Zone] = true
 		configs = append(configs, cfg)
 
-		state := verifyAgentEndpoint(dir, cfg)
+		state, detail := verifyAgentEndpointDetail(dir, cfg)
 		entry := nativePenEntry{
-			Zone:   cfg.Zone,
-			Port:   port,
-			Up:     state == agentEndpointUp || state == agentEndpointLegacyUp,
-			Hosted: isHostedPenZone(cfg.Zone),
-			Legacy: state == agentEndpointLegacyUp,
+			Zone:         cfg.Zone,
+			Port:         port,
+			Up:           state == agentEndpointUp || state == agentEndpointLegacyUp,
+			Hosted:       isHostedPenZone(cfg.Zone),
+			Legacy:       state == agentEndpointLegacyUp,
+			statusReason: detail.reason,
 		}
 		if state == agentEndpointSquatted {
 			// Never advertise a port answered by a non-Hogman / unverified listener.
@@ -415,20 +417,31 @@ const (
 	agentEndpointSquatted
 )
 
+type agentEndpointDetail struct {
+	reason     string
+	needsLogin bool
+	verified   bool // true only when status.token HMAC proof matched
+}
+
 func verifyAgentEndpoint(dir string, cfg *agentConfig) agentEndpointState {
+	state, _ := verifyAgentEndpointDetail(dir, cfg)
+	return state
+}
+
+func verifyAgentEndpointDetail(dir string, cfg *agentConfig) (agentEndpointState, agentEndpointDetail) {
 	tokBytes, tokErr := os.ReadFile(filepath.Join(dir, statusTokenFilename))
 	token := strings.TrimSpace(string(tokBytes))
 	noTokenFile := errors.Is(tokErr, os.ErrNotExist)
 
 	nonce, err := generateHexToken(16)
 	if err != nil {
-		return agentEndpointDown
+		return agentEndpointDown, agentEndpointDetail{}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+cfg.ProxyAddr+"/status", nil)
 	if err != nil {
-		return agentEndpointDown
+		return agentEndpointDown, agentEndpointDetail{}
 	}
 	req.Header.Set("X-Hogman-Challenge", nonce)
 	client := &http.Client{
@@ -440,20 +453,20 @@ func verifyAgentEndpoint(dir string, cfg *agentConfig) agentEndpointState {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return agentEndpointDown
+		return agentEndpointDown, agentEndpointDetail{}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return agentEndpointSquatted
+		return agentEndpointSquatted, agentEndpointDetail{}
 	}
 
 	var st agentStatus
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 16*1024)).Decode(&st); err != nil {
-		return agentEndpointSquatted
+		return agentEndpointSquatted, agentEndpointDetail{}
 	}
 	if st.Zone != cfg.Zone {
-		return agentEndpointSquatted
+		return agentEndpointSquatted, agentEndpointDetail{}
 	}
 
 	// Agents started before status.token was introduced have no token file on disk.
@@ -461,24 +474,28 @@ func verifyAgentEndpoint(dir string, cfg *agentConfig) agentEndpointState {
 	// rather than falsely reporting a healthy pen as squatted right after update.
 	if noTokenFile {
 		if !st.Up {
-			return agentEndpointDown
+			return agentEndpointDown, agentEndpointDetail{reason: strings.TrimSpace(st.Error)}
 		}
-		return agentEndpointLegacyUp
+		return agentEndpointLegacyUp, agentEndpointDetail{}
 	}
 
 	// Token file is present (or unreadable): require valid HMAC proof.
 	if tokErr != nil || token == "" {
-		return agentEndpointSquatted
+		return agentEndpointSquatted, agentEndpointDetail{}
 	}
 	gotProof := strings.TrimSpace(resp.Header.Get("X-Hogman-Proof"))
 	wantProof := computeStatusProof(token, nonce, cfg.Zone)
 	if gotProof == "" || !hmac.Equal([]byte(gotProof), []byte(wantProof)) {
-		return agentEndpointSquatted
+		return agentEndpointSquatted, agentEndpointDetail{}
 	}
 	if !st.Up {
-		return agentEndpointDown
+		return agentEndpointDown, agentEndpointDetail{
+			reason:     strings.TrimSpace(st.Error),
+			needsLogin: st.NeedsLogin,
+			verified:   true,
+		}
 	}
-	return agentEndpointUp
+	return agentEndpointUp, agentEndpointDetail{verified: true}
 }
 
 type extensionHeartbeat struct {
@@ -763,6 +780,8 @@ func statusCmd() error {
 				state = "up (older agent; run hogman-join update to enable status verification)"
 			} else if p.Up {
 				state = "up"
+			} else if p.statusReason != "" {
+				state = "down (" + p.statusReason + ")"
 			}
 			addr := "-"
 			if p.Port > 0 {

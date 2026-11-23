@@ -33,9 +33,14 @@ jobs:
       - id: f
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          # The PR's own tip, not the merge commit checked out: that merge is
+          # with today's main, which may have moved since BASE, and diffing it
+          # against BASE would count other PRs' changes as this one's.
+          TIP: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           code=true
-          if [ -n "$BASE" ] && files="$(git diff --name-only "$BASE" HEAD 2>/dev/null)"; then
+          # Three dots: what changed on the branch since it left BASE.
+          if [ -n "$BASE" ] && files="$(git diff --name-only "$BASE...$TIP" 2>/dev/null)"; then
             if ! grep -qvE '^(site/|docs/|infra/)|^\.github/workflows/(dns|site-deploy)\.yml$|\.md$' <<<"$files"; then code=false; fi
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"

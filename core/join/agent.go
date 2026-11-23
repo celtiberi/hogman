@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,7 +20,9 @@ import (
 	"syscall"
 	"time"
 
+	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/net/netns"
 	"tailscale.com/tsnet"
 )
 
@@ -118,6 +121,15 @@ func inMeshRanges(ip netip.Addr) bool {
 }
 
 func newNode(dir string, c *agentConfig, authKey string) *tsnet.Server {
+	// On Linux 5.7+ inside containers or isolated networks with no default
+	// route (such as Docker --internal bridges), tailscale's netns bindToDevice
+	// falls back to SO_BINDTODEVICE("lo") unprivileged and blackholes outbound
+	// dials. Opting out via HOGMAN_DISABLE_NETNS=1 keeps isolated test harnesses
+	// working without weakening container network isolation or changing normal
+	// host VPN bypass behavior.
+	if os.Getenv("HOGMAN_DISABLE_NETNS") == "1" {
+		netns.SetEnabled(false)
+	}
 	s := &tsnet.Server{
 		Dir:        filepath.Join(dir, "node"),
 		Hostname:   c.Hostname,
@@ -131,6 +143,117 @@ func newNode(dir string, c *agentConfig, authKey string) *tsnet.Server {
 		s.UserLogf = log.Printf
 	}
 	return s
+}
+
+var errDeviceRemoved = errors.New("device is no longer authorized on this pen (NeedsLogin)")
+
+// upNode brings node up and returns its status. For already-enrolled nodes
+// (hasAuthKey == false), it fails fast with errDeviceRemoved if the control
+// server rejects the device and requests interactive login, instead of
+// blocking until ctx expires as tsnet.Server.Up does.
+func upNode(ctx context.Context, node *tsnet.Server, hasAuthKey bool) (*ipnstate.Status, error) {
+	if hasAuthKey {
+		return node.Up(ctx)
+	}
+	lc, err := node.LocalClient()
+	if err != nil {
+		return nil, fmt.Errorf("tsnet.Up: %w", err)
+	}
+	watcher, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState)
+	if err != nil {
+		return nil, fmt.Errorf("tsnet.Up: %w", err)
+	}
+	defer watcher.Close()
+
+	sawStarting := false
+	for {
+		n, err := watcher.Next()
+		if err != nil {
+			return nil, fmt.Errorf("tsnet.Up: %w", err)
+		}
+		if n.ErrMessage != nil && *n.ErrMessage != "" {
+			return nil, fmt.Errorf("tsnet.Up: backend: %s", *n.ErrMessage)
+		}
+		if n.BrowseToURL != nil && *n.BrowseToURL != "" {
+			return nil, errDeviceRemoved
+		}
+		if n.State == nil {
+			continue
+		}
+		switch *n.State {
+		case ipn.Starting:
+			sawStarting = true
+		case ipn.Running:
+			sawStarting = true
+			st, err := lc.Status(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("tsnet.Up: %w", err)
+			}
+			if len(st.TailscaleIPs) > 0 {
+				return st, nil
+			}
+		case ipn.NeedsLogin:
+			if sawStarting {
+				return nil, errDeviceRemoved
+			}
+			if st, err := lc.StatusWithoutPeers(ctx); err == nil && st != nil && st.AuthURL != "" {
+				return nil, errDeviceRemoved
+			}
+		}
+	}
+}
+
+func statusHasPeerIP(st *ipnstate.Status, want netip.Addr) bool {
+	if st == nil {
+		return false
+	}
+	want = want.Unmap()
+	if st.Self != nil {
+		for _, ip := range st.Self.TailscaleIPs {
+			if ip.Unmap() == want {
+				return true
+			}
+		}
+	}
+	for _, p := range st.Peer {
+		if p == nil {
+			continue
+		}
+		for _, ip := range p.TailscaleIPs {
+			if ip.Unmap() == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// evaluateLiveNodeStatus translates a running tsnet node's current Status into
+// (up, needsLogin, reason). needsLogin is true only when the control plane
+// explicitly reports BackendState == "NeedsLogin"; missing peers or other
+// transient states report down without claiming the device was removed.
+func evaluateLiveNodeStatus(st *ipnstate.Status, dnsServer string) (up bool, needsLogin bool, reason string) {
+	if st == nil {
+		return false, false, "no node status"
+	}
+	switch st.BackendState {
+	case "Running":
+		if st.Self != nil && st.Self.Expired {
+			return false, false, "device session expired"
+		}
+		if dnsServer != "" {
+			if dnsIP, err := netip.ParseAddr(dnsServer); err == nil && !statusHasPeerIP(st, dnsIP) {
+				return false, false, "not connected to pen"
+			}
+		}
+		return true, false, ""
+	case "NeedsLogin":
+		return false, true, "device removed from pen"
+	case "":
+		return false, false, "not connected"
+	default:
+		return false, false, "not connected (" + st.BackendState + ")"
+	}
 }
 
 // runAgent is the long-running process: connect to the pen, serve the proxy.
@@ -155,7 +278,8 @@ func runAgent(dir string) error {
 
 	keyFile := filepath.Join(dir, "authkey")
 	key, _ := os.ReadFile(keyFile)
-	node := newNode(dir, c, strings.TrimSpace(string(key)))
+	authKey := strings.TrimSpace(string(key))
+	node := newNode(dir, c, authKey)
 	defer node.Close()
 
 	a := newAgent(c, node)
@@ -173,7 +297,7 @@ func runAgent(dir string) error {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		st, err := node.Up(ctx)
+		st, err := upNode(ctx, node, authKey != "")
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		if err != nil {
@@ -222,7 +346,8 @@ type agent struct {
 	// Only those may be dialed: tsnet's Dial quietly uses the computer's own
 	// network for anything else, so a pen whose DNS answered 127.0.0.1, a LAN
 	// address or another tailnet's 100.x address would otherwise reach it.
-	isPeer func(ctx context.Context, ip netip.Addr) bool
+	isPeer     func(ctx context.Context, ip netip.Addr) bool
+	liveStatus func(ctx context.Context) (up bool, needsLogin bool, reason string, ok bool)
 
 	mu     sync.Mutex
 	up     bool
@@ -267,6 +392,18 @@ func newAgent(c *agentConfig, node *tsnet.Server) *agent {
 				return nil, err
 			}
 			return peerIPsForHost(st, host), nil
+		}
+		a.liveStatus = func(ctx context.Context) (bool, bool, string, bool) {
+			lc, err := node.LocalClient()
+			if err != nil {
+				return false, false, "", false
+			}
+			st, err := lc.Status(ctx)
+			if err != nil {
+				return false, false, "", false
+			}
+			up, needsLogin, reason := evaluateLiveNodeStatus(st, c.DNSServer)
+			return up, needsLogin, reason, true
 		}
 	}
 	return a
@@ -315,11 +452,12 @@ func orderIPs(ips []string) []string {
 }
 
 type agentStatus struct {
-	Zone   string   `json:"zone"`
-	Up     bool     `json:"up"`
-	Error  string   `json:"error,omitempty"`
-	IPs    []string `json:"ips,omitempty"`
-	Server bool     `json:"server,omitempty"` // the pen tagged this device a server (refused)
+	Zone       string   `json:"zone"`
+	Up         bool     `json:"up"`
+	NeedsLogin bool     `json:"needs_login,omitempty"`
+	Error      string   `json:"error,omitempty"`
+	IPs        []string `json:"ips,omitempty"`
+	Server     bool     `json:"server,omitempty"` // the pen tagged this device a server (refused)
 }
 
 // dial opens a connection to a pen host. Anything outside the pen is refused:
@@ -419,6 +557,16 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		st := agentStatus{Zone: a.cfg.Zone, Up: a.up, Error: a.err, IPs: a.ips, Server: a.server}
 		a.mu.Unlock()
+		if st.Up && a.liveStatus != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 200*time.Millisecond)
+			liveUp, needsLogin, liveErr, ok := a.liveStatus(ctx)
+			cancel()
+			if ok && !liveUp {
+				st.Up = false
+				st.NeedsLogin = needsLogin
+				st.Error = liveErr
+			}
+		}
 		if a.statusToken != "" {
 			if nonce := strings.TrimSpace(r.Header.Get("X-Hogman-Challenge")); nonce != "" && len(nonce) <= 128 {
 				w.Header().Set("X-Hogman-Proof", computeStatusProof(a.statusToken, nonce, a.cfg.Zone))
@@ -527,9 +675,9 @@ func agentLogout(dir string) {
 	c.trustControlCA()
 	node := newNode(dir, c, "")
 	defer node.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := node.Up(ctx); err != nil {
+	if _, err := upNode(ctx, node, false); err != nil {
 		return
 	}
 	if lc, err := node.LocalClient(); err == nil {
