@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- `deploy/signup` & `deploy/hogman-host`: free/standard sign-ups now automatically append a server-enforced 4-character random ending (`<word>-<xxxx>`, using an unambiguous 31-char lowercase alphabet without `0/o/1/i/l`, max 25-char prefix) so common pen names cannot be squatted or collided on under D-21 permanent retirement. Invite codes tagged with a leading `vanity` keyword in `$HOGMAN_HOME/signup/codes` (created via `hogman-host signup-code --vanity [note]`) keep bare vanity pen names (`3–30` chars); the sign-up UI previews `-xxxx` by default and switches to bare availability checks when opened with `#code=...&vanity=1` (purely a UI hint — the broker always enforces the `vanity` tag server-side).
+
 ### Fixed
 - `core/join`: made `shareCertManager.Close()` idempotent (`sync.Once`), fixing a `panic: close of closed channel` crash in `certmagic.(*Cache).Stop()` whenever a brand-new `hogman-join share` failed its initial certificate issuance (for example, hitting the pen's weekly 5-site certificate limit) and ran both explicit `cm.Close()` before rollback and `defer cm.Close()` on return.
 - `core/join`: live post-kick status detection and fast `leave` cleanup (surfaced by the Bot Arena), plus `core/README.md` test-only documentation for `HOGMAN_DISABLE_NETNS=1`:

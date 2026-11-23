@@ -17,12 +17,12 @@ import (
 const testToken = "0123456789abcdef0123456789abcdef"
 
 // fakeHost stands in for hogman-host: capacity from $FAKE_MAX, and provision
-// makes the pen's folder unless the pen is called "explode".
+// makes the pen's folder unless the pen is called "explode" (or "explode-*").
 const fakeHost = `#!/bin/sh
 case "$1" in
   capacity) n=$(ls "$HOGMAN_HOME/pens" | wc -l); echo "{\"pens\":$n,\"max\":${FAKE_MAX:-3},\"open\":$([ $n -lt ${FAKE_MAX:-3} ] && echo true || echo false)}" ;;
   provision)
-    [ "$2" = explode ] && { echo boom >&2; exit 1; }
+    case "$2" in explode|explode-*) echo boom >&2; exit 1 ;; esac
     [ -e "$HOGMAN_HOME/pens/$2" ] && exit 2
     [ $(ls "$HOGMAN_HOME/pens" | wc -l) -ge ${FAKE_MAX:-3} ] && exit 3
     mkdir "$HOGMAN_HOME/pens/$2"
@@ -79,7 +79,7 @@ func TestBrokerNeedsToken(t *testing.T) {
 }
 
 func TestBrokerProvisionUsesCodeOnce(t *testing.T) {
-	b, home := newTestBroker(t, "PIG-AAAA-BBBB for alice\nPIG-CCCC-DDDD other\n")
+	b, home := newTestBroker(t, "PIG-AAAA-BBBB vanity for alice\nPIG-CCCC-DDDD vanity other\n")
 	h := b.handler()
 	body := func(code, pen, owner string) string {
 		j, _ := json.Marshal(map[string]string{"code": code, "pen": pen, "owner": owner})
@@ -96,31 +96,118 @@ func TestBrokerProvisionUsesCodeOnce(t *testing.T) {
 		t.Fatalf("a used code worked again: %d", code)
 	}
 	codes, _ := os.ReadFile(filepath.Join(home, "signup", "codes"))
-	if strings.Contains(string(codes), "AAAA") || !strings.Contains(string(codes), "PIG-CCCC-DDDD other") {
+	if strings.Contains(string(codes), "AAAA") || !strings.Contains(string(codes), "PIG-CCCC-DDDD vanity other") {
 		t.Fatalf("codes file after use: %q", codes)
 	}
 	if code, _ := call(h, "POST", "/provision", body("PIG-CCCC-DDDD", "smith", "bob"), auth); code != 409 {
 		t.Fatalf("a taken name: %d", code)
 	}
 	ledger, _ := os.ReadFile(filepath.Join(home, "signup", "raised.log"))
-	if !strings.Contains(string(ledger), "raised smith for alice with PIG-AAAA-BBBB (for alice)") {
+	if !strings.Contains(string(ledger), "raised smith for alice with PIG-AAAA-BBBB (for alice) [vanity]") {
 		t.Fatalf("ledger: %q", ledger)
 	}
 }
 
+func TestBrokerSuffixedFreePensAndVanityTag(t *testing.T) {
+	// Standard codes (and notes like "vanity-project" without a space) get a
+	// server-assigned 4-char random suffix; only "vanity" / "vanity ..." gets bare names.
+	b, home := newTestBroker(t, "PIG-AAAA-BBBB for alice\nPIG-CCCC-DDDD vanity-project\nPIG-EEEE-FFFF vanity\n")
+	if v, n := parseCodeMeta("vanity"); !v || n != "" {
+		t.Fatalf("parseCodeMeta(vanity) = (%v, %q)", v, n)
+	}
+	if v, n := parseCodeMeta("vanity for vip"); !v || n != "for vip" {
+		t.Fatalf("parseCodeMeta(vanity for vip) = (%v, %q)", v, n)
+	}
+	if v, n := parseCodeMeta("vanity-project"); v || n != "vanity-project" {
+		t.Fatalf("parseCodeMeta(vanity-project) = (%v, %q)", v, n)
+	}
+
+	h := b.handler()
+	body := func(code, pen, owner string) string {
+		j, _ := json.Marshal(map[string]string{"code": code, "pen": pen, "owner": owner})
+		return string(j)
+	}
+
+	// Prefix > 25 chars is rejected for standard codes (validate + provision), allowed for vanity.
+	long26 := strings.Repeat("a", 26)
+	if code, _ := call(h, "POST", "/validate", body("PIG-AAAA-BBBB", long26, "alice"), auth); code != 400 {
+		t.Fatalf("26-char prefix on standard validate: %d, want 400", code)
+	}
+	if code, _ := call(h, "POST", "/provision", body("PIG-AAAA-BBBB", long26, "alice"), auth); code != 400 {
+		t.Fatalf("26-char prefix on standard provision: %d, want 400", code)
+	}
+	if code, out := call(h, "POST", "/validate", body("PIG-EEEE-FFFF", long26, "alice"), auth); code != 200 || out["vanity"] != true {
+		t.Fatalf("26-char bare name on vanity validate: %d %v, want 200 vanity=true", code, out)
+	}
+
+	// First standard signup gets "coffee-<4chars>".
+	code, out := call(h, "POST", "/provision", body("PIG-AAAA-BBBB", "coffee", "alice"), auth)
+	if code != 201 {
+		t.Fatalf("standard provision 1: %d %v", code, out)
+	}
+	pen1, _ := out["pen"].(string)
+	if !strings.HasPrefix(pen1, "coffee-") || len(pen1) != len("coffee-")+penSuffixLen {
+		t.Fatalf("pen1 = %q, want coffee-<4chars>", pen1)
+	}
+	for _, ch := range pen1[len("coffee-"):] {
+		if !strings.ContainsRune(penSuffixAlphabet, ch) {
+			t.Fatalf("suffix char %q outside alphabet %q", ch, penSuffixAlphabet)
+		}
+	}
+
+	// Collision retry: if the first generated suffix collides with pen1, broker retries and picks a free one.
+	takenSuffix := pen1[len("coffee-"):]
+	seq := []string{takenSuffix, "k7m2"}
+	if takenSuffix == "k7m2" {
+		seq[1] = "p9n3"
+	}
+	idx := 0
+	b.suffixFn = func() (string, error) {
+		s := seq[idx]
+		idx++
+		return s, nil
+	}
+	code, out = call(h, "POST", "/provision", body("PIG-CCCC-DDDD", "coffee", "bob"), auth)
+	if code != 201 {
+		t.Fatalf("standard provision 2 with collision retry: %d %v", code, out)
+	}
+	pen2, _ := out["pen"].(string)
+	if pen2 != "coffee-"+seq[1] || idx != 2 {
+		t.Fatalf("pen2 = %q (idx=%d), want coffee-%s (idx=2)", pen2, idx, seq[1])
+	}
+
+	// Bare "coffee" is still free for a vanity code!
+	code, out = call(h, "POST", "/provision", body("PIG-EEEE-FFFF", "coffee", "carol"), auth)
+	if code != 201 || out["pen"] != "coffee" || out["zone"] != "coffee.pens.example.com" {
+		t.Fatalf("vanity provision bare coffee: %d %v", code, out)
+	}
+
+	// Verify raised.log recorded actual suffixed and vanity names.
+	ledger, _ := os.ReadFile(filepath.Join(home, "signup", "raised.log"))
+	if !strings.Contains(string(ledger), "raised "+pen1+" for alice with PIG-AAAA-BBBB (for alice) in ") ||
+		!strings.Contains(string(ledger), "raised coffee for carol with PIG-EEEE-FFFF () [vanity]") {
+		t.Fatalf("ledger mismatch: %q", ledger)
+	}
+}
+
 func TestBrokerFailureKeepsCode(t *testing.T) {
-	b, home := newTestBroker(t, "PIG-AAAA-BBBB x\n")
+	b, home := newTestBroker(t, "PIG-AAAA-BBBB vanity x\nPIG-CCCC-DDDD y\n")
 	j := `{"code":"PIG-AAAA-BBBB","pen":"explode","owner":"alice"}`
 	code, out := call(b.handler(), "POST", "/provision", j, auth)
 	if code != 500 {
-		t.Fatalf("a failed provision: %d", code)
+		t.Fatalf("a failed vanity provision: %d", code)
 	}
 	errMsg, _ := out["error"].(string)
 	if !strings.Contains(errMsg, "pick another pen name") {
-		t.Fatalf("failed provision error = %q, want guidance to pick another pen name", errMsg)
+		t.Fatalf("failed vanity provision error = %q, want guidance to pick another pen name", errMsg)
+	}
+	j2 := `{"code":"PIG-CCCC-DDDD","pen":"explode","owner":"bob"}`
+	code, out = call(b.handler(), "POST", "/provision", j2, auth)
+	if code != 500 {
+		t.Fatalf("a failed suffixed provision: %d", code)
 	}
 	codes, _ := os.ReadFile(filepath.Join(home, "signup", "codes"))
-	if !strings.Contains(string(codes), "PIG-AAAA-BBBB") {
+	if !strings.Contains(string(codes), "PIG-AAAA-BBBB") || !strings.Contains(string(codes), "PIG-CCCC-DDDD") {
 		t.Fatal("a failed sign-up used up the code")
 	}
 }
@@ -152,7 +239,7 @@ func TestBrokerRefusesBadInput(t *testing.T) {
 }
 
 func TestWebForwardsAndDrawsQR(t *testing.T) {
-	b, _ := newTestBroker(t, "PIG-AAAA-BBBB x\n")
+	b, _ := newTestBroker(t, "PIG-AAAA-BBBB x\nPIG-CCCC-DDDD vanity y\n")
 	srv := httptest.NewServer(b.handler())
 	defer srv.Close()
 	wb := newWeb(srv.URL, testToken, "pens.test")
@@ -161,12 +248,19 @@ func TestWebForwardsAndDrawsQR(t *testing.T) {
 	if code, out := call(h, "GET", "/api/status", "", nil); code != 200 || out["open"] != true || out["pens_domain"] != "pens.test" {
 		t.Fatalf("status: %d %v", code, out)
 	}
-	if code, out := call(h, "GET", "/api/check?pen=Smith", "", nil); code != 200 || out["free"] != true {
-		t.Fatalf("check: %d %v", code, out)
+	if code, out := call(h, "GET", "/api/check?pen=Smith", "", nil); code != 200 || out["free"] != true || out["vanity"] != false {
+		t.Fatalf("standard check: %d %v", code, out)
+	}
+	if _, out := call(h, "GET", "/api/check?pen="+strings.Repeat("a", 26), "", nil); out["free"] != false {
+		t.Fatalf("26-char standard prefix should be rejected: %v", out)
+	}
+	if code, out := call(h, "GET", "/api/check?pen="+strings.Repeat("a", 26)+"&vanity=1", "", nil); code != 200 || out["free"] != true || out["vanity"] != true {
+		t.Fatalf("26-char vanity check: %d %v", code, out)
 	}
 	if _, out := call(h, "GET", "/api/check?pen=x", "", nil); out["free"] != false {
 		t.Fatalf("a one-letter name is free? %v", out)
 	}
+	// Standard code creates a suffixed pen ("smith-xxxx").
 	code, out := call(h, "POST", "/api/create", `{"code":" pig-aaaa-bbbb ","pen":"Smith","handle":"Alice"}`, map[string]string{"Content-Type": "application/json"})
 	id, _ := out["job"].(string)
 	if code != 202 || len(id) != 32 {
@@ -184,7 +278,7 @@ func TestWebForwardsAndDrawsQR(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if res == nil || res["owner"] != "alice" || !strings.HasPrefix(res["join_qr_svg"].(string), "<svg") {
+	if res == nil || res["owner"] != "alice" || !strings.HasPrefix(res["pen"].(string), "smith-") || !strings.HasPrefix(res["join_qr_svg"].(string), "<svg") {
 		t.Fatalf("job result: %v", res)
 	}
 	// Completed results stay re-readable during the post-delivery grace window.
@@ -201,8 +295,27 @@ func TestWebForwardsAndDrawsQR(t *testing.T) {
 	if code != 403 || out["job"] != nil {
 		t.Fatalf("wrong code: %d %v, want 403 without job", code, out)
 	}
-	if _, out := call(h, "GET", "/api/check?pen=smith", "", nil); out["free"] != false {
-		t.Fatalf("smith still free after it was raised: %v", out)
+	// Vanity code creates bare "smith"; then vanity check reports taken while standard prefix check stays free.
+	code, out = call(h, "POST", "/api/create", `{"code":"PIG-CCCC-DDDD","pen":"Smith","handle":"Bob"}`, map[string]string{"Content-Type": "application/json"})
+	if code != 202 {
+		t.Fatalf("vanity create: %d %v", code, out)
+	}
+	vid, _ := out["job"].(string)
+	for i := 0; i < 100; i++ {
+		_, j := call(h, "GET", "/api/job?id="+vid, "", nil)
+		if j["state"] == "done" {
+			if r, _ := j["result"].(map[string]any); r["pen"] != "smith" {
+				t.Fatalf("vanity result pen = %v, want smith", r["pen"])
+			}
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, out := call(h, "GET", "/api/check?pen=smith&vanity=1", "", nil); out["free"] != false {
+		t.Fatalf("bare smith still free for vanity after it was raised: %v", out)
+	}
+	if _, out := call(h, "GET", "/api/check?pen=smith", "", nil); out["free"] != true {
+		t.Fatalf("standard prefix smith should remain free even when bare smith is taken: %v", out)
 	}
 }
 

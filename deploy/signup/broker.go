@@ -32,6 +32,14 @@ type broker struct {
 	waitNotify  *limiter
 	raiseNotify *limiter
 	ntfySem     chan struct{}
+	suffixFn    func() (string, error) // nil uses randomPenSuffix (tests override)
+}
+
+func (b *broker) nextSuffix() (string, error) {
+	if b.suffixFn != nil {
+		return b.suffixFn()
+	}
+	return randomPenSuffix()
 }
 
 func runBroker() {
@@ -155,16 +163,25 @@ func (b *broker) taken(ctx context.Context, pen string) bool {
 }
 
 func (b *broker) check(w http.ResponseWriter, r *http.Request) {
-	pen := r.URL.Query().Get("pen")
+	pen := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("pen")))
+	vanity := r.URL.Query().Get("vanity") == "1"
+	if !vanity {
+		if why, ok := validPenPrefix(pen); !ok {
+			jsonOut(w, 200, map[string]any{"free": false, "vanity": false, "reason": why})
+			return
+		}
+		jsonOut(w, 200, map[string]any{"free": true, "vanity": false})
+		return
+	}
 	if why, ok := validPen(pen); !ok {
-		jsonOut(w, 200, map[string]any{"free": false, "reason": why})
+		jsonOut(w, 200, map[string]any{"free": false, "vanity": true, "reason": why})
 		return
 	}
 	if b.taken(r.Context(), pen) {
-		jsonOut(w, 200, map[string]any{"free": false, "reason": "that name is taken"})
+		jsonOut(w, 200, map[string]any{"free": false, "vanity": true, "reason": "that name is taken"})
 		return
 	}
-	jsonOut(w, 200, map[string]any{"free": true})
+	jsonOut(w, 200, map[string]any{"free": true, "vanity": true})
 }
 
 type signupInput struct {
@@ -207,7 +224,7 @@ func (b *broker) validate(w http.ResponseWriter, r *http.Request) {
 	if !valid {
 		return
 	}
-	_, ok, err := b.findCode(in.Code)
+	rawNote, ok, err := b.findCode(in.Code)
 	if err != nil {
 		log.Print(err)
 		jsonOut(w, 500, map[string]string{"error": "internal error"})
@@ -217,9 +234,17 @@ func (b *broker) validate(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 403, map[string]string{"error": "that sign-up code isn't right, or it was already used"})
 		return
 	}
-	if b.taken(r.Context(), in.Pen) {
-		jsonOut(w, 409, map[string]string{"error": "that name is taken"})
-		return
+	vanity, _ := parseCodeMeta(rawNote)
+	if vanity {
+		if b.taken(r.Context(), in.Pen) {
+			jsonOut(w, 409, map[string]string{"error": "that name is taken"})
+			return
+		}
+	} else {
+		if why, ok := validPenPrefix(in.Pen); !ok {
+			jsonOut(w, 400, map[string]string{"error": "pen name: " + why})
+			return
+		}
 	}
 	cap, err := b.readCapacity(r.Context())
 	if err != nil {
@@ -231,7 +256,22 @@ func (b *broker) validate(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 503, map[string]string{"error": "this server is full right now"})
 		return
 	}
-	jsonOut(w, 200, map[string]bool{"ok": true})
+	jsonOut(w, 200, map[string]any{"ok": true, "vanity": vanity})
+}
+
+func (b *broker) pickSuffixedPen(ctx context.Context, prefix string) (string, error) {
+	const maxTries = 16
+	for i := 0; i < maxTries; i++ {
+		sfx, err := b.nextSuffix()
+		if err != nil {
+			return "", err
+		}
+		cand := prefix + "-" + sfx
+		if !b.taken(ctx, cand) {
+			return cand, nil
+		}
+	}
+	return "", errors.New("could not pick a free ending; try again")
 }
 
 func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
@@ -242,7 +282,7 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	note, ok, err := b.findCode(in.Code)
+	rawNote, ok, err := b.findCode(in.Code)
 	if err != nil {
 		log.Print(err)
 		jsonOut(w, 500, map[string]string{"error": "internal error"})
@@ -252,31 +292,54 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 403, map[string]string{"error": "that sign-up code isn't right, or it was already used"})
 		return
 	}
-	if b.taken(r.Context(), in.Pen) {
-		jsonOut(w, 409, map[string]string{"error": "that name is taken"})
-		return
+	vanity, note := parseCodeMeta(rawNote)
+	targetPen := in.Pen
+	if vanity {
+		if b.taken(r.Context(), targetPen) {
+			jsonOut(w, 409, map[string]string{"error": "that name is taken"})
+			return
+		}
+	} else {
+		if why, ok := validPenPrefix(in.Pen); !ok {
+			jsonOut(w, 400, map[string]string{"error": "pen name: " + why})
+			return
+		}
+		targetPen, err = b.pickSuffixedPen(r.Context(), in.Pen)
+		if err != nil {
+			log.Printf("pickSuffixedPen %s: %v", in.Pen, err)
+			jsonOut(w, 500, map[string]string{"error": "could not pick a free ending; try again"})
+			return
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	start := time.Now()
-	out, code, stderr := b.run(ctx, "provision", in.Pen, in.Owner)
+	out, code, stderr := b.run(ctx, "provision", targetPen, in.Owner)
 	switch code {
 	case 0:
 	case 2:
-		jsonOut(w, 409, map[string]string{"error": "that name is taken"})
+		if vanity {
+			jsonOut(w, 409, map[string]string{"error": "that name is taken"})
+		} else {
+			jsonOut(w, 409, map[string]string{"error": "that name was just taken; try again"})
+		}
 		return
 	case 3:
 		jsonOut(w, 503, map[string]string{"error": "this server is full right now"})
 		return
 	default:
-		log.Printf("provision %s for %s failed (exit %d): %s", in.Pen, in.Owner, code, strings.TrimSpace(stderr))
-		jsonOut(w, 500, map[string]string{"error": "raising your pen failed. Your code still works — pick another pen name and try again."})
+		log.Printf("provision %s for %s failed (exit %d): %s", targetPen, in.Owner, code, strings.TrimSpace(stderr))
+		if vanity {
+			jsonOut(w, 500, map[string]string{"error": "raising your pen failed. Your code still works — pick another pen name and try again."})
+		} else {
+			jsonOut(w, 500, map[string]string{"error": "raising your pen failed. Your code still works — try again."})
+		}
 		return
 	}
 	var res map[string]string
 	if err := json.Unmarshal(lastJSONLine(out), &res); err != nil || res["join_link"] == "" {
-		log.Printf("provision %s: unreadable result %q", in.Pen, out)
+		log.Printf("provision %s: unreadable result %q", targetPen, out)
 		jsonOut(w, 500, map[string]string{"error": "internal error"})
 		return
 	}
@@ -286,8 +349,12 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 	if err := b.dropInvited(in.Code); err != nil {
 		log.Printf("could not clear the waiting list entry: %v", err)
 	}
-	b.ledger(fmt.Sprintf("%s raised %s for %s with %s (%s) in %s",
-		time.Now().UTC().Format(time.RFC3339), in.Pen, in.Owner, in.Code, note, time.Since(start).Round(time.Second)))
+	tag := ""
+	if vanity {
+		tag = " [vanity]"
+	}
+	b.ledger(fmt.Sprintf("%s raised %s for %s with %s (%s)%s in %s",
+		time.Now().UTC().Format(time.RFC3339), targetPen, in.Owner, in.Code, note, tag, time.Since(start).Round(time.Second)))
 	b.notifyKind("raised", fmt.Sprintf("New pen raised: %s", res["zone"]))
 	jsonOut(w, 201, res)
 }

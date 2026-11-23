@@ -333,8 +333,12 @@ no_arg_signup_refresh() {
   "$HOST" signup-setup && grep -qx "PENS_DOMAIN='gate.hogman.test'" "$HOGMAN_HOME/host.env"
 }
 check "no-arg signup-setup refreshes to GATE_DOMAIN despite stale PENS_DOMAIN" no_arg_signup_refresh
-code="$("$HOST" signup-code for the test | awk '/^code:/ {print $2}')"
-check "signup-code makes a code" grep -q "^$code " "$HOGMAN_HOME/signup/codes"
+std_out="$("$HOST" signup-code for standard test)"
+std_code="$(awk '/^code:/ {print $2}' <<<"$std_out")"
+check "signup-code makes a standard (suffixed) code" bash -c 'grep -q "^$1 for standard test$" "$2/signup/codes" && ! grep -q "vanity=1" <<<"$3"' _ "$std_code" "$HOGMAN_HOME" "$std_out"
+vanity_out="$("$HOST" signup-code --vanity for the test)"
+code="$(awk '/^code:/ {print $2}' <<<"$vanity_out")"
+check "signup-code --vanity tags the code and link" bash -c 'grep -q "^$1 vanity for the test$" "$2/signup/codes" && grep -q "vanity=1" <<<"$3"' _ "$code" "$HOGMAN_HOME" "$vanity_out"
 
 front_ip="$(docker inspect -f '{{(index .NetworkSettings.Networks "hogman-front").IPAddress}}' hogman-front-front-1)"
 docker run -d --name client-signup --network hogman-front \
@@ -370,8 +374,11 @@ check "the sign-up page sets Origin-Agent-Cluster" grep -iq '^origin-agent-clust
 check "it says sign-ups are open" sh -c "docker exec client-signup curl -sf https://get.example/api/status | jq -e '.open'"
 check "it shows names under the pens zone" sh -c "docker exec client-signup curl -sf https://get.example/api/status | jq -e '.sites_domain == \"pens.hogman.test\"'"
 check "a reserved name is refused" sh -c "docker exec client-signup curl -sf 'https://get.example/api/check?pen=www' | jq -e '.free == false'"
-check "a name used before (alpha) shows as taken (D-21)" sh -c "docker exec client-signup curl -sf 'https://get.example/api/check?pen=alpha' | jq -e '.free == false'"
-check "a never-used name shows as free" sh -c "docker exec client-signup curl -sf 'https://get.example/api/check?pen=freshname' | jq -e '.free == true'"
+check "a name used before (alpha) shows as taken for vanity (D-21)" sh -c "docker exec client-signup curl -sf 'https://get.example/api/check?pen=alpha&vanity=1' | jq -e '.free == false'"
+check "a standard suffixed prefix (alpha) is allowed without colliding with bare alpha" sh -c "docker exec client-signup curl -sf 'https://get.example/api/check?pen=alpha' | jq -e '.free == true and .vanity == false'"
+check "a never-used vanity name shows as free" sh -c "docker exec client-signup curl -sf 'https://get.example/api/check?pen=freshname&vanity=1' | jq -e '.free == true and .vanity == true'"
+long_std_prefix() { [ "$(create_pen "{\"code\":\"$std_code\",\"pen\":\"aaaaaaaaaaaaaaaaaaaaaaaaaa\",\"handle\":\"keeper\"}" | jq -r .status)" = 400 ]; }
+check "a >25-char prefix is refused on a standard suffixed code" long_std_prefix
 wrong_code() { [ "$(create_pen '{"code":"PIG-AAAA-AAAA","pen":"smithy","handle":"keeper"}' | jq -r .status)" = 403 ]; }
 check "a wrong code is refused" wrong_code
 front_started="$(docker inspect -f '{{.State.StartedAt}}' hogman-front-front-1)"
