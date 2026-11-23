@@ -363,6 +363,7 @@ type shareCertManager struct {
 	fallbackIss *certmagic.ACMEIssuer
 
 	renewMu              sync.Mutex
+	closeOnce            sync.Once
 	failoverCh           chan struct{}
 	backoff              []time.Duration
 	maxInProcessWait     time.Duration
@@ -447,9 +448,11 @@ func newShareCertManager(cfg shareACMEConfig) (*shareCertManager, error) {
 }
 
 func (m *shareCertManager) Close() {
-	if m.cache != nil {
-		m.cache.Stop()
-	}
+	m.closeOnce.Do(func() {
+		if m.cache != nil {
+			m.cache.Stop()
+		}
+	})
 }
 
 func (m *shareCertManager) TLSConfig() *tls.Config {

@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- `core/join`: made `shareCertManager.Close()` idempotent (`sync.Once`), fixing a `panic: close of closed channel` crash in `certmagic.(*Cache).Stop()` whenever a brand-new `hogman-join share` failed its initial certificate issuance (for example, hitting the pen's weekly 5-site certificate limit) and ran both explicit `cm.Close()` before rollback and `defer cm.Close()` on return.
 - `core/join`: live post-kick status detection and fast `leave` cleanup (surfaced by the Bot Arena), plus `core/README.md` test-only documentation for `HOGMAN_DISABLE_NETNS=1`:
   - `GET /status` now queries the running `tsnet` node's live `BackendState`, session expiry, and pen DNS peer presence rather than latching `up=true` forever after initial join, so `hogman-join status` immediately reports `down (device removed from pen)` and the browser extension sees `up: false` after a kick.
   - Already-enrolled `tsnet` reconnects (`upNode`) now fail fast with `NeedsLogin` as soon as the control server rejects the node key instead of blocking until the full context timeout; `hogman-join leave` skips redundant logout when the device is already removed, bounds share teardown to 15s, and cleans up local share directories for revoked or unreachable pens instead of hanging for 2+ minutes.
