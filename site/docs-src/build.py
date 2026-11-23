@@ -17,11 +17,15 @@ import os
 import re
 
 SRC = os.path.dirname(os.path.abspath(__file__))
+WORK_SRC = os.path.normpath(os.path.join(SRC, "..", "work-docs-src"))
 PUBLIC = os.path.normpath(os.path.join(SRC, "..", "public"))
 OUT = os.path.join(PUBLIC, "docs")
 WORK_OUT = os.path.join(PUBLIC, "work", "docs")
 BASE_URL = "https://hogman.network"
 WORK_BASE_URL = "https://work.hogman.network"
+# Flip to https://get.work.hogman.network/ once DNS and signup-work-host are live.
+WORK_SIGNUP_URL = "https://get.hogman.network/#wait"
+WORK_SIGNUP_LABEL = "get.hogman.network"
 
 PAGES = [  # (file, nav title, page title, description, sidebar group)
     ("index", "Quickstart", "Docs — Quickstart", "Create a pen, join with one command, and put an HTTPS server on your private network.", "Guides"),
@@ -30,6 +34,17 @@ PAGES = [  # (file, nav title, page title, description, sidebar group)
     ("keeper", "Running a pen", "Running a pen", "Roles, invites, the herd, suspend and kick, and what keepers can and can't see.", "Guides"),
     ("security", "Architecture & security", "Architecture and security", "Packet flow, components, client isolation, DNS-01 HTTPS, threat model, host isolation, and known limits.", "Reference"),
     ("faq", "FAQ & troubleshooting", "FAQ and troubleshooting", "Common questions (Tailscale, self-hosting, VPNs, limits) and fixes for common errors.", "Reference"),
+]
+
+# Work docs use native business guides in site/work-docs-src/ and single-source
+# site/docs-src/security.html so security architecture never drifts between sites.
+WORK_PAGES = [  # (file, nav title, page title, description, sidebar group, shared_security)
+    ("index", "Quickstart", "Docs — Quickstart", "Plan site pens, bridge on-site equipment or internal web apps over HTTPS, and onboard staff with zero public IP addresses.", "Guides", False),
+    ("join", "Onboarding staff & devices", "Onboarding staff and devices", "Connect Mac and Linux workstations from single-use invite links, handle corporate VPNs, update, and disconnect.", "Guides", False),
+    ("share", "Bridging equipment & apps", "Bridging equipment and internal apps", "Bridge local LAN equipment controllers and internal web apps into a pen over HTTPS with an always-on site bridge.", "Guides", False),
+    ("keeper", "Managing access & offboarding", "Managing access and offboarding", "Owner, admin, and member roles, contractor invites, ~2-second offboarding, and backup-owner policy.", "Guides", False),
+    ("security", "Architecture & security", "Architecture and security", "Packet flow, components, client isolation, DNS-01 HTTPS, threat model, host isolation, and known limits.", "Reference", True),
+    ("faq", "FAQ & troubleshooting", "FAQ and troubleshooting", "Operational questions (firmware boundaries, multi-site design, contractors, VPNs) and fixes for common errors.", "Reference", False),
 ]
 
 H2_RE = re.compile(r'<h2\b[^>]*\bid="([^"]+)"[^>]*>(.*?)</h2>', re.DOTALL)
@@ -46,14 +61,15 @@ def work_page_rel(slug: str) -> str:
 
 
 def adapt_work_body(body: str) -> str:
-    """Adapt single-source doc fragments for work.hogman.network/docs/:
-    keep all internal doc links inside the Work docs tree and swap consumer
-    example names to neutral operational examples."""
-    out = body.replace('href="/docs/"', 'href="./"')
+    """Resolve Work template variables and adapt shared security.html examples/links
+    so all internal links stay inside work.hogman.network/docs/."""
+    out = body.replace("{{WORK_SIGNUP_URL}}", WORK_SIGNUP_URL)
+    out = out.replace("{{WORK_SIGNUP_LABEL}}", WORK_SIGNUP_LABEL)
+    out = out.replace('href="/docs/"', 'href="./"')
     out = re.sub(r'href="/docs/([^"]+)"', r'href="./\1"', out)
     out = out.replace("john-mcafee", "store-north")
     out = out.replace("deadmans-switch", "cooler-1")
-    out = out.replace("https://get.hogman.network/", "https://get.hogman.network/#wait")
+    out = out.replace("https://get.hogman.network/", WORK_SIGNUP_URL)
     return out
 
 
@@ -78,18 +94,18 @@ def build_toc(body: str) -> str:
     )
 
 
-def build_pager(idx: int, href_fn=page_href) -> str:
+def build_pager(idx: int, pages=PAGES, href_fn=page_href) -> str:
     prev_html = '<span class="pager-slot"></span>'
     next_html = '<span class="pager-slot"></span>'
     if idx > 0:
-        slug, navt, *_ = PAGES[idx - 1]
+        slug, navt = pages[idx - 1][0], pages[idx - 1][1]
         prev_html = (
             f'<a class="pager-link prev" href="{href_fn(slug)}">'
             f'<span class="pager-dir">&larr; Previous</span>'
             f'<span class="pager-title">{html_mod.escape(navt)}</span></a>'
         )
-    if idx + 1 < len(PAGES):
-        slug, navt, *_ = PAGES[idx + 1]
+    if idx + 1 < len(pages):
+        slug, navt = pages[idx + 1][0], pages[idx + 1][1]
         next_html = (
             f'<a class="pager-link next" href="{href_fn(slug)}">'
             f'<span class="pager-dir">Next &rarr;</span>'
@@ -308,9 +324,10 @@ def html_to_markdown(fragment: str, base_url: str = BASE_URL) -> str:
     return conv.render()
 
 
-def write_sitemap(base_url: str = BASE_URL, out_dir: str = PUBLIC, label: str = "sitemap.xml"):
+def write_sitemap(base_url: str = BASE_URL, out_dir: str = PUBLIC, label: str = "sitemap.xml", pages=PAGES):
     urls = [(base_url + "/", "1.0")]
-    for slug, *_ in PAGES:
+    for entry in pages:
+        slug = entry[0]
         prio = "0.9" if slug == "index" else "0.8"
         urls.append((base_url + page_href(slug), prio))
     entries = "\n".join(
@@ -327,7 +344,10 @@ def write_sitemap(base_url: str = BASE_URL, out_dir: str = PUBLIC, label: str = 
     print("wrote", label)
 
 
-def write_llms_files(bodies: list[tuple[str, str, str, str, str]]):
+def write_llms_files(
+    bodies: list[tuple[str, str, str, str, str]],
+    work_bodies: list[tuple[str, str, str, str, str]],
+):
     doc_links = "\n".join(
         f"- [{navt}]({BASE_URL}{page_href(slug)}): {desc}"
         for slug, navt, _, desc, _ in PAGES
@@ -377,7 +397,7 @@ def write_llms_files(bodies: list[tuple[str, str, str, str, str]]):
     work_dir = os.path.join(PUBLIC, "work")
     work_doc_links = "\n".join(
         f"- [{navt}]({WORK_BASE_URL}{page_href(slug)}): {desc}"
-        for slug, navt, _, desc, _ in PAGES
+        for slug, navt, _, desc, _, _ in WORK_PAGES
     )
     work_llms_txt = f"""# Hogman for Work
 
@@ -400,7 +420,7 @@ def write_llms_files(bodies: list[tuple[str, str, str, str, str]]):
 
 - [Complete Hogman for Work documentation in one Markdown file]({WORK_BASE_URL}/llms-full.txt)
 - [Hogman for Work overview]({WORK_BASE_URL}/)
-- [Request early access](https://get.hogman.network/#wait)
+- [Request early access]({WORK_SIGNUP_URL})
 - [Source code (AGPL-3.0) on GitHub](https://github.com/celtiberi/hogman)
 """
     open(os.path.join(work_dir, "llms.txt"), "w").write(work_llms_txt)
@@ -412,9 +432,9 @@ def write_llms_files(bodies: list[tuple[str, str, str, str, str]]):
         "Repository: https://github.com/celtiberi/hogman  \n"
         "License: AGPL-3.0\n"
     ]
-    for slug, navt, title, desc, body in bodies:
+    for slug, navt, title, desc, work_body in work_bodies:
         url = WORK_BASE_URL + page_href(slug)
-        md = html_to_markdown(adapt_work_body(body), WORK_BASE_URL)
+        md = html_to_markdown(work_body, WORK_BASE_URL)
         work_sections.append(f"---\n\n<!-- Page: {navt} ({url}) -->\n\n{md}")
     open(os.path.join(work_dir, "llms-full.txt"), "w").write("\n".join(work_sections))
     print("wrote work/llms-full.txt")
@@ -517,7 +537,7 @@ WORK_HEAD = """<!doctype html>
 <link rel="stylesheet" href="/work/work.css?v=2">
 {jsonld}
 </head>
-<!-- Generated by site/docs-src/build.py from site/docs-src. Edit there. -->
+<!-- Generated by site/docs-src/build.py from {src_comment}. Edit there. -->
 <body class="docs-page">
 <header class="top">
   <div class="wrap top-inner">
@@ -532,7 +552,7 @@ WORK_HEAD = """<!doctype html>
       <a href="../#uses">Use cases</a>
       <a href="../#honest">Security limits</a>
       <a href="./" aria-current="true">Docs</a>
-      <a class="nav-cta" href="https://get.hogman.network/#wait">Request access</a>
+      <a class="nav-cta" href="{signup_url}">Request access</a>
     </nav>
   </div>
 </header>
@@ -546,7 +566,7 @@ WORK_HEAD = """<!doctype html>
 WORK_FOOT = """
 {pager}
 <p class="docs-edit fine">Spot something wrong or unclear? Edit the source in
-  <a href="https://github.com/celtiberi/hogman/tree/main/site/docs-src">site/docs-src</a> on GitHub.</p>
+  <a href="{edit_href}">{edit_label}</a> on GitHub.</p>
 </main>
 {toc}
 </div>
@@ -570,9 +590,10 @@ WORK_FOOT = """
 """
 
 
-def build_sidebar(current_slug: str, href_fn=page_href) -> str:
+def build_sidebar(current_slug: str, pages=PAGES, href_fn=page_href) -> str:
     nav, group = [], None
-    for g, n, _, _, grp in PAGES:
+    for entry in pages:
+        g, n, grp = entry[0], entry[1], entry[4]
         if grp != group:
             if group is not None:
                 nav.append("</ul>")
@@ -597,16 +618,31 @@ for idx, (f, navt, title, desc, _) in enumerate(PAGES):
             desc=desc,
             href=page_href(f),
             jsonld=build_jsonld(f, navt, title, desc, body),
-            nav=build_sidebar(f, page_href),
+            nav=build_sidebar(f, PAGES, page_href),
         )
         + body
         + "\n"
-        + FOOT.format(pager=build_pager(idx, page_href), toc=build_toc(body))
+        + FOOT.format(pager=build_pager(idx, PAGES, page_href), toc=build_toc(body))
     )
     open(os.path.join(OUT, f + ".html"), "w").write(out_html)
     print("wrote", f)
 
-    work_body = adapt_work_body(body)
+work_built_bodies = []
+for idx, (f, navt, title, desc, _, shared_security) in enumerate(WORK_PAGES):
+    src_dir = SRC if shared_security else WORK_SRC
+    raw_work_body = open(os.path.join(src_dir, f + ".html")).read().strip()
+    work_body = adapt_work_body(raw_work_body)
+    work_built_bodies.append((f, navt, title, desc, work_body))
+
+    if shared_security:
+        src_comment = "site/docs-src/security.html (shared)"
+        edit_href = "https://github.com/celtiberi/hogman/blob/main/site/docs-src/security.html"
+        edit_label = "site/docs-src/security.html"
+    else:
+        src_comment = "site/work-docs-src"
+        edit_href = "https://github.com/celtiberi/hogman/tree/main/site/work-docs-src"
+        edit_label = "site/work-docs-src"
+
     work_html = (
         WORK_HEAD.format(
             title=title,
@@ -622,15 +658,22 @@ for idx, (f, navt, title, desc, _) in enumerate(PAGES):
                 site_name="Hogman for Work",
                 og_image=WORK_BASE_URL + "/work/og-work.jpg",
             ),
-            nav=build_sidebar(f, work_page_rel),
+            src_comment=src_comment,
+            signup_url=WORK_SIGNUP_URL,
+            nav=build_sidebar(f, WORK_PAGES, work_page_rel),
         )
         + work_body
         + "\n"
-        + WORK_FOOT.format(pager=build_pager(idx, work_page_rel), toc=build_toc(work_body))
+        + WORK_FOOT.format(
+            pager=build_pager(idx, WORK_PAGES, work_page_rel),
+            toc=build_toc(work_body),
+            edit_href=edit_href,
+            edit_label=edit_label,
+        )
     )
     open(os.path.join(WORK_OUT, f + ".html"), "w").write(work_html)
     print("wrote work/docs/" + f)
 
-write_sitemap(BASE_URL, PUBLIC, "sitemap.xml")
-write_sitemap(WORK_BASE_URL, os.path.join(PUBLIC, "work"), "work/sitemap.xml")
-write_llms_files(built_bodies)
+write_sitemap(BASE_URL, PUBLIC, "sitemap.xml", PAGES)
+write_sitemap(WORK_BASE_URL, os.path.join(PUBLIC, "work"), "work/sitemap.xml", WORK_PAGES)
+write_llms_files(built_bodies, work_built_bodies)

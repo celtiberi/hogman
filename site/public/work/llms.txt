@@ -13,12 +13,12 @@
 
 ## Documentation
 
-- [Quickstart](https://work.hogman.network/docs/): Create a pen, join with one command, and put an HTTPS server on your private network.
-- [Joining a pen](https://work.hogman.network/docs/join.html): Join a pen on Mac or Linux, handle VPNs and browsers, add devices, update, and leave.
-- [Hosting HTTPS servers](https://work.hogman.network/docs/share.html): Put any web app, local port, or static directory inside your pen over HTTPS (port 443).
-- [Running a pen](https://work.hogman.network/docs/keeper.html): Roles, invites, the herd, suspend and kick, and what keepers can and can't see.
+- [Quickstart](https://work.hogman.network/docs/): Plan site pens, bridge on-site equipment or internal web apps over HTTPS, and onboard staff with zero public IP addresses.
+- [Onboarding staff & devices](https://work.hogman.network/docs/join.html): Connect Mac and Linux workstations from single-use invite links, handle corporate VPNs, update, and disconnect.
+- [Bridging equipment & apps](https://work.hogman.network/docs/share.html): Bridge local LAN equipment controllers and internal web apps into a pen over HTTPS with an always-on site bridge.
+- [Managing access & offboarding](https://work.hogman.network/docs/keeper.html): Owner, admin, and member roles, contractor invites, ~2-second offboarding, and backup-owner policy.
 - [Architecture & security](https://work.hogman.network/docs/security.html): Packet flow, components, client isolation, DNS-01 HTTPS, threat model, host isolation, and known limits.
-- [FAQ & troubleshooting](https://work.hogman.network/docs/faq.html): Common questions (Tailscale, self-hosting, VPNs, limits) and fixes for common errors.
+- [FAQ & troubleshooting](https://work.hogman.network/docs/faq.html): Operational questions (firmware boundaries, multi-site design, contractors, VPNs) and fixes for common errors.
 
 ## Full documentation & links
 
