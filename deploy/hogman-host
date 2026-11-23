@@ -1020,8 +1020,8 @@ PEN_GID=65532   # the group the pens' registrars run as (H3); it may use the API
 # challenge-dns-setup keeps it. Let's Encrypt accounts stay without one.
 CDNS_CONTACT_DROPIN=/etc/systemd/system/hogman-challenge-dns.service.d/contact.conf
 cmd_fallback_contact() {
-  local addr="${1:-}"
-  [[ "$addr" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] \
+  local addr="${1:-}"   # no %: systemd would read it as a specifier
+  [[ "$addr" =~ ^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] \
     || die "usage: hogman-host fallback-contact <email>   (an operator address, e.g. ops@example.com)"
   [ -f "$CDNS_UNIT" ] || die "set up the challenge DNS server first: hogman-host challenge-dns-setup <public-ip> <gcp-key.json>"
   install -d -m 0755 "$(dirname "$CDNS_CONTACT_DROPIN")"
