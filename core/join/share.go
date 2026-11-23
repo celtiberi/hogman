@@ -699,10 +699,11 @@ func formatFreshShareCertError(fqdn, name string, err error) error {
 
 // hasPathTraversal reports whether a request's path or raw escaped path attempts
 // to traverse out of a subpath-scoped reverse-proxy target using dot-segments,
-// backslashes, or percent-encoded dots/slashes.
+// backslashes, or percent-encoded dots/backslashes (while allowing legitimate
+// percent-encoded slashes like %2F inside non-traversal path parameters).
 func hasPathTraversal(u *url.URL) bool {
 	raw := strings.ToLower(u.EscapedPath())
-	if strings.Contains(raw, "%2e") || strings.Contains(raw, "%2f") || strings.Contains(raw, "%5c") || strings.Contains(raw, "\\") {
+	if strings.Contains(raw, "%2e") || strings.Contains(raw, "%5c") || strings.Contains(raw, "\\") {
 		return true
 	}
 	for _, seg := range strings.Split(u.Path, "/") {

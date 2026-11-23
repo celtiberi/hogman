@@ -194,7 +194,13 @@ function connectWatch() {
       lastSnapshot = null;
       state.connected = false;
       state.nativeError = errMsg;
-      applyProxyConfig().catch(() => updateBadge());
+      // If the native host was uninstalled/missing, clear any persisted OS proxy
+      // conflict flag so Chrome does not stay stepped aside forever.
+      const hostMissing = /not found|does not exist|not registered/i.test(errMsg);
+      const prep = hostMissing
+        ? chrome.storage.local.remove(["lastKnownOSProxyConflict", "lastKnownOSProxyKind"]).catch(() => {})
+        : Promise.resolve();
+      prep.then(() => applyProxyConfig()).catch(() => updateBadge());
       scheduleReconnect();
     });
 
@@ -222,9 +228,11 @@ async function refreshNow() {
 }
 
 chrome.runtime.onInstalled.addListener(() => {
+  applyProxyConfig().catch(() => {});
   connectWatch();
 });
 chrome.runtime.onStartup.addListener(() => {
+  applyProxyConfig().catch(() => {});
   connectWatch();
 });
 
@@ -261,4 +269,5 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return false;
 });
 
+applyProxyConfig().catch(() => {});
 connectWatch();

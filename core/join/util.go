@@ -41,7 +41,7 @@ func confirm(prompt string) bool {
 // sudoPath returns the absolute path to sudo from trusted system directories so
 // a poisoned PATH entry cannot hijack privileged invocations.
 func sudoPath() string {
-	for _, p := range []string{"/usr/bin/sudo", "/bin/sudo"} {
+	for _, p := range []string{"/usr/bin/sudo", "/bin/sudo", "/run/wrappers/bin/sudo"} {
 		if info, err := os.Stat(p); err == nil && !info.IsDir() {
 			return p
 		}

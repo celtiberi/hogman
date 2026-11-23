@@ -9,6 +9,7 @@ import {
 
 const NATIVE_HOST = "network.hogman.browser";
 const REFRESH_TTL_MS = 10000;
+const NATIVE_ERROR_BACKOFF_MS = 5000;
 const UNKNOWN_REFRESH_COOLDOWN_MS = 15000;
 const HOST_PERMISSION_ORIGINS = [
   "*://*.pens.hogman.network/*",
@@ -18,6 +19,7 @@ const HOST_PERMISSION_ORIGINS = [
 let cachedSnapshot = null;
 let cachedRoutes = {};
 let lastFetchAt = 0;
+let lastFailedFetchAt = 0;
 let lastUnknownRefreshAt = 0;
 let inFlightRefresh = null;
 
@@ -112,6 +114,9 @@ function refreshSnapshot(force = false) {
   if (!force && cachedSnapshot && Date.now() - lastFetchAt < REFRESH_TTL_MS) {
     return rebuildRoutesFromCache();
   }
+  if (!force && !cachedSnapshot && lastFailedFetchAt > 0 && Date.now() - lastFailedFetchAt < NATIVE_ERROR_BACKOFF_MS) {
+    return rebuildRoutesFromCache();
+  }
   if (inFlightRefresh) return inFlightRefresh;
   inFlightRefresh = (async () => {
     try {
@@ -119,12 +124,14 @@ function refreshSnapshot(force = false) {
       if (resp && resp.ok) {
         cachedSnapshot = resp;
         lastFetchAt = Date.now();
+        lastFailedFetchAt = 0;
         state.connected = true;
         state.nativeError = "";
       } else {
         cachedSnapshot = null;
         cachedRoutes = {};
         lastFetchAt = 0;
+        lastFailedFetchAt = Date.now();
         state.connected = false;
         state.nativeError = (resp && resp.error) || "unexpected native host response";
       }
@@ -132,6 +139,7 @@ function refreshSnapshot(force = false) {
       cachedSnapshot = null;
       cachedRoutes = {};
       lastFetchAt = 0;
+      lastFailedFetchAt = Date.now();
       state.connected = false;
       state.nativeError = String(err && err.message ? err.message : err);
     } finally {

@@ -302,6 +302,16 @@ func runAgent(dir string) error {
 		return fmt.Errorf("agent config: %w", err)
 	}
 	c.trustControlCA()
+
+	// Bind the proxy port BEFORE writing agent.pid or rotating status.token so
+	// a duplicate agent that fails to bind never invalidates a running agent's
+	// status.token or deletes its PID file.
+	ln, err := net.Listen("tcp", c.ProxyAddr)
+	if err != nil {
+		return fmt.Errorf("proxy: %w", err)
+	}
+	defer ln.Close()
+
 	_ = os.WriteFile(filepath.Join(dir, "agent.pid"), []byte(strconv.Itoa(os.Getpid())), 0o600)
 	defer os.Remove(filepath.Join(dir, "agent.pid"))
 
@@ -323,10 +333,6 @@ func runAgent(dir string) error {
 	a.statusToken = statusTok
 
 	// Serve the proxy straight away, so the setup step can watch us come up.
-	ln, err := net.Listen("tcp", c.ProxyAddr)
-	if err != nil {
-		return fmt.Errorf("proxy: %w", err)
-	}
 	srv := &http.Server{Handler: a, ReadHeaderTimeout: 15 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
 
@@ -575,16 +581,33 @@ func (a *agent) pac() string {
 	return a.cfg.pac()
 }
 
-// rejectBrowserProbe blocks cross-origin browser requests (<script>, fetch,
-// <img>, iframe) to the local agent's control endpoints (/proxy.pac, /status).
-// System PAC fetchers, hogman-join, and the native host never send browser
-// Origin/Referer/Sec-Fetch-* headers.
+// rejectBrowserProbe applies Fetch Metadata resource isolation to the local
+// agent's control endpoints (/proxy.pac, /status). Non-browser callers (OS PAC
+// fetchers, hogman-join, native host) send no Fetch Metadata headers, and
+// Firefox's internal PAC loader sends Sec-Fetch-Site: none (with Dest: empty).
+// Cross-site/same-site web requests and subresource loads (<script>, <img>,
+// <iframe>) are rejected with 403.
 func rejectBrowserProbe(w http.ResponseWriter, r *http.Request) bool {
-	for _, hdr := range []string{"Origin", "Referer", "Sec-Fetch-Site", "Sec-Fetch-Dest", "Sec-Fetch-Mode"} {
-		if strings.TrimSpace(r.Header.Get(hdr)) != "" {
+	if strings.TrimSpace(r.Header.Get("Origin")) != "" || strings.TrimSpace(r.Header.Get("Referer")) != "" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return true
+	}
+	site := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")))
+	dest := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")))
+	mode := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Mode")))
+	if site != "" {
+		if site != "none" && site != "same-origin" {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return true
 		}
+	} else if dest != "" || mode != "" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return true
+	}
+	switch dest {
+	case "script", "image", "iframe", "embed", "object", "style", "media", "font":
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return true
 	}
 	return false
 }

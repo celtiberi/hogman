@@ -387,9 +387,8 @@ func collectNativePens(configBase string) ([]nativePenEntry, []*agentConfig) {
 		entry := nativePenEntry{
 			Zone:         cfg.Zone,
 			Port:         port,
-			Up:           state == agentEndpointUp || state == agentEndpointLegacyUp,
+			Up:           state == agentEndpointUp,
 			Hosted:       isHostedPenZone(cfg.Zone),
-			Legacy:       state == agentEndpointLegacyUp,
 			statusReason: detail.reason,
 		}
 		if state == agentEndpointSquatted {
@@ -413,7 +412,6 @@ type agentEndpointState int
 const (
 	agentEndpointDown agentEndpointState = iota
 	agentEndpointUp
-	agentEndpointLegacyUp
 	agentEndpointSquatted
 )
 

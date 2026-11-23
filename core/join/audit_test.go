@@ -35,23 +35,77 @@ func TestAuditAgentBlocksBrowserProbesAndSetsSecurityHeaders(t *testing.T) {
 			t.Fatalf("%s Cache-Control = %q, want no-store", path, got)
 		}
 
-		// Any browser probe header is rejected with 403.
-		for _, hdr := range []struct{ k, v string }{
-			{"Origin", "https://evil.example"},
-			{"Referer", "https://evil.example/page"},
-			{"Sec-Fetch-Site", "cross-site"},
-			{"Sec-Fetch-Dest", "script"},
-			{"Sec-Fetch-Mode", "no-cors"},
+		// Firefox's internal PAC loader sends Sec-Fetch-Site: none with Dest: empty
+		// (and same-origin direct loads send Sec-Fetch-Site: same-origin): allow both.
+		for _, allowed := range []map[string]string{
+			{"Sec-Fetch-Site": "none", "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "no-cors"},
+			{"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Dest": "empty"},
+		} {
+			reqOK := httptest.NewRequest(http.MethodGet, path, nil)
+			reqOK.Host = "127.0.0.1:22111"
+			for k, v := range allowed {
+				reqOK.Header.Set(k, v)
+			}
+			recOK := httptest.NewRecorder()
+			a.ServeHTTP(recOK, reqOK)
+			if recOK.Code != http.StatusOK {
+				t.Fatalf("%s with %v = %d, want 200", path, allowed, recOK.Code)
+			}
+		}
+
+		// Cross-site, same-site, Origin, Referer, and subresource loads are rejected.
+		for _, blocked := range []map[string]string{
+			{"Origin": "https://evil.example"},
+			{"Referer": "https://evil.example/page"},
+			{"Sec-Fetch-Site": "cross-site"},
+			{"Sec-Fetch-Site": "same-site"},
+			{"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Dest": "script"},
+			{"Sec-Fetch-Dest": "script"},
+			{"Sec-Fetch-Mode": "no-cors"},
 		} {
 			req2 := httptest.NewRequest(http.MethodGet, path, nil)
 			req2.Host = "127.0.0.1:22111"
-			req2.Header.Set(hdr.k, hdr.v)
+			for k, v := range blocked {
+				req2.Header.Set(k, v)
+			}
 			rec2 := httptest.NewRecorder()
 			a.ServeHTTP(rec2, req2)
 			if rec2.Code != http.StatusForbidden {
-				t.Fatalf("%s with %s=%q = %d, want 403", path, hdr.k, hdr.v, rec2.Code)
+				t.Fatalf("%s with %v = %d, want 403", path, blocked, rec2.Code)
 			}
 		}
+	}
+}
+
+func TestAuditDuplicateAgentBindFailurePreservesRunningToken(t *testing.T) {
+	dir := t.TempDir()
+	ln, port := listenInHogmanRange(t)
+	cfg := &agentConfig{Zone: "dup.pens.hogman.network", ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port)}
+	if err := cfg.save(dir); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := writeStatusToken(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := newAgent(cfg, nil)
+	a.up = true
+	a.statusToken = tok
+	srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: a}}
+	srv.Start()
+	defer srv.Close()
+
+	// A second runAgent pointing at the same directory fails to bind ProxyAddr
+	// and MUST NOT overwrite or delete the running agent's status.token.
+	if err := runAgent(dir); err == nil {
+		t.Fatal("duplicate runAgent unexpectedly succeeded on an occupied port")
+	}
+	st, err := agentStateInDir(dir, cfg)
+	if err != nil || !st.Up {
+		t.Fatalf("running agent failed verification after duplicate bind failure: st=%+v err=%v", st, err)
+	}
+	if state := verifyAgentEndpoint(dir, cfg); state != agentEndpointUp {
+		t.Fatalf("verifyAgentEndpoint after duplicate bind failure = %v, want agentEndpointUp", state)
 	}
 }
 
@@ -128,11 +182,11 @@ func TestAuditShareSubpathBlocksTraversal(t *testing.T) {
 		t.Fatalf("traversal requests reached upstream: %v", gotPaths)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "https://app.farm.pens.hogman.network/items", nil)
+	req := httptest.NewRequest(http.MethodGet, "https://app.farm.pens.hogman.network/items/a%2Fb", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || len(gotPaths) != 1 || gotPaths[0] != "/sub/items" {
-		t.Fatalf("valid subpath request: code=%d paths=%v", rec.Code, gotPaths)
+	if rec.Code != http.StatusOK || len(gotPaths) != 1 || gotPaths[0] != "/sub/items/a/b" {
+		t.Fatalf("valid subpath request with %%2F: code=%d paths=%v", rec.Code, gotPaths)
 	}
 }
 
@@ -157,12 +211,15 @@ func TestAuditControlClientBlocksCrossHostRedirect(t *testing.T) {
 }
 
 func TestAuditSystemdQuoteEscapesPercentAndNewlines(t *testing.T) {
-	got := systemdQuote("/tmp/foo%h/bar\nExecStart=/evil\r")
+	got := systemdQuote("/tmp/foo%h/$HOME/bar\nExecStart=/evil\r")
 	if strings.ContainsAny(got, "\r\n") {
 		t.Fatalf("systemdQuote left newline: %q", got)
 	}
 	if !strings.Contains(got, "%%h") {
 		t.Fatalf("systemdQuote did not escape %%: %q", got)
+	}
+	if !strings.Contains(got, "$$HOME") {
+		t.Fatalf("systemdQuote did not escape $: %q", got)
 	}
 }
 
