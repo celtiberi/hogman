@@ -4,103 +4,160 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>Home</title>
+<meta name="theme-color" content="#0e080c">
+<title>Home · Hogman</title>
+<link rel="icon" href="/hogman-32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="/hogman-48.png" type="image/png" sizes="48x48">
 <link rel="stylesheet" href="/portal.css">
 </head>
 <body>
-<h1 id="hello">You're in.</h1>
-<p class="sub" id="whoami">This page is only reachable from inside the network.</p>
 
-<section id="sites" hidden>
-  <h2>Sites in this pen</h2>
-  <p class="muted hint" id="sites-empty" hidden>No sites yet. Put a folder or a website here with
-    <code>./hogman-join share NAME FOLDER-or-PORT</code> (see Host something, below).</p>
-  <ul class="devices" id="directory"></ul>
-  <p class="error" id="sites-err" hidden></p>
-</section>
+<header class="top">
+  <div class="top-inner">
+    <div class="top-brand">
+      <a class="brand" href="#top" aria-label="Pen home">
+        <img class="brand-icon" src="/hogman-icon.webp" width="28" height="28" alt="">
+        <span>H&Ouml;GMAN</span>
+      </a>
+      <span class="pen-pill zone" aria-label="Pen domain">your pen</span>
+    </div>
+    <nav aria-label="Pen sections">
+      <a href="#sites">Sites</a>
+      <a href="#mine">Devices</a>
+      <a href="#invite">Invites</a>
+      <a href="#herd">The herd</a>
+      <a href="#host">Host</a>
+      <a href="https://hogman.network/docs/" target="_blank" rel="noopener noreferrer">Docs</a>
+    </nav>
+  </div>
+</header>
+<div class="studs" aria-hidden="true"></div>
 
-<section id="mine" hidden>
-  <h2>Your devices</h2>
-  <ul class="devices" id="devices"></ul>
+<main id="top" class="shell">
+  <section class="hero">
+    <p class="status-pill"><span class="status-dot" aria-hidden="true"></span>Inside your pen &middot; Private HTTPS only</p>
+    <h1 id="hello">You're in.</h1>
+    <p class="sub" id="whoami">This page is only reachable from inside the network.</p>
+  </section>
 
-  <div class="card">
-    <strong>Add a device</strong>
-    <p class="muted hint">Get a one-time link for another computer or your phone. It joins as you,
-      works once, and expires in an hour. A share link is for putting something in the pen from
-      a computer that isn't in it.</p>
-    <button class="primary" id="add-personal" type="button">Add a device</button>
-    <button id="add-server" type="button">Get a share link</button>
-    <div id="newlink" hidden>
-      <div class="qr">
-        <img id="qr" alt="QR code for the one-time device link">
-        <div class="info">
-          <p id="phone-line"><strong>Phone:</strong> scan this with the Hogman app (coming soon).</p>
-          <p id="computer-line">Computer: open this link on it and follow the steps:</p>
-          <div class="linkbox" id="linktext"></div>
-          <p><button id="copy" type="button">Copy link</button> <span class="muted" id="expires"></span></p>
+  <section id="sites" class="panel" hidden>
+    <div class="section-head">
+      <h2>Sites in this pen</h2>
+      <a class="section-link" href="#host">Host a site &darr;</a>
+    </div>
+    <p class="muted hint" id="sites-empty" hidden>No sites yet. Put a folder or a website here with
+      <code>~/hogman-join share NAME FOLDER-or-PORT</code> (see <a href="#host">Host something</a> below).</p>
+    <ul class="devices site-grid" id="directory"></ul>
+    <p class="error" id="sites-err" hidden></p>
+  </section>
+
+  <section id="mine" class="panel" hidden>
+    <div class="section-head">
+      <h2>Your devices</h2>
+    </div>
+    <ul class="devices" id="devices"></ul>
+
+    <div class="card">
+      <div class="card-head">
+        <strong>Add a device or share link</strong>
+      </div>
+      <p class="muted hint">Get a one-time link for another computer or your phone. It joins as you,
+        works once, and expires in an hour. A share link is for putting something in the pen from
+        a computer that isn't in it.</p>
+      <div class="btn-row">
+        <button class="primary" id="add-personal" type="button">Add a device</button>
+        <button id="add-server" type="button">Get a share link</button>
+      </div>
+      <div id="newlink" class="link-reveal" hidden>
+        <div class="qr">
+          <img id="qr" alt="QR code for the one-time device link">
+          <div class="info">
+            <p id="phone-line"><strong>Phone:</strong> scan this with the Hogman app (coming soon).</p>
+            <p id="computer-line">Computer: open this link on it and follow the steps:</p>
+            <div class="linkbox" id="linktext"></div>
+            <p class="copy-row"><button id="copy" type="button">Copy link</button> <span class="muted small" id="expires"></span></p>
+          </div>
         </div>
       </div>
+      <p class="error" id="adderr" hidden></p>
     </div>
-    <p class="error" id="adderr" hidden></p>
-  </div>
+  </section>
 
-</section>
+  <section id="invite" class="panel" hidden>
+    <div class="section-head">
+      <h2>Invite someone</h2>
+    </div>
+    <div class="card">
+      <p class="muted hint">A link for one person. They open it, pick a name, and run one command.
+        It works once and lasts a week.</p>
+      <form id="invite-form" class="row">
+        <input id="invite-note" maxlength="200" placeholder="Who is it for? (a note for keepers)" autocomplete="off">
+        <button class="primary" id="invite-make" type="submit">Make an invite</button>
+      </form>
+      <div id="invite-new" class="link-reveal" hidden>
+        <div class="qr">
+          <img id="invite-qr" alt="QR code for the invite link">
+          <div class="info">
+            <p>Send this link to them, any way you like:</p>
+            <div class="linkbox" id="invite-link"></div>
+            <p class="copy-row"><button id="invite-copy" type="button">Copy link</button> <span class="muted small" id="invite-exp"></span></p>
+          </div>
+        </div>
+      </div>
+      <p class="error" id="invite-err" hidden></p>
+    </div>
+    <h3 id="invites-title" hidden>Open invites</h3>
+    <ul class="devices" id="invites"></ul>
+  </section>
 
-<section id="invite" hidden>
-  <h2>Invite someone</h2>
-  <div class="card">
-    <p class="muted hint">A link for one person. They open it, pick a name, and copy one command.
-      It works once and lasts a week.</p>
-    <form id="invite-form" class="row">
-      <input id="invite-note" maxlength="200" placeholder="Who is it for? (a note for keepers)" autocomplete="off">
-      <button class="primary" id="invite-make" type="submit">Make an invite</button>
+  <section id="herd" class="panel" hidden>
+    <div class="section-head">
+      <h2>The herd</h2>
+      <p class="muted small herd-count" id="herd-count"></p>
+    </div>
+    <p class="muted hint">Everyone in the pen. Suspending cuts all their devices off at once and can
+      be undone. Kicking ends their membership for good and permanently retires their names.</p>
+    <p class="callout warn error" id="solo-owner" hidden><strong>You're the only owner.</strong> If you lose
+      every device, nobody can manage this pen again — there is no account recovery. Make someone
+      you trust completely an owner (make them an admin, then an owner).</p>
+    <p class="muted hint">Someone lost every device? There is no account recovery: invite them
+      again as a new member, give them back their role, then kick the old account (an old owner
+      account has to be made an admin first).</p>
+    <form class="row search-row" id="herd-form" role="search">
+      <input id="herd-q" type="search" placeholder="Find someone by name" autocomplete="off" maxlength="32">
     </form>
-    <div id="invite-new" hidden>
-      <div class="qr">
-        <img id="invite-qr" alt="QR code for the invite link">
-        <div class="info">
-          <p>Send this link to them, any way you like:</p>
-          <div class="linkbox" id="invite-link"></div>
-          <p><button id="invite-copy" type="button">Copy link</button> <span class="muted" id="invite-exp"></span></p>
-        </div>
-      </div>
+    <ul class="devices" id="members"></ul>
+    <p class="more-row"><button id="herd-more" type="button" hidden>Show more</button></p>
+    <p class="error" id="herd-err" hidden></p>
+  </section>
+
+  <section id="host" class="panel">
+    <div class="section-head">
+      <h2>Host something</h2>
+      <a class="section-link" href="https://hogman.network/docs/share.html" target="_blank" rel="noopener noreferrer">Hosting guide &rarr;</a>
     </div>
-    <p class="error" id="invite-err" hidden></p>
-  </div>
-  <h3 id="invites-title" hidden>Open invites</h3>
-  <ul class="devices" id="invites"></ul>
-</section>
+    <p class="host-intro">One command puts a folder or a web server in the pen, with its own name and a real browser padlock.
+      Run it with the same <code>hogman-join</code> you joined with, on a computer that's in the pen:</p>
+    <pre><code>~/hogman-join share photos ~/holiday --note "Summer trip photos"
+~/hogman-join share blog 3000            # a site you're building, by its port</code></pre>
+    <p class="muted hint">Everyone in the pen can then open <code>https://blog.<span class="zone">&lt;network&gt;.pens.hogman.network</span></code>.
+      Add <code>--background</code> to keep it running after the window closes;
+      <code>~/hogman-join share stop blog</code> takes it down and frees the name.</p>
+    <p class="muted hint">Running from a spare computer that isn't in the pen? Click <em>Get a share link</em>
+      above and pass the link at the end: <code>~/hogman-join share blog 3000 '&lt;share link&gt;'</code>.
+      Already run Caddy or nginx? Share its port.</p>
+  </section>
+</main>
 
-<section id="herd" hidden>
-  <h2>The herd</h2>
-  <p class="muted hint">Everyone in the pen. Suspending cuts all their devices off at once and can
-    be undone. Kicking ends their membership for good.</p>
-  <p class="error" id="solo-owner" hidden><strong>You're the only owner.</strong> If you lose
-    every device, nobody can manage this pen again: there is no account recovery. Make someone
-    you trust completely an owner (make them an admin, then an owner).</p>
-  <p class="muted hint">Someone lost every device? There is no account recovery: invite them
-    again as a new member, give them back their role, then kick the old account (an old owner
-    account has to be made an admin first).</p>
-  <form class="row" id="herd-form" role="search">
-    <input id="herd-q" type="search" placeholder="Find someone by name" autocomplete="off" maxlength="32">
-  </form>
-  <p class="muted small" id="herd-count"></p>
-  <ul class="devices" id="members"></ul>
-  <p><button id="herd-more" type="button" hidden>Show more</button></p>
-  <p class="error" id="herd-err" hidden></p>
-</section>
-
-<h2>Host something</h2>
-<p>One command puts a folder or a website in the pen, with its own name and the padlock.
-Run it with the same <code>hogman-join</code> you joined with, on a computer that's in the pen:</p>
-<pre><code>./hogman-join share photos ~/holiday --note "Summer trip photos"
-./hogman-join share blog 3000            # a site you're building, by its port</code></pre>
-<p class="muted">Everyone in the pen can then open <code>https://blog.<span class="zone">&lt;network&gt;.pens.hogman.network</span></code>.
-Add <code>--background</code> to keep it running after the window closes;
-<code>./hogman-join share stop blog</code> takes it down and frees the name.</p>
-<p>A computer that isn't in the pen, like a spare box in the closet? Press <em>Get a share link</em>
-above, and put the link at the end: <code>./hogman-join share blog 3000 '&lt;share link&gt;'</code>.
-Already run a web server such as Caddy or nginx? Share its port.</p>
+<footer class="foot">
+  <p>Keep a clean pen.</p>
+  <p class="foot-links">
+    <a href="https://hogman.network/" target="_blank" rel="noopener noreferrer">hogman.network</a> &middot;
+    <a href="https://hogman.network/docs/" target="_blank" rel="noopener noreferrer">Docs</a> &middot;
+    <a href="https://hogman.network/docs/share.html" target="_blank" rel="noopener noreferrer">Hosting</a> &middot;
+    <a href="https://hogman.network/docs/faq.html" target="_blank" rel="noopener noreferrer">FAQ</a>
+  </p>
+</footer>
 
 <script src="/portal.js" defer></script>
 </body>
