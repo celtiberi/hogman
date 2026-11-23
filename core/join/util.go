@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 func sha1Hex(b []byte) string {
@@ -27,9 +28,22 @@ func isTerminal() bool {
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
+var (
+	stdinMu     sync.Mutex
+	stdinFile   *os.File
+	stdinReader *bufio.Reader
+)
+
 func ask(prompt string) string {
 	fmt.Print(prompt)
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	stdinMu.Lock()
+	if stdinReader == nil || stdinFile != os.Stdin {
+		stdinFile = os.Stdin
+		stdinReader = bufio.NewReader(os.Stdin)
+	}
+	r := stdinReader
+	stdinMu.Unlock()
+	line, _ := r.ReadString('\n')
 	return strings.TrimSpace(line)
 }
 
@@ -85,7 +99,9 @@ func run(asRoot bool, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
-	cmd.Stdin = os.Stdin // lets sudo ask for a password
+	if asRoot && !isRoot() {
+		cmd.Stdin = os.Stdin // lets sudo ask for a password without leaking native-host stdin to unprivileged children
+	}
 	err := cmd.Run()
 	return strings.TrimSpace(out.String()), err
 }

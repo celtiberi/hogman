@@ -426,6 +426,14 @@ func verifyAgentEndpoint(dir string, cfg *agentConfig) agentEndpointState {
 	return state
 }
 
+// loopbackStatusTransport disables keep-alive pooling so frequent 1-second
+// loopback /status probes never accumulate idle sockets or readLoop/writeLoop
+// goroutines in hogman-native-host or hogman-join agent.
+var loopbackStatusTransport = &http.Transport{
+	Proxy:             nil,
+	DisableKeepAlives: true,
+}
+
 func verifyAgentEndpointDetail(dir string, cfg *agentConfig) (agentEndpointState, agentEndpointDetail) {
 	tokBytes, tokErr := os.ReadFile(filepath.Join(dir, statusTokenFilename))
 	token := strings.TrimSpace(string(tokBytes))
@@ -442,10 +450,8 @@ func verifyAgentEndpointDetail(dir string, cfg *agentConfig) (agentEndpointState
 	}
 	req.Header.Set("X-Hogman-Challenge", nonce)
 	client := &http.Client{
-		Timeout: 400 * time.Millisecond,
-		Transport: &http.Transport{
-			Proxy: nil, // always hit loopback directly
-		},
+		Timeout:       400 * time.Millisecond,
+		Transport:     loopbackStatusTransport,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	resp, err := client.Do(req)
@@ -754,11 +760,29 @@ func browserSetupCmd(args []string, o options) error {
 	return nil
 }
 
+func corruptPenConfigs(configBase string) []string {
+	var bad []string
+	m, _ := filepath.Glob(filepath.Join(configBase, "*", "config.json"))
+	sort.Strings(m)
+	for _, f := range m {
+		dir := filepath.Dir(f)
+		zoneDir := filepath.Base(dir)
+		c, err := loadAgentConfig(dir)
+		if err != nil || c.Zone == "" || c.Zone != zoneDir || !validPACZone(c.Zone) {
+			bad = append(bad, zoneDir)
+		}
+	}
+	return bad
+}
+
 func statusCmd() error {
 	base := hogmanConfigBase()
 	pens, configs := collectNativePens(base)
 	if len(pens) == 0 {
 		say("No pens installed on this computer.")
+		if shares := allShares(""); len(shares) > 0 {
+			say("  (%d local share(s) configured; run 'hogman-join share list' to see them)", len(shares))
+		}
 	} else {
 		say("Pens:")
 		for _, p := range pens {
@@ -778,6 +802,9 @@ func statusCmd() error {
 			}
 			say("  %-42s  %-16s  %s", p.Zone, addr, state)
 		}
+	}
+	if bad := corruptPenConfigs(base); len(bad) > 0 {
+		say("\n! Unreadable or invalid pen settings in %s: %s", base, strings.Join(bad, ", "))
 	}
 
 	sys := detectSystemProxyState(configs)

@@ -71,7 +71,7 @@ func registerNativeManifests(configBase, hostPath string, chromeIDs, firefoxIDs 
 			}
 			manifestPath = firefoxPath
 		}
-		if out, err := exec.Command("reg.exe", "add", rk.key, "/ve", "/t", "REG_SZ", "/d", manifestPath, "/f").CombinedOutput(); err != nil {
+		if out, err := exec.Command(winSystem32("reg.exe"), "add", rk.key, "/ve", "/t", "REG_SZ", "/d", manifestPath, "/f").CombinedOutput(); err != nil {
 			return written, fmt.Errorf("register %s: %v (%s)", rk.key, err, firstLine(string(out)))
 		}
 		written++
@@ -80,8 +80,9 @@ func registerNativeManifests(configBase, hostPath string, chromeIDs, firefoxIDs 
 }
 
 func unregisterNativeManifests(configBase string) {
+	regExe := winSystem32("reg.exe")
 	for _, rk := range windowsNativeRegKeys {
-		_ = exec.Command("reg.exe", "delete", rk.key, "/f").Run()
+		_ = exec.Command(regExe, "delete", rk.key, "/f").Run()
 	}
 	binDir := filepath.Join(configBase, "bin")
 	_ = os.Remove(filepath.Join(binDir, nativeHostName+".chrome.json"))

@@ -21,13 +21,17 @@ func startExistingBinary(bin, dir string, c *agentConfig, noService bool) error 
 	unit := renderSystemdUnit(c.Zone, bin, dir)
 	path := unitPath(c.Zone)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		note("could not write user service for %s (%v); running in the background until restart", c.Zone, err)
 		return startDetached(bin, dir)
 	}
 	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
+		note("could not write user service for %s (%v); running in the background until restart", c.Zone, err)
 		return startDetached(bin, dir)
 	}
-	_, _ = run(false, "systemctl", "--user", "daemon-reload")
-	if _, err := run(false, "systemctl", "--user", "enable", "--now", unitName(c.Zone)); err != nil {
+	sc := systemctlBin()
+	_, _ = run(false, sc, "--user", "daemon-reload")
+	if out, err := run(false, sc, "--user", "enable", "--now", unitName(c.Zone)); err != nil {
+		note("could not start user service for %s (%s); running in the background until restart", c.Zone, firstLine(out))
 		return startDetached(bin, dir)
 	}
 	return nil

@@ -6,10 +6,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -540,38 +540,54 @@ func (m *shareCertManager) storageHasPair(ctx context.Context, issuerKey string)
 		m.storage.Exists(ctx, certmagic.StorageKeys.SitePrivateKey(issuerKey, m.host))
 }
 
+// storageCertFresh inspects the stored leaf certificate without loading it into
+// the in-memory TLS cache, returning true only when the cert/key pair exists,
+// is currently valid, and has more than one-third of its lifetime remaining.
+func (m *shareCertManager) storageCertFresh(ctx context.Context, issuerKey string) bool {
+	if !m.storageHasPair(ctx, issuerKey) {
+		return false
+	}
+	raw, err := m.storage.Load(ctx, certmagic.StorageKeys.SiteCert(issuerKey, m.host))
+	if err != nil {
+		return false
+	}
+	blk, _ := pem.Decode(raw)
+	if blk == nil {
+		return false
+	}
+	leaf, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		return false
+	}
+	// Match certmagic.Certificate.NeedsRenewal, which evaluates cert validity
+	// against wall-clock time (m.now is only for the retry backoff clock).
+	now := time.Now()
+	if now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) {
+		return false
+	}
+	lifetime := leaf.NotAfter.Sub(leaf.NotBefore)
+	remaining := leaf.NotAfter.Sub(now)
+	return lifetime > 0 && remaining > lifetime/3
+}
+
 func (m *shareCertManager) getConfigForCert(_ certmagic.Certificate) (*certmagic.Config, error) {
 	ctx := context.Background()
-	if m.fallbackCfg != nil && m.fallbackIss != nil {
-		if m.storageHasPair(ctx, m.fallbackIss.IssuerKey()) && !m.storageHasPair(ctx, m.primaryIss.IssuerKey()) {
-			return m.fallbackCfg, nil
-		}
+	if m.fallbackCfg != nil && m.fallbackIss != nil &&
+		!m.storageCertFresh(ctx, m.primaryIss.IssuerKey()) &&
+		m.storageCertFresh(ctx, m.fallbackIss.IssuerKey()) {
+		return m.fallbackCfg, nil
 	}
 	return m.primaryCfg, nil
 }
 
-func (m *shareCertManager) cachedNeedsRenewal(ctx context.Context, cfg *certmagic.Config, iss *certmagic.ACMEIssuer) (bool, error) {
-	if cfg == nil || iss == nil {
-		return false, fs.ErrNotExist
-	}
-	if !m.storageHasPair(ctx, iss.IssuerKey()) {
-		return false, fs.ErrNotExist
-	}
-	cert, err := cfg.CacheManagedCertificate(ctx, m.host)
-	if err != nil {
-		return false, err
-	}
-	return cert.NeedsRenewal(cfg), nil
-}
-
 func (m *shareCertManager) ensureCachedLocked(ctx context.Context) bool {
-	needsRenew, err := m.cachedNeedsRenewal(ctx, m.primaryCfg, m.primaryIss)
-	if err == nil && !needsRenew {
-		return true
+	if m.storageCertFresh(ctx, m.primaryIss.IssuerKey()) {
+		if _, err := m.primaryCfg.CacheManagedCertificate(ctx, m.host); err == nil {
+			return true
+		}
 	}
-	if errors.Is(err, fs.ErrNotExist) && m.fallbackCfg != nil {
-		fbRenew, fbErr := m.cachedNeedsRenewal(ctx, m.fallbackCfg, m.fallbackIss)
-		if fbErr == nil && !fbRenew {
+	if m.fallbackCfg != nil && m.fallbackIss != nil && m.storageCertFresh(ctx, m.fallbackIss.IssuerKey()) {
+		if _, err := m.fallbackCfg.CacheManagedCertificate(ctx, m.host); err == nil {
 			return true
 		}
 	}
@@ -714,7 +730,7 @@ func (m *shareCertManager) Ensure(ctx context.Context) error {
 
 	err := m.syncCert(ctx, m.primaryCfg, m.primaryIss)
 	if err == nil {
-		_, _ = m.cachedNeedsRenewal(ctx, m.primaryCfg, m.primaryIss)
+		_, _ = m.primaryCfg.CacheManagedCertificate(ctx, m.host)
 		m.clearRetryState()
 		return nil
 	}
@@ -727,7 +743,7 @@ func (m *shareCertManager) Ensure(ctx context.Context) error {
 	if fbErr != nil {
 		return fmt.Errorf("primary failed (%w); fallback failed: %v", err, fbErr)
 	}
-	_, _ = m.cachedNeedsRenewal(ctx, m.fallbackCfg, m.fallbackIss)
+	_, _ = m.fallbackCfg.CacheManagedCertificate(ctx, m.host)
 	m.clearRetryState()
 	return nil
 }
@@ -839,7 +855,7 @@ func (m *shareCertManager) RunFailoverLoop(ctx context.Context) {
 			if err := m.syncCert(ctx, m.fallbackCfg, m.fallbackIss); err != nil {
 				log.Printf("acme: fallback renewal failed for %s: %v", m.host, err)
 			} else {
-				_, _ = m.cachedNeedsRenewal(ctx, m.fallbackCfg, m.fallbackIss)
+				_, _ = m.fallbackCfg.CacheManagedCertificate(ctx, m.host)
 			}
 			m.renewMu.Unlock()
 

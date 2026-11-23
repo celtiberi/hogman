@@ -25,6 +25,9 @@ func spawnDetached(logPath, bin string, args ...string) (int, error) {
 
 // processAlive: on Windows, FindProcess fails for a process that has gone.
 func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
 	p, err := os.FindProcess(pid)
 	if err != nil {
 		return false

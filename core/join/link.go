@@ -31,8 +31,18 @@ func normaliseFP(s string) string {
 	return strings.ToUpper(strings.NewReplacer(":", "", " ", "").Replace(strings.TrimSpace(s)))
 }
 
+func trimMatchingQuotes(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 {
+		if (s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"') {
+			return strings.TrimSpace(s[1 : len(s)-1])
+		}
+	}
+	return s
+}
+
 func ParseLink(raw string) (*Link, error) {
-	u, err := url.Parse(strings.TrimSpace(raw))
+	u, err := url.Parse(trimMatchingQuotes(raw))
 	if err != nil {
 		return nil, fmt.Errorf("not a link: %w", err)
 	}
@@ -52,7 +62,7 @@ func ParseLink(raw string) (*Link, error) {
 	if q.Get("fp") != "" {
 		return nil, errors.New("this link is from an older release (carries fp=) and is no longer supported; ask whoever sent it for a fresh one")
 	}
-	l := &Link{Host: u.Host, InviteToken: q.Get("t"), DeviceKey: q.Get("k"),
+	l := &Link{Host: strings.ToLower(u.Host), InviteToken: q.Get("t"), DeviceKey: q.Get("k"),
 		ForShare: q.Get("for") == "share"}
 	switch {
 	case l.InviteToken == "" && l.DeviceKey == "":

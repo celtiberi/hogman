@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 )
 
@@ -33,14 +32,22 @@ func linuxStore() (*anchorStore, error) {
 	return nil, errorf("could not find this system's certificate store (looked for update-ca-certificates and update-ca-trust)")
 }
 
-// sbinTool finds an admin tool. Debian keeps update-ca-certificates in
-// /usr/sbin, which isn't on an ordinary user's PATH, and we run it with sudo
-// anyway, so look there too and use the full path.
+// sbinTool finds an admin tool strictly from trusted system directories
+// (never $PATH) because it is executed under sudo as root.
 func sbinTool(name string) string {
-	if p, err := exec.LookPath(name); err == nil {
-		return p
+	for _, dir := range []string{"/usr/sbin", "/sbin", "/usr/bin"} {
+		p := filepath.Join(dir, name)
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+			return p
+		}
 	}
-	for _, dir := range []string{"/usr/sbin", "/sbin", "/usr/local/sbin"} {
+	return ""
+}
+
+// linuxSystemTool resolves a standard Linux userland utility from fixed system
+// directories (including NixOS's system profile) without trusting $PATH.
+func linuxSystemTool(name string) string {
+	for _, dir := range []string{"/usr/bin", "/bin", "/run/current-system/sw/bin"} {
 		p := filepath.Join(dir, name)
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
 			return p
@@ -84,7 +91,7 @@ func removeLegacyHogmanRoot(zone, rootFP string) (bool, error) {
 }
 
 func tailscaleCandidates() []string {
-	return []string{"tailscale", "/usr/bin/tailscale", "/usr/local/bin/tailscale"}
+	return []string{"/usr/bin/tailscale", "/usr/local/bin/tailscale"}
 }
 
 func tailscaleInstallHelp() string {
@@ -92,7 +99,7 @@ func tailscaleInstallHelp() string {
 }
 
 func openURL(u string) {
-	if _, err := exec.LookPath("xdg-open"); err == nil {
-		_, _ = run(false, "xdg-open", u)
+	if p := linuxSystemTool("xdg-open"); p != "" {
+		_, _ = run(false, p, u)
 	}
 }

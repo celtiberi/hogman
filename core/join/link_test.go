@@ -129,10 +129,10 @@ func TestFilterLinuxLegacyAnchorFiles(t *testing.T) {
 
 	const dir = "/usr/local/share/ca-certificates"
 	files := map[string][]byte{
-		filepath.Join(dir, "hogman-bobo.hogman.crt"): []byte(hogPEM),
+		filepath.Join(dir, "hogman-bobo.hogman.crt"):  []byte(hogPEM),
 		filepath.Join(dir, "hogman-other.hogman.crt"): []byte(otherPEM),
-		filepath.Join(dir, "hogman-fake.crt"):          []byte(foreignPEM),
-		filepath.Join(dir, "corp-root.crt"):            []byte(hogPEM),
+		filepath.Join(dir, "hogman-fake.crt"):         []byte(foreignPEM),
+		filepath.Join(dir, "corp-root.crt"):           []byte(hogPEM),
 	}
 	names := []string{"hogman-bobo.hogman.crt", "hogman-other.hogman.crt", "hogman-fake.crt", "corp-root.crt"}
 	read := func(p string) ([]byte, error) { return files[p], nil }

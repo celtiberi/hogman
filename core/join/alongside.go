@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/tls"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -100,7 +102,7 @@ func agentStateInDir(dir string, c *agentConfig) (*agentStatus, error) {
 	req.Header.Set("X-Hogman-Challenge", nonce)
 	client := &http.Client{
 		Timeout:       2 * time.Second,
-		Transport:     &http.Transport{Proxy: nil},
+		Transport:     loopbackStatusTransport,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	resp, err := client.Do(req)
@@ -126,7 +128,15 @@ func agentStateInDir(dir string, c *agentConfig) (*agentStatus, error) {
 	return &st, nil
 }
 
+type agentJoinError struct{ msg string }
+
+func (e *agentJoinError) Error() string { return e.msg }
+
 func waitAgentUp(c *agentConfig, d time.Duration) (*agentStatus, error) {
+	return waitAgentUpCtx(context.Background(), c, d)
+}
+
+func waitAgentUpCtx(ctx context.Context, c *agentConfig, d time.Duration) (*agentStatus, error) {
 	deadline := time.Now().Add(d)
 	for {
 		st, err := agentState(c)
@@ -134,13 +144,103 @@ func waitAgentUp(c *agentConfig, d time.Duration) (*agentStatus, error) {
 			return st, nil
 		}
 		if err == nil && st.Error != "" {
-			return nil, errorf("could not join the pen: %s", st.Error)
+			return nil, &agentJoinError{msg: fmt.Sprintf("could not join the pen: %s", st.Error)}
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, errorf("cancelled before the pen connection came up (saved credentials were kept; re-run the same command to resume)")
 		}
 		if time.Now().After(deadline) {
 			return nil, errorf("the pen connection did not come up within %s. Log: %s", d, filepath.Join(stateDir(c.Zone), "agent.log"))
 		}
-		time.Sleep(time.Second)
+		select {
+		case <-ctx.Done():
+			return nil, errorf("cancelled before the pen connection came up (saved credentials were kept; re-run the same command to resume)")
+		case <-time.After(time.Second):
+		}
 	}
+}
+
+// existingPenNeedsReenroll reports whether an already-configured pen's running
+// agent explicitly proves (via verified status.token HMAC) that the control
+// plane rejected this device (NeedsLogin). Unspent authkeys from an interrupted
+// join are NOT treated as stale so we retry them without burning a fresh invite.
+func existingPenNeedsReenroll(dir string, cfg *agentConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "authkey")); err == nil {
+		return false
+	}
+	if state, detail := verifyAgentEndpointDetail(dir, cfg); state == agentEndpointDown && detail.verified && detail.needsLogin {
+		return true
+	}
+	return false
+}
+
+// reenrollExistingPen acquires the new authkey BEFORE touching existing local
+// state (so a failed invite redeem never destroys the saved pen setup), then
+// stops the old agent and swaps in the fresh credentials.
+func reenrollExistingPen(dir string, existing *agentConfig, n *networkInfo, hostname string, o options, acquireKey func() (key, handle string, err error), stopFn func(string, *agentConfig)) (*agentConfig, string, error) {
+	key, handle, err := acquireKey()
+	if err != nil {
+		return nil, "", err
+	}
+	if stopFn != nil {
+		stopFn(dir, existing)
+	}
+	_ = os.RemoveAll(filepath.Join(dir, "node"))
+	_ = os.Remove(filepath.Join(dir, "authkey"))
+	addr := existing.ProxyAddr
+	if addr == "" {
+		addr, err = pickLocalAddr(n.Zone)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	cfg := &agentConfig{
+		Zone:        n.Zone,
+		LoginServer: n.LoginServer,
+		DNSServer:   n.DNSServer,
+		Hostname:    hostname,
+		ProxyAddr:   addr,
+		ControlCA:   existing.ControlCA,
+	}
+	if o.controlCA != "" {
+		pemBytes, rerr := os.ReadFile(o.controlCA)
+		if rerr != nil {
+			return nil, "", errorf("--control-ca: %v", rerr)
+		}
+		cfg.ControlCA = string(pemBytes)
+	}
+	if err := cfg.save(dir); err != nil {
+		return nil, "", err
+	}
+	if _, err := writeStatusToken(dir); err != nil {
+		return nil, "", err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "authkey"), []byte(key), 0o600); err != nil {
+		return nil, "", err
+	}
+	return cfg, handle, nil
+}
+
+// shouldRollbackFreshJoin decides whether a failed fresh join should tear down
+// local state. Never roll back when an unspent authkey is still on disk (e.g.,
+// Ctrl-C, timeout, or transient start failure) so a single-use invite is never
+// burned; roll back only on definite enrollment failures once the key is spent
+// or explicitly rejected by the agent.
+func shouldRollbackFreshJoin(freshJoin bool, dir string, err error) bool {
+	if !freshJoin || err == nil {
+		return false
+	}
+	var aje *agentJoinError
+	if errors.As(err, &aje) {
+		return true
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "authkey")); statErr == nil {
+		return false
+	}
+	return true
 }
 
 // joinAlongside sets up side-by-side mode. why explains, in a few words, why
@@ -150,34 +250,60 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 		return errorf("this pen's server is too old for side-by-side mode (it does not publish its DNS address)")
 	}
 	dir := stateDir(n.Zone)
-	hostname := o.hostname
-	if hostname == "" {
-		hostname = defaultHostname()
+	hostname := defaultHostname()
+	if strings.TrimSpace(o.hostname) != "" {
+		hostname = sanitizeHostname(o.hostname)
+		if hostname == "" {
+			return errorf("--hostname %q contains no letters or digits", o.hostname)
+		}
 	}
 	note("%s", why)
 	note("joining side by side: only names ending in .%s use the pen; nothing else on this computer changes", n.Zone)
 
 	existing, _ := loadAgentConfig(dir)
+	reenroll := existing != nil && (link.InviteToken != "" || link.DeviceKey != "") && existingPenNeedsReenroll(dir, existing)
 	var oldSameServer []penTarget
 	if existing == nil {
 		oldSameServer = findLegacySameServerPens(hogmanConfigBase(), n.Zone, n.LoginServer)
 	}
 	if o.dryRun {
 		step("Dry run: nothing changed. Would:")
-		if existing == nil && link.InviteToken != "" {
+		if (existing == nil || reenroll) && link.InviteToken != "" {
 			note("redeem the invite (handle: %s)", orAsk(o.handle))
 		}
 		note("verify %s using this computer's built-in trusted certificates", n.Zone)
-		note("run a small background agent as %q, with a local proxy for .%s (already set up: %v)", hostname, n.Zone, existing != nil)
+		note("run a small background agent as %q, with a local proxy for .%s (already set up: %v)", hostname, n.Zone, existing != nil && !reenroll)
 		for _, old := range oldSameServer {
 			note("retire old %s pen setup (%s)", old.zone, old.dir)
 		}
 		return nil
 	}
 
+	acquireKey := func() (string, string, error) {
+		if link.InviteToken != "" {
+			step("Redeeming the invite")
+			en, err := redeemWithHandle(client, link, o)
+			if err != nil {
+				return "", "", err
+			}
+			note("welcome, %s", en.Handle)
+			return en.AuthKey, en.Handle, nil
+		}
+		return link.DeviceKey, "", nil
+	}
+
 	handle := ""
 	cfg := existing
-	if cfg != nil {
+	freshJoin := existing == nil
+	if cfg != nil && reenroll {
+		step("Previous %s setup needs a fresh login; re-enrolling with the new link", n.Zone)
+		var err error
+		cfg, handle, err = reenrollExistingPen(dir, existing, n, hostname, o, acquireKey, stopAgent)
+		if err != nil {
+			return err
+		}
+		freshJoin = true
+	} else if cfg != nil {
 		step("This computer is already set up for %s", n.Zone)
 		if link.InviteToken != "" {
 			note("not using the invite; it stays valid for another device or person")
@@ -189,16 +315,11 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 			}
 		}
 	} else {
-		key := link.DeviceKey
-		if link.InviteToken != "" {
-			step("Redeeming the invite")
-			en, err := redeemWithHandle(client, link, o)
-			if err != nil {
-				return err
-			}
-			key, handle = en.AuthKey, en.Handle
-			note("welcome, %s", handle)
+		key, h, err := acquireKey()
+		if err != nil {
+			return err
 		}
+		handle = h
 		addr, err := pickLocalAddr(n.Zone)
 		if err != nil {
 			return err
@@ -225,14 +346,24 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 		}
 	}
 
+	ctx, stopSig := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSig()
+
 	step("Starting the pen connection as %q", cfg.Hostname)
 	if st, err := agentState(cfg); err != nil || !st.Up {
 		if err := startAgent(dir, cfg, o); err != nil {
 			return err
 		}
 	}
-	st, err := waitAgentUp(cfg, 90*time.Second)
+	st, err := waitAgentUpCtx(ctx, cfg, 90*time.Second)
 	if err != nil {
+		if shouldRollbackFreshJoin(freshJoin, dir, err) {
+			leaveAlongside(n.Zone, false)
+		}
+		var aje *agentJoinError
+		if errors.As(err, &aje) {
+			return errorf("%s", aje.msg)
+		}
 		return err
 	}
 	if st.Server {
@@ -245,9 +376,9 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	note("online as %s", strings.Join(st.IPs, ", "))
 
 	step("Checking %s loads securely", n.Portal)
-	who, err := checkPortalVia(n.Portal, cfg.proxyURL())
+	who, err := checkPortalViaCtx(ctx, n.Portal, cfg.proxyURL())
 	if err != nil {
-		if existing == nil {
+		if ctx.Err() == nil && shouldRollbackFreshJoin(freshJoin, dir, err) {
 			leaveAlongside(n.Zone, false)
 		}
 		return err
@@ -295,36 +426,61 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 // checkPortalVia loads the portal through the agent's proxy, verifying with
 // system roots (or HOGMAN_ACME_CA_ROOT).
 func checkPortalVia(portal, proxy string) (string, error) {
+	return checkPortalViaCtx(context.Background(), portal, proxy)
+}
+
+func checkPortalViaCtx(ctx context.Context, portal, proxy string) (string, error) {
 	pool, err := testACMECAPool()
 	if err != nil {
 		return "", err
 	}
-	pu, _ := url.Parse(proxy)
+	pu, err := url.Parse(proxy)
+	if err != nil || pu == nil || pu.Host == "" {
+		return "", errorf("invalid local proxy URL %q", proxy)
+	}
 	c := &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{
 		Proxy:           http.ProxyURL(pu),
 		TLSClientConfig: &tls.Config{RootCAs: pool},
 	}}
-	return pollPortal(c, portal, 45*time.Second)
+	return pollPortalCtx(ctx, c, portal, 45*time.Second)
 }
 
 func pollPortal(c *http.Client, portal string, d time.Duration) (string, error) {
+	return pollPortalCtx(context.Background(), c, portal, d)
+}
+
+func pollPortalCtx(ctx context.Context, c *http.Client, portal string, d time.Duration) (string, error) {
 	deadline := time.Now().Add(d)
 	var last error
 	for time.Now().Before(deadline) {
-		resp, err := c.Get(portal + "/api/me")
+		if err := ctx.Err(); err != nil {
+			return "", errorf("cancelled while checking the portal")
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, portal+"/api/me", nil)
 		if err == nil {
-			var me struct {
-				Member struct{ Handle string }
+			var resp *http.Response
+			resp, err = c.Do(req)
+			if err == nil {
+				var me struct {
+					Member struct{ Handle string }
+				}
+				data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+				resp.Body.Close()
+				if resp.StatusCode == 200 && json.Unmarshal(data, &me) == nil {
+					return me.Member.Handle, nil
+				}
+				err = fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 			}
-			data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-			resp.Body.Close()
-			if resp.StatusCode == 200 && json.Unmarshal(data, &me) == nil {
-				return me.Member.Handle, nil
-			}
-			err = fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		}
+		if ctx.Err() != nil {
+			return "", errorf("cancelled while checking the portal")
 		}
 		last = err
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			return "", errorf("cancelled while checking the portal")
+		case <-time.After(2 * time.Second):
+		}
 	}
 	var ue x509.UnknownAuthorityError
 	if errors.As(last, &ue) {
@@ -467,28 +623,32 @@ func retireLegacySameServerPens(oldPens []penTarget, ops legacyRetireOps) {
 
 // stopDetached stops an agent that was started as a plain background process.
 func stopDetached(dir string) {
-	b, err := os.ReadFile(filepath.Join(dir, "agent.pid"))
+	pidPath := filepath.Join(dir, "agent.pid")
+	b, err := os.ReadFile(pidPath)
 	if err != nil {
 		return
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
+	if err != nil || pid <= 0 {
+		_ = os.Remove(pidPath)
 		return
 	}
 	if p, err := os.FindProcess(pid); err == nil {
 		_ = p.Signal(syscall.SIGTERM)
 		for i := 0; i < 20; i++ {
-			if _, err := os.Stat(filepath.Join(dir, "agent.pid")); err != nil {
+			if _, err := os.Stat(pidPath); err != nil {
 				return
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
 		_ = p.Kill()
 	}
+	_ = os.Remove(pidPath)
 }
 
-// installedBinary copies this program next to the agent's settings, so the
-// background service keeps working after the download is deleted.
+// installedBinary copies this program next to the agent's settings atomically,
+// so the background service keeps working after the download is deleted without
+// truncating symlinked binaries or invalidating macOS arm64 code signatures.
 func installedBinary(dir string) (string, error) {
 	self, err := os.Executable()
 	if err != nil {
@@ -499,21 +659,11 @@ func installedBinary(dir string) (string, error) {
 		name += ".exe"
 	}
 	dst := filepath.Join(dir, name)
-	if self == dst {
+	if sameFilePath(self, dst) {
 		return dst, nil
 	}
-	in, err := os.Open(self)
-	if err != nil {
+	if err := copyExecutableAtomic(self, dst); err != nil {
 		return "", err
 	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-	if err != nil {
-		return "", err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return "", err
-	}
-	return dst, out.Close()
+	return dst, nil
 }

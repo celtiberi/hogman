@@ -61,6 +61,9 @@ so a pen whose server is gone can still be left. `leave` with no pen does nothin
 owner (no account recovery) or one that can't be reached to check. `--force` overrides that only
 after a warning and typing the exact pen name; `--yes` never skips the name, and there's no
 override without a terminal. `uninstall` is all or nothing: if any pen is refused, nothing changes.
+`hogman-join share list [--pen ZONE]` lists local shares with any error state, `hogman-join share stop NAME [--force]`
+tears down a share (or removes local files when unreachable with `--force`), and `hogman-join version` / `help`
+print version or usage.
 
 Built for macOS (Apple silicon, Intel), Linux (x86-64, ARM64) and Windows (x86-64; untested).
 

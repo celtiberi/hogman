@@ -333,7 +333,7 @@ func runAgent(dir string) error {
 	a.statusToken = statusTok
 
 	// Serve the proxy straight away, so the setup step can watch us come up.
-	srv := &http.Server{Handler: a, ReadHeaderTimeout: 15 * time.Second}
+	srv := &http.Server{Handler: a, ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
 
 	go func() {

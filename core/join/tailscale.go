@@ -35,11 +35,15 @@ type TSStatus struct {
 
 func (t *Tailscale) Status() (*TSStatus, error) {
 	out, err := run(false, t.bin, "status", "--json")
-	if err != nil && !strings.HasPrefix(strings.TrimSpace(out), "{") {
+	idx := strings.Index(out, "{")
+	if err != nil && idx < 0 {
 		return nil, errorf("tailscale is installed but not running (%v). Start it and run this again.\n%s", err, out)
 	}
+	if idx < 0 {
+		return nil, errorf("could not read tailscale status: unexpected output")
+	}
 	var s TSStatus
-	if err := json.Unmarshal([]byte(out[strings.Index(out, "{"):]), &s); err != nil {
+	if err := json.Unmarshal([]byte(out[idx:]), &s); err != nil {
 		return nil, errorf("could not read tailscale status: %v", err)
 	}
 	return &s, nil
