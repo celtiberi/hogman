@@ -153,8 +153,9 @@ def build_jsonld(
 class MarkdownConverter(HTMLParser):
     """Minimal deterministic HTML-fragment to clean Markdown converter for llms-full.txt."""
 
-    def __init__(self):
+    def __init__(self, base_url: str = BASE_URL):
         super().__init__(convert_charrefs=True)
+        self.base_url = base_url
         self.out = []
         self.in_pre = False
         self.in_code = False
@@ -220,7 +221,11 @@ class MarkdownConverter(HTMLParser):
         elif tag == "a":
             href = attr.get("href", "")
             if href.startswith("/"):
-                href = BASE_URL + href
+                href = self.base_url + href
+            elif href == "./":
+                href = self.base_url + "/docs/"
+            elif href.startswith("./"):
+                href = self.base_url + "/docs/" + href[2:]
             self.link_href = href
             self.link_buf = []
         elif tag == "table":
@@ -296,21 +301,18 @@ class MarkdownConverter(HTMLParser):
         return cleaned + "\n"
 
 
-def html_to_markdown(fragment: str) -> str:
-    conv = MarkdownConverter()
+def html_to_markdown(fragment: str, base_url: str = BASE_URL) -> str:
+    conv = MarkdownConverter(base_url=base_url)
     conv.feed(fragment)
     conv.close()
     return conv.render()
 
 
-def write_sitemap():
-    urls = [
-        (BASE_URL + "/", "1.0"),
-        (BASE_URL + "/work/", "0.9"),
-    ]
+def write_sitemap(base_url: str = BASE_URL, out_dir: str = PUBLIC, label: str = "sitemap.xml"):
+    urls = [(base_url + "/", "1.0")]
     for slug, *_ in PAGES:
         prio = "0.9" if slug == "index" else "0.8"
-        urls.append((BASE_URL + page_href(slug), prio))
+        urls.append((base_url + page_href(slug), prio))
     entries = "\n".join(
         f"  <url>\n    <loc>{loc}</loc>\n    <priority>{prio}</priority>\n  </url>"
         for loc, prio in urls
@@ -321,8 +323,8 @@ def write_sitemap():
         f"{entries}\n"
         "</urlset>\n"
     )
-    open(os.path.join(PUBLIC, "sitemap.xml"), "w").write(xml)
-    print("wrote sitemap.xml")
+    open(os.path.join(out_dir, "sitemap.xml"), "w").write(xml)
+    print("wrote", label)
 
 
 def write_llms_files(bodies: list[tuple[str, str, str, str, str]]):
@@ -352,7 +354,7 @@ def write_llms_files(bodies: list[tuple[str, str, str, str, str]]):
 
 - [Complete documentation in one Markdown file]({BASE_URL}/llms-full.txt)
 - [Homepage]({BASE_URL}/)
-- [Hogman for Work (small businesses & operations)](https://work.hogman.network/)
+- [Hogman for Work (small businesses & operations)]({WORK_BASE_URL}/)
 - [Create a pen](https://get.hogman.network/)
 - [Source code (AGPL-3.0) on GitHub](https://github.com/celtiberi/hogman)
 """
@@ -367,10 +369,55 @@ def write_llms_files(bodies: list[tuple[str, str, str, str, str]]):
     ]
     for slug, navt, title, desc, body in bodies:
         url = BASE_URL + page_href(slug)
-        md = html_to_markdown(body)
+        md = html_to_markdown(body, BASE_URL)
         sections.append(f"---\n\n<!-- Page: {navt} ({url}) -->\n\n{md}")
     open(os.path.join(PUBLIC, "llms-full.txt"), "w").write("\n".join(sections))
     print("wrote llms-full.txt")
+
+    work_dir = os.path.join(PUBLIC, "work")
+    work_doc_links = "\n".join(
+        f"- [{navt}]({WORK_BASE_URL}{page_href(slug)}): {desc}"
+        for slug, navt, _, desc, _ in PAGES
+    )
+    work_llms_txt = f"""# Hogman for Work
+
+> Private HTTPS networks ("pens") over WireGuard for small businesses and operations teams that don't have a dedicated security department. Take refrigeration controllers, building dashboards, and internal web tools off the open internet — real domain names, standard browser HTTPS, zero public IP addresses, and ~2-second access revocation. Open source (AGPL-3.0).
+
+## Key facts for businesses & operations
+
+- **What it solves:** Removes equipment controllers (refrigeration, HVAC/BMS, cameras, local monitors) and internal web apps from the open internet so automated scanners and attackers have no public IP or login page to reach.
+- **How on-site equipment connects:** Devices that cannot run client software stay strictly on the local LAN (no open router ports); a small always-on Linux or Mac computer on site bridges only that device's web UI into the pen via `hogman-join share cooler-1 http://192.168.1.40 --background '<share-link>'`. The local upstream can speak plain HTTP while staff always connect over HTTPS (`:443`).
+- **Multi-site blast-radius isolation:** Create separate pens per region or store group so one lost laptop or compromised account cannot reach every location.
+- **What it deliberately is NOT:** Not a VPN (ordinary browsing stays direct), no SSH, no raw TCP/UDP ports, no exit nodes, and zero inbound connections to staff laptops. Devices without a web UI are not a fit.
+- **Honest security boundaries:** A pen hides vulnerable devices and narrows access to pen members — **it does not patch firmware** (keep vendor security updates enabled). Hostnames appear in public Certificate Transparency logs (names only, never site contents). There is zero account recovery (always appoint two owners per pen). Experimental software, not yet independently audited.
+- **Hosting & status:** Control planes are hosted-only on `hogman.network` (invite-only testbed today; commercial plans coming soon). macOS and Linux work today; Windows and mobile apps are in progress.
+
+## Documentation
+
+{work_doc_links}
+
+## Full documentation & links
+
+- [Complete Hogman for Work documentation in one Markdown file]({WORK_BASE_URL}/llms-full.txt)
+- [Hogman for Work overview]({WORK_BASE_URL}/)
+- [Request early access](https://get.hogman.network/#wait)
+- [Source code (AGPL-3.0) on GitHub](https://github.com/celtiberi/hogman)
+"""
+    open(os.path.join(work_dir, "llms.txt"), "w").write(work_llms_txt)
+    print("wrote work/llms.txt")
+
+    work_sections = [
+        "# Hogman for Work — Complete Documentation\n\n"
+        f"Source: {WORK_BASE_URL}/docs/  \n"
+        "Repository: https://github.com/celtiberi/hogman  \n"
+        "License: AGPL-3.0\n"
+    ]
+    for slug, navt, title, desc, body in bodies:
+        url = WORK_BASE_URL + page_href(slug)
+        md = html_to_markdown(adapt_work_body(body), WORK_BASE_URL)
+        work_sections.append(f"---\n\n<!-- Page: {navt} ({url}) -->\n\n{md}")
+    open(os.path.join(work_dir, "llms-full.txt"), "w").write("\n".join(work_sections))
+    print("wrote work/llms-full.txt")
 
 
 HEAD = """<!doctype html>
@@ -450,7 +497,7 @@ WORK_HEAD = """<!doctype html>
 <title>{title} · Hogman for Work</title>
 <meta name="description" content="{desc}">
 <link rel="canonical" href="https://work.hogman.network{href}">
-<link rel="alternate" type="text/plain" href="https://hogman.network/llms.txt" title="Hogman documentation for LLMs">
+<link rel="alternate" type="text/plain" href="https://work.hogman.network/llms.txt" title="Hogman for Work documentation for LLMs">
 <meta property="og:title" content="{title} · Hogman for Work">
 <meta property="og:description" content="{desc}">
 <meta property="og:type" content="website">
@@ -584,5 +631,6 @@ for idx, (f, navt, title, desc, _) in enumerate(PAGES):
     open(os.path.join(WORK_OUT, f + ".html"), "w").write(work_html)
     print("wrote work/docs/" + f)
 
-write_sitemap()
+write_sitemap(BASE_URL, PUBLIC, "sitemap.xml")
+write_sitemap(WORK_BASE_URL, os.path.join(PUBLIC, "work"), "work/sitemap.xml")
 write_llms_files(built_bodies)
