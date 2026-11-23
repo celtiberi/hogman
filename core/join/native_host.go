@@ -781,17 +781,9 @@ func statusCmd() error {
 	}
 
 	sys := detectSystemProxyState(configs)
-	// The browser extension is optional (it's for browsing pens with a VPN
-	// on), so it's only mentioned when it's installed or actually needed.
-	hostPath := nativeHostBinaryPath(base)
-	if _, err := os.Stat(hostPath); err == nil {
-		extState := "installed (not yet contacted by browser extension)"
-		if extensionRecentlySeen(base, 7*24*time.Hour) {
-			extState = "active (browser extension connected)"
-		}
-		say("\nBrowser extension host: %s", extState)
-	} else if sys.VPNOverride {
-		say("\nBrowser extension host: not installed (run: hogman-join browser-setup)")
+	_, hostErr := os.Stat(nativeHostBinaryPath(base))
+	if line := extensionHostLine(hostErr == nil, extensionRecentlySeen(base, 7*24*time.Hour), sys.VPNOverride); line != "" {
+		say("\n%s", line)
 	}
 	if sys.StalePAC != "" {
 		say("\n! A proxy setting left by a pen this computer no longer runs is still on: %s", sys.StalePAC)
@@ -811,4 +803,19 @@ func statusCmd() error {
 		say("\n! Non-Hogman system proxy active: %s", sys.OSProxyDetail)
 	}
 	return nil
+}
+
+// extensionHostLine is status's line about the browser extension's native
+// host. The extension is optional (it's for browsing pens with a VPN on), so
+// it's only mentioned when it's installed or a VPN override makes it useful.
+func extensionHostLine(installed, recentlySeen, vpnOverride bool) string {
+	switch {
+	case installed && recentlySeen:
+		return "Browser extension host: active (browser extension connected)"
+	case installed:
+		return "Browser extension host: installed (not yet contacted by browser extension)"
+	case vpnOverride:
+		return "Browser extension host: not installed (run: hogman-join browser-setup)"
+	}
+	return ""
 }

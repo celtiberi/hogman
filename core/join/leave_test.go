@@ -383,3 +383,23 @@ func TestStaleHogmanPACIsNotAConflict(t *testing.T) {
 		t.Fatalf("company PAC: conflict=%v stale=%q; want a conflict", st.OSProxyConflict, st.StalePAC)
 	}
 }
+
+// status mentions the optional extension host only when it's installed or a
+// VPN override makes it useful: never a nag on a healthy computer.
+func TestExtensionHostLine(t *testing.T) {
+	for _, c := range []struct {
+		installed, seen, vpn bool
+		want                 string
+	}{
+		{false, false, false, ""},
+		{false, false, true, "not installed"},
+		{true, false, false, "installed (not yet"},
+		{true, true, false, "active"},
+		{true, true, true, "active"},
+	} {
+		got := extensionHostLine(c.installed, c.seen, c.vpn)
+		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
+			t.Errorf("installed=%v seen=%v vpn=%v: %q, want %q", c.installed, c.seen, c.vpn, got, c.want)
+		}
+	}
+}
