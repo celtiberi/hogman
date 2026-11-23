@@ -52,6 +52,8 @@ usage: hogman-host <command>
   challenge-dns-setup <public-ip> [gcp-key.json]
                                  run the DNS-01 challenge server (public certificates, D-18)
                                  on <public-ip>:53; the Google key enables the fallback CA
+  fallback-contact <email>       the operator address Google's fallback CA accounts carry
+                                 (Google refuses accounts without one; never a member's)
   challenge-dns <args...>        talk to it, e.g.  challenge-dns cred list
   gate-cert-setup <gate-domain>  keep the front door's *.<gate-domain> certificate
                                  (e.g. gate-cert-setup gate.hogman.network)
@@ -1012,6 +1014,22 @@ cmd_pens_zone() {
   info "New pens: front door <pen>.$GATE_DOMAIN, sites under <pen>.$z"
 }
 PEN_GID=65532   # the group the pens' registrars run as (H3); it may use the API socket
+
+# fallback-contact <email>: the operator address put on Google (fallback CA)
+# accounts, which Google requires. Kept in a systemd drop-in, so re-running
+# challenge-dns-setup keeps it. Let's Encrypt accounts stay without one.
+CDNS_CONTACT_DROPIN=/etc/systemd/system/hogman-challenge-dns.service.d/contact.conf
+cmd_fallback_contact() {
+  local addr="${1:-}"
+  [[ "$addr" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] \
+    || die "usage: hogman-host fallback-contact <email>   (an operator address, e.g. ops@example.com)"
+  [ -f "$CDNS_UNIT" ] || die "set up the challenge DNS server first: hogman-host challenge-dns-setup <public-ip> <gcp-key.json>"
+  install -d -m 0755 "$(dirname "$CDNS_CONTACT_DROPIN")"
+  printf '[Service]\nEnvironment=CDNS_GTS_CONTACT=%s\n' "$addr" > "$CDNS_CONTACT_DROPIN"
+  systemctl daemon-reload
+  systemctl restart hogman-challenge-dns.service
+  info "Google fallback accounts will carry $addr"
+}
 cmd_challenge_dns_setup() {
   load_host
   local ip="${1:-}" key="${2:-}" arch
@@ -1114,6 +1132,7 @@ UNIT
   sleep 1
   systemctl is-active --quiet hogman-challenge-dns.service || die "it didn't start: journalctl -u hogman-challenge-dns"
   info "challenge-dns answers on $ip:53 (UDP and TCP)$( [ -n "$cred" ] && echo ", with the Google fallback CA")"
+  [ -n "$cred" ] && [ ! -f "$CDNS_CONTACT_DROPIN" ] && info "Google needs a contact for its accounts: hogman-host fallback-contact <email>"
   info "Check from outside:  dig @$ip pens.hogman.network SOA   (and +tcp)"
   info "If DigitalOcean's cloud firewall is on, allow TCP and UDP 53 there too."
 }
@@ -1261,6 +1280,7 @@ case "${1:-}" in
   init)    shift; cmd_init "$@" ;;
   gate-cert-setup) shift; cmd_gate_cert_setup "$@" ;;
   challenge-dns-setup) shift; cmd_challenge_dns_setup "$@" ;;
+  fallback-contact) shift; cmd_fallback_contact "$@" ;;
   challenge-dns) shift; load_host; [ -x "$CDNS_BIN" ] || die "not set up: hogman-host challenge-dns-setup"; CDNS_ADMIN_SOCK="$CDNS_ADMIN" exec "$CDNS_BIN" "$@" ;;
   pens-zone) shift; cmd_pens_zone "$@" ;;
   name-free) shift; load_host; [[ "${1:-}" =~ $HOSTED_RE ]] || die "usage: hogman-host name-free <pen>"; name_free "$1"; exit $? ;;

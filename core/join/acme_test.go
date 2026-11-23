@@ -440,9 +440,11 @@ func TestShareCertManagerMockACME(t *testing.T) {
 			http.Error(w, "missing EAB", http.StatusForbidden)
 			return
 		}
-		if len(acctPayload.Contact) != 0 {
-			t.Errorf("fallback /acct expected empty contact list, got %v", acctPayload.Contact)
-			http.Error(w, "unexpected ACME contact", http.StatusBadRequest)
+		// Like Google: an account needs a contact. It must be the operator's
+		// address handed out with the EAB, nothing else.
+		if len(acctPayload.Contact) != 1 || acctPayload.Contact[0] != "mailto:ops@example.com" {
+			t.Errorf("fallback /acct contact = %v, want [mailto:ops@example.com]", acctPayload.Contact)
+			http.Error(w, `{"type":"urn:ietf:params:acme:error:malformed","detail":"Accounts must have at least one contact."}`, http.StatusBadRequest)
 			return
 		}
 		w.Header().Set("Location", "https://"+r.Host+"/acct/1")
@@ -539,6 +541,7 @@ func TestShareCertManagerMockACME(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]string{
 				"kid":         "share-eab-kid",
 				"hmac_b64url": base64.RawURLEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")),
+				"contact":     "ops@example.com",
 			})
 		default:
 			http.NotFound(w, r)
@@ -1464,5 +1467,16 @@ func TestShareACMERegistrarCapLongBackoff(t *testing.T) {
 	}
 	if txtHits.Load() != 3 {
 		t.Fatalf("expected 3 total TXT hits, got %d", txtHits.Load())
+	}
+}
+
+func TestFallbackContact(t *testing.T) {
+	if got := fallbackContact(" ops@example.com "); len(got) != 1 || got[0] != "mailto:ops@example.com" {
+		t.Fatalf("fallbackContact = %v", got)
+	}
+	for _, bad := range []string{"", "nope", "Ops <ops@example.com>", "a@b.com,c@d.com", "ops@example.com?cc=x@y.z"} {
+		if got := fallbackContact(bad); got != nil {
+			t.Fatalf("fallbackContact(%q) = %v, want nil", bad, got)
+		}
 	}
 }

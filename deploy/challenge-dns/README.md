@@ -27,7 +27,10 @@ That last list holds only names, which are public in the certificate logs anyway
 **The fallback CA.** With `CDNS_GCP_KEY` set to a Google service-account key that holds
 only `roles/publicca.externalAccountKeyCreator`, `POST /v1/eab` mints one single-use
 Google account key on request, at most 5 a day per credential, within Google's quota.
-The service-account key never leaves this server.
+The service-account key never leaves this server. Google refuses an account without a
+contact, so a key is handed out only with `CDNS_GTS_CONTACT` set (`hogman-host
+fallback-contact <email>`), and the response carries that operator address for the account.
+Without it the API answers 503 rather than mint a key that would be wasted.
 
 Design and threat model: [docs/security/public-certificates.md](../../docs/security/public-certificates.md).
 
@@ -44,4 +47,4 @@ challenge-dns name used <penname>        # sign-up asks before raising a pen
 |---|---|
 | `POST /v1/txt {fqdn, value}` | 201 (also on repeat) · 400 bad value · 403 out of scope · 409 two live already · 429 weekly cap |
 | `DELETE /v1/txt {fqdn, value}` | 204 (also when absent) · 403 out of scope |
-| `POST /v1/eab` | 201 `{kid, hmac_b64url}` · 429 allowance or Google quota · 503 not configured |
+| `POST /v1/eab` | 201 `{kid, hmac_b64url, contact}` · 429 allowance or Google quota · 503 not configured or no contact |

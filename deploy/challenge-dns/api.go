@@ -21,9 +21,12 @@ import (
 )
 
 type API struct {
-	store  *Store
-	eab    EABMinter // nil when no GTS service account is configured
-	global *windowLimiter
+	store *Store
+	eab   EABMinter // nil when no GTS service account is configured
+	// contact is the operator's address for fallback CA accounts. Google refuses
+	// an account without one, so no key is minted (and none wasted) without it.
+	contact string
+	global  *windowLimiter
 }
 
 type txtReq struct {
@@ -119,6 +122,10 @@ func (a *API) Handler() http.Handler {
 			fail(w, http.StatusServiceUnavailable, "no fallback certificate authority is configured")
 			return
 		}
+		if a.contact == "" {
+			fail(w, http.StatusServiceUnavailable, "the fallback certificate authority has no contact address configured (CDNS_GTS_CONTACT)")
+			return
+		}
 		// Google allows 25 new accounts a minute and 100 an hour per project;
 		// stay under both, then apply the per-credential daily allowance.
 		if !a.global.allow(time.Now()) {
@@ -138,7 +145,7 @@ func (a *API) Handler() http.Handler {
 			return
 		}
 		log.Printf("eab minted for %s", c.ID)
-		writeJSON(w, http.StatusCreated, map[string]string{"kid": kid, "hmac_b64url": hmac})
+		writeJSON(w, http.StatusCreated, map[string]string{"kid": kid, "hmac_b64url": hmac, "contact": a.contact})
 	})
 	return mux
 }

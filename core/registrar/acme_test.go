@@ -85,7 +85,7 @@ func (b *stubACMEBackend) MintEAB(_ context.Context) (*EABPair, error) {
 		cp := *b.eabPair
 		return &cp, nil
 	}
-	return &EABPair{KID: "test-kid", HMACB64URL: "dGVzdC1tYWM"}, nil
+	return &EABPair{KID: "test-kid", HMACB64URL: "dGVzdC1tYWM", Contact: "ops@example.com"}, nil
 }
 
 func newShortSocketPath(t *testing.T, name string) string {
@@ -618,8 +618,9 @@ func TestHomeCertManagerEnsureOnceFastFailover429(t *testing.T) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if len(acctPayload.Contact) != 0 {
-			http.Error(w, fmt.Sprintf("expected empty contact, got %v", acctPayload.Contact), http.StatusBadRequest)
+		// Like Google: a fallback account needs the operator's contact.
+		if len(acctPayload.Contact) != 1 || acctPayload.Contact[0] != "mailto:ops@example.com" {
+			http.Error(w, fmt.Sprintf("Accounts must have at least one contact (want [mailto:ops@example.com], got %v)", acctPayload.Contact), http.StatusBadRequest)
 			return
 		}
 		w.Header().Set("Location", "https://"+r.Host+"/acct/1")

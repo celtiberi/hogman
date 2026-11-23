@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -491,6 +492,7 @@ func (m *shareCertManager) newManagedConfig(caURL string, withEAB bool) (*certma
 			var pair struct {
 				KID        string `json:"kid"`
 				HMACB64URL string `json:"hmac_b64url"`
+				Contact    string `json:"contact"`
 			}
 			if err := meshJSON(ctx, m.cfg.HTTPClient, m.cfg.Zone, http.MethodPost, "/acme/eab", nil, &pair); err != nil {
 				return acct, err
@@ -501,6 +503,9 @@ func (m *shareCertManager) newManagedConfig(caURL string, withEAB bool) (*certma
 			iss.ExternalAccount = &acme.EAB{
 				KeyID:  pair.KID,
 				MACKey: pair.HMACB64URL,
+			}
+			if len(acct.Contact) == 0 {
+				acct.Contact = fallbackContact(pair.Contact)
 			}
 			return acct, nil
 		}
@@ -833,4 +838,20 @@ func (m *shareCertManager) RunFailoverLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// fallbackContact turns the operator contact handed out with a fallback EAB
+// into an ACME contact URI. Google refuses accounts without a contact; the
+// primary CA's accounts stay without one. Anything that isn't a plain address
+// is dropped rather than sent.
+func fallbackContact(addr string) []string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return nil
+	}
+	a, err := mail.ParseAddress(addr)
+	if err != nil || a.Name != "" || a.Address != addr {
+		return nil
+	}
+	return []string{"mailto:" + addr}
 }

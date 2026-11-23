@@ -41,13 +41,17 @@ door and a host-level ACME DNS-01 challenge server (`challenge-dns`):
    ```bash
    hogman-host challenge-dns-setup 203.0.113.10              # public IPv4
    hogman-host challenge-dns-setup 203.0.113.10 gcp-eab.json # optional Google fallback CA key
+   hogman-host fallback-contact ops@example.com              # required with the Google key
    hogman-host challenge-dns cred list
    ```
 
    Runs `hogman-challenge-dns` as a locked-down systemd service (dedicated user, read-only root,
    only UDP/TCP 53 open, API socket in `/run/hogman-acme`), answering only for the delegated
    pens zone and `_acme-challenge.<gate-domain>`. Test delegation with `dig @<ip> pens.hogman.network SOA`
-   (and `+tcp`).
+   (and `+tcp`). Google refuses ACME accounts without a contact, so with its key set the
+   server hands out fallback account keys only once `fallback-contact` names an operator address;
+   pens put that address on their Google accounts only. Let's Encrypt accounts stay without one,
+   and no member's address is ever used.
 
 4. **Configure the wildcard front-door cert and pens zone:**
 
