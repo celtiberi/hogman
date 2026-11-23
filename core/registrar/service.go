@@ -62,16 +62,17 @@ func (a Actor) Is(m *Member) bool {
 
 // Problem is an error meant for the caller, with an HTTP status.
 type Problem struct {
-	Status int
-	Msg    string
+	Status     int
+	Msg        string
+	RetryAfter int // optional seconds for Retry-After response header
 }
 
 func (p *Problem) Error() string { return p.Msg }
 
-func bad(f string, a ...any) error       { return &Problem{400, fmt.Sprintf(f, a...)} }
-func forbidden(f string, a ...any) error { return &Problem{403, fmt.Sprintf(f, a...)} }
-func missing(f string, a ...any) error   { return &Problem{404, fmt.Sprintf(f, a...)} }
-func conflict(f string, a ...any) error  { return &Problem{409, fmt.Sprintf(f, a...)} }
+func bad(f string, a ...any) error       { return &Problem{Status: 400, Msg: fmt.Sprintf(f, a...)} }
+func forbidden(f string, a ...any) error { return &Problem{Status: 403, Msg: fmt.Sprintf(f, a...)} }
+func missing(f string, a ...any) error   { return &Problem{Status: 404, Msg: fmt.Sprintf(f, a...)} }
+func conflict(f string, a ...any) error  { return &Problem{Status: 409, Msg: fmt.Sprintf(f, a...)} }
 
 type Service struct {
 	cfg  Config

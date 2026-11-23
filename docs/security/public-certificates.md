@@ -64,7 +64,7 @@ We follow two existing models rather than invent our own:
     - The two CAs give the host two different account URIs, and they exist only after the host registers, so these CAA records are added after that.
 - **Each pen gets its own API credential, scoped to that pen.** It can write TXT records under `_acme-challenge.*.<its pen name>.pens.hogman.network`, and nothing else: no other pen, no other record type, nothing under `gate.`.
   - It allows at most 2 live TXT records per name.
-  - Its **weekly cap** (5 by default, configurable via `CDNS_WEEKLY_CAP`) counts distinct names whose challenge was written this week, not raw TXT writes. `home.<pen>` uses one slot (so a new pen gets `home` plus 4 sites in its first week), and a renewal touches its name about once every 60 days, so renewals barely count.
+  - Its **two-window per-pen caps and soft/hard global hourly ceiling** count distinct names whose challenge was written, not raw TXT writes: **5 new names per rolling hour** (`CDNS_HOURLY_CAP`) and **20 per rolling 7 days** (`CDNS_WEEKLY_CAP`) per pen, plus **40/hour soft** (`CDNS_GLOBAL_HOURLY_CAP`) and **60/hour hard** (`CDNS_GLOBAL_HARD_HOURLY_CAP`) across all pens combined. Headroom between the soft and hard global caps is reserved exclusively for quiet or newly created pens (`< 2` new names in the last hour) so bursty pens cannot starve quiet users or new pen sign-ups. `home.<pen>` uses one slot; attempts count on the first TXT write (not issued certs), retries and renewals of already-counted names are exempt, and `429` responses carry a `Retry-After` header with a distinct message for hourly, weekly, and global limits. Fallback EAB mints (`POST /v1/eab`) follow the same per-credential hourly and weekly windows.
   - The host has one separate credential, which only the front door uses, for the `*.gate.hogman.network` wildcard.
   - The registrar reaches the server's HTTP API over a host-only Docker network, documented in `hogman-host`. The API never faces the internet.
 - **Self-hosted pens:** the registrar uses a DNS provider library (libdns) with the operator's DNS API token. The docs recommend the narrowest token the provider allows. They also show the standard trick for making it narrower: delegate `_acme-challenge` with a CNAME to a zone used only for challenges.
@@ -100,7 +100,7 @@ We follow two existing models rather than invent our own:
   - GTS issues each EAB key as a **single-use pair that expires after 7 days** (`gcloud publicca external-account-keys create`). certmagic takes the pair directly, so a remotely signed JWS doesn't fit.
   - So the challenge DNS service holds a Google service account limited to `roles/publicca.externalAccountKeyCreator`. When a share sets up its fallback account, the registrar asks the service for **one fresh pair** and passes it to that share alone. The pair binds that share's account once and is useless after that.
   - No long-lived GTS secret ever reaches a pen or a share.
-  - Pairs are minted **lazily**, only when a share first actually fails over, because GCP's quota is 25 new accounts a minute and 100 an hour, and unused pairs expire after 7 days.
+  - Pairs are minted **lazily**, only when a share first actually fails over, and are gated by the same per-credential hourly and weekly caps (`CDNS_HOURLY_CAP` / `CDNS_WEEKLY_CAP`) plus a per-process burst limiter so traffic stays safely under GCP Public CA's project quota (`120 req/min` and ~100 orders/hour); unused pairs expire after 7 days.
   - ZeroSSL was considered and set aside: it issues through Sectigo, whose CAA handling of `validationmethods` is unreliable, and it doesn't document ARI.
 - **When to fail over.** Switch to the fallback only on `rateLimited`, HTTP 429, or a CA 5xx or outage. Never on DNS validation errors (`unauthorized`, `dns`): those mean our DNS is wrong, and retrying at a second CA would burn its failed-validation limit too. Stock certmagic tries the next issuer on *any* error, so our issuer wrapper decides explicitly and returns `ErrNoRetry` for validation failures.
 - **Renewal:** 90-day certificates. Renew when ARI says to, or at about 30 days left. Renewals don't count against the new-certificate limit.
@@ -108,7 +108,7 @@ We follow two existing models rather than invent our own:
   - a persistent cache per share (kept across restarts and `update`);
   - a duplicate guard (Let's Encrypt allows 5 identical certificates a week);
   - backoff after failed validations (5 per hour per name);
-  - the per-pen weekly cap.
+  - the per-pen hourly/weekly caps and global hourly ceiling.
 
 ## What goes away
 
@@ -189,7 +189,7 @@ The docs say, in one sentence, that pens created before this change need to be r
 | A compromised pen issues certificates for another pen or for `hogman.network` | Per-pen credential scope at the challenge DNS service, plus NS delegation (it can't touch `hogman.network`) |
 | Someone issues through another CA or method | CAA restricted to our two CAs, with `validationmethods=dns-01` and `accounturi` |
 | A leaked GTS credential | The GCP service-account key never leaves the challenge DNS service. A share holds only a single-use EAB pair, which is useless once its account is bound. |
-| One pen exhausts the shared quota | The per-pen weekly cap, the LE override, the GTS fallback |
+| One pen exhausts the shared quota | The per-pen hourly/weekly caps, the global hourly ceiling, the LE override, the GTS fallback |
 | Pen and site names exposed in CT | Disclosed up front (D-21); bring-your-own-domain for those who mind |
 | Cross-pen cookie risk before the PSL | D-19 disclosure; PSL application; bring-your-own-domain |
 | The challenge DNS service is down | Existing certificates keep working for up to about 60 days, and ARI starts renewing early. `hogman-watch` alerts when it stops answering. |
@@ -203,7 +203,7 @@ The docs say, in one sentence, that pens created before this change need to be r
 | acme-dns or our own | Our own small server on `miekg/dns`. |
 | certmagic | Yes, with public resolvers for propagation checks and its cache kept across updates. |
 | `get_certificate` | Dropped. Atomic files in a mount-isolated folder, and a reload over Caddy's admin Unix socket. |
-| Weekly cap | 5 by default (`CDNS_WEEKLY_CAP`), counting distinct new names, not TXT writes. |
+| Rate caps | 5/hour (`CDNS_HOURLY_CAP`) and 20/7d (`CDNS_WEEKLY_CAP`) per pen, plus 40/hour soft (`CDNS_GLOBAL_HOURLY_CAP`) / 60/hour hard (`CDNS_GLOBAL_HARD_HOURLY_CAP`) global ceiling with a reserved quiet-pen floor, counting distinct new names on first TXT write (attempts count; renewals are exempt), with `Retry-After` headers. |
 | Pen ID length | 12 characters at rev 2; replaced by readable pen names in D-21. |
 
 Also fixed:
@@ -219,7 +219,7 @@ Also fixed:
 2. Should the challenge DNS service be acme-dns itself (joohoi/acme-dns, extended with pen scopes and the cap), or our own small server on `miekg/dns`, which the registrar already uses?
 3. certmagic in shares: the dependency weight is acceptable, it already brings libdns and ARI, and keeps `CGO_ENABLED=0`. Better alternatives?
 4. Should `get_certificate http` for the home page and front door replace a custom Caddy build?
-5. Is a per-pen cap of 10 new certificates a week right for the trial? *(Answered: lowered to 5 by default via `CDNS_WEEKLY_CAP` — `home.<pen>` plus 4 sites in week 1.)*
+5. Is a per-pen cap of 10 new certificates a week right for the trial? *(Answered: replaced with a two-window cap — 5/hour burst (`CDNS_HOURLY_CAP`) and 20/7d (`CDNS_WEEKLY_CAP`) per pen plus a 40/hour soft / 60/hour hard global ceiling (`CDNS_GLOBAL_HOURLY_CAP`, `CDNS_GLOBAL_HARD_HOURLY_CAP`) reserving headroom for quiet/new pens.)*
 6. Keep 8-character pen IDs, or longer?
 
 ## What the operator needs to set up (before code reaches production)

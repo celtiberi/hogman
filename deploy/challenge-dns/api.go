@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,15 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func fail(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+func failRateLimit(w http.ResponseWriter, rle *rateLimitError) {
+	secs := int(rle.retryAfter / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	fail(w, http.StatusTooManyRequests, rle.Error())
 }
 
 func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
@@ -81,6 +91,7 @@ func (a *API) Handler() http.Handler {
 		if !readJSON(w, r, &in) {
 			return
 		}
+		var rle *rateLimitError
 		switch err := a.store.PutTXT(c, in.FQDN, in.Value); {
 		case err == nil:
 			log.Printf("txt put %s by %s", normalize(in.FQDN), c.ID)
@@ -89,8 +100,8 @@ func (a *API) Handler() http.Handler {
 			fail(w, http.StatusForbidden, err.Error())
 		case errors.Is(err, errValue):
 			fail(w, http.StatusBadRequest, err.Error())
-		case errors.Is(err, errCap):
-			fail(w, http.StatusTooManyRequests, err.Error())
+		case errors.As(err, &rle):
+			failRateLimit(w, rle)
 		case errors.Is(err, errFull):
 			fail(w, http.StatusConflict, err.Error())
 		default:
@@ -126,14 +137,21 @@ func (a *API) Handler() http.Handler {
 			fail(w, http.StatusServiceUnavailable, "the fallback certificate authority has no contact address configured (CDNS_GTS_CONTACT)")
 			return
 		}
-		// Google allows 25 new accounts a minute and 100 an hour per project;
-		// stay under both, then apply the per-credential daily allowance.
-		if !a.global.allow(time.Now()) {
+		// Stay under Google's per-project request burst limits, then enforce
+		// the credential's hourly and weekly allowances.
+		if !a.global.allow(a.store.now()) {
+			w.Header().Set("Retry-After", "60")
 			fail(w, http.StatusTooManyRequests, "fallback account keys are rate-limited; try later")
 			return
 		}
-		if !a.store.AllowEAB(c) {
-			fail(w, http.StatusTooManyRequests, "this credential's daily allowance of fallback account keys is used")
+		if err := a.store.AllowEAB(c); err != nil {
+			var rle *rateLimitError
+			if errors.As(err, &rle) {
+				failRateLimit(w, rle)
+				return
+			}
+			log.Printf("eab allow for %s: %v", c.ID, err)
+			fail(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)

@@ -22,24 +22,52 @@ import (
 )
 
 const (
-	txtTTL          = 10 * time.Minute // a challenge record lives this long unless refreshed
-	maxLivePer      = 2                // live values per name (ACME may ask for two at once)
-	capWindow       = 7 * 24 * time.Hour
-	defaultCapNames = 5 // distinct new names per pen per capWindow (overridable via CDNS_WEEKLY_CAP)
-	eabPerDay       = 5 // GTS account keys per credential per day
-	acmePrefix      = "_acme-challenge."
-	maxSiteDepth    = 4 // labels before the pen name, as site names allow
+	txtTTL                     = 10 * time.Minute // a challenge record lives this long unless refreshed
+	maxLivePer                 = 2                // live values per name (ACME may ask for two at once)
+	hourlyWindow               = time.Hour
+	capWindow                  = 7 * 24 * time.Hour
+	defaultHourlyCap           = 5  // distinct new names per pen per rolling hour (CDNS_HOURLY_CAP)
+	defaultCapNames            = 20 // distinct new names per pen per 7 days (CDNS_WEEKLY_CAP)
+	defaultGlobalHourlyCap     = 40 // soft global hourly cap across all pens (CDNS_GLOBAL_HOURLY_CAP)
+	defaultGlobalHardHourlyCap = 60 // hard global hourly ceiling with reserved quiet-pen floor (CDNS_GLOBAL_HARD_HOURLY_CAP)
+	quietPenHourlyFloor        = 2  // pens with <2 new names in the last hour may use soft..hard headroom
+	acmePrefix                 = "_acme-challenge."
+	maxSiteDepth               = 4 // labels before the pen name, as site names allow
 )
 
 var (
-	penRE    = regexp.MustCompile(`^[a-z][a-z0-9-]{1,28}[a-z0-9]$`) // the hosted pen-name rule (D-21)
-	labelRE  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	valueRE  = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
-	errScope = errors.New("not allowed for this credential")
-	errCap   = errors.New("this pen's weekly limit on new certificate names is reached")
-	errFull  = errors.New("too many live challenge values for this name")
-	errValue = errors.New("challenge value must be 16-128 characters of A-Z a-z 0-9 _ -")
+	penRE              = regexp.MustCompile(`^[a-z][a-z0-9-]{1,28}[a-z0-9]$`) // the hosted pen-name rule (D-21)
+	labelRE            = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	valueRE            = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
+	errScope           = errors.New("not allowed for this credential")
+	errCap             = errors.New("this pen's weekly limit on new certificate names is reached")
+	errHourlyCap       = errors.New("too many new certificate names for this pen in the last hour")
+	errGlobalHourlyCap = errors.New("the network is busy; too many new certificate names in the last hour")
+	errEABHourlyCap    = errors.New("too many fallback account keys for this credential in the last hour")
+	errEABWeeklyCap    = errors.New("this credential's weekly allowance of fallback account keys is used")
+	errFull            = errors.New("too many live challenge values for this name")
+	errValue           = errors.New("challenge value must be 16-128 characters of A-Z a-z 0-9 _ -")
 )
+
+// rateLimitError pairs a rate-limit sentinel with a Retry-After duration.
+type rateLimitError struct {
+	cause      error
+	retryAfter time.Duration
+}
+
+func (e *rateLimitError) Error() string { return e.cause.Error() }
+func (e *rateLimitError) Unwrap() error { return e.cause }
+
+func retryAfterFromOldest(oldest, now time.Time, window time.Duration) time.Duration {
+	if oldest.IsZero() {
+		return time.Minute
+	}
+	rem := oldest.Add(window).Sub(now)
+	if rem < time.Second {
+		return time.Second
+	}
+	return ((rem + time.Second - 1) / time.Second) * time.Second
+}
 
 // Cred is one API credential. Kind is "pen" (scoped to PenID) or "host"
 // (only the front door's wildcard challenge). Only the token's hash is kept.
@@ -53,9 +81,9 @@ type Cred struct {
 
 // state is what survives a restart, and deliberately little of it:
 //   - credentials, as token hashes only;
-//   - for the weekly cap, which names each pen wrote in the last 7 days
-//     (pruned as the window moves);
-//   - recent fallback-key mints (pruned after a day);
+//   - for the hourly and weekly caps, which names each pen wrote in the last
+//     7 days (pruned as the window moves);
+//   - recent fallback-key mints in the last 7 days;
 //   - the names of pens that ever had a credential, so a deleted pen's name
 //     is never given out again (D-21). Just the name: it's public in the
 //     certificate logs anyway.
@@ -75,13 +103,16 @@ type txtValue struct {
 
 // Store holds the state (persisted) and the live challenge records (not).
 type Store struct {
-	mu       sync.Mutex
-	path     string
-	zones    Zones
-	st       state
-	txt      map[string][]txtValue // fqdn -> live values
-	now      func() time.Time
-	capNames int // 0 uses defaultCapNames
+	mu                       sync.Mutex
+	path                     string
+	zones                    Zones
+	st                       state
+	txt                      map[string][]txtValue // fqdn -> live values
+	now                      func() time.Time
+	hourlyCapNames           int // 0 uses defaultHourlyCap (clamped to weeklyCap)
+	capNames                 int // 0 uses defaultCapNames
+	globalHourlyCapNames     int // 0 uses defaultGlobalHourlyCap (soft global cap)
+	globalHardHourlyCapNames int // 0 uses defaultGlobalHardHourlyCap (or globalHourlyCapNames if set directly)
 }
 
 func (s *Store) weeklyCap() int {
@@ -89,6 +120,38 @@ func (s *Store) weeklyCap() int {
 		return s.capNames
 	}
 	return defaultCapNames
+}
+
+func (s *Store) hourlyCap() int {
+	h := s.hourlyCapNames
+	if h <= 0 {
+		h = defaultHourlyCap
+	}
+	if w := s.weeklyCap(); h > w {
+		return w
+	}
+	return h
+}
+
+func (s *Store) globalHourlyCap() int {
+	if s.globalHourlyCapNames > 0 {
+		return s.globalHourlyCapNames
+	}
+	return defaultGlobalHourlyCap
+}
+
+func (s *Store) globalHardHourlyCap() int {
+	h := s.globalHardHourlyCapNames
+	if h <= 0 {
+		if s.globalHourlyCapNames > 0 {
+			return s.globalHourlyCapNames
+		}
+		h = defaultGlobalHardHourlyCap
+	}
+	if soft := s.globalHourlyCap(); h < soft {
+		return soft
+	}
+	return h
 }
 
 // Zones are the names this server answers for.
@@ -322,22 +385,65 @@ func (s *Store) PutTXT(c Cred, fqdn, value string) error {
 	return nil
 }
 
-// countLocked applies the weekly cap: a name already counted in the window is
-// free; a new one counts, up to s.weeklyCap().
+// countLocked applies the per-pen weekly cap, per-pen hourly burst cap, and
+// global hourly cap across all pens. A name already counted in this pen's
+// 7-day window (retries and renewals) is free; a new name counts on first TXT
+// write (attempts count, not issued certs).
 func (s *Store) countLocked(c Cred, fqdn string, now time.Time) error {
+	// Prune expired 7-day entries across all credentials so global counts stay accurate.
+	globalHourly := 0
+	var oldestGlobalHourly time.Time
+	for id, m := range s.st.Seen {
+		for n, t := range m {
+			if now.Sub(t) >= capWindow {
+				delete(m, n)
+				continue
+			}
+			if now.Sub(t) < hourlyWindow {
+				globalHourly++
+				if oldestGlobalHourly.IsZero() || t.Before(oldestGlobalHourly) {
+					oldestGlobalHourly = t
+				}
+			}
+		}
+		if len(m) == 0 && id != c.ID {
+			delete(s.st.Seen, id)
+		}
+	}
+
 	seen := s.st.Seen[c.ID]
 	if seen == nil {
 		seen = map[string]time.Time{}
 	}
-	for n, t := range seen {
-		if now.Sub(t) > capWindow {
-			delete(seen, n)
-		}
-	}
 	if _, ok := seen[fqdn]; !ok {
+		penHourly := 0
+		var oldestWeekly, oldestHourly time.Time
+		for _, t := range seen {
+			if oldestWeekly.IsZero() || t.Before(oldestWeekly) {
+				oldestWeekly = t
+			}
+			if now.Sub(t) < hourlyWindow {
+				penHourly++
+				if oldestHourly.IsZero() || t.Before(oldestHourly) {
+					oldestHourly = t
+				}
+			}
+		}
 		if len(seen) >= s.weeklyCap() {
 			s.st.Seen[c.ID] = seen
-			return errCap
+			return &rateLimitError{cause: errCap, retryAfter: retryAfterFromOldest(oldestWeekly, now, capWindow)}
+		}
+		if penHourly >= s.hourlyCap() {
+			s.st.Seen[c.ID] = seen
+			return &rateLimitError{cause: errHourlyCap, retryAfter: retryAfterFromOldest(oldestHourly, now, hourlyWindow)}
+		}
+		if globalHourly >= s.globalHardHourlyCap() {
+			s.st.Seen[c.ID] = seen
+			return &rateLimitError{cause: errGlobalHourlyCap, retryAfter: retryAfterFromOldest(oldestGlobalHourly, now, hourlyWindow)}
+		}
+		if globalHourly >= s.globalHourlyCap() && penHourly >= quietPenHourlyFloor {
+			s.st.Seen[c.ID] = seen
+			return &rateLimitError{cause: errGlobalHourlyCap, retryAfter: retryAfterFromOldest(oldestGlobalHourly, now, hourlyWindow)}
 		}
 		seen[fqdn] = now
 	}
@@ -411,21 +517,37 @@ func (s *Store) liveLocked(fqdn string, now time.Time) []txtValue {
 	return out
 }
 
-// AllowEAB records an EAB mint for a credential, at most eabPerDay a day.
-func (s *Store) AllowEAB(c Cred) bool {
+// AllowEAB records an EAB mint for a credential, gated by the same per-pen
+// hourly and weekly caps as new certificate names.
+func (s *Store) AllowEAB(c Cred) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
 	recent := s.st.EAB[c.ID][:0]
+	hourly := 0
+	var oldestWeekly, oldestHourly time.Time
 	for _, t := range s.st.EAB[c.ID] {
-		if now.Sub(t) < 24*time.Hour {
+		if now.Sub(t) < capWindow {
 			recent = append(recent, t)
+			if oldestWeekly.IsZero() || t.Before(oldestWeekly) {
+				oldestWeekly = t
+			}
+			if now.Sub(t) < hourlyWindow {
+				hourly++
+				if oldestHourly.IsZero() || t.Before(oldestHourly) {
+					oldestHourly = t
+				}
+			}
 		}
 	}
-	if len(recent) >= eabPerDay {
+	if len(recent) >= s.weeklyCap() {
 		s.st.EAB[c.ID] = recent
-		return false
+		return &rateLimitError{cause: errEABWeeklyCap, retryAfter: retryAfterFromOldest(oldestWeekly, now, capWindow)}
+	}
+	if hourly >= s.hourlyCap() {
+		s.st.EAB[c.ID] = recent
+		return &rateLimitError{cause: errEABHourlyCap, retryAfter: retryAfterFromOldest(oldestHourly, now, hourlyWindow)}
 	}
 	s.st.EAB[c.ID] = append(recent, now)
-	return s.saveLocked() == nil
+	return s.saveLocked()
 }

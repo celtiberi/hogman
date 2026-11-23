@@ -1496,3 +1496,35 @@ func TestShareCertManagerCloseIdempotent(t *testing.T) {
 	cm.Close()
 	cm.Close()
 }
+
+func TestMeshJSONParsesRetryAfter(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "2700")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"too many new certificate names for this pen in the last hour"}`))
+	}))
+	defer srv.Close()
+
+	hc := srv.Client()
+	origTr := hc.Transport.(*http.Transport)
+	hc.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		u, _ := url.Parse(srv.URL)
+		req2 := req.Clone(req.Context())
+		req2.URL.Scheme = u.Scheme
+		req2.URL.Host = u.Host
+		return origTr.RoundTrip(req2)
+	})
+
+	err := meshJSON(context.Background(), hc, "bobo.pens.example.com", http.MethodPost, "/acme/txt", map[string]string{"name": "photos", "value": "x"}, nil)
+	var me *meshAPIError
+	if !errors.As(err, &me) {
+		t.Fatalf("expected *meshAPIError, got %T: %v", err, err)
+	}
+	if me.Status != http.StatusTooManyRequests || me.RetryAfter != 45*time.Minute {
+		t.Fatalf("meshAPIError = %+v, want status=429 retryAfter=45m", me)
+	}
+	if me.Msg != "too many new certificate names for this pen in the last hour" {
+		t.Fatalf("meshAPIError.Msg = %q", me.Msg)
+	}
+}

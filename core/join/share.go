@@ -634,7 +634,7 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 		if fresh {
 			cm.Close()
 			undoFreshShare(hc, node, dir, c)
-			out = errorf("no certificate for %s: %v\n  Nothing was left behind: the name %s is free again. Fix the problem above,\n  then share again with a fresh share link (this one is used up).", c.fqdn(), err, c.Name)
+			out = formatFreshShareCertError(c.fqdn(), c.Name, err)
 			return fail(permanentShare(out))
 		}
 		if permanent {
@@ -653,6 +653,39 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 	<-ctx.Done()
 	writeShareStatus(dir, "stopped", "")
 	return nil
+}
+
+func retryAfterHint(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	mins := int((d + time.Minute - 1) / time.Minute)
+	if mins < 1 {
+		mins = 1
+	}
+	if mins <= 120 {
+		if mins == 1 {
+			return "try again in about 1 minute"
+		}
+		return fmt.Sprintf("try again in about %d minutes", mins)
+	}
+	hours := int((d + time.Hour - 1) / time.Hour)
+	if hours < 48 {
+		return fmt.Sprintf("try again in about %d hours", hours)
+	}
+	days := int((d + 24*time.Hour - 1) / (24 * time.Hour))
+	return fmt.Sprintf("try again in about %d days", days)
+}
+
+func formatFreshShareCertError(fqdn, name string, err error) error {
+	var me *meshAPIError
+	if errors.As(err, &me) && me.Status == http.StatusTooManyRequests {
+		if hint := retryAfterHint(me.RetryAfter); hint != "" {
+			return errorf("no certificate for %s: %s (%s)\n  Nothing was left behind: the name %s is free again. Wait and share again\n  (if you used a one-time server link, get a fresh one).", fqdn, me.Msg, hint, name)
+		}
+		return errorf("no certificate for %s: %s\n  Nothing was left behind: the name %s is free again. Wait and share again\n  (if you used a one-time server link, get a fresh one).", fqdn, me.Msg, name)
+	}
+	return errorf("no certificate for %s: %v\n  Nothing was left behind: the name %s is free again. Fix the problem above,\n  then share again with a fresh share link (this one is used up).", fqdn, err, name)
 }
 
 func shareHandler(c *shareConfig) (http.Handler, func(), error) {

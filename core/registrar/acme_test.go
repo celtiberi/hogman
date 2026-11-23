@@ -305,6 +305,71 @@ func TestMeshACMEEndpoints(t *testing.T) {
 	}
 }
 
+func TestMeshACMERateLimitPassthrough(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+
+	if _, err := e.svc.AddMember(ctx, cli, "alice", "member"); err != nil {
+		t.Fatal(err)
+	}
+	_, aliceSrv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.11", "")
+	if _, err := e.svc.ServerClaim(Actor{CLI: false, Member: aliceSrvMember(t, e, "alice")}, aliceSrv, "photos", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate challenge-dns returning 429 with Retry-After on both /v1/txt and /v1/eab.
+	cdns := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/txt":
+			w.Header().Set("Retry-After", "1800")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":"too many new certificate names for this pen in the last hour"}`)
+		case "/v1/eab":
+			w.Header().Set("Retry-After", "2400")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":"too many fallback account keys for this credential in the last hour"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer cdns.Close()
+
+	cdnsCli, err := NewChallengeDNSClient(cdns.URL, "hcd_test_token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.svc.acme = cdnsCli
+
+	h := MeshHandler(e.svc)
+	jsonHdr := map[string]string{"Content-Type": "application/json"}
+	validVal := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+	rec := doMeshReq(h, "POST", "/api/acme/txt", "100.64.0.11", `{"name":"photos","value":"`+validVal+`"}`, jsonHdr)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("POST /api/acme/txt 429: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Retry-After"); got != "1800" {
+		t.Fatalf("POST /api/acme/txt Retry-After = %q, want 1800", got)
+	}
+	if !strings.Contains(rec.Body.String(), "too many new certificate names for this pen in the last hour") {
+		t.Fatalf("POST /api/acme/txt body = %s, want verbatim message", rec.Body.String())
+	}
+
+	rec = doMeshReq(h, "POST", "/api/acme/eab", "100.64.0.11", ``, jsonHdr)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("POST /api/acme/eab 429: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Retry-After"); got != "2400" {
+		t.Fatalf("POST /api/acme/eab Retry-After = %q, want 2400", got)
+	}
+	if !strings.Contains(rec.Body.String(), "too many fallback account keys for this credential in the last hour") {
+		t.Fatalf("POST /api/acme/eab body = %s, want verbatim message", rec.Body.String())
+	}
+}
+
 func aliceSrvMember(t *testing.T, e *testEnv, handle string) *Member {
 	t.Helper()
 	m, err := e.st.MemberByHandle(handle)

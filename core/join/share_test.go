@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -288,5 +289,54 @@ func TestWaitShareBackgroundCleansUpOnErrorAndTimeout(t *testing.T) {
 	}
 	if !stopped {
 		t.Fatal("stopFn must be called when background share times out")
+	}
+}
+
+func TestFormatFreshShareCertErrorRateLimit(t *testing.T) {
+	// Wrapped *meshAPIError 429 with Retry-After -> shows verbatim message + human hint.
+	wrappedHourly := fmt.Errorf("certmagic: %w", dnsStepError{
+		err: &meshAPIError{
+			Status:     http.StatusTooManyRequests,
+			Msg:        "too many new certificate names for this pen in the last hour",
+			RetryAfter: 45 * time.Minute,
+		},
+	})
+	got := formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", wrappedHourly).Error()
+	if !strings.Contains(got, "too many new certificate names for this pen in the last hour") {
+		t.Fatalf("missing verbatim message: %s", got)
+	}
+	if !strings.Contains(got, "try again in about 45 minutes") {
+		t.Fatalf("missing retry hint: %s", got)
+	}
+	if !strings.Contains(got, "the name photos is free again") {
+		t.Fatalf("missing rollback note: %s", got)
+	}
+
+	// Global hourly cap with short Retry-After.
+	wrappedGlobal := &meshAPIError{
+		Status:     http.StatusTooManyRequests,
+		Msg:        "the network is busy; too many new certificate names in the last hour",
+		RetryAfter: 30 * time.Second,
+	}
+	got = formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", wrappedGlobal).Error()
+	if !strings.Contains(got, "try again in about 1 minute") {
+		t.Fatalf("short retry hint wrong: %s", got)
+	}
+
+	// Weekly cap (~6 days).
+	wrappedWeekly := &meshAPIError{
+		Status:     http.StatusTooManyRequests,
+		Msg:        "this pen's weekly limit on new certificate names is reached",
+		RetryAfter: 6 * 24 * time.Hour,
+	}
+	got = formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", wrappedWeekly).Error()
+	if !strings.Contains(got, "try again in about 6 days") {
+		t.Fatalf("weekly retry hint wrong: %s", got)
+	}
+
+	// Non-429 error keeps original format.
+	got = formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", errors.New("dns timeout")).Error()
+	if !strings.Contains(got, "Fix the problem above") {
+		t.Fatalf("non-429 error changed unexpectedly: %s", got)
 	}
 }

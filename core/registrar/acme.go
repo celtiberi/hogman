@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -178,7 +179,13 @@ func (c *ChallengeDNSClient) doJSON(ctx context.Context, method, path string, in
 	if msg == "" {
 		msg = http.StatusText(resp.StatusCode)
 	}
-	return &Problem{Status: resp.StatusCode, Msg: msg}
+	retryAfter := 0
+	if raw := strings.TrimSpace(resp.Header.Get("Retry-After")); raw != "" {
+		if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+			retryAfter = secs
+		}
+	}
+	return &Problem{Status: resp.StatusCode, Msg: msg, RetryAfter: retryAfter}
 }
 
 func (c *ChallengeDNSClient) SetTXT(ctx context.Context, fqdn, value string) error {

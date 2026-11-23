@@ -15,7 +15,7 @@ Host droplet (holds LLM API key, runs orchestrator + deterministic Judge)
   │     └── pen-penb-core          (Pen B: isolated second pen)
   │
   ├── hogman-arena-acme (--internal: ZERO internet egress)
-  │     ├── hogman-arena-cdns      (challenge-dns, CDNS_WEEKLY_CAP=5)
+  │     ├── hogman-arena-cdns      (challenge-dns, 5/hr & 20/7d per pen, 40/hr soft / 60/hr hard global)
   │     └── hogman-arena-pebble    (Pebble ACME CA; mgmt 15000 bound to 127.0.0.1 only;
   │                                 detached from pen-*-core once home certs are issued)
   │
@@ -75,7 +75,7 @@ Use a separate DigitalOcean project and a fresh Ubuntu 24.04 LTS droplet (2 vCPU
    sudo -E python3 test-arena/run.py
    ```
 
-   Or run the expanded **v2 red-team scenario** (ACME `/api/acme/{txt,eab}` & `CDNS_WEEKLY_CAP=5` exhaustion, reserved/victim name hijacking, `X-Forwarded-For` impersonation, admin privilege escalation, proxy/CSWSH checks, cross-pen isolation, and post-kick revocation):
+   Or run the expanded **v2 red-team scenario** (ACME `/api/acme/{txt,eab}` & `CDNS_HOURLY_CAP=5` burst exhaustion, reserved/victim name hijacking, `X-Forwarded-For` impersonation, admin privilege escalation, proxy/CSWSH checks, cross-pen isolation, and post-kick revocation):
 
    ```bash
    sudo -E python3 test-arena/run.py --prompts test-arena/prompts.v2.json

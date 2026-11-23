@@ -58,7 +58,11 @@ Settings (environment):
   CDNS_GCP_KEY       optional Google service-account key file (fallback CA)
   CDNS_GTS_CONTACT   contact email for fallback CA (Google) accounts; required for
                      handing out fallback account keys (Google refuses accounts without one)
-  CDNS_WEEKLY_CAP    distinct new certificate names per pen per 7 days, default 5
+  CDNS_HOURLY_CAP    distinct new certificate names per pen per rolling hour, default 5
+  CDNS_WEEKLY_CAP    distinct new certificate names per pen per 7 days, default 20
+  CDNS_GLOBAL_HOURLY_CAP       soft global cap across all pens per rolling hour, default 40
+  CDNS_GLOBAL_HARD_HOURLY_CAP  hard global cap across all pens per rolling hour (headroom above soft
+                               is reserved for quiet/new pens with <2 names this hour), default 60
 `
 
 func main() {
@@ -106,15 +110,56 @@ func parseContact(raw string) (string, error) {
 	return raw, nil
 }
 
-func parseWeeklyCap(raw string) (int, error) {
+func parseCap(envName, raw string, def, max int) (int, error) {
 	if raw == "" {
-		return defaultCapNames, nil
+		return def, nil
 	}
 	n, err := strconv.Atoi(raw)
-	if err != nil || n < 1 || n > 1000 {
-		return 0, fmt.Errorf("CDNS_WEEKLY_CAP must be an integer between 1 and 1000 (got %q)", raw)
+	if err != nil || n < 1 || n > max {
+		return 0, fmt.Errorf("%s must be an integer between 1 and %d (got %q)", envName, max, raw)
 	}
 	return n, nil
+}
+
+func parseWeeklyCap(raw string) (int, error) {
+	return parseCap("CDNS_WEEKLY_CAP", raw, defaultCapNames, 1000)
+}
+
+func parseCapsFromEnv(hourlyRaw, weeklyRaw, globalHourlyRaw, globalHardHourlyRaw string) (hourly, weekly, globalHourly, globalHardHourly int, err error) {
+	weekly, err = parseWeeklyCap(weeklyRaw)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	hourlyDef := defaultHourlyCap
+	if hourlyRaw == "" && weekly < hourlyDef {
+		hourlyDef = weekly
+	}
+	hourly, err = parseCap("CDNS_HOURLY_CAP", hourlyRaw, hourlyDef, 1000)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	if hourly > weekly {
+		return 0, 0, 0, 0, fmt.Errorf("CDNS_HOURLY_CAP (%d) must not exceed CDNS_WEEKLY_CAP (%d)", hourly, weekly)
+	}
+	globalHourly, err = parseCap("CDNS_GLOBAL_HOURLY_CAP", globalHourlyRaw, defaultGlobalHourlyCap, 10000)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	if globalHourly < hourly {
+		return 0, 0, 0, 0, fmt.Errorf("CDNS_GLOBAL_HOURLY_CAP (%d) must be at least CDNS_HOURLY_CAP (%d)", globalHourly, hourly)
+	}
+	globalHardDef := defaultGlobalHardHourlyCap
+	if globalHardHourlyRaw == "" && globalHourly > globalHardDef {
+		globalHardDef = globalHourly
+	}
+	globalHardHourly, err = parseCap("CDNS_GLOBAL_HARD_HOURLY_CAP", globalHardHourlyRaw, globalHardDef, 10000)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	if globalHardHourly < globalHourly {
+		return 0, 0, 0, 0, fmt.Errorf("CDNS_GLOBAL_HARD_HOURLY_CAP (%d) must be at least CDNS_GLOBAL_HOURLY_CAP (%d)", globalHardHourly, globalHourly)
+	}
+	return hourly, weekly, globalHourly, globalHardHourly, nil
 }
 
 func serve() error {
@@ -122,7 +167,12 @@ func serve() error {
 	if listen == "" {
 		return errors.New("set CDNS_LISTEN to the public address to answer on, e.g. 203.0.113.10:53 (not 127.0.0.53, where systemd-resolved sits)")
 	}
-	weeklyCap, err := parseWeeklyCap(os.Getenv("CDNS_WEEKLY_CAP"))
+	hourlyCap, weeklyCap, globalHourlyCap, globalHardHourlyCap, err := parseCapsFromEnv(
+		os.Getenv("CDNS_HOURLY_CAP"),
+		os.Getenv("CDNS_WEEKLY_CAP"),
+		os.Getenv("CDNS_GLOBAL_HOURLY_CAP"),
+		os.Getenv("CDNS_GLOBAL_HARD_HOURLY_CAP"),
+	)
 	if err != nil {
 		return err
 	}
@@ -135,8 +185,12 @@ func serve() error {
 	if err != nil {
 		return err
 	}
+	store.hourlyCapNames = hourlyCap
 	store.capNames = weeklyCap
-	log.Printf("per-pen weekly certificate cap: %d distinct names / 7d", store.weeklyCap())
+	store.globalHourlyCapNames = globalHourlyCap
+	store.globalHardHourlyCapNames = globalHardHourlyCap
+	log.Printf("certificate caps: %d/hour per pen, %d/7d per pen, %d/hour global soft (%d/hour hard with quiet-pen floor)",
+		store.hourlyCap(), store.weeklyCap(), store.globalHourlyCap(), store.globalHardHourlyCap())
 	d := &DNS{store: store, zones: zones, ns: env("CDNS_NS", "ns1.hogman.network"),
 		mbox: env("CDNS_MBOX", "hostmaster.hogman.network"), caa: defaultCAA()}
 
