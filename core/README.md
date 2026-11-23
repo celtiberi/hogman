@@ -52,11 +52,15 @@ More devices: each member adds their own from the home page (`POST /api/devices`
 device link (`https://<PUBLIC_HOST>/join#k=…`, or with `&for=share` for `hogman-join share`). Nobody can
 make one for someone else: there is no account recovery. `hogman-join update` verifies downloads
 against `SHA256SUMS` over HTTPS, cleans up any leftover legacy private-CA root certificates, and
-restarts background agents and service-managed shares. `hogman-join leave [<pen>]` (a join link
-with or without its key, the control host, or the pen zone; no argument means every pen) stops shares
-on that pen, cleans up any legacy root cert, logs the device out, and removes its local settings. It
-works from saved settings, so a pen whose server is gone can still be left. `hogman-join uninstall`
-leaves every pen and removes Hogman's settings folders, then says how to delete the program.
+restarts background agents and service-managed shares. `hogman-join leave <pen>` (a join link
+with or without its key, the control host, or the pen zone) stops shares on that pen, cleans up any
+legacy root cert, logs the device out, and removes its local settings. It works from saved settings,
+so a pen whose server is gone can still be left. `leave` with no pen does nothing and points to
+`leave-all`, which lists every pen and asks `[y/N]`. `hogman-join uninstall` leaves every pen
+(asking first) and removes Hogman's settings folders. All three refuse a pen whose person is an
+owner (no account recovery) or one that can't be reached to check. `--force` overrides that only
+after a warning and typing the exact pen name; `--yes` never skips the name, and there's no
+override without a terminal. `uninstall` is all or nothing: if any pen is refused, nothing changes.
 
 Built for macOS (Apple silicon, Intel), Linux (x86-64, ARM64) and Windows (x86-64; untested).
 

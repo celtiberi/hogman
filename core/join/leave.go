@@ -8,6 +8,15 @@ import (
 	"strings"
 )
 
+// Seams for tests: the network check, the [y/N] question and the per-pen
+// leave steps.
+var (
+	ownsPenFn      = ownsPen
+	confirmFn      = confirm
+	typedConfirmFn = typedConfirm
+	leaveOneFn     = leaveOne
+)
+
 // leaveTarget is one pen this computer is in (a joined device, its shares, or
 // both). host is the pen's public control host, when known.
 type leaveTarget struct {
@@ -78,50 +87,163 @@ func matchLeaveTargets(local []leaveTarget, key string) []leaveTarget {
 	return out
 }
 
-// leaveCmd: "leave" alone leaves every pen on this computer; "leave X" leaves
-// the pen X names (link, control host or zone). Everything is decided from
-// this computer's saved settings, so a pen whose server is gone can still be
-// left.
+// leaveCmd takes this computer out of the one pen named (link with or without
+// its key, control host or zone). It never leaves more than that pen: leaving
+// every pen is leave-all, which asks first.
 func leaveCmd(args []string, o options) error {
+	if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
+		local := localLeaveTargets()
+		return errorf("leave which pen? Name it, for example:  hogman-join leave %s\n"+
+			"  Pens on this computer: %s\n"+
+			"  To leave every pen, run hogman-join leave-all (it asks first).",
+			firstZoneOr(local, "home.example.pens.hogman.network"), zoneList(local))
+	}
 	local := localLeaveTargets()
-	var targets []leaveTarget
-	switch len(args) {
-	case 0:
-		if len(local) == 0 {
-			say("This computer isn't in any pen. Nothing to do.")
-			return nil
+	key := leaveKey(args[0])
+	targets := matchLeaveTargets(local, key)
+	if len(targets) == 0 {
+		// Not known here by that name: ask the server which zone it is.
+		client, err := controlClient(o.controlCA)
+		if err != nil {
+			return err
 		}
-		targets = local
-	case 1:
-		key := leaveKey(args[0])
-		if key == "" {
-			return errorf("leave what? Give a pen name like home.example.pens.hogman.network, or run hogman-join leave on its own to leave every pen")
+		n, err := fetchNetwork(client, key)
+		if err != nil {
+			return errorf("this computer isn't in a pen called %s (pens here: %s)", key, zoneList(local))
 		}
-		targets = matchLeaveTargets(local, key)
-		if len(targets) == 0 {
-			// Not known here by that name: ask the server which zone it is.
-			client, err := controlClient(o.controlCA)
-			if err != nil {
-				return err
-			}
-			n, err := fetchNetwork(client, key)
-			if err != nil {
-				return errorf("this computer isn't in a pen called %s (pens here: %s)", key, zoneList(local))
-			}
-			targets = matchLeaveTargets(local, n.Zone)
-			if len(targets) == 0 {
-				return errorf("this computer isn't in %s (pens here: %s)", n.Zone, zoneList(local))
-			}
+		if targets = matchLeaveTargets(local, n.Zone); len(targets) == 0 {
+			return errorf("this computer isn't in %s (pens here: %s)", n.Zone, zoneList(local))
 		}
-	default:
-		return errorf("usage: hogman-join leave ['<pen>']")
 	}
 	for _, t := range targets {
-		if err := leaveOne(t); err != nil {
+		if err := checkCanLeave(t, o); err != nil {
+			return err
+		}
+		if err := leaveOneFn(t); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// leaveAllCmd takes this computer out of every pen it's in, after showing the
+// list and asking. Pens this person owns are kept (see checkCanLeave). It
+// reports how many pens were left in place.
+func leaveAllCmd(args []string, o options) error {
+	_, err := leaveAll(args, o, "Leave all of these pens")
+	return err
+}
+
+func leaveAll(args []string, o options, question string) (kept int, err error) {
+	if len(args) != 0 {
+		return 0, errorf("leave-all takes no pen name; to leave one pen: hogman-join leave '<pen>'")
+	}
+	local := localLeaveTargets()
+	if len(local) == 0 {
+		say("This computer isn't in any pen.")
+		return 0, nil
+	}
+	var go_, stay []leaveTarget
+	var why []string
+	for _, t := range local {
+		if err := checkCanLeave(t, o); err != nil {
+			stay = append(stay, t)
+			why = append(why, err.Error())
+			continue
+		}
+		go_ = append(go_, t)
+	}
+	step("This computer is in %d pen(s)", len(local))
+	for _, t := range go_ {
+		note("will leave  %s", t.zone)
+	}
+	for i, t := range stay {
+		note("will KEEP   %s: %s", t.zone, firstLine(why[i]))
+	}
+	if len(go_) == 0 {
+		return len(stay), errorf("nothing to leave")
+	}
+	if !o.yes && !confirmFn("\n"+question+"?") {
+		return len(stay), errorf("nothing changed")
+	}
+	for _, t := range go_ {
+		if err := leaveOneFn(t); err != nil {
+			return len(stay), err
+		}
+	}
+	return len(stay), nil
+}
+
+func firstZoneOr(ts []leaveTarget, def string) string {
+	if len(ts) > 0 {
+		return ts[0].zone
+	}
+	return def
+}
+
+// checkCanLeave refuses to take this computer out of a pen its person owns,
+// or one that can't be reached to ask. Owners have no account recovery: if
+// this is their last device and there's no other owner, nobody could run the
+// pen again. --force overrides either refusal, but only after a warning and
+// typing the pen's name exactly (like deleting a repository); --yes never
+// skips that, and without a person at the keyboard it refuses.
+func checkCanLeave(t leaveTarget, o options) error {
+	if t.cfg == nil {
+		return nil // only shares here: no device, no membership to lose
+	}
+	owner, known := ownsPenFn(t.cfg)
+	var warning string
+	switch {
+	case known && owner:
+		if !o.force {
+			return errorf("you're an owner of %s, so this computer won't leave it.\n"+
+				"  Owners have no account recovery: if this is your last device and there's no other owner,\n"+
+				"  nobody could run the pen again. Make someone else an owner first (home.%s, People).\n"+
+				"  If you're sure, run it with --force and type the pen's name to confirm.", t.zone, t.zone)
+		}
+		warning = "You are an OWNER of " + t.zone + ". Owners have no account recovery.\n" +
+			"  If this is your last device and there's no other owner, NOBODY can ever run this pen again:\n" +
+			"  no invites, no new devices, no removing anyone. This can't be undone."
+	case !known:
+		if !o.force {
+			return errorf("couldn't reach %s to check whether you own it, so this computer won't leave it yet.\n"+
+				"  Try again when it's reachable. If the pen is gone for good, run it with --force and type the\n"+
+				"  pen's name to confirm.", t.zone)
+		}
+		warning = "Couldn't reach " + t.zone + " to check whether you own it.\n" +
+			"  If you do and the pen comes back, you may have lost your last way to run it. This can't be undone."
+	default:
+		return nil
+	}
+	if !typedConfirmFn(t.zone, warning) {
+		return errorf("the name didn't match, so %s was not left", t.zone)
+	}
+	return nil
+}
+
+// typedConfirm shows the warning and makes the person type the pen's name.
+// It refuses when nobody is at the keyboard.
+func typedConfirm(zone, warning string) bool {
+	if fi, err := os.Stdin.Stat(); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		note("refusing: --force needs a person to type the pen's name (stdin is not a terminal)")
+		return false
+	}
+	say("\n⚠ %s", warning)
+	return ask("  To confirm, type the pen's name ("+zone+"): ") == zone
+}
+
+// ownsPen asks the pen, as this computer, whether its person is an owner.
+// known is false when the pen can't be asked.
+func ownsPen(cfg *agentConfig) (owner, known bool) {
+	c, err := penClient(cfg)
+	if err != nil {
+		return false, false
+	}
+	var me meView
+	if _, err := homeAPI(c, cfg.Zone, "GET", "/me", nil, &me); err != nil || me.Member.Handle == "" {
+		return false, false
+	}
+	return me.IsOwner, true
 }
 
 func zoneList(ts []leaveTarget) string {
@@ -189,15 +311,28 @@ func leaveOne(t leaveTarget) error {
 	return nil
 }
 
-// uninstallCmd leaves every pen, then removes what hogman-join keeps on this
-// computer. The program file itself is left for the person to delete, since
-// it may live anywhere and be in use.
+// uninstallCmd takes Hogman off this computer: every pen, then its settings.
+// It's all or nothing. If this person owns any pen here (owners have no
+// account recovery), or a pen can't be checked, it refuses before asking or
+// changing anything. Otherwise it lists the pens and asks first. The program
+// file itself is left for the person to delete, since it may live anywhere.
 func uninstallCmd(args []string, o options) error {
 	if len(args) != 0 {
 		return errorf("usage: hogman-join uninstall")
 	}
-	if err := leaveCmd(nil, o); err != nil {
-		return err
+	var blocked []string
+	for _, t := range localLeaveTargets() {
+		if err := checkCanLeave(t, o); err != nil {
+			blocked = append(blocked, "  "+t.zone+": "+firstLine(err.Error()))
+		}
+	}
+	if len(blocked) > 0 {
+		return errorf("Hogman can't be removed from this computer yet, so nothing was changed:\n%s\n"+
+			"  Sort those out (make someone else an owner first), or run hogman-join uninstall --force and type each pen's name.",
+			strings.Join(blocked, "\n"))
+	}
+	if _, err := leaveAll(nil, o, "Leave these pens and remove Hogman from this computer"); err != nil {
+		return err // declined, or a pen failed to leave: remove nothing
 	}
 	step("Removing Hogman's settings from this computer")
 	removeNativeHost(hogmanConfigBase())

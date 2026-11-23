@@ -348,17 +348,11 @@ func removeOwnDevice(zone string) bool {
 		note("this computer was already removed from the pen")
 		return true
 	}
-	pool, err := testACMECAPool()
+	c, err := penClient(cfg)
 	if err != nil {
-		note("could not read HOGMAN_ACME_CA_ROOT while leaving: %v", err)
+		note("could not reach the pen while leaving: %v", err)
 		return false
 	}
-	pu, err := url.Parse(cfg.proxyURL())
-	if err != nil {
-		return false
-	}
-	c := &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{
-		Proxy: http.ProxyURL(pu), TLSClientConfig: &tls.Config{RootCAs: pool}}}
 	var me meView
 	if _, err := homeAPI(c, zone, "GET", "/me", nil, &me); err != nil || me.ThisDevice.ID == 0 {
 		note("could not remove this computer from your devices (the keeper can, on the home page)")
@@ -371,6 +365,21 @@ func removeOwnDevice(zone string) bool {
 	}
 	note("removed this computer from your devices")
 	return true
+}
+
+// penClient talks to the pen's home page as this computer, through its own
+// running connection.
+func penClient(cfg *agentConfig) (*http.Client, error) {
+	pool, err := testACMECAPool()
+	if err != nil {
+		return nil, fmt.Errorf("reading HOGMAN_ACME_CA_ROOT: %w", err)
+	}
+	pu, err := url.Parse(cfg.proxyURL())
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{
+		Proxy: http.ProxyURL(pu), TLSClientConfig: &tls.Config{RootCAs: pool}}}, nil
 }
 
 // leaveAlongside undoes side-by-side mode for a pen. Reports whether there was

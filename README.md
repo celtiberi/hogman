@@ -61,10 +61,13 @@ Paste your invite link: https://store-north.gate.hogman.network/join#t=(your inv
 - On macOS, it prompts for local-network access and asks once for your Mac password to configure the
   system automatic proxy (`networksetup`).
 - Add more devices from your pen's home page (*Add a device*), update anytime with
-  `~/hogman-join update`, or leave with `~/hogman-join leave <pen>` (no link needed;
-  `~/hogman-join leave` alone leaves every pen).
-- To take Hogman off a computer entirely: `~/hogman-join uninstall`, then delete `~/hogman-join`
-  and remove the browser extension if you added it.
+  `~/hogman-join update`, or leave one pen with `~/hogman-join leave <pen>` (no link needed).
+  `~/hogman-join leave-all` leaves every pen and asks first.
+- To take Hogman off a computer entirely: `~/hogman-join uninstall` (asks first), then delete
+  `~/hogman-join` and remove the browser extension if you added it.
+- Owners have no account recovery, so `leave`, `leave-all` and `uninstall` refuse a pen you own.
+  Make someone else an owner first. `--force` overrides this only after a warning and typing the
+  pen's name exactly.
 
 ### Hosting HTTPS servers (`share`)
 

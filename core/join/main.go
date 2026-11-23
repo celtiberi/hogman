@@ -42,8 +42,9 @@ const usageText = `hogman-join: join this device to a Hogman private network
 usage:
   hogman-join [options] '<link>'      join, using an invite or device link
   hogman-join update ['<link|host>']  update hogman-join from a pen's server (verifies SHA-256)
-  hogman-join leave ['<pen>']         leave a pen (its link, host or name), or every pen if none given
-  hogman-join uninstall               leave every pen and remove Hogman's settings from this computer
+  hogman-join leave '<pen>'           take this computer out of one pen (its link, host or name)
+  hogman-join leave-all               take this computer out of every pen (asks first)
+  hogman-join uninstall               leave every pen and remove Hogman's settings (asks first)
   hogman-join status                  show installed pens, browser extension host, and VPN proxy state
   hogman-join browser-setup           register the browser extension native messaging host (no sudo)
   hogman-join share NAME WHAT         put a port or a folder on the pen over HTTPS
@@ -57,6 +58,7 @@ options:
   --dry-run         check the link and the network, then stop without changing anything
   --no-open         don't open the portal in a browser at the end
   --verbose         show the commands being run
+  --force           leave: clean up a pen whose server can't be reached (gone for good)
   --control-ca FILE extra certificate to trust for the public control server
                     (test networks with a self-signed control host only)
 
@@ -66,6 +68,7 @@ Quote the link: it contains '#' and '&'.
 type options struct {
 	handle, hostname, controlCA string
 	yes, dryRun, noOpen         bool
+	force                       bool // leave: clean up a pen whose server can't be reached
 	alongside                   bool // accepted for old scripts; it's the only way now
 	noService, noSystemProxy    bool
 	pen                         string // share: which pen
@@ -92,6 +95,7 @@ func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err 
 	fs.StringVar(&o.hostname, "hostname", "", "")
 	fs.StringVar(&o.controlCA, "control-ca", "", "")
 	fs.BoolVar(&o.yes, "yes", false, "")
+	fs.BoolVar(&o.force, "force", false, "")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "")
 	fs.BoolVar(&o.noOpen, "no-open", false, "")
 	fs.BoolVar(&verbose, "verbose", false, "")
@@ -183,6 +187,8 @@ func main() {
 		err = browserSetupCmd(pos[1:], o)
 	case len(pos) >= 1 && pos[0] == "leave":
 		err = leaveCmd(pos[1:], o)
+	case len(pos) >= 1 && pos[0] == "leave-all":
+		err = leaveAllCmd(pos[1:], o)
 	case len(pos) >= 1 && pos[0] == "uninstall":
 		err = uninstallCmd(pos[1:], o)
 	case len(pos) == 1:

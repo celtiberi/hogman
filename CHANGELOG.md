@@ -7,10 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
-- `core/join`: `hogman-join leave` no longer needs a keyed join link (I-2). It accepts a link with or without its key, the control host, or the pen zone, and with no argument leaves every pen on the computer. It works from saved settings, so a pen whose server is gone (or unreachable) can still be left. Before macOS asks for a password to change the proxy setting, `hogman-join` now says why.
+- `core/join`: `hogman-join leave <pen>` no longer needs a keyed join link (I-2). It accepts a link with or without its key, the control host, or the pen zone, and works from saved settings, so a pen whose server is gone can still be left. `leave` with no pen does nothing and points to `leave-all`. `leave`, `leave-all` and `uninstall` refuse a pen the person owns (owners have no account recovery) or one that can't be reached to check; `--force` overrides only after a warning and typing the exact pen name, which `--yes` never skips. Before macOS asks for a password to change the proxy setting, `hogman-join` says why.
 
 ### Added
-- `core/join`: `hogman-join uninstall` leaves every pen, removes Hogman's settings folders and browser native-messaging host, and prints how to delete the program and the extension.
+- `core/join`: `hogman-join leave-all` (lists every pen and asks first) and `hogman-join uninstall` (all or nothing: asks first, then leaves every pen and removes Hogman's settings folders and browser native-messaging host, and prints how to delete the program and the extension).
 
 ### Added
 - `deploy/challenge-dns`, `deploy/signup`, and `deploy/hogman-host`: Work tier plan with higher per-pen certificate caps and separate Stripe pricing (D-30, D-31):
