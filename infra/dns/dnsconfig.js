@@ -46,6 +46,13 @@ D("hogman.network", REG_NONE, DnsProvider(DSP_CLOUDFLARE),
   CAA("gate", "issue", ";"),
   CAA("gate", "issuewild", "letsencrypt.org; validationmethods=dns-01; accounturi=https://acme-v02.api.letsencrypt.org/acme/acct/4026504272"),
 
+  // Cloudflare's Advanced Certificate Manager (edge certificate for
+  // *.hogman.network and *.work.hogman.network) writes its own DNS-01 TXT
+  // records here at issue and at every renewal. Leave them alone, or an apply
+  // that runs mid-validation deletes them and the renewal fails.
+  IGNORE("_acme-challenge", "TXT"),
+  IGNORE("_acme-challenge.work", "TXT"),
+
   // Email from the sign-up page (Resend).
   CNAME("send", "send.forge.rmta.net."),
   CNAME("rsend", "rsend.forge.rmta.net."),
