@@ -780,6 +780,9 @@ func statusCmd() error {
 		}
 	}
 
+	sys := detectSystemProxyState(configs)
+	// The browser extension is optional (it's for browsing pens with a VPN
+	// on), so it's only mentioned when it's installed or actually needed.
 	hostPath := nativeHostBinaryPath(base)
 	if _, err := os.Stat(hostPath); err == nil {
 		extState := "installed (not yet contacted by browser extension)"
@@ -787,11 +790,17 @@ func statusCmd() error {
 			extState = "active (browser extension connected)"
 		}
 		say("\nBrowser extension host: %s", extState)
-	} else {
+	} else if sys.VPNOverride {
 		say("\nBrowser extension host: not installed (run: hogman-join browser-setup)")
 	}
-
-	sys := detectSystemProxyState(configs)
+	if sys.StalePAC != "" {
+		say("\n! A proxy setting left by a pen this computer no longer runs is still on: %s", sys.StalePAC)
+		if len(configs) == 0 {
+			say("  Clear it with: hogman-join uninstall")
+		} else {
+			say("  It's cleared the next time you leave or update a pen; or run: hogman-join update")
+		}
+	}
 	if sys.VPNOverride {
 		say("\n! VPN override detected (%s): macOS system PAC is hidden while this VPN is connected.", sys.VPNInterface)
 		if !extensionRecentlySeen(base, 7*24*time.Hour) {

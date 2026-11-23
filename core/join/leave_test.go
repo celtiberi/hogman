@@ -95,6 +95,7 @@ type leaveFixture struct {
 	answer  bool              // what the person answers
 	typed   map[string]string // what the person types when asked for a pen's name
 	prompts []string          // pens whose name was asked for (with a warning)
+	swept   int               // how many times the stale-proxy sweep ran
 	owners  map[string]bool
 	unknown map[string]bool // pens that can't be reached to ask
 }
@@ -126,8 +127,9 @@ func newLeaveFixture(t *testing.T) *leaveFixture {
 	write(filepath.Join(shareDir("shr.pens.example.network", "cooler"), "share.json"),
 		shareConfig{Name: "cooler", Zone: "shr.pens.example.network", LoginServer: "https://shr.gate.example.network"})
 
-	oldOwns, oldConfirm, oldLeave := ownsPenFn, confirmFn, leaveOneFn
-	t.Cleanup(func() { ownsPenFn, confirmFn, leaveOneFn = oldOwns, oldConfirm, oldLeave })
+	oldOwns, oldConfirm, oldLeave, oldSweep := ownsPenFn, confirmFn, leaveOneFn, sweepStaleProxyFn
+	t.Cleanup(func() { ownsPenFn, confirmFn, leaveOneFn, sweepStaleProxyFn = oldOwns, oldConfirm, oldLeave, oldSweep })
+	sweepStaleProxyFn = func() { f.swept++ }
 	ownsPenFn = func(c *agentConfig) (bool, bool) {
 		if f.unknown[c.Zone] {
 			return false, false
@@ -343,5 +345,41 @@ func TestUninstallRemovesSettingsWhenAllLeft(t *testing.T) {
 	}
 	if len(f.left) != 3 || f.settingsExist() {
 		t.Fatalf("left %v, settings exist %v; want all three left and settings gone", f.left, f.settingsExist())
+	}
+}
+
+// After leaving pens, leave-all (and so uninstall) sweeps a stale Hogman proxy
+// setting; declining sweeps nothing.
+func TestLeaveAllSweepsStaleProxy(t *testing.T) {
+	f := newLeaveFixture(t)
+	f.answer = false
+	_ = leaveAllCmd(nil, options{})
+	if f.swept != 0 {
+		t.Fatalf("declined leave-all swept the proxy %d times", f.swept)
+	}
+	f.answer = true
+	if err := leaveAllCmd(nil, options{}); err != nil {
+		t.Fatal(err)
+	}
+	if f.swept != 1 {
+		t.Fatalf("leave-all swept %d times, want 1", f.swept)
+	}
+}
+
+// A PAC address an old Hogman pen left behind is reported as stale, not as
+// someone else's proxy (which would also stop a later join from setting it).
+func TestStaleHogmanPACIsNotAConflict(t *testing.T) {
+	const stale = "http://127.0.0.1:25148/proxy.pac?v=f862f6b0"
+	old := staleHogmanPAC
+	t.Cleanup(func() { staleHogmanPAC = old })
+	staleHogmanPAC = func(u string) bool { return u == stale }
+
+	st := evaluateDarwinProxyState(scutilProxyInfo{PACOn: true, PACURL: stale}, "en0", false, nil)
+	if st.OSProxyConflict || st.StalePAC != stale {
+		t.Fatalf("stale Hogman PAC: conflict=%v stale=%q; want no conflict, stale reported", st.OSProxyConflict, st.StalePAC)
+	}
+	st = evaluateDarwinProxyState(scutilProxyInfo{PACOn: true, PACURL: "http://proxy.corp.example/wpad.dat"}, "en0", false, nil)
+	if !st.OSProxyConflict || st.StalePAC != "" {
+		t.Fatalf("company PAC: conflict=%v stale=%q; want a conflict", st.OSProxyConflict, st.StalePAC)
 	}
 }

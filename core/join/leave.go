@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -171,7 +172,21 @@ func leaveAll(args []string, o options, question string) (kept int, err error) {
 			return len(stay), err
 		}
 	}
+	sweepStaleProxyFn()
 	return len(stay), nil
+}
+
+// sweepStaleProxyFn clears any automatic-proxy setting an old Hogman pen left
+// behind (for example when an earlier leave's password prompt was cancelled),
+// pointing it at the remaining pens or turning it off. macOS only: elsewhere
+// hogman-join never changes the system proxy itself. A seam for tests.
+var sweepStaleProxyFn = func() {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	if msg := clearSystemProxy(nil, loadInstalledPenConfigs(hogmanConfigBase())); msg != "" {
+		note("%s", msg)
+	}
 }
 
 func firstZoneOr(ts []leaveTarget, def string) string {
