@@ -105,7 +105,10 @@ hogman-host upgrade bobo                                                        
 
 `install.sh` resolves `latest` once, then downloads `SHA256SUMS` and every archive from that pinned
 release tag (`releases/download/v<ver>/...`) so a concurrent release cannot mix versions. Set
-`HOGMAN_VERSION=<ver>` to install a specific release tag directly.
+`HOGMAN_VERSION=<ver>` to install a specific release tag directly. `install.sh` refreshes the
+`challenge-dns` binary via `hogman-host refresh-services`; if upgrading manually (or without
+prebuilt binaries), re-run `hogman-host challenge-dns-setup <public-ip>` (which keeps the existing
+GCP key) so new `challenge-dns` features such as per-plan certificate caps take effect.
 
 If upgrading from a pre-switchover server before `gate-cert-setup` and `pens-zone` are configured,
 `install.sh` skips the `signup-setup` refresh with a reminder rather than failing. Once configured,
@@ -166,12 +169,14 @@ NTFY_TOPIC=<topic> WATCH_URLS="https://get.hogman.network/api/status" \
 ```bash
 hogman-host backup-setup age1...
 hogman-host signup-setup gate.hogman.network get.hogman.network 8
-hogman-host signup-code "for alice"          # standard code: appends -xxxx random ending
-hogman-host signup-code --vanity "for alice" # vanity code: allows a bare pen name
-hogman-host signup-cloudflare on             # trust CF-Connecting-IP + block direct-to-origin bypasses
+hogman-host signup-code "for alice"                  # standard Personal code: appends -xxxx random ending
+hogman-host signup-code --vanity "for alice"         # Personal vanity code: allows a bare pen name
+hogman-host signup-code --vanity --work "for acme"   # Work vanity code (PLAN=work, THEME=work, higher cert caps)
+hogman-host signup-cloudflare on                     # trust CF-Connecting-IP + block direct-to-origin bypasses
 hogman-host signup-turnstile <site-key> < ts-secret  # require Cloudflare Turnstile on signup/waitlist
 hogman-host signup-work-host get.work.example.com    # optional Work sign-up host (THEME=work default)
 hogman-host theme <pen> work                         # toggle an existing pen's UI theme (work|default)
+hogman-host plan <pen> work                          # switch an existing pen's cert-cap plan live (personal|work)
 ```
 
 **Cloudflare Proxy rollout order:** deploy this release first, apply the DNS change (`CF_PROXY_ON`),
@@ -220,9 +225,16 @@ Link directly to the waitlist with `https://<signup-host>/#wait`.
 2. On the server, with the key and the webhook signing secret one per line on standard input:
 
 ```bash
-hogman-host signup-stripe price_123 < stripe-keys      # add "tax" to turn on Stripe Tax
+hogman-host signup-stripe price_123 [--work price_456] [tax] < stripe-keys
+hogman-host signup-stripe work-price price_456         # update Work price without re-piping keys (or: off)
 hogman-host signup-stripe off
 ```
+
+When `--work` (or `work-price`) is set, checkouts started on the Work sign-up host use the Work
+Stripe Price over the same single webhook, and both Stripe metadata and `/opt/hogman/signup/payments`
+record the tier (`personal` or `work`). When no Work price is configured, the Work host reports
+`for_sale: false` and refuses `/api/checkout` (`404`) so it never sells a Work plan at the Personal
+price.
 
 The page shows **Buy a pen** while the server has room. After paying, Stripe sends the buyer to
 `/paid.html`, which shows their code once Stripe's event arrives. The broker checks every event's

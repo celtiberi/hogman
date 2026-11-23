@@ -723,3 +723,119 @@ func TestPenNamesAreNeverReused(t *testing.T) {
 		t.Fatalf("after removal and restart, kept: %+v", s2.st)
 	}
 }
+
+func TestPerPlanCertCapsAndQuietPenReservation(t *testing.T) {
+	s, now := newTestStore(t)
+	s.hourlyCapNames = 2
+	s.capNames = 4
+	s.workHourlyCapNames = 5
+	s.workCapNames = 10
+	s.globalHourlyCapNames = 6
+	s.globalHardHourlyCapNames = 8
+
+	cPers, _ := mustCred(t, s, "pen", penA)
+	cWork, _, err := s.AddCredWithPlan("pen", penB, "work")
+	if err != nil || cWork.Plan != "work" {
+		t.Fatalf("AddCredWithPlan work: c=%+v err=%v", cWork, err)
+	}
+	cQuiet, _, err := s.AddCredWithPlan("pen", "carol", "")
+	if err != nil || cQuiet.Plan != "" {
+		t.Fatalf("AddCredWithPlan default: c=%+v err=%v", cQuiet, err)
+	}
+	if _, _, err := s.AddCredWithPlan("host", "", "work"); err == nil {
+		t.Fatal("host cred accepted a plan")
+	}
+	if _, _, err := s.AddCredWithPlan("pen", "dave", "enterprise"); err == nil {
+		t.Fatal("invalid plan accepted")
+	}
+
+	// Personal pen stops at 2/hour.
+	for i := 0; i < 2; i++ {
+		if err := s.PutTXT(cPers, ch(fmt.Sprintf("p%d", i), penA), val1); err != nil {
+			t.Fatalf("personal put %d: %v", i, err)
+		}
+	}
+	if err := s.PutTXT(cPers, ch("p2", penA), val1); !errors.Is(err, errHourlyCap) {
+		t.Fatalf("personal 3rd put = %v, want errHourlyCap", err)
+	}
+
+	// Work pen exceeds personal cap (writes 4 names, reaching global soft=6: 2+4=6),
+	// then 5th name hits global soft cap (6) because work pen is bursty (>=2 names/hr).
+	for i := 0; i < 4; i++ {
+		if err := s.PutTXT(cWork, ch(fmt.Sprintf("w%d", i), penB), val1); err != nil {
+			t.Fatalf("work put %d: %v", i, err)
+		}
+	}
+	if err := s.PutTXT(cWork, ch("w4", penB), val1); !errors.Is(err, errGlobalHourlyCap) {
+		t.Fatalf("work 5th put at global soft=6 = %v, want errGlobalHourlyCap", err)
+	}
+
+	// Quiet pen (<2 names/hr) STILL gets reserved headroom between soft(6) and hard(8)!
+	for i := 0; i < 2; i++ {
+		if err := s.PutTXT(cQuiet, ch(fmt.Sprintf("q%d", i), "carol"), val1); err != nil {
+			t.Fatalf("quiet pen put %d in reserved headroom: %v", i, err)
+		}
+	}
+
+	// Advance 1 hour: Work pen can write up to 5/hour (its full hourly cap) and EAB honors work cap.
+	*now = now.Add(hourlyWindow + time.Second)
+	for i := 4; i < 9; i++ {
+		if err := s.PutTXT(cWork, ch(fmt.Sprintf("w%d", i), penB), val1); err != nil {
+			t.Fatalf("work hour-2 put %d: %v", i, err)
+		}
+	}
+	if err := s.PutTXT(cWork, ch("w9", penB), val1); !errors.Is(err, errHourlyCap) {
+		t.Fatalf("work 6th in hour 2 = %v, want errHourlyCap", err)
+	}
+
+	// Live upgrade of personal pen to work raises its hourly cap immediately and persists.
+	*now = now.Add(hourlyWindow + time.Second)
+	updated, err := s.SetCredPlan(penA, "work")
+	if err != nil || updated.Plan != "work" {
+		t.Fatalf("SetCredPlan upgrade: %+v %v", updated, err)
+	}
+	for i := 2; i < 6; i++ {
+		if err := s.PutTXT(updated, ch(fmt.Sprintf("p%d", i), penA), val1); err != nil {
+			t.Fatalf("upgraded pen put %d: %v", i, err)
+		}
+	}
+	// Reload from disk and verify plan persisted.
+	s2, err := OpenStore(s.path, testZones)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundWork int
+	for _, c := range s2.Creds() {
+		if c.Plan == "work" {
+			foundWork++
+		}
+	}
+	if foundWork != 2 {
+		t.Fatalf("persisted work creds = %d, want 2", foundWork)
+	}
+
+	// Admin HTTP API: PUT /admin/creds/{id}/plan downgrades penA back to personal.
+	adm := AdminHandler(s)
+	req := httptest.NewRequest("PUT", "/admin/creds/"+updated.ID+"/plan", strings.NewReader(`{"plan":"personal"}`))
+	rec := httptest.NewRecorder()
+	adm.ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"plan":"personal"`) {
+		t.Fatalf("PUT plan downgrade: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestParseWorkCapsFromEnv(t *testing.T) {
+	if wh, ww, err := parseWorkCapsFromEnv("", "", 40); err != nil || wh != defaultWorkHourlyCap || ww != defaultWorkWeeklyCap {
+		t.Fatalf("defaults = (%d, %d, %v)", wh, ww, err)
+	}
+	// Clamps default work hourly cap down to small globalHourly when unset (backwards compat for tests).
+	if wh, ww, err := parseWorkCapsFromEnv("", "", 6); err != nil || wh != 6 || ww != defaultWorkWeeklyCap {
+		t.Fatalf("clamped = (%d, %d, %v)", wh, ww, err)
+	}
+	if _, _, err := parseWorkCapsFromEnv("20", "10", 40); err == nil {
+		t.Fatal("work hourly > work weekly accepted")
+	}
+	if _, _, err := parseWorkCapsFromEnv("50", "60", 40); err == nil {
+		t.Fatal("work hourly > global hourly accepted")
+	}
+}

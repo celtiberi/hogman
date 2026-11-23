@@ -189,10 +189,11 @@ func (b *broker) check(w http.ResponseWriter, r *http.Request) {
 }
 
 type signupInput struct {
-	Code  string `json:"code"`
-	Pen   string `json:"pen"`
-	Owner string `json:"owner"`
-	Theme string `json:"theme,omitempty"`
+	Code     string `json:"code"`
+	Pen      string `json:"pen"`
+	Owner    string `json:"owner"`
+	Theme    string `json:"theme,omitempty"`
+	WantPlan string `json:"want_plan,omitempty"`
 }
 
 func decodeSignupInput(w http.ResponseWriter, r *http.Request) (signupInput, bool) {
@@ -213,6 +214,14 @@ func decodeSignupInput(w http.ResponseWriter, r *http.Request) (signupInput, boo
 		return signupInput{}, false
 	}
 	in.Theme = theme
+	if strings.TrimSpace(in.WantPlan) != "" {
+		wp, ok := normalisePlan(in.WantPlan)
+		if !ok {
+			jsonOut(w, 400, map[string]string{"error": "unknown plan"})
+			return signupInput{}, false
+		}
+		in.WantPlan = wp
+	}
 	if why, ok := validPen(in.Pen); !ok {
 		jsonOut(w, 400, map[string]string{"error": "pen name: " + why})
 		return signupInput{}, false
@@ -245,7 +254,11 @@ func (b *broker) validate(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 403, map[string]string{"error": "that sign-up code isn't right, or it was already used"})
 		return
 	}
-	vanity, _ := parseCodeMeta(rawNote)
+	vanity, plan, _ := parseCodeMeta(rawNote)
+	if in.WantPlan == planWork && plan != planWork {
+		jsonOut(w, 403, map[string]string{"error": "this sign-up code is for a personal pen, not a Work pen"})
+		return
+	}
 	if vanity {
 		if b.taken(r.Context(), in.Pen) {
 			jsonOut(w, 409, map[string]string{"error": "that name is taken"})
@@ -267,7 +280,7 @@ func (b *broker) validate(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 503, map[string]string{"error": "this server is full right now"})
 		return
 	}
-	jsonOut(w, 200, map[string]any{"ok": true, "vanity": vanity})
+	jsonOut(w, 200, map[string]any{"ok": true, "vanity": vanity, "plan": plan})
 }
 
 func (b *broker) pickSuffixedPen(ctx context.Context, prefix string) (string, error) {
@@ -303,7 +316,11 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 403, map[string]string{"error": "that sign-up code isn't right, or it was already used"})
 		return
 	}
-	vanity, note := parseCodeMeta(rawNote)
+	vanity, plan, note := parseCodeMeta(rawNote)
+	if in.WantPlan == planWork && plan != planWork {
+		jsonOut(w, 403, map[string]string{"error": "this sign-up code is for a personal pen, not a Work pen"})
+		return
+	}
 	targetPen := in.Pen
 	if vanity {
 		if b.taken(r.Context(), targetPen) {
@@ -327,8 +344,15 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	start := time.Now()
 	args := []string{"provision", targetPen, in.Owner}
-	if in.Theme != "" {
-		args = append(args, "--theme", in.Theme)
+	theme := in.Theme
+	if plan == planWork && theme == "" {
+		theme = "work"
+	}
+	if theme != "" {
+		args = append(args, "--theme", theme)
+	}
+	if plan == planWork {
+		args = append(args, "--plan", planWork)
 	}
 	out, code, stderr := b.run(ctx, args...)
 	switch code {
@@ -368,8 +392,11 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 	if vanity {
 		tag += " [vanity]"
 	}
-	if in.Theme != "" {
-		tag += " [theme=" + in.Theme + "]"
+	if plan == planWork {
+		tag += " [plan=work]"
+	}
+	if theme != "" {
+		tag += " [theme=" + theme + "]"
 	}
 	b.ledger(fmt.Sprintf("%s raised %s for %s with %s (%s)%s in %s",
 		time.Now().UTC().Format(time.RFC3339), targetPen, in.Owner, in.Code, note, tag, time.Since(start).Round(time.Second)))

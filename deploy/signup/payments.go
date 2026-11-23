@@ -42,8 +42,18 @@ const (
 	paidTag        = "paid"   // the note on a code a payment bought
 	penMetaKey     = "hogman" // metadata on our sessions, so other sales don't mint codes
 	penMetaValue   = "pen"
+	planMetaKey    = "plan" // metadata recording which tier was bought ("personal" or "work")
+	planPersonal   = "personal"
+	planWork       = "work"
 	codeAlphabet   = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // as hogman-host's rand_chars: no 0/O, 1/I
 )
+
+func planFromMeta(meta map[string]string) string {
+	if meta[planMetaKey] == planWork {
+		return planWork
+	}
+	return planPersonal
+}
 
 var sessionRE = regexp.MustCompile(`^cs_(test|live)_[A-Za-z0-9]{10,200}$`)
 
@@ -52,10 +62,28 @@ var sessionRE = regexp.MustCompile(`^cs_(test|live)_[A-Za-z0-9]{10,200}$`)
 // stripeCheckout is what the page needs to sell a pen. nil: selling is off.
 type stripeCheckout struct {
 	client         *stripe.Client
-	price          string            // price_...
+	price          string            // personal price_...
+	workPrice      string            // optional Work price_... (falls back to price when empty)
 	publicURL      string            // default https://get.example.com, for Stripe's redirects
 	allowedOrigins map[string]string // lowercased bare host -> allowlisted https://<host>
 	automatTax     bool              // Stripe Tax computes tax (needs Stripe Tax set up)
+}
+
+func (sc *stripeCheckout) priceForPlan(plan string) string {
+	if plan == planWork {
+		return sc.workPrice
+	}
+	return sc.price
+}
+
+func (wb *web) forSaleForRequest(r *http.Request) bool {
+	if wb.stripe == nil {
+		return false
+	}
+	if wb.isWorkHost(r) {
+		return wb.stripe.workPrice != ""
+	}
+	return true
 }
 
 func (sc *stripeCheckout) allowOrigin(rawURL string) {
@@ -93,7 +121,13 @@ func loadStripeCheckout() *stripeCheckout {
 	if !strings.HasPrefix(pub, "https://") {
 		log.Fatal("PUBLIC_URL must be the page's https:// address when selling pens")
 	}
-	sc := &stripeCheckout{client: stripe.NewClient(key), price: price, publicURL: pub, automatTax: env("STRIPE_AUTOMATIC_TAX", "") == "1"}
+	sc := &stripeCheckout{
+		client:     stripe.NewClient(key),
+		price:      price,
+		workPrice:  strings.TrimSpace(env("STRIPE_WORK_PRICE", "")),
+		publicURL:  pub,
+		automatTax: env("STRIPE_AUTOMATIC_TAX", "") == "1",
+	}
 	sc.allowOrigin(pub)
 	if workHost := stripHostPort(env("WORK_SIGNUP_HOST", "")); workHost != "" {
 		sc.allowOrigin("https://" + workHost)
@@ -114,21 +148,30 @@ func stripeMode(k string) string {
 }
 
 func (sc *stripeCheckout) params() *stripe.CheckoutSessionCreateParams {
-	return sc.paramsForOrigin(sc.publicURL)
+	return sc.paramsFor(sc.publicURL, planPersonal)
 }
 
 func (sc *stripeCheckout) paramsForOrigin(origin string) *stripe.CheckoutSessionCreateParams {
+	return sc.paramsFor(origin, planPersonal)
+}
+
+func (sc *stripeCheckout) paramsFor(origin, plan string) *stripe.CheckoutSessionCreateParams {
 	if origin == "" {
 		origin = sc.publicURL
 	}
+	if plan != planWork {
+		plan = planPersonal
+	}
+	meta := map[string]string{penMetaKey: penMetaValue, planMetaKey: plan}
+	subMeta := map[string]string{penMetaKey: penMetaValue, planMetaKey: plan}
 	p := &stripe.CheckoutSessionCreateParams{
 		Mode:       stripe.String(string(stripe.CheckoutSessionModeSubscription)),
-		LineItems:  []*stripe.CheckoutSessionCreateLineItemParams{{Price: stripe.String(sc.price), Quantity: stripe.Int64(1)}},
+		LineItems:  []*stripe.CheckoutSessionCreateLineItemParams{{Price: stripe.String(sc.priceForPlan(plan)), Quantity: stripe.Int64(1)}},
 		SuccessURL: stripe.String(origin + "/paid.html?session_id={CHECKOUT_SESSION_ID}"),
 		CancelURL:  stripe.String(origin + "/"),
-		Metadata:   map[string]string{penMetaKey: penMetaValue},
+		Metadata:   meta,
 		SubscriptionData: &stripe.CheckoutSessionCreateSubscriptionDataParams{
-			Metadata: map[string]string{penMetaKey: penMetaValue},
+			Metadata: subMeta,
 		},
 		// Businesses can add their VAT number (EU/UK reverse charge).
 		TaxIDCollection: &stripe.CheckoutSessionCreateTaxIDCollectionParams{Enabled: stripe.Bool(true)},
@@ -143,7 +186,7 @@ func (sc *stripeCheckout) paramsForOrigin(origin string) *stripe.CheckoutSession
 // checkout starts a Checkout Session. Not when the server is full: nobody
 // should pay for a pen that can't be raised.
 func (wb *web) checkout(w http.ResponseWriter, r *http.Request) {
-	if wb.stripe == nil {
+	if !wb.forSaleForRequest(r) {
 		jsonOut(w, 404, map[string]string{"error": "pens aren't for sale here"})
 		return
 	}
@@ -162,7 +205,11 @@ func (wb *web) checkout(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	s, err := wb.stripe.client.V1CheckoutSessions.Create(ctx, wb.stripe.paramsForOrigin(wb.stripe.originForHost(r.Host)))
+	plan := planPersonal
+	if wb.isWorkHost(r) {
+		plan = planWork
+	}
+	s, err := wb.stripe.client.V1CheckoutSessions.Create(ctx, wb.stripe.paramsFor(wb.stripe.originForHost(r.Host), plan))
 	if err != nil || s == nil || !strings.HasPrefix(s.URL, "https://") {
 		log.Printf("stripe checkout: %v", err)
 		jsonOut(w, 502, map[string]string{"error": "the payment page didn't open; try again in a minute"})
@@ -278,9 +325,10 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if fresh {
-			b.ledger(fmt.Sprintf("%s payment %s bought code %s (customer %s, subscription %s)",
-				time.Now().UTC().Format(time.RFC3339), s.ID, code, s.Customer, s.Subscription))
-			b.notifyKind("raise", "A pen was paid for")
+			plan := planFromMeta(s.Metadata)
+			b.ledger(fmt.Sprintf("%s payment %s bought code %s (plan %s, customer %s, subscription %s)",
+				time.Now().UTC().Format(time.RFC3339), s.ID, code, plan, s.Customer, s.Subscription))
+			b.notifyKind("raise", "A pen was paid for ("+plan+")")
 		}
 		jsonOut(w, 200, map[string]string{"ok": "code ready"})
 	case "customer.subscription.deleted":
@@ -288,9 +336,10 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(ev.Data.Raw, &sub); err == nil && sub.Metadata[penMetaKey] == penMetaValue {
 			// What a cancelled pen should do (warn, suspend, remove) is a later
 			// decision; for now the operator hears about it and acts by hand.
-			b.ledger(fmt.Sprintf("%s subscription %s ended (customer %s): see payments for its code",
-				time.Now().UTC().Format(time.RFC3339), sub.ID, sub.Customer))
-			b.notifyKind("raise", "A pen's subscription ended")
+			plan := planFromMeta(sub.Metadata)
+			b.ledger(fmt.Sprintf("%s subscription %s ended (plan %s, customer %s): see payments for its code",
+				time.Now().UTC().Format(time.RFC3339), sub.ID, plan, sub.Customer))
+			b.notifyKind("raise", "A pen's subscription ended ("+plan+")")
 		}
 		jsonOut(w, 200, map[string]string{"ok": "noted"})
 	default:
@@ -329,9 +378,9 @@ func (b *broker) paidCode(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- payments: $HOGMAN_HOME/signup/payments, one line per paid session ---
-// "<session> <code> <customer> <subscription> <unix time>"
+// "<session> <code> <customer> <subscription> <unix time> <plan>"
 
-type payment struct{ session, code, customer, subscription string }
+type payment struct{ session, code, customer, subscription, plan string }
 
 func (b *broker) paymentsPath() string { return filepath.Join(b.home, "signup", "payments") }
 
@@ -357,7 +406,11 @@ func (b *broker) findPaymentLocked(session string) (payment, bool, error) {
 	for sc.Scan() {
 		p := strings.Fields(sc.Text())
 		if len(p) >= 4 && p[0] == session {
-			return payment{session: p[0], code: p[1], customer: p[2], subscription: p[3]}, true, nil
+			plan := planPersonal
+			if len(p) >= 6 && p[5] == planWork {
+				plan = planWork
+			}
+			return payment{session: p[0], code: p[1], customer: p[2], subscription: p[3], plan: plan}, true, nil
 		}
 	}
 	return payment{}, false, sc.Err()
@@ -378,8 +431,13 @@ func (b *broker) codeForPayment(s checkoutObject) (code string, fresh bool, err 
 		return "", false, err
 	}
 	// The code first: a payment line always points at a code that existed.
-	// Paid pens get a bare name of the buyer's choice (no -xxxx ending).
-	if err := b.addCode(code, "vanity "+paidTag+" "+s.ID); err != nil {
+	// Paid pens get a bare name of the buyer's choice (no -xxxx ending);
+	// Work purchases carry the "work" tag so the broker provisions PLAN=work (D-30).
+	codeNote := "vanity " + paidTag + " " + s.ID
+	if planFromMeta(s.Metadata) == planWork {
+		codeNote = "vanity work " + paidTag + " " + s.ID
+	}
+	if err := b.addCode(code, codeNote); err != nil {
 		return "", false, err
 	}
 	// If the payment line can't be written, take the code back (best effort):
@@ -395,7 +453,7 @@ func (b *broker) codeForPayment(s checkoutObject) (code string, fresh bool, err 
 		return rollback(err)
 	}
 	defer f.Close()
-	_, err = fmt.Fprintf(f, "%s %s %s %s %d\n", s.ID, code, idOrDash(s.Customer), idOrDash(s.Subscription), time.Now().Unix())
+	_, err = fmt.Fprintf(f, "%s %s %s %s %d %s\n", s.ID, code, idOrDash(s.Customer), idOrDash(s.Subscription), time.Now().Unix(), planFromMeta(s.Metadata))
 	if err != nil {
 		return rollback(err)
 	}

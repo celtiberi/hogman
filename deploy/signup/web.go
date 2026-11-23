@@ -154,7 +154,7 @@ func (wb *web) status(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, code, out)
 		return
 	}
-	res := map[string]any{"open": out["open"], "pens_domain": wb.domain, "sites_domain": wb.sitesDomain, "for_sale": wb.stripe != nil}
+	res := map[string]any{"open": out["open"], "pens_domain": wb.domain, "sites_domain": wb.sitesDomain, "for_sale": wb.forSaleForRequest(r)}
 	if wb.isWorkHost(r) {
 		res["theme"] = "work"
 	}
@@ -252,6 +252,9 @@ func (wb *web) create(w http.ResponseWriter, r *http.Request) {
 	brokerReq := map[string]string{"code": in.Code, "pen": in.Pen, "owner": in.Handle}
 	if theme != "" {
 		brokerReq["theme"] = theme
+	}
+	if wb.isWorkHost(r) {
+		brokerReq["want_plan"] = planWork
 	}
 	code, out := wb.ask(r.Context(), "POST", "/validate", brokerReq)
 	if code != 200 {

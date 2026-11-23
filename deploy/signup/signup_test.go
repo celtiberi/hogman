@@ -26,14 +26,20 @@ case "$1" in
     [ -e "$HOGMAN_HOME/pens/$2" ] && exit 2
     [ $(ls "$HOGMAN_HOME/pens" | wc -l) -ge ${FAKE_MAX:-3} ] && exit 3
     mkdir "$HOGMAN_HOME/pens/$2"
-    theme=""
-    if [ "${4:-}" = "--theme" ]; then theme="${5:-}"; fi
+    pen="$2"; owner="$3"; shift 3
+    theme=""; plan=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --theme) theme="$2"; shift 2 ;;
+        --plan)  plan="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
     echo "==> lots of progress" >&2
-    if [ -n "$theme" ]; then
-      echo "{\"pen\":\"$2\",\"zone\":\"$2.pens.example.com\",\"host\":\"$2.gate.example.com\",\"owner\":\"$3\",\"join_link\":\"https://$2.gate.example.com/join#k=abc\",\"valid_until\":\"x\",\"theme\":\"$theme\"}"
-    else
-      echo "{\"pen\":\"$2\",\"zone\":\"$2.pens.example.com\",\"host\":\"$2.gate.example.com\",\"owner\":\"$3\",\"join_link\":\"https://$2.gate.example.com/join#k=abc\",\"valid_until\":\"x\"}"
-    fi ;;
+    extra=""
+    [ -n "$theme" ] && extra="$extra,\"theme\":\"$theme\""
+    [ -n "$plan" ] && extra="$extra,\"plan\":\"$plan\""
+    echo "{\"pen\":\"$pen\",\"zone\":\"$pen.pens.example.com\",\"host\":\"$pen.gate.example.com\",\"owner\":\"$owner\",\"join_link\":\"https://$pen.gate.example.com/join#k=abc\",\"valid_until\":\"x\"$extra}" ;;
   name-free) [ -e "$HOGMAN_HOME/pens/$2" ] && exit 2; [ "$2" = burned ] && exit 2; exit 0 ;;
   *) exit 9 ;;
 esac
@@ -118,14 +124,23 @@ func TestBrokerSuffixedFreePensAndVanityTag(t *testing.T) {
 	// Standard codes (and notes like "vanity-project" without a space) get a
 	// server-assigned 4-char random suffix; only "vanity" / "vanity ..." gets bare names.
 	b, home := newTestBroker(t, "PIG-AAAA-BBBB for alice\nPIG-CCCC-DDDD vanity-project\nPIG-EEEE-FFFF vanity\n")
-	if v, n := parseCodeMeta("vanity"); !v || n != "" {
-		t.Fatalf("parseCodeMeta(vanity) = (%v, %q)", v, n)
+	if v, p, n := parseCodeMeta("vanity"); !v || p != planPersonal || n != "" {
+		t.Fatalf("parseCodeMeta(vanity) = (%v, %q, %q)", v, p, n)
 	}
-	if v, n := parseCodeMeta("vanity for vip"); !v || n != "for vip" {
-		t.Fatalf("parseCodeMeta(vanity for vip) = (%v, %q)", v, n)
+	if v, p, n := parseCodeMeta("vanity for vip"); !v || p != planPersonal || n != "for vip" {
+		t.Fatalf("parseCodeMeta(vanity for vip) = (%v, %q, %q)", v, p, n)
 	}
-	if v, n := parseCodeMeta("vanity-project"); v || n != "vanity-project" {
-		t.Fatalf("parseCodeMeta(vanity-project) = (%v, %q)", v, n)
+	if v, p, n := parseCodeMeta("vanity-project"); v || p != planPersonal || n != "vanity-project" {
+		t.Fatalf("parseCodeMeta(vanity-project) = (%v, %q, %q)", v, p, n)
+	}
+	if v, p, n := parseCodeMeta("vanity work paid cs_test_1"); !v || p != planWork || n != "paid cs_test_1" {
+		t.Fatalf("parseCodeMeta(vanity work paid) = (%v, %q, %q)", v, p, n)
+	}
+	if v, p, n := parseCodeMeta("work vanity vip"); !v || p != planWork || n != "vip" {
+		t.Fatalf("parseCodeMeta(work vanity vip) = (%v, %q, %q)", v, p, n)
+	}
+	if v, p, n := parseCodeMeta("workshop for bob"); v || p != planPersonal || n != "workshop for bob" {
+		t.Fatalf("parseCodeMeta(workshop) = (%v, %q, %q)", v, p, n)
 	}
 
 	h := b.handler()
@@ -821,7 +836,7 @@ func TestTurnstileVerificationCSPAndGlobalWaitlistProtection(t *testing.T) {
 }
 
 func TestWorkHostThemeAndMultiHostTurnstile(t *testing.T) {
-	b, home := newTestBroker(t, "PIG-AAAA-BBBB vanity work1\nPIG-CCCC-DDDD vanity work2\nPIG-EEEE-FFFF vanity def1\n")
+	b, home := newTestBroker(t, "PIG-AAAA-BBBB vanity work work1\nPIG-CCCC-DDDD vanity work work2\nPIG-EEEE-FFFF vanity pers1\n")
 	brokerSrv := httptest.NewServer(b.handler())
 	defer brokerSrv.Close()
 
@@ -839,6 +854,7 @@ func TestWorkHostThemeAndMultiHostTurnstile(t *testing.T) {
 	defer tsSrv.Close()
 
 	wb := newWeb(brokerSrv.URL, testToken, "pens.test")
+	wb.creates = newLimiter(20, time.Hour)
 	wb.workHost = "get.work.example.com"
 	wb.turnstile = newTurnstileVerifier("0x4TEST", "secret", tsSrv.URL, "get.example.com,get.work.example.com")
 	h := wb.handler()
@@ -875,6 +891,14 @@ func TestWorkHostThemeAndMultiHostTurnstile(t *testing.T) {
 		t.Fatalf("foreign Turnstile host: %d, want 403", code)
 	}
 
+	// 4. D-30: Personal code cannot raise a pen on the Work host (403 on both web and broker).
+	if code, out := callHost("get.work.example.com", "POST", "/api/create", `{"code":"PIG-EEEE-FFFF","pen":"gamma","handle":"carol","turnstile_token":"tok-work"}`); code != 403 {
+		t.Fatalf("personal code on work host: %d %v, want 403", code, out)
+	}
+	if code, out := call(b.handler(), "POST", "/provision", `{"code":"PIG-EEEE-FFFF","pen":"gamma","owner":"carol","want_plan":"work"}`, auth); code != 403 {
+		t.Fatalf("personal code direct broker provision with want_plan=work: %d %v, want 403", code, out)
+	}
+
 	waitDone := func(jobID string) map[string]any {
 		t.Helper()
 		for i := 0; i < 100; i++ {
@@ -888,38 +912,41 @@ func TestWorkHostThemeAndMultiHostTurnstile(t *testing.T) {
 		return nil
 	}
 
-	// 4. Work host with omitted theme defaults to "work" and accepts work-host Turnstile token.
+	// 5. Work code on Work host raises a Work pen (plan=work, theme=work) and accepts work-host Turnstile token.
 	code, out := callHost("get.work.example.com", "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"acme","handle":"alice","turnstile_token":"tok-work"}`)
 	if code != 202 {
 		t.Fatalf("work host create: %d %v", code, out)
 	}
-	if res := waitDone(out["job"].(string)); res["theme"] != "work" {
-		t.Fatalf("work host create result = %v, want theme=work", res)
+	if res := waitDone(out["job"].(string)); res["theme"] != "work" || res["plan"] != "work" {
+		t.Fatalf("work host create result = %v, want theme=work plan=work", res)
 	}
 
-	// 5. Default host with explicit theme="work" also passes --theme work.
-	code, out = callHost("get.example.com", "POST", "/api/create", `{"code":"PIG-CCCC-DDDD","pen":"beta","handle":"bob","theme":"work","turnstile_token":"tok-main"}`)
+	// 6. D-30: Work code redeemed on the primary host ALSO raises a Work pen (plan=work, theme=work).
+	code, out = callHost("get.example.com", "POST", "/api/create", `{"code":"PIG-CCCC-DDDD","pen":"beta","handle":"bob","turnstile_token":"tok-main"}`)
 	if code != 202 {
-		t.Fatalf("explicit work theme create: %d %v", code, out)
+		t.Fatalf("work code on default host create: %d %v", code, out)
 	}
-	if res := waitDone(out["job"].(string)); res["theme"] != "work" {
-		t.Fatalf("explicit work theme result = %v, want theme=work", res)
+	if res := waitDone(out["job"].(string)); res["theme"] != "work" || res["plan"] != "work" {
+		t.Fatalf("work code on default host result = %v, want theme=work plan=work", res)
 	}
 
-	// 6. Work host with explicit theme="default" keeps default theme (no --theme flag).
-	code, out = callHost("get.work.example.com", "POST", "/api/create", `{"code":"PIG-EEEE-FFFF","pen":"gamma","handle":"carol","theme":"default","turnstile_token":"tok-work"}`)
+	// 7. Personal code on default host with explicit theme="work" keeps Personal plan (THEME != PLAN).
+	code, out = callHost("get.example.com", "POST", "/api/create", `{"code":"PIG-EEEE-FFFF","pen":"gamma","handle":"carol","theme":"work","turnstile_token":"tok-main"}`)
 	if code != 202 {
-		t.Fatalf("explicit default theme on work host: %d %v", code, out)
+		t.Fatalf("personal code with work theme on default host: %d %v", code, out)
 	}
-	if res := waitDone(out["job"].(string)); res["theme"] != nil {
-		t.Fatalf("explicit default theme result = %v, want no theme", res)
+	if res := waitDone(out["job"].(string)); res["theme"] != "work" || res["plan"] != nil {
+		t.Fatalf("personal code with work theme result = %v, want theme=work and no plan=work", res)
 	}
 
 	ledger, _ := os.ReadFile(filepath.Join(home, "signup", "raised.log"))
-	if !strings.Contains(string(ledger), "raised acme for alice with PIG-AAAA-BBBB (work1) [vanity] [theme=work]") {
-		t.Fatalf("ledger missing [theme=work] for acme:\n%s", ledger)
+	if !strings.Contains(string(ledger), "raised acme for alice with PIG-AAAA-BBBB (work1) [vanity] [plan=work] [theme=work]") {
+		t.Fatalf("ledger missing [plan=work] [theme=work] for acme:\n%s", ledger)
 	}
-	if strings.Contains(string(ledger), "raised gamma for carol") && strings.Contains(strings.Split(string(ledger), "raised gamma for carol")[1], "[theme=work]") {
-		t.Fatalf("ledger unexpectedly tagged gamma with [theme=work]:\n%s", ledger)
+	if !strings.Contains(string(ledger), "raised beta for bob with PIG-CCCC-DDDD (work2) [vanity] [plan=work] [theme=work]") {
+		t.Fatalf("ledger missing [plan=work] [theme=work] for beta:\n%s", ledger)
+	}
+	if strings.Contains(string(ledger), "raised gamma for carol") && strings.Contains(strings.Split(string(ledger), "raised gamma for carol")[1], "[plan=work]") {
+		t.Fatalf("ledger unexpectedly tagged personal pen gamma with [plan=work]:\n%s", ledger)
 	}
 }

@@ -31,12 +31,13 @@ usage() {
 usage: hogman-host <command>
 
   init [--test]                  set up the front door (--test: self-signed certificates, for local trials)
-  add <pen> [--theme work|default]
+  add <pen> [--theme work|default] [--plan personal|work]
                                  create a pen with public certificates: its front door is
                                  <pen>.<gate-domain>, its sites <site>.<pen>.<pens-zone>
   list                           pens on this host
   pen <network> <args...>        run ./hogman in a pen, e.g.  pen bobo member list
   theme <network> work|default   switch a pen's UI theme (updates .env and reloads registrar)
+  plan <network> personal|work   switch a pen's certificate cap plan (updates .env and challenge-dns)
   upgrade <network>              update a pen's code from src/ and restart it
   routes                         rewrite the front door's routes and reload it
   remove <network>               stop a pen (its folder is kept; delete it yourself to destroy it)
@@ -48,16 +49,18 @@ usage: hogman-host <command>
   signup-setup <front-door-domain> <signup-host> [max-pens]
                                  a sign-up page that raises pens for other people
                                  (no arguments: rebuild it with the saved settings)
-  signup-code [--vanity] [note]  a single-use sign-up code (--vanity: allow a bare name without -xxxx)
+  signup-code [--vanity] [--work] [note]
+                                 a single-use sign-up code (--vanity: bare name; --work: Work plan)
   waitlist [invite|remove <id>]  who's waiting for a pen; invite emails them a code
   signup-mail "<from>" < key     email waiting-list codes through Resend (signup-mail test <addr>)
   signup-notify <ntfy-url>|off   a push when someone joins the waiting list or gets a pen
-  signup-stripe <price> [tax]|off  sell pens with Stripe Checkout (keys on stdin)
+  signup-stripe <price> [--work <price>] [tax]|work-price <price>|off
+                                 sell pens with Stripe Checkout (keys on stdin; optional Work price)
   signup-cloudflare on|off       trust CF-Connecting-IP and require Cloudflare Proxy on the sign-up host
   signup-turnstile <site-key>|off  require Cloudflare Turnstile on sign-up/waitlist (secret on stdin)
   signup-work-host <host>|off    serve a Work sign-up host (e.g. get.work.hogman.network) on the same page
   capacity                       how many pens this server holds, and its limit
-  provision <pen> <owner> [--theme work|default]
+  provision <pen> <owner> [--theme work|default] [--plan personal|work]
                                  raise a hosted pen (what the sign-up page runs)
 
   challenge-dns-setup <public-ip> [gcp-key.json]
@@ -405,24 +408,33 @@ next_stun_port() {
 
 cmd_add() {
   load_host
-  # add <pen> [--theme work|default]: a pen with public certificates (D-18 / D-22).
-  # Its front door is <pen>.<GATE_DOMAIN> and its sites live under <pen>.<PENS_ZONE>.
-  local n="${1:-}" theme=""
+  # add <pen> [--theme work|default] [--plan personal|work]: a pen with public
+  # certificates (D-18 / D-22 / D-30). Its front door is <pen>.<GATE_DOMAIN>
+  # and its sites live under <pen>.<PENS_ZONE>.
+  local n="${1:-}" theme="" plan=""
   shift || true
   while [ $# -gt 0 ]; do
     case "$1" in
       --theme)
-        [ $# -ge 2 ] || die "usage: hogman-host add <pen> [--theme work|default]"
+        [ $# -ge 2 ] || die "usage: hogman-host add <pen> [--theme work|default] [--plan personal|work]"
         case "$2" in
           default|"") theme="" ;;
           work) theme="work" ;;
           *) die "unknown theme: $2 (want default or work)" ;;
         esac
         shift 2 ;;
-      *) die "usage: hogman-host add <pen> [--theme work|default]" ;;
+      --plan)
+        [ $# -ge 2 ] || die "usage: hogman-host add <pen> [--theme work|default] [--plan personal|work]"
+        case "$2" in
+          personal|"") plan="" ;;
+          work) plan="work" ;;
+          *) die "unknown plan: $2 (want personal or work)" ;;
+        esac
+        shift 2 ;;
+      *) die "usage: hogman-host add <pen> [--theme work|default] [--plan personal|work]" ;;
     esac
   done
-  [ -n "$n" ] || die "usage: hogman-host add <pen> [--theme work|default]"
+  [ -n "$n" ] || die "usage: hogman-host add <pen> [--theme work|default] [--plan personal|work]"
   [ -n "${PENS_ZONE:-}" ] && [ -n "${GATE_DOMAIN:-}" ] || die "public pens aren't set up here yet: hogman-host gate-cert-setup, then hogman-host pens-zone"
   [[ "$n" =~ $HOSTED_RE ]] || die "pen names are 3-30 lowercase letters, digits and dashes, starting with a letter"
   local host="$n.$GATE_DOMAIN" zone="$n.$PENS_ZONE"
@@ -457,11 +469,18 @@ EOF
   if [ -n "$theme" ]; then
     echo "THEME=$theme" >> "$PENS/$n/.env"
   fi
+  if [ -n "$plan" ]; then
+    echo "PLAN=$plan" >> "$PENS/$n/.env"
+  fi
   # This pen's challenge DNS credential: it can write only this pen's
   # challenge records. The token goes straight into the registrar's secrets.
   install -d -m 0700 "$PENS/$n/data/secrets/registrar"
   local out tok
-  out="$(cdns cred add pen "$n")" || die "could not make the pen's challenge DNS credential: $out"
+  if [ -n "$plan" ]; then
+    out="$(cdns cred add pen "$n" --plan "$plan")" || die "could not make the pen's challenge DNS credential: $out"
+  else
+    out="$(cdns cred add pen "$n")" || die "could not make the pen's challenge DNS credential: $out"
+  fi
   tok="$(awk '/^token:/ {print $2}' <<<"$out")"
   [ -n "$tok" ] || die "no token from challenge-dns"
   ( umask 077; printf '%s' "$tok" > "$PENS/$n/data/secrets/registrar/challenge_dns_token" )
@@ -521,6 +540,33 @@ cmd_theme() {
   [ -n "${FRONT_TLS_MODE:-}" ] && front_ca="$FRONT/data/caddy/pki/authorities/local/root.crt"
   (cd "$PENS/$n" && FRONT_CA="$front_ca" FRONT_JOIN_DL="$FRONT/join-dl" ./hogman up)
   info "Pen $n theme set to ${val:-default}"
+}
+
+cmd_plan() {
+  load_host
+  local n="${1:-}" want="${2:-}"
+  [ -n "$n" ] && [ -n "$want" ] && [ $# -eq 2 ] || die "usage: hogman-host plan <network> personal|work"
+  valid_name "$n" || die "invalid network name: $n"
+  [ -d "$PENS/$n" ] || die "no pen $n"
+  [ ! -f "$PENS/$n/.removed" ] || die "pen $n is stopped"
+  [ -f "$PENS/$n/.env" ] || die "pen $n has no .env"
+  [ -s "$PENS/$n/.challenge-dns-id" ] || die "pen $n has no challenge DNS credential id"
+  [ -x "$CDNS_BIN" ] || die "challenge DNS server not installed"
+  local val=""
+  case "$want" in
+    personal) val="" ;;
+    work) val="work" ;;
+    *) die "unknown plan: $want (want personal or work)" ;;
+  esac
+  local cid; cid="$(cat "$PENS/$n/.challenge-dns-id")"
+  cdns cred plan "$cid" "$want" >/dev/null || die "could not update challenge-dns plan for $n"
+  local tmp; tmp="$(mktemp)"
+  grep -v '^PLAN=' "$PENS/$n/.env" > "$tmp" || true
+  if [ -n "$val" ]; then
+    printf 'PLAN=%s\n' "$val" >> "$tmp"
+  fi
+  install -m 0600 "$tmp" "$PENS/$n/.env"; rm -f "$tmp"
+  info "Pen $n plan set to $want (challenge-dns caps updated live)"
 }
 
 cmd_upgrade() {
@@ -718,19 +764,27 @@ cmd_capacity() {
 # Exit 2: the name is taken. Exit 3: the server is full.
 cmd_provision() {
   load_host
-  local n="${1:-}" owner="${2:-}" theme=""
-  shift 2 || die "usage: hogman-host provision <pen> <owner> [--theme work|default]"
+  local n="${1:-}" owner="${2:-}" theme="" plan=""
+  shift 2 || die "usage: hogman-host provision <pen> <owner> [--theme work|default] [--plan personal|work]"
   while [ $# -gt 0 ]; do
     case "$1" in
       --theme)
-        [ $# -ge 2 ] || die "usage: hogman-host provision <pen> <owner> [--theme work|default]"
+        [ $# -ge 2 ] || die "usage: hogman-host provision <pen> <owner> [--theme work|default] [--plan personal|work]"
         case "$2" in
           default|"") theme="" ;;
           work) theme="work" ;;
           *) die "unknown theme: $2 (want default or work)" ;;
         esac
         shift 2 ;;
-      *) die "usage: hogman-host provision <pen> <owner> [--theme work|default]" ;;
+      --plan)
+        [ $# -ge 2 ] || die "usage: hogman-host provision <pen> <owner> [--theme work|default] [--plan personal|work]"
+        case "$2" in
+          personal|"") plan="" ;;
+          work) plan="work" ;;
+          *) die "unknown plan: $2 (want personal or work)" ;;
+        esac
+        shift 2 ;;
+      *) die "usage: hogman-host provision <pen> <owner> [--theme work|default] [--plan personal|work]" ;;
     esac
   done
   [ -n "${PENS_DOMAIN:-}" ] || die "sign-ups are not set up: hogman-host signup-setup"
@@ -746,7 +800,7 @@ cmd_provision() {
   # (Not `if ! ( ... )`: bash ignores set -e inside a subshell used as a condition.)
   local res rc; res="$(mktemp)"
   set +e
-  ( set -e; provision_steps "$n" "$owner" "$theme" ) > "$res"
+  ( set -e; provision_steps "$n" "$owner" "$theme" "$plan" ) > "$res"
   rc=$?
   set -e
   if [ "$rc" -ne 0 ]; then
@@ -754,23 +808,23 @@ cmd_provision() {
     provision_rollback "$n"
     die "raising $n failed; rolled back (its folder is in $HOGMAN_HOME/failed/)"
   fi
-  local link exp zone="$n.$PENS_ZONE" host="$n.$GATE_DOMAIN" theme_json=""
+  local link exp zone="$n.$PENS_ZONE" host="$n.$GATE_DOMAIN" extra_json=""
   link="$(sed -n 1p "$res")"; exp="$(sed -n 2p "$res")"; rm -f "$res"
-  [ -n "$theme" ] && theme_json="$(printf ',"theme":"%s"' "$theme")"
+  [ -n "$theme" ] && extra_json="${extra_json}$(printf ',"theme":"%s"' "$theme")"
+  [ -n "$plan" ] && extra_json="${extra_json}$(printf ',"plan":"%s"' "$plan")"
   info "pen $n raised for $owner"
   printf '{"pen":"%s","zone":"%s","host":"%s","owner":"%s","join_link":"%s","valid_until":"%s"%s}\n' \
-    "$n" "$zone" "$host" "$owner" "$link" "$exp" "$theme_json"
+    "$n" "$zone" "$host" "$owner" "$link" "$exp" "$extra_json"
 }
 
 # signup-setup <pens-domain> <signup-host> [max-pens]: turn on the sign-up page.
 # Pens get <name>.<pens-domain>; point *.<pens-domain> and <signup-host> here.
 provision_steps() {  # in a subshell: prints the join link, then its expiry
-  local n="$1" owner="$2" theme="${3:-}" out link
-  if [ -n "$theme" ]; then
-    cmd_add "$n" --theme "$theme" >&2
-  else
-    cmd_add "$n" >&2
-  fi
+  local n="$1" owner="$2" theme="${3:-}" plan="${4:-}" out link
+  local add_args=("$n")
+  [ -n "$theme" ] && add_args+=(--theme "$theme")
+  [ -n "$plan" ] && add_args+=(--plan "$plan")
+  cmd_add "${add_args[@]}" >&2
   echo "HOSTED=true" >> "$PENS/$n/.env"
   (cd "$PENS/$n" && ./hogman member add "$owner" --role owner) >&2
   out="$(cd "$PENS/$n" && ./hogman device key "$owner" personal)"
@@ -842,6 +896,7 @@ cmd_signup_setup() {
 "
     web_stripe="      STRIPE_SECRET_KEY_FILE: /run/secrets/stripe_key
       STRIPE_PRICE: $SIGNUP_STRIPE_PRICE
+      STRIPE_WORK_PRICE: \"${SIGNUP_STRIPE_WORK_PRICE:-}\"
       STRIPE_AUTOMATIC_TAX: \"${SIGNUP_STRIPE_TAX:-}\"
       PUBLIC_URL: https://$SIGNUP_HOST"
     broker_stripe="      STRIPE_WEBHOOK_SECRET_FILE: $SIGNUP/stripe_webhook_secret"
@@ -956,31 +1011,42 @@ with_lock() {
   if command -v flock >/dev/null; then flock "$l" "$@"; else "$@"; fi
 }
 
-# signup-code [--vanity] [note]: a single-use code for the sign-up page
+# signup-code [--vanity] [--work] [note]: a single-use code for the sign-up page
 # (invite-only sign-ups). Standard codes add a random 4-character suffix to the
-# pen name; --vanity tags the code to allow a bare vanity name.
+# pen name; --vanity tags the code to allow a bare vanity name; --work tags the
+# code for a Work pen (PLAN=work, THEME=work, higher certificate caps; D-30).
 cmd_signup_code() {
   load_host
   [ -n "${SIGNUP_HOST:-}" ] && [ -f "$SIGNUP/codes" ] || die "sign-ups are not set up: hogman-host signup-setup"
-  local vanity=0
-  if [ "${1:-}" = "--vanity" ]; then vanity=1; shift; fi
-  local note="${*:-}"
-  if [ "$vanity" = 1 ]; then
-    note="vanity${note:+ $note}"
-  else
-    case "$note" in
-      vanity|vanity\ *) die "notes cannot start with 'vanity' unless --vanity is passed" ;;
+  local vanity=0 work=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --vanity) vanity=1; shift ;;
+      --work)   work=1; shift ;;
+      --)       shift; break ;;
+      -*)       die "usage: hogman-host signup-code [--vanity] [--work] [note]" ;;
+      *)        break ;;
     esac
-  fi
-  local code; code="$(make_code "$note")"
+  done
+  local note="${*:-}"
+  case "$note" in
+    vanity|vanity\ *|work|work\ *) die "notes cannot start with 'vanity' or 'work' (use --vanity / --work flags)" ;;
+  esac
+  local tags=""
+  [ "$vanity" = 1 ] && tags="${tags:+$tags }vanity"
+  [ "$work" = 1 ] && tags="${tags:+$tags }work"
+  local full_note="${tags}${note:+${tags:+ }$note}"
+  local code; code="$(make_code "$full_note")"
+  local host="$SIGNUP_HOST"
+  if [ "$work" = 1 ] && [ -n "${SIGNUP_WORK_HOST:-}" ]; then host="$SIGNUP_WORK_HOST"; fi
   echo "code: $code"
-  if [ "$vanity" = 1 ]; then
-    echo "link: https://$SIGNUP_HOST/#code=$code&vanity=1"
-    echo "works once (vanity pen name — no random ending)"
-  else
-    echo "link: https://$SIGNUP_HOST/#code=$code"
-    echo "works once (pen gets a 4-character random ending)"
-  fi
+  local link="https://$host/#code=$code"
+  [ "$vanity" = 1 ] && link="${link}&vanity=1"
+  echo "link: $link"
+  local desc=""
+  if [ "$vanity" = 1 ]; then desc="vanity pen name — no random ending"; else desc="pen gets a 4-character random ending"; fi
+  [ "$work" = 1 ] && desc="Work plan, $desc"
+  echo "works once ($desc)"
 }
 
 # --------------------------------------------------------- waiting list ----
@@ -1119,26 +1185,57 @@ cmd_signup_notify() {
   info "Sign-up pushes ${u:+go to $u}${u:-are off}"
 }
 
-# signup-stripe <price-id> [tax] < keys: sell pens on the sign-up page with
-# Stripe Checkout (D-28). Standard input: the Stripe API key (best a restricted
-# key that can only write Checkout Sessions), then the webhook signing secret
-# (whsec_...), one per line. "tax" turns on Stripe Tax. "off" stops selling.
+# signup-stripe <price-id> [--work <work-price-id>] [tax] < keys: sell pens on
+# the sign-up page with Stripe Checkout (D-28). Standard input: the Stripe API
+# key (best a restricted key that can only write Checkout Sessions), then the
+# webhook signing secret (whsec_...), one per line. "tax" turns on Stripe Tax.
+# "work-price <price-id>|off" updates the optional Work price without re-piping
+# keys. "off" stops selling.
 # Webhook endpoint (in Stripe): https://<signup-host>/api/stripe/webhook, events
 # checkout.session.completed, checkout.session.async_payment_succeeded and
 # customer.subscription.deleted.
 cmd_signup_stripe() {
   load_host
-  local price="${1:-}" tax="${2:-}"
+  local price="${1:-}" work_price="" tax=""
   if [ "$price" = off ]; then
     rm -f "$SIGNUP/stripe_key" "$SIGNUP/stripe_webhook_secret"
     set_host_var SIGNUP_STRIPE_PRICE ""
+    set_host_var SIGNUP_STRIPE_WORK_PRICE ""
     set_host_var SIGNUP_STRIPE_TAX ""
     cmd_signup_setup
     info "Pens aren't for sale on the sign-up page any more"
     return
   fi
-  [[ "$price" =~ ^price_[A-Za-z0-9]{6,64}$ ]] || die "usage: hogman-host signup-stripe <price_...> [tax] < keys   |   hogman-host signup-stripe off"
-  case "$tax" in "") ;; tax) tax=1 ;; *) die "the second argument is 'tax' or nothing" ;; esac
+  if [ "$price" = work-price ]; then
+    local wp="${2:-}"
+    [ -n "${SIGNUP_STRIPE_PRICE:-}" ] && [ -s "$SIGNUP/stripe_key" ] || die "configure Stripe first: hogman-host signup-stripe <price_...> < keys"
+    if [ "$wp" = off ]; then
+      set_host_var SIGNUP_STRIPE_WORK_PRICE ""
+      cmd_signup_setup
+      info "Work sign-up host Stripe checkout is off (set work-price <price_...> to re-enable)"
+      return
+    fi
+    [[ "$wp" =~ ^price_[A-Za-z0-9]{6,64}$ ]] || die "usage: hogman-host signup-stripe work-price <price_...>|off"
+    set_host_var SIGNUP_STRIPE_WORK_PRICE "$wp"
+    cmd_signup_setup
+    info "Work sign-up host now uses Stripe price $wp"
+    return
+  fi
+  [[ "$price" =~ ^price_[A-Za-z0-9]{6,64}$ ]] || die "usage: hogman-host signup-stripe <price_...> [--work <price_...>] [tax] < keys   |   work-price <price_...>|off   |   off"
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --work)
+        [ $# -ge 2 ] || die "usage: hogman-host signup-stripe <price_...> [--work <price_...>] [tax] < keys"
+        [[ "$2" =~ ^price_[A-Za-z0-9]{6,64}$ ]] || die "invalid --work Stripe price ID: $2"
+        work_price="$2"
+        shift 2 ;;
+      tax)
+        tax=1
+        shift ;;
+      *) die "unknown argument: $1 (want --work <price_...> or tax)" ;;
+    esac
+  done
   [ -t 0 ] && die "pipe the keys in on standard input: the API key, then the webhook secret, one per line"
   local key whsec
   IFS= read -r key || true
@@ -1151,10 +1248,11 @@ cmd_signup_stripe() {
   ( umask 077; printf '%s' "$key" > "$SIGNUP/stripe_key"; printf '%s' "$whsec" > "$SIGNUP/stripe_webhook_secret" )
   chown 65534:65534 "$SIGNUP/stripe_key"; chmod 0400 "$SIGNUP/stripe_key"
   set_host_var SIGNUP_STRIPE_PRICE "$price"
+  set_host_var SIGNUP_STRIPE_WORK_PRICE "$work_price"
   set_host_var SIGNUP_STRIPE_TAX "$tax"
   cmd_signup_setup
   local mode=test; case "$key" in *_live_*) mode=live ;; esac
-  info "Pens are for sale on https://$SIGNUP_HOST ($mode mode${tax:+, Stripe Tax on})."
+  info "Pens are for sale on https://$SIGNUP_HOST ($mode mode${work_price:+, Work price $work_price}${tax:+, Stripe Tax on})."
   info "Stripe webhook: https://$SIGNUP_HOST/api/stripe/webhook"
 }
 
@@ -1554,6 +1652,7 @@ case "${1:-}" in
   list)    cmd_list ;;
   pen)     shift; cmd_pen "$@" ;;
   theme)   shift; cmd_theme "$@" ;;
+  plan)    shift; cmd_plan "$@" ;;
   upgrade) shift; cmd_upgrade "$@" ;;
   routes)  load_host; write_front; reload_front; info "routes rewritten" ;;
   remove)  shift; cmd_remove "$@" ;;
