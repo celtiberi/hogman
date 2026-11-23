@@ -253,6 +253,9 @@ func (wb *web) create(w http.ResponseWriter, r *http.Request) {
 	if theme != "" {
 		brokerReq["theme"] = theme
 	}
+	if wb.isWorkHost(r) {
+		brokerReq["want_plan"] = planWork
+	}
 	code, out := wb.ask(r.Context(), "POST", "/validate", brokerReq)
 	if code != 200 {
 		jsonOut(w, code, out)

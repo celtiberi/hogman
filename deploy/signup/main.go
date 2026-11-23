@@ -82,17 +82,46 @@ func randomPenSuffix() (string, error) {
 	return string(out), nil
 }
 
-// parseCodeMeta extracts an optional leading "vanity" tag from a code's note
-// in $HOGMAN_HOME/signup/codes ("CODE vanity [note]" -> vanity=true).
-func parseCodeMeta(rawNote string) (vanity bool, note string) {
-	rawNote = strings.TrimSpace(rawNote)
-	if rawNote == "vanity" {
-		return true, ""
+// parseCodeMeta extracts optional leading "vanity" and "work" tags (in either
+// order) from a code's note in $HOGMAN_HOME/signup/codes:
+//
+//	"CODE vanity work paid cs_..." -> vanity=true, plan="work", note="paid cs_..."
+//	"CODE for alice"               -> vanity=false, plan="personal", note="for alice"
+func parseCodeMeta(rawNote string) (vanity bool, plan, note string) {
+	rest := strings.TrimSpace(rawNote)
+	plan = planPersonal
+	for {
+		word, after, hasSpace := strings.Cut(rest, " ")
+		switch word {
+		case "vanity":
+			if vanity {
+				return vanity, plan, rest
+			}
+			vanity = true
+		case "work":
+			if plan == planWork {
+				return vanity, plan, rest
+			}
+			plan = planWork
+		default:
+			return vanity, plan, rest
+		}
+		if !hasSpace {
+			return vanity, plan, ""
+		}
+		rest = strings.TrimSpace(after)
 	}
-	if rest, ok := strings.CutPrefix(rawNote, "vanity "); ok {
-		return true, strings.TrimSpace(rest)
+}
+
+func normalisePlan(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", planPersonal:
+		return planPersonal, true
+	case planWork:
+		return planWork, true
+	default:
+		return "", false
 	}
-	return false, rawNote
 }
 
 func validHandle(h string) (string, bool) {

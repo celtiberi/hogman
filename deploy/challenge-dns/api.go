@@ -173,12 +173,15 @@ func AdminHandler(s *Store) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /admin/creds", func(w http.ResponseWriter, r *http.Request) {
 		type view struct {
-			ID, Kind, PenID string
-			Created         time.Time
+			ID      string    `json:"id"`
+			Kind    string    `json:"kind"`
+			PenID   string    `json:"pen_id,omitempty"`
+			Plan    string    `json:"plan,omitempty"`
+			Created time.Time `json:"created"`
 		}
 		var out []view
 		for _, c := range s.Creds() {
-			out = append(out, view{c.ID, c.Kind, c.PenID, c.Created})
+			out = append(out, view{c.ID, c.Kind, c.PenID, c.Plan, c.Created})
 		}
 		writeJSON(w, http.StatusOK, out)
 	})
@@ -186,16 +189,43 @@ func AdminHandler(s *Store) http.Handler {
 		var in struct {
 			Kind  string `json:"kind"`
 			PenID string `json:"pen_id"`
+			Plan  string `json:"plan,omitempty"`
 		}
 		if !readJSON(w, r, &in) {
 			return
 		}
-		c, tok, err := s.AddCred(in.Kind, in.PenID)
+		c, tok, err := s.AddCredWithPlan(in.Kind, in.PenID, in.Plan)
 		if err != nil {
 			fail(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusCreated, map[string]string{"id": c.ID, "token": tok})
+		res := map[string]string{"id": c.ID, "token": tok}
+		if c.Plan != "" {
+			res["plan"] = c.Plan
+		}
+		writeJSON(w, http.StatusCreated, res)
+	})
+	mux.HandleFunc("PUT /admin/creds/{id}/plan", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Plan string `json:"plan"`
+		}
+		if !readJSON(w, r, &in) {
+			return
+		}
+		c, err := s.SetCredPlan(r.PathValue("id"), in.Plan)
+		if err != nil {
+			code := http.StatusBadRequest
+			if strings.HasPrefix(err.Error(), "no pen credential ") {
+				code = http.StatusNotFound
+			}
+			fail(w, code, err.Error())
+			return
+		}
+		plan := c.Plan
+		if plan == "" {
+			plan = planPersonal
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"id": c.ID, "pen_id": c.PenID, "plan": plan})
 	})
 	// Sign-up asks before raising a pen: a name used once is never used again.
 	mux.HandleFunc("GET /admin/names/{name}", func(w http.ResponseWriter, r *http.Request) {

@@ -166,12 +166,14 @@ NTFY_TOPIC=<topic> WATCH_URLS="https://get.hogman.network/api/status" \
 ```bash
 hogman-host backup-setup age1...
 hogman-host signup-setup gate.hogman.network get.hogman.network 8
-hogman-host signup-code "for alice"          # standard code: appends -xxxx random ending
-hogman-host signup-code --vanity "for alice" # vanity code: allows a bare pen name
-hogman-host signup-cloudflare on             # trust CF-Connecting-IP + block direct-to-origin bypasses
+hogman-host signup-code "for alice"                  # standard Personal code: appends -xxxx random ending
+hogman-host signup-code --vanity "for alice"         # Personal vanity code: allows a bare pen name
+hogman-host signup-code --vanity --work "for acme"   # Work vanity code (PLAN=work, THEME=work, higher cert caps)
+hogman-host signup-cloudflare on                     # trust CF-Connecting-IP + block direct-to-origin bypasses
 hogman-host signup-turnstile <site-key> < ts-secret  # require Cloudflare Turnstile on signup/waitlist
 hogman-host signup-work-host get.work.example.com    # optional Work sign-up host (THEME=work default)
 hogman-host theme <pen> work                         # toggle an existing pen's UI theme (work|default)
+hogman-host plan <pen> work                          # switch an existing pen's cert-cap plan live (personal|work)
 ```
 
 **Cloudflare Proxy rollout order:** deploy this release first, apply the DNS change (`CF_PROXY_ON`),
@@ -220,9 +222,14 @@ Link directly to the waitlist with `https://<signup-host>/#wait`.
 2. On the server, with the key and the webhook signing secret one per line on standard input:
 
 ```bash
-hogman-host signup-stripe price_123 < stripe-keys      # add "tax" to turn on Stripe Tax
+hogman-host signup-stripe price_123 [--work price_456] [tax] < stripe-keys
+hogman-host signup-stripe work-price price_456         # update Work price without re-piping keys (or: off)
 hogman-host signup-stripe off
 ```
+
+When `--work` (or `work-price`) is set, checkouts started on the Work sign-up host use the Work
+Stripe Price over the same single webhook, and both Stripe metadata and `/opt/hogman/signup/payments`
+record the tier (`personal` or `work`).
 
 The page shows **Buy a pen** while the server has room. After paying, Stripe sends the buyer to
 `/paid.html`, which shows their code once Stripe's event arrives. The broker checks every event's

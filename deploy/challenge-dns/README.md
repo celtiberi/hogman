@@ -13,9 +13,10 @@ It never serves an address. Names under its zones that have nothing are answered
 
 **Who may write what.** Each pen's registrar has a credential for that pen alone: it can write
 `_acme-challenge.<site>.<its pen name>.pens.hogman.network` and nothing else, subject to a
-two-window cap on distinct new names: by default **5 per rolling hour** (`CDNS_HOURLY_CAP`) and
-**20 per rolling 7 days** (`CDNS_WEEKLY_CAP`) per pen, plus a global hourly ceiling across all
-pens: **40 per rolling hour soft cap** (`CDNS_GLOBAL_HOURLY_CAP`) and **60 per rolling hour hard
+two-window cap on distinct new names by plan (D-30):
+- **Personal pens** (default): **5 per rolling hour** (`CDNS_HOURLY_CAP`) and **20 per rolling 7 days** (`CDNS_WEEKLY_CAP`).
+- **Work pens** (`--plan work`): **10 per rolling hour** (`CDNS_WORK_HOURLY_CAP`) and **60 per rolling 7 days** (`CDNS_WORK_WEEKLY_CAP`).
+- **Shared global ceiling** across all pens combined: **40 per rolling hour soft cap** (`CDNS_GLOBAL_HOURLY_CAP`) and **60 per rolling hour hard
 cap** (`CDNS_GLOBAL_HARD_HOURLY_CAP`). Slots between the soft and hard caps are reserved
 exclusively for quiet or newly created pens (pens with fewer than 2 new names in the last hour), so
 bursty pens cannot starve quiet users or new pen sign-ups. `home.<pen>` uses one slot, **attempts

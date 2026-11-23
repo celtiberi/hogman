@@ -26,14 +26,29 @@ const (
 	maxLivePer                 = 2                // live values per name (ACME may ask for two at once)
 	hourlyWindow               = time.Hour
 	capWindow                  = 7 * 24 * time.Hour
-	defaultHourlyCap           = 5  // distinct new names per pen per rolling hour (CDNS_HOURLY_CAP)
-	defaultCapNames            = 20 // distinct new names per pen per 7 days (CDNS_WEEKLY_CAP)
+	defaultHourlyCap           = 5  // distinct new names per personal pen per rolling hour (CDNS_HOURLY_CAP)
+	defaultCapNames            = 20 // distinct new names per personal pen per 7 days (CDNS_WEEKLY_CAP)
+	defaultWorkHourlyCap       = 10 // distinct new names per work pen per rolling hour (CDNS_WORK_HOURLY_CAP)
+	defaultWorkWeeklyCap       = 60 // distinct new names per work pen per 7 days (CDNS_WORK_WEEKLY_CAP)
 	defaultGlobalHourlyCap     = 40 // soft global hourly cap across all pens (CDNS_GLOBAL_HOURLY_CAP)
 	defaultGlobalHardHourlyCap = 60 // hard global hourly ceiling with reserved quiet-pen floor (CDNS_GLOBAL_HARD_HOURLY_CAP)
 	quietPenHourlyFloor        = 2  // pens with <2 new names in the last hour may use soft..hard headroom
+	planPersonal               = "personal"
+	planWork                   = "work"
 	acmePrefix                 = "_acme-challenge."
 	maxSiteDepth               = 4 // labels before the pen name, as site names allow
 )
+
+func normalizePlan(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", planPersonal:
+		return "", nil
+	case planWork:
+		return planWork, nil
+	default:
+		return "", fmt.Errorf("unknown plan %q (want personal or work)", raw)
+	}
+}
 
 var (
 	penRE              = regexp.MustCompile(`^[a-z][a-z0-9-]{1,28}[a-z0-9]$`) // the hosted pen-name rule (D-21)
@@ -71,10 +86,12 @@ func retryAfterFromOldest(oldest, now time.Time, window time.Duration) time.Dura
 
 // Cred is one API credential. Kind is "pen" (scoped to PenID) or "host"
 // (only the front door's wildcard challenge). Only the token's hash is kept.
+// Plan is "" (personal) or "work" (higher per-pen certificate caps, D-30).
 type Cred struct {
 	ID      string    `json:"id"`
 	Kind    string    `json:"kind"`
 	PenID   string    `json:"pen_id,omitempty"`
+	Plan    string    `json:"plan,omitempty"`
 	Hash    string    `json:"hash"`
 	Created time.Time `json:"created"`
 }
@@ -111,6 +128,8 @@ type Store struct {
 	now                      func() time.Time
 	hourlyCapNames           int // 0 uses defaultHourlyCap (clamped to weeklyCap)
 	capNames                 int // 0 uses defaultCapNames
+	workHourlyCapNames       int // 0 uses defaultWorkHourlyCap (clamped to workWeeklyCap)
+	workCapNames             int // 0 uses defaultWorkWeeklyCap
 	globalHourlyCapNames     int // 0 uses defaultGlobalHourlyCap (soft global cap)
 	globalHardHourlyCapNames int // 0 uses defaultGlobalHardHourlyCap (or globalHourlyCapNames if set directly)
 }
@@ -131,6 +150,38 @@ func (s *Store) hourlyCap() int {
 		return w
 	}
 	return h
+}
+
+func (s *Store) workWeeklyCap() int {
+	if s.workCapNames > 0 {
+		return s.workCapNames
+	}
+	return defaultWorkWeeklyCap
+}
+
+func (s *Store) workHourlyCap() int {
+	h := s.workHourlyCapNames
+	if h <= 0 {
+		h = defaultWorkHourlyCap
+	}
+	if w := s.workWeeklyCap(); h > w {
+		return w
+	}
+	return h
+}
+
+func (s *Store) weeklyCapFor(c Cred) int {
+	if c.Plan == planWork {
+		return s.workWeeklyCap()
+	}
+	return s.weeklyCap()
+}
+
+func (s *Store) hourlyCapFor(c Cred) int {
+	if c.Plan == planWork {
+		return s.workHourlyCap()
+	}
+	return s.hourlyCap()
 }
 
 func (s *Store) globalHourlyCap() int {
@@ -221,14 +272,28 @@ func newSecret(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// AddCred makes a credential and returns its token, which is shown once.
+// AddCred makes a credential with the default (personal) plan and returns its
+// token, which is shown once.
 func (s *Store) AddCred(kind, penID string) (Cred, string, error) {
+	return s.AddCredWithPlan(kind, penID, "")
+}
+
+// AddCredWithPlan makes a credential with an optional plan ("personal" or "work"
+// for pen credentials) and returns its token, which is shown once.
+func (s *Store) AddCredWithPlan(kind, penID, rawPlan string) (Cred, string, error) {
+	plan, err := normalizePlan(rawPlan)
+	if err != nil {
+		return Cred{}, "", err
+	}
 	switch kind {
 	case "pen":
 		if !penRE.MatchString(penID) {
 			return Cred{}, "", fmt.Errorf("pen name must be 3-30 lowercase letters, digits and dashes, starting with a letter")
 		}
 	case "host":
+		if plan != "" {
+			return Cred{}, "", fmt.Errorf("host credentials do not take a plan")
+		}
 		penID = ""
 	default:
 		return Cred{}, "", fmt.Errorf("kind must be pen or host")
@@ -244,7 +309,7 @@ func (s *Store) AddCred(kind, penID string) (Cred, string, error) {
 		return Cred{}, "", fmt.Errorf("the pen name %s was used before and is never given out again", penID)
 	}
 	tok := "hcd_" + newSecret(32)
-	c := Cred{ID: newSecret(6), Kind: kind, PenID: penID, Hash: hashToken(tok), Created: s.now().UTC()}
+	c := Cred{ID: newSecret(6), Kind: kind, PenID: penID, Plan: plan, Hash: hashToken(tok), Created: s.now().UTC()}
 	s.st.Creds = append(s.st.Creds, c)
 	if kind == "pen" {
 		s.st.Used = append(s.st.Used, penID) // marked the moment it's taken, not only on removal
@@ -257,6 +322,33 @@ func (s *Store) AddCred(kind, penID string) (Cred, string, error) {
 		return Cred{}, "", err
 	}
 	return c, tok, nil
+}
+
+// SetCredPlan updates the plan ("personal" or "work") of an existing pen
+// credential (matched by credential ID or pen name) and persists it.
+func (s *Store) SetCredPlan(idOrPen, rawPlan string) (Cred, error) {
+	plan, err := normalizePlan(rawPlan)
+	if err != nil {
+		return Cred{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.st.Creds {
+		c := &s.st.Creds[i]
+		if c.ID == idOrPen || (c.Kind == "pen" && c.PenID == idOrPen) {
+			if c.Kind != "pen" {
+				return Cred{}, fmt.Errorf("credential %q is not a pen credential", idOrPen)
+			}
+			prev := c.Plan
+			c.Plan = plan
+			if err := s.saveLocked(); err != nil {
+				c.Plan = prev
+				return Cred{}, err
+			}
+			return *c, nil
+		}
+	}
+	return Cred{}, fmt.Errorf("no pen credential %q", idOrPen)
 }
 
 func (s *Store) usedLocked(name string) bool {
@@ -429,11 +521,11 @@ func (s *Store) countLocked(c Cred, fqdn string, now time.Time) error {
 				}
 			}
 		}
-		if len(seen) >= s.weeklyCap() {
+		if len(seen) >= s.weeklyCapFor(c) {
 			s.st.Seen[c.ID] = seen
 			return &rateLimitError{cause: errCap, retryAfter: retryAfterFromOldest(oldestWeekly, now, capWindow)}
 		}
-		if penHourly >= s.hourlyCap() {
+		if penHourly >= s.hourlyCapFor(c) {
 			s.st.Seen[c.ID] = seen
 			return &rateLimitError{cause: errHourlyCap, retryAfter: retryAfterFromOldest(oldestHourly, now, hourlyWindow)}
 		}
@@ -540,11 +632,11 @@ func (s *Store) AllowEAB(c Cred) error {
 			}
 		}
 	}
-	if len(recent) >= s.weeklyCap() {
+	if len(recent) >= s.weeklyCapFor(c) {
 		s.st.EAB[c.ID] = recent
 		return &rateLimitError{cause: errEABWeeklyCap, retryAfter: retryAfterFromOldest(oldestWeekly, now, capWindow)}
 	}
-	if hourly >= s.hourlyCap() {
+	if hourly >= s.hourlyCapFor(c) {
 		s.st.EAB[c.ID] = recent
 		return &rateLimitError{cause: errEABHourlyCap, retryAfter: retryAfterFromOldest(oldestHourly, now, hourlyWindow)}
 	}

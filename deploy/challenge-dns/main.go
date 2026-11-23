@@ -38,8 +38,11 @@ func env(k, def string) string {
 const usage = `challenge-dns: DNS-01 challenge server for Hogman pens
 
   challenge-dns serve
-  challenge-dns cred add pen <penname>   a credential for one pen (prints its token once)
+  challenge-dns cred add pen <penname> [--plan personal|work]
+                                         a credential for one pen (prints its token once)
   challenge-dns cred add host            the front door's credential (gate wildcard)
+  challenge-dns cred plan <id-or-pen> personal|work
+                                         change a pen credential's certificate cap plan
   challenge-dns cred rm <id>
   challenge-dns cred list
   challenge-dns name used <penname>      prints "used" (exit 0) if the name was ever given out
@@ -58,8 +61,10 @@ Settings (environment):
   CDNS_GCP_KEY       optional Google service-account key file (fallback CA)
   CDNS_GTS_CONTACT   contact email for fallback CA (Google) accounts; required for
                      handing out fallback account keys (Google refuses accounts without one)
-  CDNS_HOURLY_CAP    distinct new certificate names per pen per rolling hour, default 5
-  CDNS_WEEKLY_CAP    distinct new certificate names per pen per 7 days, default 20
+  CDNS_HOURLY_CAP       distinct new certificate names per personal pen per rolling hour, default 5
+  CDNS_WEEKLY_CAP       distinct new certificate names per personal pen per 7 days, default 20
+  CDNS_WORK_HOURLY_CAP  distinct new certificate names per work pen per rolling hour, default 10
+  CDNS_WORK_WEEKLY_CAP  distinct new certificate names per work pen per 7 days, default 60
   CDNS_GLOBAL_HOURLY_CAP       soft global cap across all pens per rolling hour, default 40
   CDNS_GLOBAL_HARD_HOURLY_CAP  hard global cap across all pens per rolling hour (headroom above soft
                                is reserved for quiet/new pens with <2 names this hour), default 60
@@ -162,6 +167,33 @@ func parseCapsFromEnv(hourlyRaw, weeklyRaw, globalHourlyRaw, globalHardHourlyRaw
 	return hourly, weekly, globalHourly, globalHardHourly, nil
 }
 
+func parseWorkCapsFromEnv(workHourlyRaw, workWeeklyRaw string, globalHourly int) (workHourly, workWeekly int, err error) {
+	workWeekly, err = parseCap("CDNS_WORK_WEEKLY_CAP", workWeeklyRaw, defaultWorkWeeklyCap, 1000)
+	if err != nil {
+		return 0, 0, err
+	}
+	workHourlyDef := defaultWorkHourlyCap
+	if workHourlyRaw == "" {
+		if workWeekly < workHourlyDef {
+			workHourlyDef = workWeekly
+		}
+		if globalHourly < workHourlyDef {
+			workHourlyDef = globalHourly
+		}
+	}
+	workHourly, err = parseCap("CDNS_WORK_HOURLY_CAP", workHourlyRaw, workHourlyDef, 1000)
+	if err != nil {
+		return 0, 0, err
+	}
+	if workHourly > workWeekly {
+		return 0, 0, fmt.Errorf("CDNS_WORK_HOURLY_CAP (%d) must not exceed CDNS_WORK_WEEKLY_CAP (%d)", workHourly, workWeekly)
+	}
+	if workHourly > globalHourly {
+		return 0, 0, fmt.Errorf("CDNS_WORK_HOURLY_CAP (%d) must not exceed CDNS_GLOBAL_HOURLY_CAP (%d)", workHourly, globalHourly)
+	}
+	return workHourly, workWeekly, nil
+}
+
 func serve() error {
 	listen := os.Getenv("CDNS_LISTEN")
 	if listen == "" {
@@ -172,6 +204,14 @@ func serve() error {
 		os.Getenv("CDNS_WEEKLY_CAP"),
 		os.Getenv("CDNS_GLOBAL_HOURLY_CAP"),
 		os.Getenv("CDNS_GLOBAL_HARD_HOURLY_CAP"),
+	)
+	if err != nil {
+		return err
+	}
+	workHourlyCap, workWeeklyCap, err := parseWorkCapsFromEnv(
+		os.Getenv("CDNS_WORK_HOURLY_CAP"),
+		os.Getenv("CDNS_WORK_WEEKLY_CAP"),
+		globalHourlyCap,
 	)
 	if err != nil {
 		return err
@@ -187,10 +227,12 @@ func serve() error {
 	}
 	store.hourlyCapNames = hourlyCap
 	store.capNames = weeklyCap
+	store.workHourlyCapNames = workHourlyCap
+	store.workCapNames = workWeeklyCap
 	store.globalHourlyCapNames = globalHourlyCap
 	store.globalHardHourlyCapNames = globalHardHourlyCap
-	log.Printf("certificate caps: %d/hour per pen, %d/7d per pen, %d/hour global soft (%d/hour hard with quiet-pen floor)",
-		store.hourlyCap(), store.weeklyCap(), store.globalHourlyCap(), store.globalHardHourlyCap())
+	log.Printf("certificate caps: personal %d/hour %d/7d, work %d/hour %d/7d, global %d/hour soft (%d/hour hard with quiet-pen floor)",
+		store.hourlyCap(), store.weeklyCap(), store.workHourlyCap(), store.workWeeklyCap(), store.globalHourlyCap(), store.globalHardHourlyCap())
 	d := &DNS{store: store, zones: zones, ns: env("CDNS_NS", "ns1.hogman.network"),
 		mbox: env("CDNS_MBOX", "hostmaster.hogman.network"), caa: defaultCAA()}
 
@@ -299,10 +341,22 @@ func credCmd(args []string) error {
 	case len(args) >= 2 && args[0] == "add":
 		body := map[string]string{"kind": args[1]}
 		if args[1] == "pen" {
-			if len(args) != 3 {
-				return errors.New("usage: cred add pen <penname>")
+			if len(args) < 3 {
+				return errors.New("usage: cred add pen <penname> [--plan personal|work]")
 			}
 			body["pen_id"] = args[2]
+			switch len(args) {
+			case 3:
+			case 5:
+				if args[3] != "--plan" {
+					return errors.New("usage: cred add pen <penname> [--plan personal|work]")
+				}
+				body["plan"] = args[4]
+			default:
+				return errors.New("usage: cred add pen <penname> [--plan personal|work]")
+			}
+		} else if len(args) != 2 {
+			return errors.New("usage: cred add host")
 		}
 		b, code, err := adminDo(sock, "POST", "/admin/creds", body)
 		if err != nil {
@@ -314,6 +368,21 @@ func credCmd(args []string) error {
 		var out struct{ ID, Token string }
 		_ = json.Unmarshal(b, &out)
 		fmt.Printf("id:    %s\ntoken: %s\n(shown once: put it in the pen's registrar config, nowhere else)\n", out.ID, out.Token)
+	case len(args) == 3 && args[0] == "plan":
+		b, code, err := adminDo(sock, "PUT", "/admin/creds/"+args[1]+"/plan", map[string]string{"plan": args[2]})
+		if err != nil {
+			return err
+		}
+		if err := show(b, code, http.StatusOK); err != nil {
+			return err
+		}
+		var out struct {
+			ID    string `json:"id"`
+			PenID string `json:"pen_id"`
+			Plan  string `json:"plan"`
+		}
+		_ = json.Unmarshal(b, &out)
+		fmt.Printf("%s (%s): plan=%s\n", out.PenID, out.ID, out.Plan)
 	case len(args) == 2 && args[0] == "rm":
 		b, code, err := adminDo(sock, "DELETE", "/admin/creds/"+args[1], nil)
 		if err != nil {
@@ -332,16 +401,26 @@ func credCmd(args []string) error {
 			return err
 		}
 		var out []struct {
-			ID, Kind, PenID string
-			Created         time.Time
+			ID      string    `json:"id"`
+			Kind    string    `json:"kind"`
+			PenID   string    `json:"pen_id"`
+			Plan    string    `json:"plan"`
+			Created time.Time `json:"created"`
 		}
 		_ = json.Unmarshal(b, &out)
-		fmt.Printf("%-14s %-5s %-14s %s\n", "ID", "KIND", "PEN", "CREATED")
+		fmt.Printf("%-14s %-5s %-14s %-9s %s\n", "ID", "KIND", "PEN", "PLAN", "CREATED")
 		for _, c := range out {
-			fmt.Printf("%-14s %-5s %-14s %s\n", c.ID, c.Kind, c.PenID, c.Created.Format("2006-01-02 15:04"))
+			plan := "-"
+			if c.Kind == "pen" {
+				plan = c.Plan
+				if plan == "" {
+					plan = planPersonal
+				}
+			}
+			fmt.Printf("%-14s %-5s %-14s %-9s %s\n", c.ID, c.Kind, c.PenID, plan, c.Created.Format("2006-01-02 15:04"))
 		}
 	default:
-		return errors.New("usage: cred add pen <penname> | cred add host | cred rm <id> | cred list")
+		return errors.New("usage: cred add pen <penname> [--plan personal|work] | cred add host | cred plan <id-or-pen> personal|work | cred rm <id> | cred list")
 	}
 	return nil
 }

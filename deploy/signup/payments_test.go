@@ -324,7 +324,7 @@ func TestStripeCheckoutDualHostOriginAllowlist(t *testing.T) {
 		}
 	}
 
-	// Work host stays on get.work.example.com through Stripe's success/cancel URLs.
+	// Work host without workPrice falls back to personal price, still tagging plan=work.
 	postCheckout("get.work.example.com")
 	if got := form.Get("success_url"); got != "https://get.work.example.com/paid.html?session_id={CHECKOUT_SESSION_ID}" {
 		t.Fatalf("work success_url = %q", got)
@@ -332,13 +332,95 @@ func TestStripeCheckoutDualHostOriginAllowlist(t *testing.T) {
 	if got := form.Get("cancel_url"); got != "https://get.work.example.com/" {
 		t.Fatalf("work cancel_url = %q", got)
 	}
+	if got := form.Get("line_items[0][price]"); got != "price_test_pen" {
+		t.Fatalf("work fallback price = %q, want price_test_pen", got)
+	}
+	if got := form.Get("metadata[plan]"); got != "work" {
+		t.Fatalf("work metadata[plan] = %q, want work", got)
+	}
+	if got := form.Get("subscription_data[metadata][plan]"); got != "work" {
+		t.Fatalf("work subscription metadata[plan] = %q, want work", got)
+	}
 
-	// Forged Host header MUST NOT be reflected into Stripe redirect URLs.
+	// With workPrice configured, get.work uses workPrice while primary host keeps personal price.
+	sc.workPrice = "price_test_work"
+	postCheckout("get.work.example.com")
+	if got := form.Get("line_items[0][price]"); got != "price_test_work" {
+		t.Fatalf("work price = %q, want price_test_work", got)
+	}
+	postCheckout("get.example.com")
+	if got := form.Get("line_items[0][price]"); got != "price_test_pen" {
+		t.Fatalf("personal price = %q, want price_test_pen", got)
+	}
+	if got := form.Get("metadata[plan]"); got != "personal" {
+		t.Fatalf("personal metadata[plan] = %q, want personal", got)
+	}
+
+	// Forged Host header MUST NOT be reflected into Stripe redirect URLs or Work plan.
 	postCheckout("evil.attacker.example")
 	if got := form.Get("success_url"); got != "https://get.example.com/paid.html?session_id={CHECKOUT_SESSION_ID}" {
 		t.Fatalf("forged host reflected into success_url: %q", got)
 	}
 	if got := form.Get("cancel_url"); got != "https://get.example.com/" {
 		t.Fatalf("forged host reflected into cancel_url: %q", got)
+	}
+	if got := form.Get("line_items[0][price]"); got != "price_test_pen" || form.Get("metadata[plan]") != "personal" {
+		t.Fatalf("forged host got price=%q plan=%q", form.Get("line_items[0][price]"), form.Get("metadata[plan]"))
+	}
+}
+
+func TestStripeWorkPlanRecordedInLedgerAndPayments(t *testing.T) {
+	b, home := newTestBroker(t, "")
+	b.webhookSecret = testWebhookSecret
+	h := b.handler()
+
+	workSession := "cs_test_work1234567890abcd"
+	evObj := map[string]any{
+		"id": "evt_work_1", "object": "event", "type": "checkout.session.completed", "api_version": "2099-01-01",
+		"data": map[string]any{"object": map[string]any{
+			"id": workSession, "object": "checkout.session", "mode": "subscription",
+			"payment_status": "paid", "customer": "cus_work1", "subscription": "sub_work1",
+			"metadata": map[string]string{penMetaKey: penMetaValue, planMetaKey: planWork},
+		}},
+	}
+	ev, _ := json.Marshal(evObj)
+	if code, out := sendEvent(t, h, ev, signed(ev, testWebhookSecret, time.Now())); code != 200 {
+		t.Fatalf("work paid event: %d %v", code, out)
+	}
+	codes, _ := os.ReadFile(filepath.Join(home, "signup", "codes"))
+	if !strings.Contains(string(codes), " vanity work paid "+workSession) {
+		t.Fatalf("codes missing vanity work paid tag:\n%s", codes)
+	}
+	pays, _ := os.ReadFile(filepath.Join(home, "signup", "payments"))
+	if !strings.HasSuffix(strings.TrimSpace(string(pays)), " work") {
+		t.Fatalf("payments missing work plan:\n%s", pays)
+	}
+	rec, ok, err := b.findPayment(workSession)
+	if err != nil || !ok || rec.plan != planWork {
+		t.Fatalf("findPayment work = (%+v, %v, %v)", rec, ok, err)
+	}
+	// Provisioning with the Work paid code raises a bare Work pen (plan=work, theme=work).
+	pc, po := call(h, "POST", "/provision", fmt.Sprintf(`{"code":%q,"pen":"acmework","owner":"alice"}`, rec.code), auth)
+	if pc != 201 || po["pen"] != "acmework" || po["plan"] != "work" || po["theme"] != "work" {
+		t.Fatalf("provision with work bought code: %d %v", pc, po)
+	}
+	ledger, _ := os.ReadFile(filepath.Join(home, "signup", "raised.log"))
+	if !strings.Contains(string(ledger), "plan work, customer cus_work1") {
+		t.Fatalf("ledger missing plan work:\n%s", ledger)
+	}
+
+	subEv, _ := json.Marshal(map[string]any{
+		"id": "evt_work_2", "object": "event", "type": "customer.subscription.deleted",
+		"data": map[string]any{"object": map[string]any{
+			"id": "sub_work1", "customer": "cus_work1",
+			"metadata": map[string]string{penMetaKey: penMetaValue, planMetaKey: planWork},
+		}},
+	})
+	if code, _ := sendEvent(t, h, subEv, signed(subEv, testWebhookSecret, time.Now())); code != 200 {
+		t.Fatalf("work sub deleted: %d", code)
+	}
+	ledger, _ = os.ReadFile(filepath.Join(home, "signup", "raised.log"))
+	if !strings.Contains(string(ledger), "subscription sub_work1 ended (plan work, customer cus_work1)") {
+		t.Fatalf("ledger missing work cancellation:\n%s", ledger)
 	}
 }
