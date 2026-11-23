@@ -136,6 +136,7 @@ func TestStripeEventsRefused(t *testing.T) {
 		checkoutEvent(t, "checkout.session.completed", testSession, "paid", false),
 		checkoutEvent(t, "checkout.session.completed", testSession, "unpaid", true),
 		checkoutEvent(t, "invoice.paid", testSession, "paid", true),
+		[]byte(strings.Replace(string(checkoutEvent(t, "checkout.session.completed", testSession, "paid", true)), `"mode":"subscription"`, `"mode":"payment"`, 1)),
 	} {
 		if code, _ := sendEvent(t, h, e, signed(e, testWebhookSecret, time.Now())); code != 200 {
 			t.Fatalf("ignorable event: %d", code)

@@ -145,6 +145,10 @@ func (wb *web) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if !wb.webhooks.allow(rateLimitKey(clientIP(r)), time.Now()) {
+		jsonOut(w, 429, map[string]string{"error": "slow down a little"}) // Stripe retries
+		return
+	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBody))
 	if err != nil {
 		jsonOut(w, 400, map[string]string{"error": "bad request"})
@@ -155,7 +159,9 @@ func (wb *web) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "missing signature"})
 		return
 	}
-	code, out := wb.ask(r.Context(), "POST", "/stripe/event", map[string]string{"payload": string(body), "signature": sig})
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	code, out := wb.ask(ctx, "POST", "/stripe/event", map[string]string{"payload": string(body), "signature": sig})
 	jsonOut(w, code, out)
 }
 
@@ -229,7 +235,7 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 			jsonOut(w, 400, map[string]string{"error": "unreadable checkout session"})
 			return
 		}
-		if s.Metadata[penMetaKey] != penMetaValue || s.PaymentStatus != "paid" {
+		if s.Metadata[penMetaKey] != penMetaValue || s.Mode != "subscription" || s.PaymentStatus != "paid" {
 			jsonOut(w, 200, map[string]string{"ok": "ignored"}) // not ours, or not paid yet
 			return
 		}
@@ -277,7 +283,13 @@ func (b *broker) paidCode(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 200, map[string]string{"state": "pending"})
 		return
 	}
-	if _, unused, err := b.findCode(rec.code); err == nil && !unused {
+	_, unused, err := b.findCode(rec.code)
+	if err != nil {
+		log.Printf("codes: %v", err)
+		jsonOut(w, 500, map[string]string{"error": "internal error"})
+		return
+	}
+	if !unused {
 		jsonOut(w, 200, map[string]string{"state": "used"})
 		return
 	}
@@ -338,15 +350,25 @@ func (b *broker) codeForPayment(s checkoutObject) (code string, fresh bool, err 
 	if err := b.addCode(code, "vanity "+paidTag+" "+s.ID); err != nil {
 		return "", false, err
 	}
+	// If the payment line can't be written, take the code back (best effort):
+	// Stripe retries, and the retry makes a fresh code and line together.
+	rollback := func(err error) (string, bool, error) {
+		if uerr := b.useCode(code); uerr != nil {
+			log.Printf("payments: couldn't take back code for %s: %v", s.ID, uerr)
+		}
+		return "", false, err
+	}
 	f, err := os.OpenFile(b.paymentsPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return "", false, err
+		return rollback(err)
 	}
 	defer f.Close()
 	_, err = fmt.Fprintf(f, "%s %s %s %s %d\n", s.ID, code, idOrDash(s.Customer), idOrDash(s.Subscription), time.Now().Unix())
 	if err != nil {
-		return "", false, err
+		return rollback(err)
 	}
+	// A failed sync may still have written the line: keep the code, so a
+	// retry that finds the line hands out a code that exists.
 	return code, true, f.Sync()
 }
 

@@ -37,6 +37,7 @@ type web struct {
 	globalWaits *limiter // server-wide cap on waiting-list joins
 	leaves      *limiter // taking yourself off the list (its own allowance)
 	checkouts   *limiter // starting a payment
+	webhooks    *limiter // Stripe's calls (it retries what we refuse)
 	jobs        *jobStore
 	stripe      *stripeCheckout // nil: pens aren't for sale
 }
@@ -65,6 +66,7 @@ func newWeb(brokerURL, token, domain string) *web {
 		globalWaits: newLimiterWithCap(30, time.Hour, 4),
 		leaves:      newLimiter(5, time.Hour),
 		checkouts:   newLimiter(10, time.Hour),
+		webhooks:    newLimiter(120, time.Minute),
 		jobs:        newJobStore(defaultMaxOpenJobs, defaultMaxStoredJobs, defaultJobTTL, defaultDeliveredTTL),
 	}
 }
