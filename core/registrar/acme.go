@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -35,6 +36,25 @@ var acmeTXTValueRE = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
 type EABPair struct {
 	KID        string `json:"kid"`
 	HMACB64URL string `json:"hmac_b64url"`
+	// Contact is the operator's address for the fallback account (Google
+	// requires one). Set by the host, never a member's address.
+	Contact string `json:"contact,omitempty"`
+}
+
+// fallbackContact turns the operator contact handed out with a fallback EAB
+// into an ACME contact URI. Google refuses accounts without a contact; the
+// primary CA's accounts stay without one. Anything that isn't a plain address
+// is dropped rather than sent.
+func fallbackContact(addr string) []string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return nil
+	}
+	a, err := mail.ParseAddress(addr)
+	if err != nil || a.Name != "" || a.Address != addr {
+		return nil
+	}
+	return []string{"mailto:" + addr}
 }
 
 // ACMEBackend talks to the host's challenge DNS service (or a test stub) to
@@ -545,6 +565,9 @@ func (m *HomeCertManager) newManagedConfig(caURL string, withEAB bool) (*certmag
 			iss.ExternalAccount = &acme.EAB{
 				KeyID:  pair.KID,
 				MACKey: pair.HMACB64URL,
+			}
+			if len(acct.Contact) == 0 {
+				acct.Contact = fallbackContact(pair.Contact)
 			}
 			return acct, nil
 		}

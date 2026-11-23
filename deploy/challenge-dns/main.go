@@ -15,9 +15,11 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/mail"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -54,6 +56,8 @@ Settings (environment):
   CDNS_ADMIN_SOCK    default /run/challenge-dns/admin.sock (root only)
   CDNS_HTTP_ADDR     optional TCP address for the API (tests and development only)
   CDNS_GCP_KEY       optional Google service-account key file (fallback CA)
+  CDNS_GTS_CONTACT   contact email for fallback CA (Google) accounts; required for
+                     handing out fallback account keys (Google refuses accounts without one)
   CDNS_WEEKLY_CAP    distinct new certificate names per pen per 7 days, default 5
 `
 
@@ -86,6 +90,20 @@ func zonesFromEnv() Zones {
 		Pens: normalize(env("CDNS_PENS_ZONE", "pens.hogman.network")),
 		Gate: normalize(env("CDNS_GATE_NAME", "_acme-challenge.gate.hogman.network")),
 	}
+}
+
+// parseContact checks the operator's contact address for fallback CA accounts:
+// a bare address (no display name), or empty for none.
+func parseContact(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	a, err := mail.ParseAddress(raw)
+	if err != nil || a.Name != "" || a.Address != raw || strings.ContainsAny(raw, " ,;<>") {
+		return "", fmt.Errorf("CDNS_GTS_CONTACT must be a plain email address like ops@example.com (got %q)", raw)
+	}
+	return raw, nil
 }
 
 func parseWeeklyCap(raw string) (int, error) {
@@ -133,6 +151,15 @@ func serve() error {
 		}
 		api.eab = m
 		log.Printf("fallback CA account keys: Google project %s", m.project)
+		contact, err := parseContact(os.Getenv("CDNS_GTS_CONTACT"))
+		if err != nil {
+			return err
+		}
+		if api.contact = contact; contact == "" {
+			log.Printf("warning: CDNS_GTS_CONTACT is not set; Google refuses accounts without a contact, so no fallback account keys will be handed out")
+		} else {
+			log.Printf("fallback CA account contact: %s", contact)
+		}
 	}
 
 	errc := make(chan error, 8)

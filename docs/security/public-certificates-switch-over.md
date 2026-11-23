@@ -145,7 +145,7 @@ That's a few minutes of DNS plus a restore, and it's acceptable because only tes
 
 ## Phase E: when the outside pieces arrive
 
-- **GTS key:** make it fresh, straight onto the server (`hogman-host challenge-dns-setup <ip> <key>`), never on a laptop. Then add the `pki.goog` `issuewild` line with the host's GTS `accounturi` (a DNS PR).
+- **GTS key (done 2026-11-22):** made fresh, straight onto the server (gcloud signed in on the server, then signed out and removed), never on a laptop, and loaded with `hogman-host challenge-dns-setup <ip> <key>`. Google also needs an operator contact on its accounts: `hogman-host fallback-contact <email>`. A live failover test found this (the first try failed with "Accounts must have at least one contact"). Still to do: add the `pki.goog` `issuewild` line with the host's GTS `accounturi` (a DNS PR) once the front door has a GTS account.
 - **Let's Encrypt rate-limit increase:** check it's live for `hogman.network` before raising the trial's pen limit.
 - **Public Suffix List:** file the pull request for `pens.hogman.network` when we're eligible (D-19).
 - **Post-launch security audit:** access, who owns what, removals, scripted where we can (D-23).

@@ -351,16 +351,43 @@ func TestAPIEABAllowances(t *testing.T) {
 	_, tokA := mustCred(t, s, "pen", penA)
 	minted := 0
 	api := &API{store: s, global: &windowLimiter{perMin: 20, perHour: 90},
-		eab: eabFunc(func() (string, string, error) { minted++; return fmt.Sprintf("kid-%d", minted), "bWFjLWtleQ", nil })}
+		eab:     eabFunc(func() (string, string, error) { minted++; return fmt.Sprintf("kid-%d", minted), "bWFjLWtleQ", nil }),
+		contact: "ops@example.com"}
 	h := api.Handler()
 	for i := 0; i < eabPerDay; i++ {
 		rec := doAPI(t, h, "POST", "/v1/eab", tokA, nil)
-		if rec.Code != 201 || !strings.Contains(rec.Body.String(), `"hmac_b64url":"bWFjLWtleQ"`) {
+		if rec.Code != 201 || !strings.Contains(rec.Body.String(), `"hmac_b64url":"bWFjLWtleQ"`) || !strings.Contains(rec.Body.String(), `"contact":"ops@example.com"`) {
 			t.Fatalf("mint %d: %d %s", i, rec.Code, rec.Body)
 		}
 	}
 	if rec := doAPI(t, h, "POST", "/v1/eab", tokA, nil); rec.Code != 429 {
 		t.Fatalf("over the daily allowance: %d", rec.Code)
+	}
+}
+
+// Google refuses an ACME account without a contact, so without one configured
+// no key is minted: a refused registration would waste it (and the allowance).
+func TestAPIEABNeedsContact(t *testing.T) {
+	s, _ := newTestStore(t)
+	_, tokA := mustCred(t, s, "pen", penA)
+	minted := 0
+	api := &API{store: s, global: &windowLimiter{perMin: 20, perHour: 90},
+		eab: eabFunc(func() (string, string, error) { minted++; return "kid", "bWFjLWtleQ", nil })}
+	if rec := doAPI(t, api.Handler(), "POST", "/v1/eab", tokA, nil); rec.Code != 503 || minted != 0 {
+		t.Fatalf("no contact: %d, minted %d; want 503 and nothing minted", rec.Code, minted)
+	}
+}
+
+func TestParseContact(t *testing.T) {
+	for _, ok := range []string{"", "ops@example.com", " hogman-network@proton.me "} {
+		if _, err := parseContact(ok); err != nil {
+			t.Fatalf("parseContact(%q): %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"not-an-email", "Ops <ops@example.com>", "a@b.com,c@d.com", "mailto:ops@example.com"} {
+		if _, err := parseContact(bad); err == nil {
+			t.Fatalf("parseContact(%q) succeeded, want error", bad)
+		}
 	}
 }
 
