@@ -19,7 +19,9 @@ import re
 SRC = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.normpath(os.path.join(SRC, "..", "public"))
 OUT = os.path.join(PUBLIC, "docs")
+WORK_OUT = os.path.join(PUBLIC, "work", "docs")
 BASE_URL = "https://hogman.network"
+WORK_BASE_URL = "https://work.hogman.network"
 
 PAGES = [  # (file, nav title, page title, description, sidebar group)
     ("index", "Quickstart", "Docs — Quickstart", "Create a pen, join with one command, and put an HTTPS server on your private network.", "Guides"),
@@ -37,6 +39,22 @@ TAG_RE = re.compile(r"<[^>]+>")
 
 def page_href(slug: str) -> str:
     return "/docs/" if slug == "index" else f"/docs/{slug}.html"
+
+
+def work_page_rel(slug: str) -> str:
+    return "./" if slug == "index" else f"./{slug}.html"
+
+
+def adapt_work_body(body: str) -> str:
+    """Adapt single-source doc fragments for work.hogman.network/docs/:
+    keep all internal doc links inside the Work docs tree and swap consumer
+    example names to neutral operational examples."""
+    out = body.replace('href="/docs/"', 'href="./"')
+    out = re.sub(r'href="/docs/([^"]+)"', r'href="./\1"', out)
+    out = out.replace("john-mcafee", "store-north")
+    out = out.replace("deadmans-switch", "cooler-1")
+    out = out.replace("https://get.hogman.network/", "https://get.hogman.network/#wait")
+    return out
 
 
 def plain_text(fragment: str) -> str:
@@ -60,31 +78,40 @@ def build_toc(body: str) -> str:
     )
 
 
-def build_pager(idx: int) -> str:
+def build_pager(idx: int, href_fn=page_href) -> str:
     prev_html = '<span class="pager-slot"></span>'
     next_html = '<span class="pager-slot"></span>'
     if idx > 0:
         slug, navt, *_ = PAGES[idx - 1]
         prev_html = (
-            f'<a class="pager-link prev" href="{page_href(slug)}">'
+            f'<a class="pager-link prev" href="{href_fn(slug)}">'
             f'<span class="pager-dir">&larr; Previous</span>'
             f'<span class="pager-title">{html_mod.escape(navt)}</span></a>'
         )
     if idx + 1 < len(PAGES):
         slug, navt, *_ = PAGES[idx + 1]
         next_html = (
-            f'<a class="pager-link next" href="{page_href(slug)}">'
+            f'<a class="pager-link next" href="{href_fn(slug)}">'
             f'<span class="pager-dir">Next &rarr;</span>'
             f'<span class="pager-title">{html_mod.escape(navt)}</span></a>'
         )
     return f'<nav class="docs-pager" aria-label="Adjacent pages">\n  {prev_html}\n  {next_html}\n</nav>'
 
 
-def build_jsonld(slug: str, navt: str, title: str, desc: str, body: str) -> str:
-    url = BASE_URL + page_href(slug)
+def build_jsonld(
+    slug: str,
+    navt: str,
+    title: str,
+    desc: str,
+    body: str,
+    base_url: str = BASE_URL,
+    site_name: str = "Hogman",
+    og_image: str = BASE_URL + "/og-hero-v2.jpg",
+) -> str:
+    url = base_url + page_href(slug)
     crumbs = [
-        {"@type": "ListItem", "position": 1, "name": "Hogman", "item": BASE_URL + "/"},
-        {"@type": "ListItem", "position": 2, "name": "Docs", "item": BASE_URL + "/docs/"},
+        {"@type": "ListItem", "position": 1, "name": site_name, "item": base_url + "/"},
+        {"@type": "ListItem", "position": 2, "name": "Docs", "item": base_url + "/docs/"},
     ]
     if slug != "index":
         crumbs.append({"@type": "ListItem", "position": 3, "name": navt, "item": url})
@@ -92,11 +119,11 @@ def build_jsonld(slug: str, navt: str, title: str, desc: str, body: str) -> str:
     graph = [
         {
             "@type": "TechArticle",
-            "headline": f"{title} · Hogman",
+            "headline": f"{title} · {site_name}",
             "description": desc,
             "url": url,
-            "image": BASE_URL + "/og-hero-v2.jpg",
-            "isPartOf": {"@type": "WebSite", "name": "Hogman", "url": BASE_URL + "/"},
+            "image": og_image,
+            "isPartOf": {"@type": "WebSite", "name": site_name, "url": base_url + "/"},
         },
         {
             "@type": "BreadcrumbList",
@@ -277,7 +304,10 @@ def html_to_markdown(fragment: str) -> str:
 
 
 def write_sitemap():
-    urls = [(BASE_URL + "/", "1.0")]
+    urls = [
+        (BASE_URL + "/", "1.0"),
+        (BASE_URL + "/work/", "0.9"),
+    ]
     for slug, *_ in PAGES:
         prio = "0.9" if slug == "index" else "0.8"
         urls.append((BASE_URL + page_href(slug), prio))
@@ -322,6 +352,7 @@ def write_llms_files(bodies: list[tuple[str, str, str, str, str]]):
 
 - [Complete documentation in one Markdown file]({BASE_URL}/llms-full.txt)
 - [Homepage]({BASE_URL}/)
+- [Hogman for Work (small businesses & operations)](https://work.hogman.network/)
 - [Create a pen](https://get.hogman.network/)
 - [Source code (AGPL-3.0) on GitHub](https://github.com/celtiberi/hogman)
 """
@@ -411,11 +442,88 @@ FOOT = """
 </html>
 """
 
-os.makedirs(OUT, exist_ok=True)
-built_bodies = []
-for idx, (f, navt, title, desc, _) in enumerate(PAGES):
-    body = open(os.path.join(SRC, f + ".html")).read().strip()
-    built_bodies.append((f, navt, title, desc, body))
+WORK_HEAD = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title} · Hogman for Work</title>
+<meta name="description" content="{desc}">
+<link rel="canonical" href="https://work.hogman.network{href}">
+<link rel="alternate" type="text/plain" href="https://hogman.network/llms.txt" title="Hogman documentation for LLMs">
+<meta property="og:title" content="{title} · Hogman for Work">
+<meta property="og:description" content="{desc}">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://work.hogman.network{href}">
+<meta property="og:site_name" content="Hogman for Work">
+<meta property="og:image" content="https://work.hogman.network/work/og-work.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Hogman for Work documentation: private HTTPS networks for small businesses.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{title} · Hogman for Work">
+<meta name="twitter:description" content="{desc}">
+<meta name="twitter:image" content="https://work.hogman.network/work/og-work.jpg">
+<meta name="theme-color" content="#14181f">
+<link rel="icon" href="/work/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/work/work.css?v=2">
+{jsonld}
+</head>
+<!-- Generated by site/docs-src/build.py from site/docs-src. Edit there. -->
+<body class="docs-page">
+<header class="top">
+  <div class="wrap top-inner">
+    <a class="brand" href="../" aria-label="Hogman for Work home">
+      <img src="/work/favicon.svg" width="28" height="28" alt="">
+      <span class="brand-name">Hogman</span>
+      <span class="brand-tag">Work</span>
+    </a>
+    <nav aria-label="Primary navigation">
+      <a href="../#why">Why pens</a>
+      <a href="../#how">How it works</a>
+      <a href="../#uses">Use cases</a>
+      <a href="../#honest">Security limits</a>
+      <a href="./" aria-current="true">Docs</a>
+      <a class="nav-cta" href="https://get.hogman.network/#wait">Request access</a>
+    </nav>
+  </div>
+</header>
+<div class="docs">
+<aside class="docs-nav" aria-label="Docs pages">
+{nav}
+</aside>
+<main class="docs-main">
+"""
+
+WORK_FOOT = """
+{pager}
+<p class="docs-edit fine">Spot something wrong or unclear? Edit the source in
+  <a href="https://github.com/celtiberi/hogman/tree/main/site/docs-src">site/docs-src</a> on GitHub.</p>
+</main>
+{toc}
+</div>
+<footer class="foot">
+  <div class="wrap foot-inner">
+    <p class="foot-brand">
+      <strong>Hogman</strong> &middot; Open source (<a href="https://github.com/celtiberi/hogman/blob/main/LICENSE">AGPL-3.0</a>) &middot; Hosted control planes on <code>hogman.network</code>
+    </p>
+    <p class="foot-links">
+      <a href="../">Overview</a> &middot;
+      <a href="./">Docs</a> &middot;
+      <a href="./security.html">Security</a> &middot;
+      <a href="./faq.html">FAQ</a> &middot;
+      <a href="https://github.com/celtiberi/hogman">GitHub</a>
+    </p>
+  </div>
+</footer>
+<script src="/docs.js?v=1" defer></script>
+</body>
+</html>
+"""
+
+
+def build_sidebar(current_slug: str, href_fn=page_href) -> str:
     nav, group = [], None
     for g, n, _, _, grp in PAGES:
         if grp != group:
@@ -423,9 +531,18 @@ for idx, (f, navt, title, desc, _) in enumerate(PAGES):
                 nav.append("</ul>")
             nav.append(f'<p class="docs-nav-h">{grp}</p>\n<ul>')
             group = grp
-        current = ' aria-current="page"' if g == f else ""
-        nav.append(f'<li><a href="{page_href(g)}"{current}>{n}</a></li>')
+        current = ' aria-current="page"' if g == current_slug else ""
+        nav.append(f'<li><a href="{href_fn(g)}"{current}>{n}</a></li>')
     nav.append("</ul>")
+    return "\n".join(nav)
+
+
+os.makedirs(OUT, exist_ok=True)
+os.makedirs(WORK_OUT, exist_ok=True)
+built_bodies = []
+for idx, (f, navt, title, desc, _) in enumerate(PAGES):
+    body = open(os.path.join(SRC, f + ".html")).read().strip()
+    built_bodies.append((f, navt, title, desc, body))
 
     out_html = (
         HEAD.format(
@@ -433,14 +550,39 @@ for idx, (f, navt, title, desc, _) in enumerate(PAGES):
             desc=desc,
             href=page_href(f),
             jsonld=build_jsonld(f, navt, title, desc, body),
-            nav="\n".join(nav),
+            nav=build_sidebar(f, page_href),
         )
         + body
         + "\n"
-        + FOOT.format(pager=build_pager(idx), toc=build_toc(body))
+        + FOOT.format(pager=build_pager(idx, page_href), toc=build_toc(body))
     )
     open(os.path.join(OUT, f + ".html"), "w").write(out_html)
     print("wrote", f)
+
+    work_body = adapt_work_body(body)
+    work_html = (
+        WORK_HEAD.format(
+            title=title,
+            desc=desc,
+            href=page_href(f),
+            jsonld=build_jsonld(
+                f,
+                navt,
+                title,
+                desc,
+                work_body,
+                base_url=WORK_BASE_URL,
+                site_name="Hogman for Work",
+                og_image=WORK_BASE_URL + "/work/og-work.jpg",
+            ),
+            nav=build_sidebar(f, work_page_rel),
+        )
+        + work_body
+        + "\n"
+        + WORK_FOOT.format(pager=build_pager(idx, work_page_rel), toc=build_toc(work_body))
+    )
+    open(os.path.join(WORK_OUT, f + ".html"), "w").write(work_html)
+    print("wrote work/docs/" + f)
 
 write_sitemap()
 write_llms_files(built_bodies)

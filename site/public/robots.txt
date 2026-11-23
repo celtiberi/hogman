@@ -1,6 +1,6 @@
 # Public marketing site and documentation for Hogman (https://hogman.network).
 # Search engines and AI assistants are welcome to index public pages and docs.
-# (Private Hogman pens live on *.pens.hogman.network with zero public DNS.)
+# (Private Hogman pens live on *.pens.hogman.network with no public IP addresses.)
 #
 # Machine-readable docs for AI assistants:
 #   https://hogman.network/llms.txt

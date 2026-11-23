@@ -25,5 +25,6 @@
 
 - [Complete documentation in one Markdown file](https://hogman.network/llms-full.txt)
 - [Homepage](https://hogman.network/)
+- [Hogman for Work (small businesses & operations)](https://work.hogman.network/)
 - [Create a pen](https://get.hogman.network/)
 - [Source code (AGPL-3.0) on GitHub](https://github.com/celtiberi/hogman)
