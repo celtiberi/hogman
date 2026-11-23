@@ -5,9 +5,6 @@
 .env.*
 !.env.example
 
-# release artifacts, built by deploy/release.sh
-site/public/dl/
-
 # local bot arena run transcripts and verdicts
 test-arena/runs/
 __pycache__/

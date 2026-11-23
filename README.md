@@ -188,7 +188,6 @@ Built on [Headscale](https://github.com/juanfont/headscale), [Tailscale `tsnet`]
 | [`browser-ext`](browser-ext) | Manifest V3 extension for Chrome, Brave, Edge, and Firefox (VPN coexistence + per-profile pen allowlists). |
 | [`deploy/challenge-dns`](deploy/challenge-dns) | Authoritative DNS-01 challenge server (`_acme-challenge.*` TXT, `SOA`, `NS`, `CAA`; never `A`/`AAAA`). |
 | [`deploy/hogman-host`](deploy/hogman-host) & [`deploy/signup`](deploy/signup) | Isolated hosted pens, shared `*.gate.hogman.network` front door, backups, monitoring (`hogman-watch.sh`), and web sign-ups. |
-| [`site`](site) | `hogman.network`, `work.hogman.network`, and single-source `/docs/` generator (`site/docs-src/build.py`), deployed automatically via `.github/workflows/site-deploy.yml`. |
 | [`infra`](infra) | DNS configuration as code (`dnscontrol`). |
 | [`test-arena`](test-arena) | Disposable sandbox testing and automated red-team harness. |
 
@@ -207,5 +206,5 @@ Hogman's code is free software under the [GNU Affero General Public License v3.0
 use, study, change, and share it; if you run a modified version as a service for others, you must
 offer them your changes under the same license.
 
-The artwork (the paintings, logo, and mascot icons in `site/public/`) is not covered by that
+The artwork (the paintings, logo, and mascot icons) is not covered by that
 license. All rights reserved.
