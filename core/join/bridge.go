@@ -125,6 +125,7 @@ func runBridge(ctx context.Context, sockPath, targetAddr string, maxConns int, o
 			if ctx.Err() != nil {
 				break
 			}
+			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		select {

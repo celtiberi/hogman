@@ -20,7 +20,7 @@ Run any Dockerized web app inside a container with **zero internet access** (`ne
 
 ## Quick Start
 
-### 1. Build the sidecar image (or pull from GHCR once published)
+### 1. Build the sidecar image
 
 ```sh
 docker build -f core/join/Dockerfile.sidecar -t hogman-sidecar core/join
@@ -72,7 +72,7 @@ services:
       - --listen-unix=/run/hogman-in/app.sock
       - --forward-tcp=127.0.0.1:8080
     healthcheck:
-      test: ["/hogman", "bridge", "--check", "/run/hogman-in/app.sock"]
+      test: ["CMD", "/hogman", "bridge", "--check", "/run/hogman-in/app.sock"]
       interval: 5s
       timeout: 3s
       retries: 10

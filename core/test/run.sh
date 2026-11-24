@@ -66,7 +66,10 @@ cleanup() {
     echo; echo "Stack left running in $WORK"
     echo "  cd there, export COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME ACME_DIR=$ACME, then ./hogman <command>; ./hogman down -v to stop"
   else
-    docker rm -f hogman-run-cdns hogman-run-pebble >/dev/null 2>&1 || true
+    docker rm -f hogman-run-cdns hogman-run-pebble \
+      "hogman-e2e-sidecar-$$" "hogman-e2e-bridge-$$" "hogman-e2e-app-$$" >/dev/null 2>&1 || true
+    docker volume rm -f "hogman-e2e-state-$$" "hogman-e2e-in-$$" >/dev/null 2>&1 || true
+    docker rmi -f "hogman-sidecar-e2e:$$" >/dev/null 2>&1 || true
     dc down -v --remove-orphans >/dev/null 2>&1
     docker network rm hogman-test-acme >/dev/null 2>&1 || true
     rm -rf "$WORK"
@@ -540,6 +543,92 @@ check "a server link plus one command shares a port (exit $rc)" grep -q "https:/
 check "members load https://app.$ZONE" retry 30 fetch app.$ZONE "app from a server link"
 out="$(join_tool dave-server share stop app 2>&1)"; rc=$?
 check "and it stops cleanly (exit $rc)" grep -q "app.$ZONE is down" <<<"$out"
+
+# Sealed sidecar E2E: real scratch hogman-sidecar container -> --enroll-only --link-stdin
+# -> serve over mesh via :ro UDS -> network_mode: none bridge -> app -> docker kill PID 1
+# -> restart on the exact same state volume and serve again.
+step "Sealed server sidecar (enroll, serve, kill PID 1, restart)"
+SIDECAR_IMG="hogman-sidecar-e2e:$$"
+SIDECAR_STATE="hogman-e2e-state-$$"
+SIDECAR_IN="hogman-e2e-in-$$"
+SIDECAR_CTR="hogman-e2e-sidecar-$$"
+BRIDGE_CTR="hogman-e2e-bridge-$$"
+APP_CTR="hogman-e2e-app-$$"
+OUTSIDE_NET="$(docker inspect "$(dc ps -q dave-server)" --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' | tr ' ' '\n' | grep -v '^hogman-test-acme$' | grep -v '^$' | head -n 1)"
+mkdir -p "$WORK/sidecar-ca"
+cp "$WORK/data/edge-trust/root.crt" "$WORK/sidecar-ca/root.crt"
+cp "$ACME/bundle.crt" "$WORK/sidecar-ca/bundle.crt"
+cat "$WORK/data/edge-trust/root.crt" "$ACME/bundle.crt" > "$WORK/sidecar-ca/combined.crt"
+chmod 755 "$WORK/sidecar-ca" && chmod 644 "$WORK/sidecar-ca"/*.crt
+
+docker build -q -f "$REPO/core/join/Dockerfile.sidecar" -t "$SIDECAR_IMG" "$REPO/core/join" >/dev/null
+docker volume create "$SIDECAR_STATE" >/dev/null
+docker volume create "$SIDECAR_IN" >/dev/null
+SEALED_LINK="$($H device key dave server | awk '/^link:/ {print $2}')"
+
+ENROLL_CTR="$(docker create -i \
+  --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  --tmpfs /tmp:size=16m,noexec,nosuid,nodev \
+  --network "$OUTSIDE_NET" \
+  -v "$SIDECAR_STATE:/var/lib/hogman" \
+  -v "$WORK/sidecar-ca:/sidecar-ca:ro" \
+  -e SSL_CERT_FILE=/sidecar-ca/combined.crt \
+  -e HOGMAN_ACME_CA_ROOT=/sidecar-ca/bundle.crt \
+  -e HOGMAN_ACME_CA_URL=https://pebble:14000/dir \
+  -e HOGMAN_ACME_RESOLVERS=hogman-run-cdns:53 \
+  -e HOGMAN_ACME_PROPAGATION_DELAY=100ms \
+  -e HOGMAN_ACME_PROPAGATION_TIMEOUT=30s \
+  "$SIDECAR_IMG" share sealed unix:///run/hogman-in/app.sock \
+    --state-dir=/var/lib/hogman --control-ca=/sidecar-ca/root.crt --enroll-only --link-stdin)"
+docker network connect hogman-test-acme "$ENROLL_CTR"
+out="$(printf '%s\n' "$SEALED_LINK" | docker start -a -i "$ENROLL_CTR" 2>&1)"; rc=$?
+docker rm -f "$ENROLL_CTR" >/dev/null 2>&1 || true
+[ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
+check "sidecar --enroll-only --link-stdin enrolls cleanly (exit $rc)" bash -c 'test "$1" = 0 && grep -q "Enrolled https://sealed.'"$ZONE"'" <<<"$2"' _ "$rc" "$out"
+
+docker run -d --name "$BRIDGE_CTR" \
+  --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  --tmpfs /tmp:size=4m,noexec,nosuid,nodev \
+  -v "$SIDECAR_IN:/run/hogman-in" \
+  "$SIDECAR_IMG" bridge --listen-unix=/run/hogman-in/app.sock --forward-tcp=127.0.0.1:8080 >/dev/null
+retry 15 docker exec "$BRIDGE_CTR" /hogman bridge --check /run/hogman-in/app.sock
+
+docker run -d --name "$APP_CTR" \
+  --network "container:$BRIDGE_CTR" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  --tmpfs /tmp:size=16m,noexec,nosuid,nodev \
+  caddy:2.11.9@sha256:4851e54a46b206517c574821bb5cc67f170d2156041e9fbc4c9193b45e84a75b \
+  sh -c 'mkdir -p /tmp/www && printf "sealed sidecar ok" > /tmp/www/index.html && exec caddy file-server --listen 127.0.0.1:8080 --root /tmp/www' >/dev/null
+
+start_live_sidecar() {
+  docker rm -f "$SIDECAR_CTR" >/dev/null 2>&1 || true
+  docker create --name "$SIDECAR_CTR" \
+    --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+    --tmpfs /tmp:size=16m,noexec,nosuid,nodev \
+    --network "$OUTSIDE_NET" \
+    -v "$SIDECAR_STATE:/var/lib/hogman" \
+    -v "$SIDECAR_IN:/run/hogman-in:ro" \
+    -v "$WORK/sidecar-ca:/sidecar-ca:ro" \
+    -e SSL_CERT_FILE=/sidecar-ca/combined.crt \
+    -e HOGMAN_ACME_CA_ROOT=/sidecar-ca/bundle.crt \
+    -e HOGMAN_ACME_CA_URL=https://pebble:14000/dir \
+    -e HOGMAN_ACME_RESOLVERS=hogman-run-cdns:53 \
+    -e HOGMAN_ACME_PROPAGATION_DELAY=100ms \
+    -e HOGMAN_ACME_PROPAGATION_TIMEOUT=30s \
+    "$SIDECAR_IMG" share sealed unix:///run/hogman-in/app.sock \
+      --state-dir=/var/lib/hogman --control-ca=/sidecar-ca/root.crt >/dev/null
+  docker network connect hogman-test-acme "$SIDECAR_CTR"
+  docker start "$SIDECAR_CTR" >/dev/null
+}
+
+start_live_sidecar
+check "members load https://sealed.$ZONE through scratch sidecar -> :ro UDS -> bridge -> app" retry 45 fetch sealed.$ZONE "sealed sidecar ok"
+
+docker kill "$SIDECAR_CTR" >/dev/null 2>&1 || true
+start_live_sidecar
+check "... and after docker kill (stale PID 1), sidecar restarts on same state volume" retry 45 fetch sealed.$ZONE "sealed sidecar ok"
+docker rm -f "$SIDECAR_CTR" "$APP_CTR" "$BRIDGE_CTR" >/dev/null 2>&1 || true
+docker volume rm -f "$SIDECAR_STATE" "$SIDECAR_IN" >/dev/null 2>&1 || true
+docker rmi -f "$SIDECAR_IMG" >/dev/null 2>&1 || true
 
 out="$(join_tool dave-laptop update --pen "$ZONE" --dry-run 2>&1)"; rc=$?
 check "hogman update --dry-run checks SHA256SUMS cleanly (exit $rc)" bash -c 'test "$1" = 0 && grep -q "already up to date" <<<"$2"' _ "$rc" "$out"

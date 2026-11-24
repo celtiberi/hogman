@@ -362,8 +362,11 @@ func shareStart(name, what, rawLink string, o options) error {
 		}
 	}
 	cfg.Target, cfg.Folder = target, folder
-	if strings.TrimSpace(o.upstreamHost) != "" {
-		cfg.UpstreamHost = strings.TrimSpace(o.upstreamHost)
+	if uh := strings.TrimSpace(o.upstreamHost); uh != "" {
+		if strings.ContainsAny(uh, " \t\r\n/\\@") || strings.Contains(uh, "://") {
+			return errorf("invalid --upstream-host %q (expected a bare hostname or host:port)", uh)
+		}
+		cfg.UpstreamHost = uh
 	}
 
 	dir := shareDir(cfg.Zone, name)
@@ -373,8 +376,10 @@ func shareStart(name, what, rawLink string, o options) error {
 	var prev *shareConfig
 	fresh := true
 	if old, err := loadShare(dir); err == nil {
-		if pid := sharePID(dir); pid != 0 && pid != os.Getpid() {
-			return errorf("%s is already being shared from this computer (process %d). Stop it first: hogman share stop %s", old.url(), pid, name)
+		if explicitDir == "" {
+			if pid := sharePID(dir); pid != 0 && pid != os.Getpid() {
+				return errorf("%s is already being shared from this computer (process %d). Stop it first: hogman share stop %s", old.url(), pid, name)
+			}
 		}
 		_, hasUnspentKey := os.Stat(filepath.Join(dir, "authkey"))
 		st := readShareStatus(dir)
@@ -1007,7 +1012,6 @@ func shareHandler(c *shareConfig) (http.Handler, func(), error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil // always connect directly to the local/LAN or Unix socket share target
 	tr.MaxResponseHeaderBytes = 64 << 10
-	tr.ResponseHeaderTimeout = 60 * time.Second
 	tr.MaxConnsPerHost = 128
 	tr.MaxIdleConnsPerHost = 32
 
@@ -1018,6 +1022,7 @@ func shareHandler(c *shareConfig) (http.Handler, func(), error) {
 		if err != nil {
 			return nil, nil, permanentShare(err)
 		}
+		tr.ResponseHeaderTimeout = 60 * time.Second
 		tr.DialContext = unixSocketDialContext(sockPath)
 		rewriteHost = strings.TrimSpace(c.UpstreamHost)
 		if rewriteHost == "" {
