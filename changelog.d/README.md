@@ -22,12 +22,13 @@ One or more Markdown list items starting with `- `:
 - `core/registrar`: added live `online` and `last_seen` presence fields to `/api/directory`.
 ```
 
-## Folding at release time
+## Release and post-release fold
 
-Before running `deploy/release.sh`, fold fragments into `CHANGELOG.md`:
+`deploy/release.sh` releases directly from any green commit on `main` and builds the GitHub Release
+notes from the fragments at that commit (plus any entries still under `## [Unreleased]`).
+
+After publishing release `<version>`, fold the fragments into `CHANGELOG.md` in a small housekeeping PR:
 
 ```bash
 deploy/changelog-fold.sh <version>
 ```
-
-`deploy/release.sh` refuses to publish a commit that still contains unfolded fragments.

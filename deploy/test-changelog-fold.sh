@@ -38,13 +38,38 @@ if CHANGELOG_REPO="$TMP" "$SCRIPT" --check >/dev/null 2>&1; then
 fi
 rm -f "$TMP/changelog.d/bad.added.md"
 
-# 3. Valid fragments across sections pass --check and fold cleanly.
+# 3. Valid fragments across sections pass --check, render --notes from git, and fold cleanly.
 printf -- '- Security hardening item.\n' > "$TMP/changelog.d/sec.security.md"
 printf -- '- Brand new feature.\n  - Sub-bullet detail.\n' > "$TMP/changelog.d/feat.added.md"
 printf -- '- Changed behavior.\n' > "$TMP/changelog.d/chg.changed.md"
 printf -- '- Fragment bugfix.\n' > "$TMP/changelog.d/bug.fixed.md"
 
 CHANGELOG_REPO="$TMP" "$SCRIPT" --check
+
+git -C "$TMP" init -q
+git -C "$TMP" config user.name "test"
+git -C "$TMP" config user.email "test@example.com"
+git -C "$TMP" add CHANGELOG.md changelog.d
+git -C "$TMP" commit -q -m "fixture"
+
+cat > "$TMP/expected-notes.md" <<'EOF'
+### Security
+- Security hardening item.
+
+### Added
+- Brand new feature.
+  - Sub-bullet detail.
+
+### Changed
+- Changed behavior.
+
+### Fixed
+- Fragment bugfix.
+- Existing unreleased fix.
+EOF
+CHANGELOG_REPO="$TMP" "$SCRIPT" --notes HEAD > "$TMP/got-notes.md"
+diff -u "$TMP/expected-notes.md" "$TMP/got-notes.md"
+
 CHANGELOG_REPO="$TMP" "$SCRIPT" 2026.11.24-deadbee 2026-11-24 >/dev/null
 
 # Fragments removed, README.md preserved.

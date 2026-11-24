@@ -292,14 +292,9 @@ persisted deadline while preserving the original `sleep_since` / `delete_after` 
 
 ## Publishing releases
 
-Before releasing, fold any per-PR `changelog.d/<name>.<section>.md` fragments into `CHANGELOG.md`
-and commit the result (`deploy/release.sh` refuses to publish a commit with unfolded fragments):
-
-```bash
-deploy/changelog-fold.sh <version>
-```
-
-`deploy/release.sh [git-ref]` publishes a release to GitHub Releases on `celtiberi/hogman`:
+`deploy/release.sh [git-ref]` publishes a release directly from any green commit on `main` and
+builds the GitHub Release notes from `changelog.d/` fragments (plus any remaining `## [Unreleased]`
+entries) at that commit:
 
 1. Verifies a successful non-PR `.github/workflows/build.yml` run for the exact commit and checks
    GitHub build provenance (`gh attestation verify`) on every compiled binary before packaging.
@@ -307,6 +302,13 @@ deploy/changelog-fold.sh <version>
    `SHA256SUMS`, and `latest`.
 3. Uploads all five assets into a **draft** release (`v<ver>`), verifies the asset list, then
    publishes and marks it `latest` atomically (`gh release edit --draft=false --latest`).
+
+After publishing `v<ver>`, fold the released `changelog.d/` fragments into `CHANGELOG.md` under
+that exact version in a follow-up housekeeping PR:
+
+```bash
+deploy/changelog-fold.sh <ver>
+```
 
 Enable **Immutable releases** in the repository's GitHub settings (**Settings → General → Releases**)
 so published release tags and their assets cannot be modified or replaced after publication.
