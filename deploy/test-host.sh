@@ -481,6 +481,7 @@ portal_user_ok() {
 }
 check "front door Caddy runs non-root" front_user_ok
 check "pen portal Caddy runs non-root" portal_user_ok
+check "deleted-pen 30-day backup expiry and fail-closed off-host mirror (I-16 / D-37)" "$REPO/deploy/test-backup-retention.sh"
 
 echo
 echo "Result: $pass passed, $fail failed"
