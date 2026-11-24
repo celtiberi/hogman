@@ -42,14 +42,14 @@ import (
 const shareUsage = `hogman-join share: put something on your pen under its own name
 
 usage:
-  hogman-join share NAME WHAT                  share from this computer (it must be on the pen)
-  hogman-join share NAME WHAT '<server link>'  share from a computer that isn't on the pen
-  hogman-join share list                       what this computer shares
-  hogman-join share stop NAME                  take a share down and give its name back
+  hogman-join share <name> <target>                  share from this computer (it must be on the pen)
+  hogman-join share <name> <target> '<server link>'  share from a computer that isn't on the pen
+  hogman-join share list                             what this computer shares
+  hogman-join share stop <name>                      take a share down and give its name back
 
-WHAT is a port on this computer (3000), a local web address
+<target> is a port on this computer (3000), a local web address
 (http://localhost:8080) or a folder (./site) to serve as a website.
-NAME becomes https://NAME.<pen-zone>, open to everyone in the pen.
+<name> becomes https://<name>.<pen-zone>, open to everyone in the pen.
 
 options:
   --note TEXT    short one-line description shown on the pen's home page (--note "" clears it)

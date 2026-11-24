@@ -208,9 +208,13 @@ func TestResolveUpdatePlan(t *testing.T) {
 	cfgBase := filepath.Join(root, "hogman")
 	sharesDir := filepath.Join(root, "hogman-shares")
 
-	// Empty state -> error without explicit source.
-	if _, err := resolveUpdatePlan(nil, options{}, cfgBase, sharesDir); err == nil {
-		t.Fatal("expected error with no joined pens")
+	// Default with 0 pens resolves to immutable GitHub Releases (I-4).
+	p0, err := resolveUpdatePlan(nil, options{}, cfgBase, sharesDir)
+	if err != nil {
+		t.Fatalf("0-pen default update plan failed: %v", err)
+	}
+	if !p0.fromRelease || p0.host != "github.com" || p0.releaseBase != defaultReleaseBase || len(p0.pens) != 0 {
+		t.Fatalf("unexpected 0-pen plan: %+v", p0)
 	}
 
 	writePen := func(zone, login, ca string) {
@@ -234,29 +238,27 @@ func TestResolveUpdatePlan(t *testing.T) {
 
 	writePen("alpha.hogman", "https://alpha.example", "CA-ALPHA")
 	writeShare("alpha.hogman", "notes", "https://alpha.example")
+	writePen("beta.hogman", "https://beta.example", "")
 
-	// Single pen + share sharing LoginServer resolves cleanly.
-	p, err := resolveUpdatePlan(nil, options{}, cfgBase, sharesDir)
+	// Default with 2 pens on different servers still resolves to GitHub Releases
+	// and includes ALL installed pens and shares (no --pen ambiguity).
+	pAll, err := resolveUpdatePlan(nil, options{}, cfgBase, sharesDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.baseURL != "https://alpha.example" || p.controlCA != "CA-ALPHA" || len(p.pens) != 1 || len(p.shares) != 1 {
-		t.Fatalf("unexpected 1-pen plan: %+v", p)
+	if !pAll.fromRelease || len(pAll.pens) != 2 || len(pAll.shares) != 1 {
+		t.Fatalf("unexpected multi-pen release plan: %+v", pAll)
 	}
 
-	// Adding a second pen on a different server requires --pen or explicit arg.
-	writePen("beta.hogman", "https://beta.example", "")
-	if _, err := resolveUpdatePlan(nil, options{}, cfgBase, sharesDir); err == nil {
-		t.Fatal("expected ambiguity error with two pens")
-	}
+	// --pen selects that specific pen's server instead of GitHub Releases.
 	pBeta, err := resolveUpdatePlan(nil, options{pen: "beta.hogman"}, cfgBase, sharesDir)
-	if err != nil || pBeta.baseURL != "https://beta.example" || len(pBeta.pens) != 1 {
+	if err != nil || pBeta.fromRelease || pBeta.baseURL != "https://beta.example" || len(pBeta.pens) != 1 {
 		t.Fatalf("unexpected --pen beta plan: (%+v, %v)", pBeta, err)
 	}
 
 	// Explicit URL matching alpha picks up alpha's ControlCA and targets.
 	pExpl, err := resolveUpdatePlan([]string{"https://alpha.example"}, options{}, cfgBase, sharesDir)
-	if err != nil || pExpl.baseURL != "https://alpha.example" || pExpl.controlCA != "CA-ALPHA" || len(pExpl.pens) != 1 || len(pExpl.shares) != 1 {
+	if err != nil || pExpl.fromRelease || pExpl.baseURL != "https://alpha.example" || pExpl.controlCA != "CA-ALPHA" || len(pExpl.pens) != 1 || len(pExpl.shares) != 1 {
 		t.Fatalf("unexpected explicit plan: (%+v, %v)", pExpl, err)
 	}
 
@@ -265,7 +267,7 @@ func TestResolveUpdatePlan(t *testing.T) {
 		t.Fatal("expected error when --pen LoginServer mismatches explicit URL")
 	}
 
-	// Share-only box with no personal pen resolves from share.json.
+	// --pen on a share-only box resolves from share.json.
 	onlyShares := filepath.Join(t.TempDir(), "shares")
 	d := filepath.Join(onlyShares, "gamma.hogman", "blog")
 	if err := os.MkdirAll(d, 0o700); err != nil {
@@ -274,9 +276,83 @@ func TestResolveUpdatePlan(t *testing.T) {
 	if err := (&shareConfig{Zone: "gamma.hogman", Name: "blog", LoginServer: "https://gamma.example", ControlCA: "CA-GAMMA"}).save(d); err != nil {
 		t.Fatal(err)
 	}
-	pShareOnly, err := resolveUpdatePlan(nil, options{}, filepath.Join(t.TempDir(), "none"), onlyShares)
-	if err != nil || pShareOnly.baseURL != "https://gamma.example" || pShareOnly.controlCA != "CA-GAMMA" || len(pShareOnly.shares) != 1 {
-		t.Fatalf("unexpected share-only plan: (%+v, %v)", pShareOnly, err)
+	pShareOnly, err := resolveUpdatePlan(nil, options{pen: "gamma.hogman"}, filepath.Join(t.TempDir(), "none"), onlyShares)
+	if err != nil || pShareOnly.fromRelease || pShareOnly.baseURL != "https://gamma.example" || pShareOnly.controlCA != "CA-GAMMA" || len(pShareOnly.shares) != 1 {
+		t.Fatalf("unexpected share-only --pen plan: (%+v, %v)", pShareOnly, err)
+	}
+}
+
+func TestGitHubReleaseFlowAndRedirects(t *testing.T) {
+	// Version tag validation matches deploy/install.sh.
+	for _, bad := range []string{"", " ", "../evil", "2026.11.23/foo", "v..bad", "v1.0;rm"} {
+		if _, _, err := validateReleaseVersion(bad); err == nil {
+			t.Fatalf("validateReleaseVersion(%q) succeeded, want error", bad)
+		}
+	}
+	ver, tag, err := validateReleaseVersion("2026.11.23-abc1234\r\n")
+	if err != nil || ver != "2026.11.23-abc1234" || tag != "v2026.11.23-abc1234" {
+		t.Fatalf("validateReleaseVersion = (%q, %q, %v)", ver, tag, err)
+	}
+
+	// GitHub redirect allowlist permits official release asset hosts only.
+	if !allowedUpdateRedirectHost("github.com", "objects.githubusercontent.com") {
+		t.Fatal("expected objects.githubusercontent.com allowed for github.com")
+	}
+	if !allowedUpdateRedirectHost("github.com", "release-assets.githubusercontent.com") {
+		t.Fatal("expected release-assets.githubusercontent.com allowed for github.com")
+	}
+	if allowedUpdateRedirectHost("github.com", "evil.example.com") {
+		t.Fatal("evil.example.com must be rejected for github.com")
+	}
+	if allowedUpdateRedirectHost("bobo.gate.example.com", "objects.githubusercontent.com") {
+		t.Fatal("objects.githubusercontent.com must not be allowed for non-GitHub hosts")
+	}
+
+	// End-to-end version-pinned download against local TLS test server.
+	binName := "hogman-join-Darwin-arm64"
+	payload := []byte("release-binary-payload-v1")
+	wantHex := hexSHA256(payload)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/releases/latest/download/latest":
+			_, _ = w.Write([]byte("2026.11.23-abc1234\n"))
+		case "/releases/download/v2026.11.23-abc1234/hogman-join-SHA256SUMS":
+			_, _ = w.Write([]byte(wantHex + "  " + binName + "\n"))
+		case "/releases/download/v2026.11.23-abc1234/" + binName:
+			_, _ = w.Write(payload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	host := strings.TrimPrefix(srv.URL, "https://")
+	client, err := updateHTTPClient("", testServerPEM(srv), host, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relBase := srv.URL + "/releases"
+	gotVer, gotTag, dlBase, err := fetchLatestReleaseTag(client, relBase)
+	if err != nil || gotVer != "2026.11.23-abc1234" || gotTag != "v2026.11.23-abc1234" {
+		t.Fatalf("fetchLatestReleaseTag = (%q, %q, %q, %v)", gotVer, gotTag, dlBase, err)
+	}
+	gotHex, err := fetchExpectedSHA256URL(client, dlBase+"/hogman-join-SHA256SUMS", binName)
+	if err != nil || gotHex != wantHex {
+		t.Fatalf("fetchExpectedSHA256URL = (%q, %v), want %q", gotHex, err, wantHex)
+	}
+	path, err := downloadVerifiedBinaryURL(client, dlBase+"/"+binName, binName, wantHex, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("downloaded release payload mismatch: %q, err=%v", got, err)
+	}
+
+	// Unreachable GitHub Releases fails clearly with explicit override hint (no silent fallback).
+	srv.Close()
+	if _, _, _, err := fetchLatestReleaseTag(client, relBase); err == nil || !strings.Contains(err.Error(), "hogman-join update --pen") {
+		t.Fatalf("unreachable error = %v, want override hint", err)
 	}
 }
 

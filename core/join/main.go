@@ -41,13 +41,13 @@ const usageText = `hogman-join: join this device to a Hogman private network
 
 usage:
   hogman-join [options] '<link>'      join, using an invite or device link
-  hogman-join update ['<link|host>']  update hogman-join from a pen's server (verifies SHA-256)
+  hogman-join update ['<link|host>']  update hogman-join from GitHub Releases (or a pen's server)
   hogman-join leave '<pen>'           take this computer out of one pen (its link, host or name)
   hogman-join leave-all               take this computer out of every pen (asks first)
   hogman-join uninstall               leave every pen and remove Hogman's settings (asks first)
   hogman-join status                  show installed pens, browser extension host, and VPN proxy state
   hogman-join browser-setup           register the browser extension native messaging host (no sudo)
-  hogman-join share NAME WHAT         put a port or a folder on the pen over HTTPS
+  hogman-join share <name> <target>   put a port, local URL, or folder on the pen over HTTPS
                                       (hogman-join share --help for more)
   hogman-join version                 print version and platform
   hogman-join help [share|update]     show usage

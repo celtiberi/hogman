@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -22,27 +23,68 @@ import (
 	"time"
 )
 
-const updateUsage = `hogman-join update: update hogman-join from a pen's server
+const updateUsage = `hogman-join update: update hogman-join from GitHub Releases (or a pen's server)
 
 usage:
   hogman-join update ['<link|host>']
 
-Downloads the matching binary from https://<host>/join/dl/, checks it against
-SHA256SUMS from the same server over HTTPS (catching broken downloads, not a
-tampered server), updates this computer's joined pen agent (restarting it if
-running), and updates cached share binaries from that server.
+By default, resolves the latest immutable release on GitHub
+(celtiberi/hogman), verifies the matching binary against
+hogman-join-SHA256SUMS over HTTPS, updates this computer's joined pen agents
+(restarting them if running), and updates cached share and browser-host
+binaries. Works even when this computer is not on any pen yet.
+
+Pass a pen's host/link or --pen ZONE to update from a pen's server instead
+(for firewalled networks or private test pens).
 
 options:
-  --pen ZONE        which pen to update from, if this computer is on more than one
-  --dry-run         check SHA256SUMS and show what would change without modifying files
-  --no-service      keep restarted agent in the background rather than a login item
-  --control-ca FILE extra certificate to trust for the public control server
+  --pen ZONE        update from one specific pen's server instead of GitHub Releases
+  --dry-run         check checksums and show what would change without modifying files
+  --no-service      keep restarted agents in the background rather than a login item
+  --control-ca FILE extra certificate to trust for a custom server
 `
 
 const (
+	defaultReleaseBase = "https://github.com/celtiberi/hogman/releases"
+	maxLatestTagBytes  = 16 << 10  // 16 KiB
 	maxSHA256SUMSBytes = 64 << 10  // 64 KiB
 	maxBinaryBytes     = 256 << 20 // 256 MiB
 )
+
+var releaseVersionRE = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._-]*$`)
+
+func effectiveReleaseBase() (baseURL, host string, err error) {
+	raw := strings.TrimSpace(os.Getenv("HOGMAN_RELEASE_BASE"))
+	if raw == "" {
+		raw = defaultReleaseBase
+	}
+	raw = strings.TrimRight(raw, "/")
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return "", "", errorf("invalid release base URL %q (must be https:// without credentials)", raw)
+	}
+	return u.String(), strings.ToLower(u.Host), nil
+}
+
+func validateReleaseVersion(raw string) (ver, tag string, err error) {
+	v := strings.TrimSpace(strings.TrimRight(raw, "\r\n"))
+	v = strings.TrimPrefix(v, "v")
+	if v == "" || !releaseVersionRE.MatchString(v) || strings.Contains(v, "..") {
+		return "", "", errorf("unexpected release version %q", raw)
+	}
+	return v, "v" + v, nil
+}
+
+func allowedUpdateRedirectHost(expectedHost, gotHost string) bool {
+	if strings.EqualFold(gotHost, expectedHost) {
+		return true
+	}
+	if strings.EqualFold(expectedHost, "github.com") {
+		return strings.EqualFold(gotHost, "objects.githubusercontent.com") ||
+			strings.EqualFold(gotHost, "release-assets.githubusercontent.com")
+	}
+	return false
+}
 
 func platformBinaryName(goos, goarch string) (string, error) {
 	switch goos + "/" + goarch {
@@ -158,7 +200,7 @@ func updateHTTPClient(caFile, caPEM, expectedHost string, timeout time.Duration)
 			if len(via) >= 5 {
 				return errors.New("too many redirects")
 			}
-			if !strings.EqualFold(req.URL.Scheme, "https") || !strings.EqualFold(req.URL.Host, expectedHost) {
+			if !strings.EqualFold(req.URL.Scheme, "https") || !allowedUpdateRedirectHost(expectedHost, req.URL.Host) {
 				return fmt.Errorf("refusing redirect to %s", req.URL.Redacted())
 			}
 			return nil
@@ -166,8 +208,37 @@ func updateHTTPClient(caFile, caPEM, expectedHost string, timeout time.Duration)
 	}, nil
 }
 
+func fetchLatestReleaseTag(client *http.Client, releaseBase string) (ver, tag, dlBase string, err error) {
+	urlStr := strings.TrimRight(releaseBase, "/") + "/latest/download/latest"
+	resp, err := client.Get(urlStr)
+	if err != nil {
+		return "", "", "", errorf("cannot reach GitHub Releases at %s: %v\n"+
+			"  To update from a pen's server instead: hogman-join update --pen <zone> or hogman-join update 'https://<pen-host>'", urlStr, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", "", errorf("GitHub Releases returned HTTP %d for %s\n"+
+			"  To update from a pen's server instead: hogman-join update --pen <zone> or hogman-join update 'https://<pen-host>'", resp.StatusCode, urlStr)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxLatestTagBytes+1))
+	if err != nil {
+		return "", "", "", errorf("failed reading latest release version: %v", err)
+	}
+	if len(data) > maxLatestTagBytes {
+		return "", "", "", errorf("latest release pointer exceeds size limit")
+	}
+	ver, tag, err = validateReleaseVersion(string(data))
+	if err != nil {
+		return "", "", "", err
+	}
+	return ver, tag, strings.TrimRight(releaseBase, "/") + "/download/" + tag, nil
+}
+
 func fetchExpectedSHA256(client *http.Client, baseURL, binName string) (string, error) {
-	urlStr := baseURL + "/join/dl/SHA256SUMS"
+	return fetchExpectedSHA256URL(client, baseURL+"/join/dl/SHA256SUMS", binName)
+}
+
+func fetchExpectedSHA256URL(client *http.Client, urlStr, binName string) (string, error) {
 	resp, err := client.Get(urlStr)
 	if err != nil {
 		return "", errorf("cannot reach %s: %v", urlStr, err)
@@ -193,7 +264,10 @@ func digestEqualHex(a, b string) bool {
 }
 
 func downloadVerifiedBinary(client *http.Client, baseURL, binName, wantHex, tmpDir string) (string, error) {
-	urlStr := baseURL + "/join/dl/" + binName
+	return downloadVerifiedBinaryURL(client, baseURL+"/join/dl/"+binName, binName, wantHex, tmpDir)
+}
+
+func downloadVerifiedBinaryURL(client *http.Client, urlStr, binName, wantHex, tmpDir string) (string, error) {
 	resp, err := client.Get(urlStr)
 	if err != nil {
 		return "", errorf("failed downloading %s: %v", urlStr, err)
@@ -320,11 +394,13 @@ type shareTargetDir struct {
 }
 
 type updatePlan struct {
-	baseURL   string
-	host      string
-	controlCA string
-	pens      []penTarget
-	shares    []shareTargetDir
+	fromRelease bool
+	releaseBase string
+	baseURL     string
+	host        string
+	controlCA   string
+	pens        []penTarget
+	shares      []shareTargetDir
 }
 
 func loadPenTargets(configBase string) []penTarget {
@@ -362,6 +438,22 @@ func loadLocalTargets(configBase, sharesDir string) ([]penTarget, []shareTargetD
 func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (*updatePlan, error) {
 	allPens, allSharesList := loadLocalTargets(configBase, sharesDir)
 	penFilter := strings.ToLower(strings.TrimSpace(o.pen))
+
+	// Default (no explicit server/link and no --pen): update from immutable
+	// GitHub Releases (works with 0, 1, or N pens and updates every local copy).
+	if len(args) == 0 && penFilter == "" {
+		relBase, relHost, err := effectiveReleaseBase()
+		if err != nil {
+			return nil, err
+		}
+		return &updatePlan{
+			fromRelease: true,
+			releaseBase: relBase,
+			host:        relHost,
+			pens:        allPens,
+			shares:      allSharesList,
+		}, nil
+	}
 
 	if len(args) == 1 {
 		baseURL, host, err := parseUpdateSourceURL(args[0])
@@ -681,8 +773,22 @@ func updateCmd(args []string, o options) error {
 	if err != nil {
 		return err
 	}
-	step("Checking %s for updates (%s)", plan.host, binName)
-	wantHex, err := fetchExpectedSHA256(metaClient, plan.baseURL, binName)
+	var sumsURL, binURL string
+	if plan.fromRelease {
+		step("Checking GitHub Releases for updates (%s)", binName)
+		ver, tag, dlBase, err := fetchLatestReleaseTag(metaClient, plan.releaseBase)
+		if err != nil {
+			return err
+		}
+		note("latest release: %s (%s)", ver, tag)
+		sumsURL = dlBase + "/hogman-join-SHA256SUMS"
+		binURL = dlBase + "/" + binName
+	} else {
+		step("Checking %s for updates (%s)", plan.host, binName)
+		sumsURL = plan.baseURL + "/join/dl/SHA256SUMS"
+		binURL = plan.baseURL + "/join/dl/" + binName
+	}
+	wantHex, err := fetchExpectedSHA256URL(metaClient, sumsURL, binName)
 	if err != nil {
 		return err
 	}
@@ -784,7 +890,7 @@ func updateCmd(args []string, o options) error {
 			return err
 		}
 		step("Downloading and verifying %s", binName)
-		verifiedSrc, err = downloadVerifiedBinary(dlClient, plan.baseURL, binName, wantHex, tmpDir)
+		verifiedSrc, err = downloadVerifiedBinaryURL(dlClient, binURL, binName, wantHex, tmpDir)
 		if err != nil {
 			return err
 		}
