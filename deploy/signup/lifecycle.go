@@ -1882,9 +1882,11 @@ func (b *broker) lifecycleWakeHandler(w http.ResponseWriter, r *http.Request) {
 // billing alerts, or purges for unrelated pens) so the 1-minute watcher stays
 // narrowly scoped to ephemeral wakes and paid-renewal recovery.
 //
-// Long-running `hogman-host wake`/`sleep` invocations execute outside
-// lifecycleMu and are serialized per pen via tryBeginWake/endWake so they never
-// overlap finishRenewalWork or stall incoming webhooks.
+// Pending-wake retries execute outside lifecycleMu and are serialized per pen
+// via tryBeginWake/endWake so they never overlap finishRenewalWork. Expired
+// renew_only sleeps hold lifecycleMu across `hogman-host sleep` and the final
+// save so a concurrent renewal payment cannot land in the gap and get
+// overwritten back to sleeping by `hogman-host sleep`.
 func (b *broker) sweepExpiredRenewWakes(ctx context.Context, now time.Time) ([]lifecycleTransition, error) {
 	nowUTC := now.UTC()
 	nowUnix := nowUTC.Unix()
@@ -2010,13 +2012,12 @@ func (b *broker) sweepExpiredRenewWakes(ctx context.Context, now time.Time) ([]l
 			defer b.endWake(pen)
 			path := b.lifecyclePath(pen)
 			b.lifecycleMu.Lock()
+			defer b.lifecycleMu.Unlock()
 			rec, lerr := loadPenLifecycle(path)
 			if lerr != nil || rec.State != stateRenewOnly {
-				b.lifecycleMu.Unlock()
 				return
 			}
 			next, changed := evaluateLifecycle(*rec, nowUTC)
-			b.lifecycleMu.Unlock()
 			if !changed || next.State != stateSleeping {
 				return
 			}
@@ -2027,24 +2028,15 @@ func (b *broker) sweepExpiredRenewWakes(ctx context.Context, now time.Time) ([]l
 				log.Printf("renew-wake watcher %s: sleep failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
 				return
 			}
-			b.lifecycleMu.Lock()
-			cur, cerr := loadPenLifecycle(path)
-			if cerr == nil && cur.State == stateRenewOnly {
-				next, changed = evaluateLifecycle(*cur, nowUTC)
-				if changed && next.State == stateSleeping {
-					if serr := savePenLifecycle(path, &next); serr != nil {
-						log.Printf("renew-wake watcher %s: save sleeping: %v", pen, serr)
-						b.lifecycleMu.Unlock()
-						return
-					}
-					_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &next, "")
-					b.ledger(fmt.Sprintf("%s lifecycle %s: renew_only -> sleeping (delete after %s)",
-						nowUTC.Format(time.RFC3339), pen, time.Unix(next.DeleteAfter, 0).UTC().Format("2006-01-02")))
-					concurrent--
-					out = append(out, lifecycleTransition{Pen: pen, From: stateRenewOnly, To: stateSleeping})
-				}
+			if serr := savePenLifecycle(path, &next); serr != nil {
+				log.Printf("renew-wake watcher %s: save sleeping: %v", pen, serr)
+				return
 			}
-			b.lifecycleMu.Unlock()
+			_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &next, "")
+			b.ledger(fmt.Sprintf("%s lifecycle %s: renew_only -> sleeping (delete after %s)",
+				nowUTC.Format(time.RFC3339), pen, time.Unix(next.DeleteAfter, 0).UTC().Format("2006-01-02")))
+			concurrent--
+			out = append(out, lifecycleTransition{Pen: pen, From: stateRenewOnly, To: stateSleeping})
 		}()
 	}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -725,5 +726,113 @@ func TestPendingWakeInFlightSkipsOverlappingWatcherAndSweepI7(t *testing.T) {
 	rawCalls, _ := os.ReadFile(callsFile)
 	if got := strings.Count(string(rawCalls), "wake racepen"); got != 1 {
 		t.Fatalf("expected exactly 1 wake invocation (no overlap), got %d:\n%s", got, string(rawCalls))
+	}
+}
+
+func TestExpiredRenewWakeSleepSerializedWithConcurrentRenewalI7(t *testing.T) {
+	b, home := newTestBroker(t, "")
+	now := time.Date(2026, 12, 1, 12, 30, 0, 0, time.UTC)
+	b.nowFn = func() time.Time { return now }
+	b.publicURL = "https://get.example.com"
+
+	penDir := filepath.Join(home, "pens", "payrace")
+	_ = os.MkdirAll(filepath.Join(penDir, "data", "registrar"), 0o700)
+	_ = os.WriteFile(filepath.Join(penDir, "data", "registrar", ".renew-only"), []byte("renew_only\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(penDir, "data", "registrar", "billing-status.json"), []byte(`{"pen":"payrace","state":"renew_only"}`), 0o644)
+	oldSleep := now.Add(-60 * 24 * time.Hour).Unix()
+	oldDelete := now.Add(305 * 24 * time.Hour).Unix()
+	lcPath := filepath.Join(penDir, "lifecycle.json")
+	_ = savePenLifecycle(lcPath, &penLifecycle{
+		Plan:          planPersonal,
+		State:         stateRenewOnly,
+		SleepSince:    oldSleep,
+		DeleteAfter:   oldDelete,
+		WakeStartedAt: now.Add(-25 * time.Minute).Unix(),
+		WakeUntil:     now.Add(-5 * time.Minute).Unix(),
+		WakeCeiling:   now.Add(-5 * time.Minute).Unix(),
+	})
+
+	startedFile := filepath.Join(home, "sleep-started")
+	releaseFile := filepath.Join(home, "sleep-release")
+	callsFile := filepath.Join(home, "sleep-calls.log")
+	// Fake hogman-host whose `sleep` blocks on a barrier AND rewrites lifecycle.json
+	// to `sleeping` with the old delete_after (mirroring real `lifecycle_mark_sleeping`).
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> \"" + callsFile + "\"\n" +
+		"if [ \"$1\" = sleep ]; then\n" +
+		"  touch \"" + startedFile + "\"\n" +
+		"  i=0\n" +
+		"  while [ ! -f \"" + releaseFile + "\" ] && [ $i -lt 200 ]; do\n" +
+		"    sleep 0.05\n" +
+		"    i=$((i+1))\n" +
+		"  done\n" +
+		"  printf '{\"plan\":\"personal\",\"state\":\"sleeping\",\"sleep_since\":%d,\"delete_after\":%d}\\n' " +
+		fmt.Sprintf("%d %d", oldSleep, oldDelete) + " > \"" + lcPath + "\"\n" +
+		"fi\n" +
+		"exit 0\n"
+	b.tool = filepath.Join(t.TempDir(), "hogman-host")
+	_ = os.WriteFile(b.tool, []byte(script), 0o755)
+
+	watcherDone := make(chan error, 1)
+	go func() {
+		_, err := b.sweepExpiredRenewWakes(context.Background(), now)
+		watcherDone <- err
+	}()
+
+	// Wait until `hogman-host sleep payrace` is actively executing inside the watcher.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(startedFile); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Stat(startedFile); err != nil {
+		t.Fatal("watcher never started hogman-host sleep")
+	}
+
+	// Land a renewal payment concurrently while `hogman-host sleep` is mid-flight.
+	type renewRes struct {
+		rec      *penLifecycle
+		sleeping bool
+		err      error
+	}
+	renewDone := make(chan renewRes, 1)
+	go func() {
+		rec, _, sleeping, err := b.recordRenewal("payrace", "cs_race_1", "sub_new_race", "cus_race", "", now)
+		renewDone <- renewRes{rec: rec, sleeping: sleeping, err: err}
+	}()
+
+	// Verify recordRenewal is serialized behind lifecycleMu and has NOT returned yet.
+	select {
+	case res := <-renewDone:
+		t.Fatalf("recordRenewal raced ahead of in-flight sleep: %+v", res)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// Release `hogman-host sleep`: watcher finishes writing sleeping, then
+	// recordRenewal runs after it and transitions cleanly to active + pending_wake.
+	_ = os.WriteFile(releaseFile, []byte("go"), 0o600)
+	if err := <-watcherDone; err != nil {
+		t.Fatalf("sweepExpiredRenewWakes error: %v", err)
+	}
+	res := <-renewDone
+	if res.err != nil || !res.sleeping || res.rec == nil {
+		t.Fatalf("recordRenewal failed after sleep: %+v", res)
+	}
+	finalRec, err := loadPenLifecycle(lcPath)
+	if err != nil {
+		t.Fatalf("load final lifecycle.json: %v", err)
+	}
+	if finalRec.State != stateActive || !finalRec.PendingWake || finalRec.DeleteAfter != 0 || finalRec.SleepSince != 0 {
+		t.Fatalf("paid renewal must NOT be overwritten to sleeping by concurrent expired-wake sleep: %+v", finalRec)
+	}
+	// Follow-up finishRenewalWork immediately wakes the pen and clears PendingWake.
+	if err := b.finishRenewalWork(context.Background(), "payrace", true); err != nil {
+		t.Fatalf("finishRenewalWork after serialized sleep failed: %v", err)
+	}
+	finalRec, _ = loadPenLifecycle(lcPath)
+	if finalRec.State != stateActive || finalRec.PendingWake {
+		t.Fatalf("expected active pen with PendingWake=false after wake: %+v", finalRec)
 	}
 }
