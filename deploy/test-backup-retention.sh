@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unit tests for I-16 / D-37 30-day deleted-pen backup expiry on host
-# (`hogman-host backup-prune`) and off-host mirror (`deploy/backup-pull.sh`).
+# (`hogman-host backup-prune`) and off-host non-deletion (`deploy/backup-pull.sh`).
 set -euo pipefail
 
 DEPLOY_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -55,59 +55,50 @@ grep -q "pruned 2 expired backup(s) for deleted pen foo" <<<"$out" || { echo "FA
 [ -f "$BACKUPS/foo-bar-20261001T033000Z.tar.gz.age" ] || { echo "FAIL: live foo-bar backup damaged by foo prune" >&2; exit 1; }
 [ -f "$BACKUPS/challenge-dns-20260801T033000Z.tar.gz.age" ] || { echo "FAIL: challenge-dns backup damaged" >&2; exit 1; }
 
-# 4. Off-host backup-pull.sh: mirror deletions for removed pens, fail closed on SSH error or empty list.
+# 4. Fail-closed orphan guard: missing or empty $PENS deletes nothing (even old archives).
+GUARD_BACKUPS="$TMP/guard-backups"
+mkdir -p "$GUARD_BACKUPS"
+printf 'age-encryption.org/v1\nlive-old' > "$GUARD_BACKUPS/live-20260801T033000Z.tar.gz.age"
+
+# 4a. Missing $PENS directory (e.g. wrong HOGMAN_HOME or unmounted disk).
+HOGMAN_HOME="$TMP/missing-home" HOGMAN_BACKUPS="$GUARD_BACKUPS" BACKUP_NOW_EPOCH="$day31" "$HOST" backup-prune >/dev/null 2>&1
+[ -f "$GUARD_BACKUPS/live-20260801T033000Z.tar.gz.age" ] || { echo "FAIL: missing PENS deleted backup" >&2; exit 1; }
+
+# 4b. Empty $PENS directory (exists, zero pen folders).
+EMPTY_HOME="$TMP/empty-home"
+mkdir -p "$EMPTY_HOME/pens"
+HOGMAN_HOME="$EMPTY_HOME" HOGMAN_BACKUPS="$GUARD_BACKUPS" BACKUP_NOW_EPOCH="$day31" "$HOST" backup-prune >/dev/null 2>&1
+[ -f "$GUARD_BACKUPS/live-20260801T033000Z.tar.gz.age" ] || { echo "FAIL: empty PENS deleted backup" >&2; exit 1; }
+
+# 5. Off-host backup-pull.sh never deletes local archives on the host's say-so
+#    (a partial remote list missing `foo` still pulls new files and keeps local `foo`).
 PULL_DIR="$TMP/offhost"
 FAKE_BIN="$TMP/fakebin"
 REMOTE_DIR="$TMP/remote"
 mkdir -p "$PULL_DIR" "$FAKE_BIN" "$REMOTE_DIR"
 
 printf 'age-encryption.org/v1\nfoo-local' > "$PULL_DIR/foo-20261120T033000Z.tar.gz.age"
-printf 'age-encryption.org/v1\nfoobar-local' > "$PULL_DIR/foo-bar-20261120T033000Z.tar.gz.age"
-printf 'age-encryption.org/v1\ncdns-local' > "$PULL_DIR/challenge-dns-20261120T033000Z.tar.gz.age"
 printf 'age-encryption.org/v1\nfoobar-new' > "$REMOTE_DIR/foo-bar-20261124T033000Z.tar.gz.age"
 
 cat > "$FAKE_BIN/ssh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-# Last two args are: list  OR  get <filename>
 cmd=""
 arg=""
 for a in "$@"; do
   if [ "$cmd" = "get" ]; then arg="$a"; fi
   if [ "$a" = "list" ] || [ "$a" = "get" ]; then cmd="$a"; fi
 done
-case "${FAKE_SSH_MODE:-ok}" in
-  fail) exit 255 ;;
-  empty) exit 0 ;;
-  ok)
-    if [ "$cmd" = "list" ]; then
-      printf 'foo-bar-20261120T033000Z.tar.gz.age\nfoo-bar-20261124T033000Z.tar.gz.age\nchallenge-dns-20261120T033000Z.tar.gz.age\n'
-    elif [ "$cmd" = "get" ]; then
-      cat "$FAKE_REMOTE_DIR/$arg"
-    fi
-    ;;
-esac
+if [ "$cmd" = "list" ]; then
+  printf 'foo-bar-20261124T033000Z.tar.gz.age\n'
+elif [ "$cmd" = "get" ]; then
+  cat "$FAKE_REMOTE_DIR/$arg"
+fi
 EOF
 chmod +x "$FAKE_BIN/ssh"
 
-# 4a. SSH error -> fail closed, keep ALL local backups.
-if PATH="$FAKE_BIN:$PATH" FAKE_SSH_MODE=fail FAKE_REMOTE_DIR="$REMOTE_DIR" "$PULL" test-host "$PULL_DIR" >/dev/null 2>&1; then
-  echo "FAIL: backup-pull.sh succeeded on SSH error" >&2
-  exit 1
-fi
-[ -f "$PULL_DIR/foo-20261120T033000Z.tar.gz.age" ] || { echo "FAIL: SSH error deleted local foo backup" >&2; exit 1; }
-[ -f "$PULL_DIR/foo-bar-20261120T033000Z.tar.gz.age" ] || { echo "FAIL: SSH error deleted local foo-bar backup" >&2; exit 1; }
-
-# 4b. Empty remote list -> fail closed, keep ALL local backups.
-PATH="$FAKE_BIN:$PATH" FAKE_SSH_MODE=empty FAKE_REMOTE_DIR="$REMOTE_DIR" "$PULL" test-host "$PULL_DIR" >/dev/null 2>&1
-[ -f "$PULL_DIR/foo-20261120T033000Z.tar.gz.age" ] || { echo "FAIL: empty remote list deleted local foo backup" >&2; exit 1; }
-[ -f "$PULL_DIR/foo-bar-20261120T033000Z.tar.gz.age" ] || { echo "FAIL: empty remote list deleted local foo-bar backup" >&2; exit 1; }
-
-# 4c. Valid non-empty remote list without `foo`: pulls new foo-bar backup, prunes `foo`, keeps `foo-bar` and `challenge-dns`.
-PATH="$FAKE_BIN:$PATH" FAKE_SSH_MODE=ok FAKE_REMOTE_DIR="$REMOTE_DIR" "$PULL" test-host "$PULL_DIR" >/dev/null 2>&1
+PATH="$FAKE_BIN:$PATH" FAKE_REMOTE_DIR="$REMOTE_DIR" "$PULL" test-host "$PULL_DIR" >/dev/null 2>&1
 [ -f "$PULL_DIR/foo-bar-20261124T033000Z.tar.gz.age" ] || { echo "FAIL: new foo-bar backup not pulled" >&2; exit 1; }
-[ -f "$PULL_DIR/foo-bar-20261120T033000Z.tar.gz.age" ] || { echo "FAIL: existing foo-bar backup lost" >&2; exit 1; }
-[ -f "$PULL_DIR/challenge-dns-20261120T033000Z.tar.gz.age" ] || { echo "FAIL: challenge-dns backup lost" >&2; exit 1; }
-[ ! -e "$PULL_DIR/foo-20261120T033000Z.tar.gz.age" ] || { echo "FAIL: removed pen foo not pruned from off-host mirror" >&2; exit 1; }
+[ -f "$PULL_DIR/foo-20261120T033000Z.tar.gz.age" ] || { echo "FAIL: partial remote list deleted local foo backup" >&2; exit 1; }
 
 echo "PASS: backup-retention (D-37 / I-16) tests OK"
