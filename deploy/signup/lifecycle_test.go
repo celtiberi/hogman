@@ -210,13 +210,17 @@ func TestBrokerLifecycleSweepBannerAlertsWakeRetryAndAdminPromotion(t *testing.T
 echo "$@" >> "` + logFile + `"
 cmd="$1"
 case "$cmd" in
-  sleep) touch "` + home + `/pens/$2/.sleeping" ;;
+  sleep)
+    pen="$2"; [ "$pen" = "--no-lifecycle" ] && pen="$3"
+    touch "` + home + `/pens/$pen/.sleeping"
+    ;;
   wake)
+    pen="$2"; [ "$pen" = "--no-lifecycle" ] && pen="$3"
     if [ -f "` + failWakeFlag + `" ]; then
       echo "host temporarily full" >&2
       exit 1
     fi
-    rm -f "` + home + `/pens/$2/.sleeping"
+    rm -f "` + home + `/pens/$pen/.sleeping"
     ;;
   pen)
     if [ -f "` + failPromoteFlag + `" ]; then
@@ -358,8 +362,8 @@ exit 0
 	}
 	calls, _ := os.ReadFile(logFile)
 	callStr := string(calls)
-	if !strings.Contains(callStr, "wake lab") || !strings.Contains(callStr, "pen lab member role alice owner") {
-		t.Fatalf("expected wake and verified admin promotion in log:\n%s", callStr)
+	if !strings.Contains(callStr, "wake --no-lifecycle lab") || !strings.Contains(callStr, "pen lab member role alice owner") {
+		t.Fatalf("expected wake --no-lifecycle and verified admin promotion in log:\n%s", callStr)
 	}
 	if strings.Contains(callStr, "role bob owner") || strings.Contains(callStr, "role mallory owner") {
 		t.Fatalf("non-admin must never be promoted:\n%s", callStr)

@@ -193,6 +193,7 @@ func (b *broker) handler() http.Handler {
 	mux.HandleFunc("GET /paid-code", b.paidCode)
 	mux.HandleFunc("POST /lifecycle/sweep", b.lifecycleSweepHandler)
 	mux.HandleFunc("POST /lifecycle/alerts", b.lifecycleAlertsHandler)
+	mux.HandleFunc("POST /lifecycle/transition", b.lifecycleTransitionHandler)
 	mux.HandleFunc("GET /lifecycle/pending-cancels", b.lifecyclePendingCancels)
 	mux.HandleFunc("POST /lifecycle/cancel-done", b.lifecycleCancelDone)
 	mux.HandleFunc("POST /lifecycle/cancel-alert", b.lifecycleCancelAlert)

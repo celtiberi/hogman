@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -202,6 +203,29 @@ func recordAppliedEvent(rec *penLifecycle, eventID string) {
 	if len(rec.AppliedEvents) > maxAppliedEvents {
 		rec.AppliedEvents = rec.AppliedEvents[len(rec.AppliedEvents)-maxAppliedEvents:]
 	}
+}
+
+// withPenLifecycleFileLock takes an exclusive POSIX advisory flock on
+// <penDir>/.lifecycle.lock around a read-modify-write of lifecycle.json (I-12).
+// Both the broker and standalone/fallback hogman-host shell commands take this
+// same lock so concurrent updates never clobber each other. Callers must NEVER
+// hold this lock across slow subprocesses (e.g. hogman-host sleep/wake).
+func withPenLifecycleFileLock(lifecyclePath string, fn func() error) error {
+	dir := filepath.Dir(lifecyclePath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	lockPath := filepath.Join(dir, ".lifecycle.lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+	return fn()
 }
 
 func loadPenLifecycle(path string) (*penLifecycle, error) {
@@ -609,7 +633,10 @@ func (b *broker) initPenLifecycle(pen, plan, code string, paid bool, now time.Ti
 			}
 		}
 	}
-	return savePenLifecycle(b.lifecyclePath(pen), rec)
+	path := b.lifecyclePath(pen)
+	return withPenLifecycleFileLock(path, func() error {
+		return savePenLifecycle(path, rec)
+	})
 }
 
 // recordRenewal idempotently records a Stripe renewal event (invoice or checkout
@@ -622,74 +649,85 @@ func (b *broker) recordRenewal(pen, eventID, subID, custID, renewNonce string, n
 	defer b.lifecycleMu.Unlock()
 
 	path := b.lifecyclePath(pen)
-	rec, err := loadPenLifecycle(path)
-	if os.IsNotExist(err) {
-		return nil, false, false, errNoLifecycle
-	}
-	if err != nil {
-		return nil, false, false, err
-	}
-	if hasAppliedEvent(*rec, eventID) {
-		return rec, true, false, nil
-	}
-	if rec.State == stateDeleted {
-		return nil, false, false, fmt.Errorf("pen %s has already been deleted", pen)
-	}
-	backdate := b.backdateRenewal || rec.BackdateRenewal
-	updated, sleeping := applyRenewal(*rec, now, backdate)
-	recordAppliedEvent(&updated, eventID)
-	// Resolve payer handle strictly from the broker's own recorded nonce (never
-	// from web-supplied Stripe metadata).
-	nonce := strings.ToLower(strings.TrimSpace(renewNonce))
-	if nonce != "" && updated.RenewNonces != nil {
-		if nr, ok := updated.RenewNonces[nonce]; ok && !nr.Consumed && nr.Handle != "" {
-			if _, valid := validHandle(nr.Handle); valid {
-				updated.PendingOwner = nr.Handle
-			}
-			nr.Consumed = true
-			updated.RenewNonces[nonce] = nr
+	var updated penLifecycle
+	var sleeping bool
+	var backdate bool
+	lockErr := withPenLifecycleFileLock(path, func() error {
+		rec, lerr := loadPenLifecycle(path)
+		if os.IsNotExist(lerr) {
+			return errNoLifecycle
 		}
-	}
-	pruneRenewNonces(&updated, now.UTC().Unix())
-	if subID != "" && subID != "-" {
-		// I-6: if a manual renewal created a new Stripe subscription while a
-		// previous still-active subscription_id existed (CancelledAt == 0),
-		// queue the old one for cancellation by signup-web (which holds the
-		// Stripe key) so it cannot double-charge. Already-cancelled old
-		// subscriptions (CancelledAt != 0) are not queued.
-		if rec.SubscriptionID != "" && rec.SubscriptionID != "-" && rec.SubscriptionID != subID {
-			if updated.ReplacedSubs == nil {
-				updated.ReplacedSubs = map[string]int64{}
+		if lerr != nil {
+			return lerr
+		}
+		if hasAppliedEvent(*rec, eventID) {
+			next = rec
+			alreadyApplied = true
+			return nil
+		}
+		if rec.State == stateDeleted {
+			return fmt.Errorf("pen %s has already been deleted", pen)
+		}
+		backdate = b.backdateRenewal || rec.BackdateRenewal
+		updated, sleeping = applyRenewal(*rec, now, backdate)
+		recordAppliedEvent(&updated, eventID)
+		// Resolve payer handle strictly from the broker's own recorded nonce (never
+		// from web-supplied Stripe metadata).
+		nonce := strings.ToLower(strings.TrimSpace(renewNonce))
+		if nonce != "" && updated.RenewNonces != nil {
+			if nr, ok := updated.RenewNonces[nonce]; ok && !nr.Consumed && nr.Handle != "" {
+				if _, valid := validHandle(nr.Handle); valid {
+					updated.PendingOwner = nr.Handle
+				}
+				nr.Consumed = true
+				updated.RenewNonces[nonce] = nr
 			}
-			updated.ReplacedSubs[rec.SubscriptionID] = now.UTC().Unix()
-			pruneReplacedSubs(&updated, now.UTC().Unix())
-			if rec.CancelledAt == 0 {
-				alreadyQueued := false
-				for _, q := range updated.PendingCancelSubs {
-					if q.SubscriptionID == rec.SubscriptionID {
-						alreadyQueued = true
-						break
+		}
+		pruneRenewNonces(&updated, now.UTC().Unix())
+		if subID != "" && subID != "-" {
+			// I-6: if a manual renewal created a new Stripe subscription while a
+			// previous still-active subscription_id existed (CancelledAt == 0),
+			// queue the old one for cancellation by signup-web (which holds the
+			// Stripe key) so it cannot double-charge. Already-cancelled old
+			// subscriptions (CancelledAt != 0) are not queued.
+			if rec.SubscriptionID != "" && rec.SubscriptionID != "-" && rec.SubscriptionID != subID {
+				if updated.ReplacedSubs == nil {
+					updated.ReplacedSubs = map[string]int64{}
+				}
+				updated.ReplacedSubs[rec.SubscriptionID] = now.UTC().Unix()
+				pruneReplacedSubs(&updated, now.UTC().Unix())
+				if rec.CancelledAt == 0 {
+					alreadyQueued := false
+					for _, q := range updated.PendingCancelSubs {
+						if q.SubscriptionID == rec.SubscriptionID {
+							alreadyQueued = true
+							break
+						}
+					}
+					if !alreadyQueued {
+						updated.PendingCancelSubs = append(updated.PendingCancelSubs, pendingCancelSub{
+							SubscriptionID: rec.SubscriptionID,
+						})
 					}
 				}
-				if !alreadyQueued {
-					updated.PendingCancelSubs = append(updated.PendingCancelSubs, pendingCancelSub{
-						SubscriptionID: rec.SubscriptionID,
-					})
-				}
+				// The pen now has a brand-new active subscription.
+				updated.CancelledAt = 0
 			}
-			// The pen now has a brand-new active subscription.
-			updated.CancelledAt = 0
+			updated.SubscriptionID = subID
 		}
-		updated.SubscriptionID = subID
+		if custID != "" && custID != "-" {
+			updated.CustomerID = custID
+		}
+		if updated.RenewURL == "" {
+			updated.RenewURL = b.renewOriginForPen(updated.Plan)
+		}
+		return savePenLifecycle(path, &updated)
+	})
+	if lockErr != nil {
+		return nil, false, false, lockErr
 	}
-	if custID != "" && custID != "-" {
-		updated.CustomerID = custID
-	}
-	if updated.RenewURL == "" {
-		updated.RenewURL = b.renewOriginForPen(updated.Plan)
-	}
-	if err := savePenLifecycle(path, &updated); err != nil {
-		return nil, false, false, err
+	if alreadyApplied {
+		return next, true, false, nil
 	}
 	if err := syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &updated, b.renewOriginForPen(updated.Plan)); err != nil {
 		log.Printf("lifecycle %s: clear grace banner: %v", pen, err)
@@ -821,6 +859,7 @@ func pendingWakeBackoff(attempts int) time.Duration {
 // finishRenewalWork executes post-webhook wake and persisted PendingOwner
 // promotion (D-35, B9) outside the webhook's synchronous response path.
 func (b *broker) finishRenewalWork(ctx context.Context, pen string, wake bool) error {
+	path := b.lifecyclePath(pen)
 	if wake {
 		if !b.tryBeginWake(pen) {
 			// Another wake is already in flight for this pen; PendingWake stays
@@ -829,30 +868,42 @@ func (b *broker) finishRenewalWork(ctx context.Context, pen string, wake bool) e
 		}
 		wakeErr := func() error {
 			defer b.endWake(pen)
-			_, code, stderr := b.runUnbounded(ctx, "wake", pen)
+			_, code, stderr := b.runUnbounded(ctx, "wake", "--no-lifecycle", pen)
 			b.invalidateCapacityCache()
 			now := b.now().UTC()
 			if code != 0 {
 				err := fmt.Errorf("wake %s failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
 				b.notifyKind("health", fmt.Sprintf("Pen %s was renewed and paid, but wake failed: %v", pen, err))
 				b.lifecycleMu.Lock()
-				if rec, lerr := loadPenLifecycle(b.lifecyclePath(pen)); lerr == nil && rec.PendingWake {
-					rec.PendingWakeAttempts++
-					rec.PendingWakeNextAt = now.Add(pendingWakeBackoff(rec.PendingWakeAttempts)).Unix()
-					rec.UpdatedAt = now.Unix()
-					_ = savePenLifecycle(b.lifecyclePath(pen), rec)
-				}
+				_ = withPenLifecycleFileLock(path, func() error {
+					if rec, lerr := loadPenLifecycle(path); lerr == nil && rec.PendingWake {
+						rec.PendingWakeAttempts++
+						rec.PendingWakeNextAt = now.Add(pendingWakeBackoff(rec.PendingWakeAttempts)).Unix()
+						rec.UpdatedAt = now.Unix()
+						return savePenLifecycle(path, rec)
+					}
+					return nil
+				})
 				b.lifecycleMu.Unlock()
 				return err
 			}
 			b.lifecycleMu.Lock()
-			if rec, lerr := loadPenLifecycle(b.lifecyclePath(pen)); lerr == nil && rec.PendingWake {
-				rec.PendingWake = false
-				rec.PendingWakeAttempts = 0
-				rec.PendingWakeNextAt = 0
-				rec.UpdatedAt = now.Unix()
-				_ = savePenLifecycle(b.lifecyclePath(pen), rec)
-				_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), rec, b.renewOriginForPen(rec.Plan))
+			var syncedRec *penLifecycle
+			_ = withPenLifecycleFileLock(path, func() error {
+				if rec, lerr := loadPenLifecycle(path); lerr == nil && rec.PendingWake {
+					rec.PendingWake = false
+					rec.PendingWakeAttempts = 0
+					rec.PendingWakeNextAt = 0
+					rec.UpdatedAt = now.Unix()
+					if serr := savePenLifecycle(path, rec); serr != nil {
+						return serr
+					}
+					syncedRec = rec
+				}
+				return nil
+			})
+			if syncedRec != nil {
+				_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), syncedRec, b.renewOriginForPen(syncedRec.Plan))
 			}
 			b.lifecycleMu.Unlock()
 			return nil
@@ -864,7 +915,7 @@ func (b *broker) finishRenewalWork(ctx context.Context, pen string, wake bool) e
 
 	b.lifecycleMu.Lock()
 	var pendingOwner string
-	if rec, err := loadPenLifecycle(b.lifecyclePath(pen)); err == nil && !rec.PendingWake {
+	if rec, err := loadPenLifecycle(path); err == nil && !rec.PendingWake {
 		pendingOwner = rec.PendingOwner
 	}
 	b.lifecycleMu.Unlock()
@@ -874,11 +925,14 @@ func (b *broker) finishRenewalWork(ctx context.Context, pen string, wake bool) e
 	done, err := b.applyPendingOwner(ctx, pen, pendingOwner)
 	if done {
 		b.lifecycleMu.Lock()
-		if rec, lerr := loadPenLifecycle(b.lifecyclePath(pen)); lerr == nil && rec.PendingOwner == pendingOwner {
-			rec.PendingOwner = ""
-			rec.UpdatedAt = b.now().UTC().Unix()
-			_ = savePenLifecycle(b.lifecyclePath(pen), rec)
-		}
+		_ = withPenLifecycleFileLock(path, func() error {
+			if rec, lerr := loadPenLifecycle(path); lerr == nil && rec.PendingOwner == pendingOwner {
+				rec.PendingOwner = ""
+				rec.UpdatedAt = b.now().UTC().Unix()
+				return savePenLifecycle(path, rec)
+			}
+			return nil
+		})
 		b.lifecycleMu.Unlock()
 	}
 	return err
@@ -952,23 +1006,37 @@ func (b *broker) sweepLifecycles(ctx context.Context, now time.Time, dryRun bool
 				}
 				func() {
 					defer b.endWake(pen)
-					_, code, stderr := b.runUnbounded(ctx, "wake", pen)
+					_, code, stderr := b.runUnbounded(ctx, "wake", "--no-lifecycle", pen)
 					b.invalidateCapacityCache()
 					if code != 0 {
 						log.Printf("lifecycle %s: retry wake failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
 						b.notifyKind("health", fmt.Sprintf("Pen %s paid renewal wake retry failed (exit %d): %s", pen, code, strings.TrimSpace(stderr)))
-						rec.PendingWakeAttempts++
-						rec.PendingWakeNextAt = now.UTC().Add(pendingWakeBackoff(rec.PendingWakeAttempts)).Unix()
-						rec.UpdatedAt = now.UTC().Unix()
-						_ = savePenLifecycle(path, rec)
+						_ = withPenLifecycleFileLock(path, func() error {
+							cur, cerr := loadPenLifecycle(path)
+							if cerr != nil {
+								return cerr
+							}
+							cur.PendingWakeAttempts++
+							cur.PendingWakeNextAt = now.UTC().Add(pendingWakeBackoff(cur.PendingWakeAttempts)).Unix()
+							cur.UpdatedAt = now.UTC().Unix()
+							rec = cur
+							return savePenLifecycle(path, cur)
+						})
 						tr.Woken = false
 						tr.ActionNote = "wake retry failed"
 					} else {
-						rec.PendingWake = false
-						rec.PendingWakeAttempts = 0
-						rec.PendingWakeNextAt = 0
-						rec.UpdatedAt = now.UTC().Unix()
-						_ = savePenLifecycle(path, rec)
+						_ = withPenLifecycleFileLock(path, func() error {
+							cur, cerr := loadPenLifecycle(path)
+							if cerr != nil {
+								return cerr
+							}
+							cur.PendingWake = false
+							cur.PendingWakeAttempts = 0
+							cur.PendingWakeNextAt = 0
+							cur.UpdatedAt = now.UTC().Unix()
+							rec = cur
+							return savePenLifecycle(path, cur)
+						})
 						_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), rec, b.renewOriginForPen(rec.Plan))
 					}
 				}()
@@ -989,9 +1057,16 @@ func (b *broker) sweepLifecycles(ctx context.Context, now time.Time, dryRun bool
 					tr.ActionNote = "promote_retry_failed:" + rec.PendingOwner
 				}
 				if done {
-					rec.PendingOwner = ""
-					rec.UpdatedAt = now.UTC().Unix()
-					_ = savePenLifecycle(path, rec)
+					_ = withPenLifecycleFileLock(path, func() error {
+						cur, cerr := loadPenLifecycle(path)
+						if cerr != nil {
+							return cerr
+						}
+						cur.PendingOwner = ""
+						cur.UpdatedAt = now.UTC().Unix()
+						rec = cur
+						return savePenLifecycle(path, cur)
+					})
 				}
 			}
 			out = append(out, tr)
@@ -1007,7 +1082,7 @@ func (b *broker) sweepLifecycles(ctx context.Context, now time.Time, dryRun bool
 			if !dryRun {
 				switch next.State {
 				case stateGrace:
-					if err := savePenLifecycle(path, &next); err != nil {
+					if err := withPenLifecycleFileLock(path, func() error { return savePenLifecycle(path, &next) }); err != nil {
 						log.Printf("lifecycle %s: save grace: %v", pen, err)
 						continue
 					}
@@ -1017,13 +1092,13 @@ func (b *broker) sweepLifecycles(ctx context.Context, now time.Time, dryRun bool
 					b.ledger(fmt.Sprintf("%s lifecycle %s: active -> grace (until %s)",
 						now.UTC().Format(time.RFC3339), pen, time.Unix(next.GraceUntil, 0).UTC().Format("2006-01-02")))
 				case stateSleeping:
-					_, code, stderr := b.runUnbounded(ctx, "sleep", pen)
+					_, code, stderr := b.runUnbounded(ctx, "sleep", "--no-lifecycle", pen)
 					b.invalidateCapacityCache()
 					if code != 0 {
 						log.Printf("lifecycle %s: sleep failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
 						continue
 					}
-					if err := savePenLifecycle(path, &next); err != nil {
+					if err := withPenLifecycleFileLock(path, func() error { return savePenLifecycle(path, &next) }); err != nil {
 						log.Printf("lifecycle %s: save sleeping: %v", pen, err)
 						continue
 					}
@@ -1037,7 +1112,7 @@ func (b *broker) sweepLifecycles(ctx context.Context, now time.Time, dryRun bool
 						log.Printf("lifecycle %s: purge --due failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
 						continue
 					}
-					if err := savePenLifecycle(path, &next); err != nil {
+					if err := withPenLifecycleFileLock(path, func() error { return savePenLifecycle(path, &next) }); err != nil {
 						log.Printf("lifecycle %s: save deleted: %v", pen, err)
 					}
 					b.ledger(fmt.Sprintf("%s lifecycle %s: sleeping -> deleted (name stays retired per D-21)",
@@ -1055,11 +1130,18 @@ func (b *broker) sweepLifecycles(ctx context.Context, now time.Time, dryRun bool
 				if serr != nil {
 					log.Printf("lifecycle %s: send alert %s: %v", pen, milestone, serr)
 				} else if sent {
-					if next.AlertsSent == nil {
-						next.AlertsSent = map[string]int64{}
-					}
-					next.AlertsSent[milestone] = now.UTC().Unix()
-					_ = savePenLifecycle(path, &next)
+					_ = withPenLifecycleFileLock(path, func() error {
+						cur, cerr := loadPenLifecycle(path)
+						if cerr != nil {
+							cur = &next
+						}
+						if cur.AlertsSent == nil {
+							cur.AlertsSent = map[string]int64{}
+						}
+						cur.AlertsSent[milestone] = now.UTC().Unix()
+						next = *cur
+						return savePenLifecycle(path, cur)
+					})
 				}
 			} else {
 				sent = true
@@ -1214,15 +1296,35 @@ func (b *broker) renewVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	// Mark nonce used and bind the broker-verified handle BEFORE Checkout creation
 	// so neither replay nor a compromised signup-web can forge payer identity.
-	rec.RenewNonces[tok.Nonce] = renewNonceRecord{
-		Handle:    tok.Handle,
-		Exp:       tok.Exp,
-		RetainExp: now.Add(renewNonceRetainTTL).Unix(),
-	}
-	rec.UpdatedAt = nowUnix
-	if err := savePenLifecycle(path, rec); err != nil {
+	var replayErr bool
+	if err := withPenLifecycleFileLock(path, func() error {
+		cur, lerr := loadPenLifecycle(path)
+		if lerr != nil {
+			return lerr
+		}
+		pruneRenewNonces(cur, nowUnix)
+		if cur.RenewNonces == nil {
+			cur.RenewNonces = map[string]renewNonceRecord{}
+		}
+		if _, used := cur.RenewNonces[tok.Nonce]; used {
+			replayErr = true
+			return nil
+		}
+		cur.RenewNonces[tok.Nonce] = renewNonceRecord{
+			Handle:    tok.Handle,
+			Exp:       tok.Exp,
+			RetainExp: now.Add(renewNonceRetainTTL).Unix(),
+		}
+		cur.UpdatedAt = nowUnix
+		rec = cur
+		return savePenLifecycle(path, cur)
+	}); err != nil {
 		log.Printf("lifecycle %s: save used renew nonce: %v", tok.Pen, err)
 		jsonOut(w, 500, map[string]string{"error": "could not process renewal right now"})
+		return
+	}
+	if replayErr {
+		jsonOut(w, 403, map[string]string{"error": "this renewal link was already used; click Renew now inside your pen for a fresh link"})
 		return
 	}
 	jsonOut(w, 200, map[string]any{
@@ -1272,51 +1374,61 @@ func (b *broker) lifecycleAlertsHandler(w http.ResponseWriter, r *http.Request) 
 	defer b.lifecycleMu.Unlock()
 
 	path := b.lifecyclePath(pen)
-	rec, err := loadPenLifecycle(path)
-	if os.IsNotExist(err) {
-		jsonOut(w, 404, map[string]string{"error": "pen has no lifecycle record"})
-		return
-	}
-	if err != nil {
-		jsonOut(w, 500, map[string]string{"error": "could not read lifecycle record"})
-		return
-	}
-	switch action {
-	case "add":
-		exists := false
-		for _, e := range rec.AlertEmails {
-			if strings.EqualFold(e, email) {
-				exists = true
-				break
-			}
+	var emails []string
+	var httpStatus int
+	var httpErr string
+	_ = withPenLifecycleFileLock(path, func() error {
+		rec, err := loadPenLifecycle(path)
+		if os.IsNotExist(err) {
+			httpStatus, httpErr = 404, "pen has no lifecycle record"
+			return nil
 		}
-		if !exists {
-			if len(rec.AlertEmails) >= 10 {
-				jsonOut(w, 400, map[string]string{"error": "at most 10 alert emails per pen"})
-				return
+		if err != nil {
+			httpStatus, httpErr = 500, "could not read lifecycle record"
+			return nil
+		}
+		switch action {
+		case "add":
+			exists := false
+			for _, e := range rec.AlertEmails {
+				if strings.EqualFold(e, email) {
+					exists = true
+					break
+				}
 			}
-			rec.AlertEmails = append(rec.AlertEmails, email)
+			if !exists {
+				if len(rec.AlertEmails) >= 10 {
+					httpStatus, httpErr = 400, "at most 10 alert emails per pen"
+					return nil
+				}
+				rec.AlertEmails = append(rec.AlertEmails, email)
+				rec.UpdatedAt = time.Now().UTC().Unix()
+				if err := savePenLifecycle(path, rec); err != nil {
+					httpStatus, httpErr = 500, "could not save lifecycle record"
+					return nil
+				}
+			}
+		case "remove":
+			kept := make([]string, 0, len(rec.AlertEmails))
+			for _, e := range rec.AlertEmails {
+				if !strings.EqualFold(e, email) {
+					kept = append(kept, e)
+				}
+			}
+			rec.AlertEmails = kept
 			rec.UpdatedAt = time.Now().UTC().Unix()
 			if err := savePenLifecycle(path, rec); err != nil {
-				jsonOut(w, 500, map[string]string{"error": "could not save lifecycle record"})
-				return
+				httpStatus, httpErr = 500, "could not save lifecycle record"
+				return nil
 			}
 		}
-	case "remove":
-		kept := make([]string, 0, len(rec.AlertEmails))
-		for _, e := range rec.AlertEmails {
-			if !strings.EqualFold(e, email) {
-				kept = append(kept, e)
-			}
-		}
-		rec.AlertEmails = kept
-		rec.UpdatedAt = time.Now().UTC().Unix()
-		if err := savePenLifecycle(path, rec); err != nil {
-			jsonOut(w, 500, map[string]string{"error": "could not save lifecycle record"})
-			return
-		}
+		emails = rec.AlertEmails
+		return nil
+	})
+	if httpStatus != 0 {
+		jsonOut(w, httpStatus, map[string]string{"error": httpErr})
+		return
 	}
-	emails := rec.AlertEmails
 	if emails == nil {
 		emails = []string{}
 	}
@@ -1399,14 +1511,32 @@ func (b *broker) clearPendingCancelSub(subID string, now time.Time) {
 			kept = append(kept, q)
 		}
 		if removed {
-			rec.PendingCancelSubs = kept
-			if rec.ReplacedSubs == nil {
-				rec.ReplacedSubs = map[string]int64{}
-			}
-			rec.ReplacedSubs[subID] = now.UTC().Unix()
-			pruneReplacedSubs(rec, now.UTC().Unix())
-			rec.UpdatedAt = now.UTC().Unix()
-			_ = savePenLifecycle(path, rec)
+			_ = withPenLifecycleFileLock(path, func() error {
+				cur, cerr := loadPenLifecycle(path)
+				if cerr != nil {
+					return cerr
+				}
+				kept2 := make([]pendingCancelSub, 0, len(cur.PendingCancelSubs))
+				removed2 := false
+				for _, q := range cur.PendingCancelSubs {
+					if q.SubscriptionID == subID {
+						removed2 = true
+						continue
+					}
+					kept2 = append(kept2, q)
+				}
+				if !removed2 {
+					return nil
+				}
+				cur.PendingCancelSubs = kept2
+				if cur.ReplacedSubs == nil {
+					cur.ReplacedSubs = map[string]int64{}
+				}
+				cur.ReplacedSubs[subID] = now.UTC().Unix()
+				pruneReplacedSubs(cur, now.UTC().Unix())
+				cur.UpdatedAt = now.UTC().Unix()
+				return savePenLifecycle(path, cur)
+			})
 		}
 	}
 }
@@ -1471,33 +1601,44 @@ func (b *broker) lifecycleCancelDone(w http.ResponseWriter, r *http.Request) {
 	defer b.lifecycleMu.Unlock()
 
 	path := b.lifecyclePath(pen)
-	rec, err := loadPenLifecycle(path)
-	if err != nil {
-		jsonOut(w, 404, map[string]string{"error": "pen not found"})
+	now := b.now()
+	var httpStatus int
+	var httpErr string
+	var removed bool
+	_ = withPenLifecycleFileLock(path, func() error {
+		rec, err := loadPenLifecycle(path)
+		if err != nil {
+			httpStatus, httpErr = 404, "pen not found"
+			return nil
+		}
+		kept := make([]pendingCancelSub, 0, len(rec.PendingCancelSubs))
+		for _, q := range rec.PendingCancelSubs {
+			if q.SubscriptionID == subID {
+				removed = true
+				continue
+			}
+			kept = append(kept, q)
+		}
+		if removed {
+			rec.PendingCancelSubs = kept
+			if rec.ReplacedSubs == nil {
+				rec.ReplacedSubs = map[string]int64{}
+			}
+			rec.ReplacedSubs[subID] = now.Unix()
+			pruneReplacedSubs(rec, now.Unix())
+			rec.UpdatedAt = now.Unix()
+			if err := savePenLifecycle(path, rec); err != nil {
+				httpStatus, httpErr = 500, "could not save lifecycle"
+				return nil
+			}
+		}
+		return nil
+	})
+	if httpStatus != 0 {
+		jsonOut(w, httpStatus, map[string]string{"error": httpErr})
 		return
 	}
-	now := b.now()
-	kept := make([]pendingCancelSub, 0, len(rec.PendingCancelSubs))
-	removed := false
-	for _, q := range rec.PendingCancelSubs {
-		if q.SubscriptionID == subID {
-			removed = true
-			continue
-		}
-		kept = append(kept, q)
-	}
 	if removed {
-		rec.PendingCancelSubs = kept
-		if rec.ReplacedSubs == nil {
-			rec.ReplacedSubs = map[string]int64{}
-		}
-		rec.ReplacedSubs[subID] = now.Unix()
-		pruneReplacedSubs(rec, now.Unix())
-		rec.UpdatedAt = now.Unix()
-		if err := savePenLifecycle(path, rec); err != nil {
-			jsonOut(w, 500, map[string]string{"error": "could not save lifecycle"})
-			return
-		}
 		b.ledger(fmt.Sprintf("%s cancelled replaced Stripe subscription %s for pen %s", now.Format(time.RFC3339), subID, pen))
 	}
 	jsonOut(w, 200, map[string]any{"ok": true})
@@ -1527,41 +1668,54 @@ func (b *broker) lifecycleCancelAlert(w http.ResponseWriter, r *http.Request) {
 	defer b.lifecycleMu.Unlock()
 
 	path := b.lifecyclePath(pen)
-	rec, err := loadPenLifecycle(path)
-	if err != nil {
-		jsonOut(w, 404, map[string]string{"error": "pen not found"})
-		return
-	}
-	idx := -1
-	for i, q := range rec.PendingCancelSubs {
-		if q.SubscriptionID == subID {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		jsonOut(w, 404, map[string]string{"error": "subscription not queued"})
-		return
-	}
-
 	now := b.now()
 	errText := cleanField(in.Error, 200)
-	item := &rec.PendingCancelSubs[idx]
-	item.Attempts++
-	item.NextAttemptAt = now.Add(cancelRetryBackoff(item.Attempts)).Unix()
-	item.LastError = errText
-	shouldAlert := item.LastAlertAt == 0 || now.Unix()-item.LastAlertAt >= int64(cancelAlertCooldown/time.Second)
-	if shouldAlert {
-		item.LastAlertAt = now.Unix()
-	}
-	rec.UpdatedAt = now.Unix()
-	if err := savePenLifecycle(path, rec); err != nil {
-		jsonOut(w, 500, map[string]string{"error": "could not save lifecycle"})
+	var httpStatus int
+	var httpErr string
+	var shouldAlert bool
+	var attempts int
+	var nextAttemptAt int64
+	_ = withPenLifecycleFileLock(path, func() error {
+		rec, err := loadPenLifecycle(path)
+		if err != nil {
+			httpStatus, httpErr = 404, "pen not found"
+			return nil
+		}
+		idx := -1
+		for i, q := range rec.PendingCancelSubs {
+			if q.SubscriptionID == subID {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			httpStatus, httpErr = 404, "subscription not queued"
+			return nil
+		}
+		item := &rec.PendingCancelSubs[idx]
+		item.Attempts++
+		item.NextAttemptAt = now.Add(cancelRetryBackoff(item.Attempts)).Unix()
+		item.LastError = errText
+		shouldAlert = item.LastAlertAt == 0 || now.Unix()-item.LastAlertAt >= int64(cancelAlertCooldown/time.Second)
+		if shouldAlert {
+			item.LastAlertAt = now.Unix()
+		}
+		attempts = item.Attempts
+		nextAttemptAt = item.NextAttemptAt
+		rec.UpdatedAt = now.Unix()
+		if err := savePenLifecycle(path, rec); err != nil {
+			httpStatus, httpErr = 500, "could not save lifecycle"
+			return nil
+		}
+		return nil
+	})
+	if httpStatus != 0 {
+		jsonOut(w, httpStatus, map[string]string{"error": httpErr})
 		return
 	}
 
 	msg := fmt.Sprintf("Could not cancel replaced Stripe subscription %s for pen %s (attempt %d; cancel manually or grant Subscriptions: Write): %s",
-		subID, pen, item.Attempts, errText)
+		subID, pen, attempts, errText)
 	log.Print(msg)
 	if shouldAlert {
 		b.notifyKind("health", msg)
@@ -1569,8 +1723,8 @@ func (b *broker) lifecycleCancelAlert(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, map[string]any{
 		"ok":              true,
 		"alerted":         shouldAlert,
-		"attempts":        item.Attempts,
-		"next_attempt_at": item.NextAttemptAt,
+		"attempts":        attempts,
+		"next_attempt_at": nextAttemptAt,
 	})
 }
 
@@ -1702,33 +1856,53 @@ func (b *broker) requestRenewWake(ctx context.Context, pen string, now time.Time
 		return false, 0, 0, "host-full"
 	}
 
-	prevRec := *rec
 	ceilUnix := now.Add(renewWakeCeiling).Unix()
-	rec.State = stateRenewOnly
-	rec.WakeStartedAt = nowUnix
-	rec.WakeReadyAt = 0
-	rec.WakeCeiling = ceilUnix
-	rec.WakeUntil = ceilUnix
-	rec.WakeHistory = append(rec.WakeHistory, nowUnix)
-	if rec.RenewURL == "" {
-		rec.RenewURL = b.renewOriginForPen(rec.Plan)
-	}
-	rec.UpdatedAt = nowUnix
-	// B1 & B2: Write BOTH .renew-only marker and billing-status.json BEFORE
-	// committing state=renew_only or starting containers. If writing fails,
-	// abort and roll back cleanly so a pen can never boot in normal mode.
-	if err := syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), rec, b.renewOriginForPen(rec.Plan)); err != nil {
-		log.Printf("lifecycle wake %s: write renew_only status/marker failed (aborting wake): %v", pen, err)
-		_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &prevRec, "")
-		return false, 0, 0, "banner-error"
-	}
-	if err := savePenLifecycle(path, rec); err != nil {
-		log.Printf("lifecycle wake %s: save renew_only: %v", pen, err)
-		_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &prevRec, "")
+	var failReason string
+	var savedHistLen int
+	if err := withPenLifecycleFileLock(path, func() error {
+		cur, lerr := loadPenLifecycle(path)
+		if lerr != nil || cur.State != stateSleeping || (cur.Plan != planPersonal && cur.Plan != planWork) {
+			failReason = "not-sleeping"
+			return nil
+		}
+		prevRec := *cur
+		cur.WakeHistory = pruneWakeHistory(cur.WakeHistory, now)
+		cur.State = stateRenewOnly
+		cur.WakeStartedAt = nowUnix
+		cur.WakeReadyAt = 0
+		cur.WakeCeiling = ceilUnix
+		cur.WakeUntil = ceilUnix
+		cur.WakeHistory = append(cur.WakeHistory, nowUnix)
+		if cur.RenewURL == "" {
+			cur.RenewURL = b.renewOriginForPen(cur.Plan)
+		}
+		cur.UpdatedAt = nowUnix
+		// B1 & B2: Write BOTH .renew-only marker and billing-status.json BEFORE
+		// committing state=renew_only or starting containers. If writing fails,
+		// abort and roll back cleanly so a pen can never boot in normal mode.
+		if berr := syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), cur, b.renewOriginForPen(cur.Plan)); berr != nil {
+			log.Printf("lifecycle wake %s: write renew_only status/marker failed (aborting wake): %v", pen, berr)
+			_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &prevRec, "")
+			failReason = "banner-error"
+			return nil
+		}
+		if serr := savePenLifecycle(path, cur); serr != nil {
+			log.Printf("lifecycle wake %s: save renew_only: %v", pen, serr)
+			_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &prevRec, "")
+			failReason = "save-error"
+			return nil
+		}
+		savedHistLen = len(cur.WakeHistory)
+		return nil
+	}); err != nil {
+		log.Printf("lifecycle wake %s: lock renew_only: %v", pen, err)
 		return false, 0, 0, "save-error"
 	}
+	if failReason != "" {
+		return false, 0, 0, failReason
+	}
 	b.ledger(fmt.Sprintf("%s renew-only wake requested for %s (ceiling %s, wakes_24h=%d, wakes_30d=%d)",
-		now.Format(time.RFC3339), pen, time.Unix(ceilUnix, 0).UTC().Format(time.RFC3339), dayCount+1, len(rec.WakeHistory)))
+		now.Format(time.RFC3339), pen, time.Unix(ceilUnix, 0).UTC().Format(time.RFC3339), dayCount+1, savedHistLen))
 	return true, nowUnix, ceilUnix, "started"
 }
 
@@ -1747,7 +1921,6 @@ func (b *broker) checkPenHealth(ctx context.Context, pen string) error {
 // to confirm home.<zone> TLS readiness before starting the 10-minute renewal
 // window (bounded by the 20-minute hard ceiling from button press).
 func (b *broker) runRenewWakeAsync(pen string, wakeStartedAt, ceilingUnix int64) {
-	ceilTime := time.Unix(ceilingUnix, 0).UTC()
 	ctx, cancel := context.WithTimeout(context.Background(), renewWakeCeiling)
 	defer cancel()
 
@@ -1758,7 +1931,7 @@ func (b *broker) runRenewWakeAsync(pen string, wakeStartedAt, ceilingUnix int64)
 	}
 	started := func() bool {
 		defer b.endWake(pen)
-		_, code, stderr := b.runUnbounded(ctx, "wake", "--renew-only", pen)
+		_, code, stderr := b.runUnbounded(ctx, "wake", "--renew-only", "--no-lifecycle", pen)
 		b.invalidateCapacityCache()
 		if code != 0 {
 			log.Printf("lifecycle wake %s: wake --renew-only failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
@@ -1770,7 +1943,11 @@ func (b *broker) runRenewWakeAsync(pen string, wakeStartedAt, ceilingUnix int64)
 	if !started {
 		return
 	}
+	b.pollRenewWakeReady(ctx, pen, wakeStartedAt, ceilingUnix)
+}
 
+func (b *broker) pollRenewWakeReady(ctx context.Context, pen string, wakeStartedAt, ceilingUnix int64) {
+	ceilTime := time.Unix(ceilingUnix, 0).UTC()
 	pollInterval := b.wakeHealthInterval
 	if pollInterval <= 0 {
 		pollInterval = 5 * time.Second
@@ -1808,23 +1985,34 @@ func (b *broker) markRenewWakeReady(pen string, wakeStartedAt int64, readyAt tim
 	defer b.lifecycleMu.Unlock()
 
 	path := b.lifecyclePath(pen)
-	rec, err := loadPenLifecycle(path)
-	if err != nil || rec.State != stateRenewOnly || rec.WakeStartedAt != wakeStartedAt {
-		return
-	}
-	readyUnix := readyAt.UTC().Unix()
-	until := readyAt.UTC().Add(renewWakeWindow).Unix()
-	if rec.WakeCeiling > 0 && until > rec.WakeCeiling {
-		until = rec.WakeCeiling
-	}
-	rec.WakeReadyAt = readyUnix
-	rec.WakeUntil = until
-	rec.UpdatedAt = readyUnix
-	if err := savePenLifecycle(path, rec); err != nil {
+	var updated *penLifecycle
+	var until int64
+	if err := withPenLifecycleFileLock(path, func() error {
+		rec, err := loadPenLifecycle(path)
+		if err != nil || rec.State != stateRenewOnly || rec.WakeStartedAt != wakeStartedAt {
+			return nil
+		}
+		readyUnix := readyAt.UTC().Unix()
+		until = readyAt.UTC().Add(renewWakeWindow).Unix()
+		if rec.WakeCeiling > 0 && until > rec.WakeCeiling {
+			until = rec.WakeCeiling
+		}
+		rec.WakeReadyAt = readyUnix
+		rec.WakeUntil = until
+		rec.UpdatedAt = readyUnix
+		if err := savePenLifecycle(path, rec); err != nil {
+			return err
+		}
+		updated = rec
+		return nil
+	}); err != nil {
 		log.Printf("lifecycle wake %s: save ready deadline: %v", pen, err)
 		return
 	}
-	if err := syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), rec, b.renewOriginForPen(rec.Plan)); err != nil {
+	if updated == nil {
+		return
+	}
+	if err := syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), updated, b.renewOriginForPen(updated.Plan)); err != nil {
 		log.Printf("lifecycle wake %s: update billing-status.json: %v", pen, err)
 	}
 	b.ledger(fmt.Sprintf("%s renew-only wake ready for %s (window until %s)",
@@ -1836,19 +2024,268 @@ func (b *broker) rollbackFailedRenewWake(pen string, wakeStartedAt int64) {
 	defer b.lifecycleMu.Unlock()
 
 	path := b.lifecyclePath(pen)
-	rec, err := loadPenLifecycle(path)
-	if err != nil || rec.State != stateRenewOnly || rec.WakeStartedAt != wakeStartedAt {
+	var rolled *penLifecycle
+	_ = withPenLifecycleFileLock(path, func() error {
+		rec, err := loadPenLifecycle(path)
+		if err != nil || rec.State != stateRenewOnly || rec.WakeStartedAt != wakeStartedAt {
+			return nil
+		}
+		rec.State = stateSleeping
+		rec.WakeStartedAt = 0
+		rec.WakeReadyAt = 0
+		rec.WakeUntil = 0
+		rec.WakeCeiling = 0
+		rec.UpdatedAt = b.now().Unix()
+		if err := savePenLifecycle(path, rec); err != nil {
+			return err
+		}
+		rolled = rec
+		return nil
+	})
+	if rolled == nil {
 		return
 	}
-	rec.State = stateSleeping
-	rec.WakeStartedAt = 0
-	rec.WakeReadyAt = 0
-	rec.WakeUntil = 0
-	rec.WakeCeiling = 0
-	rec.UpdatedAt = b.now().Unix()
-	_ = savePenLifecycle(path, rec)
-	_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), rec, "")
+	_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), rolled, "")
 	_ = os.Remove(filepath.Join(b.home, "pens", pen, ".renew-wake"))
+}
+
+// lifecycleTransitionHandler executes operator-initiated `hogman-host sleep`,
+// `hogman-host wake`, and `hogman-host wake --renew-only` transitions through
+// the broker so the broker stays the single owner of lifecycle.json (I-12).
+func (b *broker) lifecycleTransitionHandler(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Pen    string `json:"pen"`
+		Action string `json:"action"` // "sleep" | "wake" | "renew_only"
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		jsonOut(w, 400, map[string]string{"error": "bad request"})
+		return
+	}
+	pen := strings.ToLower(strings.TrimSpace(in.Pen))
+	if _, ok := validPen(pen); !ok {
+		jsonOut(w, 400, map[string]string{"error": "invalid pen name"})
+		return
+	}
+	action := strings.ToLower(strings.TrimSpace(in.Action))
+	if action != "sleep" && action != "wake" && action != "renew_only" {
+		jsonOut(w, 400, map[string]string{"error": "action must be sleep, wake, or renew_only"})
+		return
+	}
+	penDir := filepath.Join(b.home, "pens", pen)
+	if fi, err := os.Stat(penDir); err != nil || !fi.IsDir() {
+		jsonOut(w, 404, map[string]string{"error": "no pen " + pen})
+		return
+	}
+	if _, err := os.Stat(filepath.Join(penDir, ".retired")); err == nil {
+		jsonOut(w, 409, map[string]string{"error": "pen " + pen + " has already been deleted"})
+		return
+	}
+	if !b.tryBeginWake(pen) {
+		jsonOut(w, 409, map[string]string{"error": "a wake or sleep is already in flight for " + pen})
+		return
+	}
+	defer b.endWake(pen)
+
+	now := b.now().UTC()
+	nowUnix := now.Unix()
+	path := b.lifecyclePath(pen)
+
+	switch action {
+	case "sleep":
+		b.lifecycleMu.Lock()
+		defer b.lifecycleMu.Unlock()
+
+		_, code, stderr := b.runUnbounded(r.Context(), "sleep", "--no-lifecycle", pen)
+		b.invalidateCapacityCache()
+		if code != 0 {
+			jsonOut(w, 500, map[string]string{"error": fmt.Sprintf("sleep %s failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))})
+			return
+		}
+		var saved *penLifecycle
+		if err := withPenLifecycleFileLock(path, func() error {
+			rec, lerr := loadPenLifecycle(path)
+			if os.IsNotExist(lerr) {
+				rec = &penLifecycle{Plan: planFree, State: stateActive}
+			} else if lerr != nil {
+				return lerr
+			}
+			sleepSince := nowUnix
+			deleteAfter := now.Add(lifecycleSleepDuration).Unix()
+			if rec.SleepSince > 0 && rec.DeleteAfter > 0 {
+				sleepSince = rec.SleepSince
+				deleteAfter = rec.DeleteAfter
+			}
+			rec.State = stateSleeping
+			rec.SleepSince = sleepSince
+			rec.DeleteAfter = deleteAfter
+			rec.WakeStartedAt = 0
+			rec.WakeReadyAt = 0
+			rec.WakeUntil = 0
+			rec.WakeCeiling = 0
+			rec.UpdatedAt = nowUnix
+			if serr := savePenLifecycle(path, rec); serr != nil {
+				return serr
+			}
+			saved = rec
+			return nil
+		}); err != nil {
+			jsonOut(w, 500, map[string]string{"error": "could not save lifecycle: " + err.Error()})
+			return
+		}
+		_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), saved, "")
+		b.ledger(fmt.Sprintf("%s lifecycle %s: operator sleep -> sleeping (delete after %s)",
+			now.Format(time.RFC3339), pen, time.Unix(saved.DeleteAfter, 0).UTC().Format("2006-01-02")))
+		jsonOut(w, 200, map[string]any{"ok": true, "pen": pen, "state": saved.State})
+
+	case "wake":
+		if _, err := os.Stat(filepath.Join(penDir, ".removed")); err == nil {
+			jsonOut(w, 409, map[string]string{"error": "pen " + pen + " was removed (use upgrade/restore, not wake)"})
+			return
+		}
+		_, code, stderr := b.runUnbounded(r.Context(), "wake", "--no-lifecycle", pen)
+		b.invalidateCapacityCache()
+		if code != 0 {
+			jsonOut(w, 500, map[string]string{"error": fmt.Sprintf("wake %s failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))})
+			return
+		}
+		b.lifecycleMu.Lock()
+		var saved *penLifecycle
+		err := withPenLifecycleFileLock(path, func() error {
+			rec, lerr := loadPenLifecycle(path)
+			if os.IsNotExist(lerr) {
+				return nil
+			}
+			if lerr != nil {
+				return lerr
+			}
+			rec.State = stateActive
+			rec.SleepSince = 0
+			rec.DeleteAfter = 0
+			rec.PendingWake = false
+			rec.PendingWakeAttempts = 0
+			rec.PendingWakeNextAt = 0
+			rec.WakeStartedAt = 0
+			rec.WakeReadyAt = 0
+			rec.WakeUntil = 0
+			rec.WakeCeiling = 0
+			rec.UpdatedAt = nowUnix
+			if serr := savePenLifecycle(path, rec); serr != nil {
+				return serr
+			}
+			saved = rec
+			return nil
+		})
+		if saved != nil {
+			_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), saved, b.renewOriginForPen(saved.Plan))
+		}
+		b.lifecycleMu.Unlock()
+		if err != nil {
+			jsonOut(w, 500, map[string]string{"error": "could not save lifecycle: " + err.Error()})
+			return
+		}
+		b.ledger(fmt.Sprintf("%s lifecycle %s: operator wake -> active", now.Format(time.RFC3339), pen))
+		jsonOut(w, 200, map[string]any{"ok": true, "pen": pen, "state": stateActive})
+
+	case "renew_only":
+		if _, err := os.Stat(filepath.Join(penDir, ".sleeping")); err != nil {
+			jsonOut(w, 409, map[string]string{"error": "pen " + pen + " is not asleep"})
+			return
+		}
+		b.lifecycleMu.Lock()
+		var prevRec penLifecycle
+		var ceilUnix int64
+		var startErrStatus int
+		var startErrMsg string
+		if err := withPenLifecycleFileLock(path, func() error {
+			rec, lerr := loadPenLifecycle(path)
+			if os.IsNotExist(lerr) {
+				rec = &penLifecycle{Plan: planPersonal, State: stateSleeping, SleepSince: nowUnix, DeleteAfter: now.Add(lifecycleSleepDuration).Unix()}
+			} else if lerr != nil {
+				startErrStatus, startErrMsg = 500, "could not read lifecycle: "+lerr.Error()
+				return nil
+			}
+			if rec.Plan != planPersonal && rec.Plan != planWork {
+				startErrStatus, startErrMsg = 400, fmt.Sprintf("pen %s plan is %q; renew-only wake is only for paid pens", pen, rec.Plan)
+				return nil
+			}
+			if rec.State != stateSleeping && rec.State != stateRenewOnly {
+				startErrStatus, startErrMsg = 409, fmt.Sprintf("pen %s state is %q, not sleeping", pen, rec.State)
+				return nil
+			}
+			concurrent := b.countRenewOnlyPens()
+			maxConc := b.effectiveRenewWakeMaxConcurrent()
+			if rec.State != stateRenewOnly && concurrent >= maxConc {
+				startErrStatus, startErrMsg = 429, fmt.Sprintf("global renewal-wake cap reached (%d/%d)", concurrent, maxConc)
+				return nil
+			}
+			capInfo, cerr := b.readCapacity(r.Context())
+			if cerr != nil {
+				startErrStatus, startErrMsg = 503, "capacity check failed: "+cerr.Error()
+				return nil
+			}
+			reserve := b.effectiveRenewWakeReserve()
+			if rec.State != stateRenewOnly && capInfo.Pens+concurrent >= capInfo.Max+reserve {
+				startErrStatus, startErrMsg = 503, fmt.Sprintf("host is at capacity (%d live + %d wake / %d total)", capInfo.Pens, concurrent, capInfo.Max+reserve)
+				return nil
+			}
+			prevRec = *rec
+			if rec.SleepSince == 0 {
+				rec.SleepSince = nowUnix
+			}
+			if rec.DeleteAfter == 0 {
+				rec.DeleteAfter = now.Add(lifecycleSleepDuration).Unix()
+			}
+			ceilUnix = now.Add(renewWakeCeiling).Unix()
+			rec.State = stateRenewOnly
+			rec.WakeStartedAt = nowUnix
+			rec.WakeReadyAt = 0
+			rec.WakeUntil = ceilUnix
+			rec.WakeCeiling = ceilUnix
+			if rec.RenewURL == "" {
+				rec.RenewURL = b.renewOriginForPen(rec.Plan)
+			}
+			rec.UpdatedAt = nowUnix
+			if berr := syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), rec, b.renewOriginForPen(rec.Plan)); berr != nil {
+				_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &prevRec, "")
+				startErrStatus, startErrMsg = 500, "failed writing renew-only status/marker: "+berr.Error()
+				return nil
+			}
+			if serr := savePenLifecycle(path, rec); serr != nil {
+				_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &prevRec, "")
+				startErrStatus, startErrMsg = 500, "failed saving lifecycle: "+serr.Error()
+				return nil
+			}
+			return nil
+		}); err != nil {
+			b.lifecycleMu.Unlock()
+			jsonOut(w, 500, map[string]string{"error": "lock error: " + err.Error()})
+			return
+		}
+		b.lifecycleMu.Unlock()
+		if startErrStatus != 0 {
+			jsonOut(w, startErrStatus, map[string]string{"error": startErrMsg})
+			return
+		}
+
+		_, code, stderr := b.runUnbounded(r.Context(), "wake", "--renew-only", "--no-lifecycle", pen)
+		b.invalidateCapacityCache()
+		if code != 0 {
+			b.rollbackFailedRenewWake(pen, nowUnix)
+			jsonOut(w, 500, map[string]string{"error": fmt.Sprintf("wake --renew-only %s failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))})
+			return
+		}
+		go func(p string, started, ceil int64) {
+			ctx, cancel := context.WithTimeout(context.Background(), renewWakeCeiling)
+			defer cancel()
+			b.pollRenewWakeReady(ctx, p, started, ceil)
+		}(pen, nowUnix, ceilUnix)
+		b.ledger(fmt.Sprintf("%s lifecycle %s: operator renew-only wake (ceiling %s)",
+			now.Format(time.RFC3339), pen, time.Unix(ceilUnix, 0).UTC().Format(time.RFC3339)))
+		jsonOut(w, 200, map[string]any{"ok": true, "pen": pen, "state": stateRenewOnly})
+	}
 }
 
 // lifecycleWakeHandler accepts a public renewal-wake request forwarded by
@@ -1952,18 +2389,21 @@ func (b *broker) sweepExpiredRenewWakes(ctx context.Context, now time.Time) ([]l
 			}
 
 			tr := lifecycleTransition{Pen: pen, From: stateSleeping, To: stateActive, Woken: true}
-			_, code, stderr := b.runUnbounded(ctx, "wake", pen)
+			_, code, stderr := b.runUnbounded(ctx, "wake", "--no-lifecycle", pen)
 			b.invalidateCapacityCache()
 			if code != 0 {
 				log.Printf("renew-wake watcher %s: pending_wake retry failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
 				b.notifyKind("health", fmt.Sprintf("Pen %s paid renewal wake retry failed (exit %d): %s", pen, code, strings.TrimSpace(stderr)))
 				b.lifecycleMu.Lock()
-				if cur, cerr := loadPenLifecycle(path); cerr == nil && cur.PendingWake {
-					cur.PendingWakeAttempts++
-					cur.PendingWakeNextAt = nowUTC.Add(pendingWakeBackoff(cur.PendingWakeAttempts)).Unix()
-					cur.UpdatedAt = nowUnix
-					_ = savePenLifecycle(path, cur)
-				}
+				_ = withPenLifecycleFileLock(path, func() error {
+					if cur, cerr := loadPenLifecycle(path); cerr == nil && cur.PendingWake {
+						cur.PendingWakeAttempts++
+						cur.PendingWakeNextAt = nowUTC.Add(pendingWakeBackoff(cur.PendingWakeAttempts)).Unix()
+						cur.UpdatedAt = nowUnix
+						return savePenLifecycle(path, cur)
+					}
+					return nil
+				})
 				b.lifecycleMu.Unlock()
 				tr.Woken = false
 				tr.ActionNote = "wake retry failed"
@@ -1972,18 +2412,30 @@ func (b *broker) sweepExpiredRenewWakes(ctx context.Context, now time.Time) ([]l
 			}
 
 			b.lifecycleMu.Lock()
-			if cur, cerr := loadPenLifecycle(path); cerr == nil && cur.State == stateActive {
+			var syncedRec *penLifecycle
+			saveErr := withPenLifecycleFileLock(path, func() error {
+				cur, cerr := loadPenLifecycle(path)
+				if cerr != nil || cur.State != stateActive {
+					return nil
+				}
 				cur.PendingWake = false
 				cur.PendingWakeAttempts = 0
 				cur.PendingWakeNextAt = 0
 				cur.UpdatedAt = nowUnix
 				if serr := savePenLifecycle(path, cur); serr != nil {
-					log.Printf("renew-wake watcher %s: save active after pending_wake: %v", pen, serr)
-					b.lifecycleMu.Unlock()
-					return
+					return serr
 				}
-				_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), cur, b.renewOriginForPen(cur.Plan))
+				syncedRec = cur
 				pendingOwner = cur.PendingOwner
+				return nil
+			})
+			if saveErr != nil {
+				log.Printf("renew-wake watcher %s: save active after pending_wake: %v", pen, saveErr)
+				b.lifecycleMu.Unlock()
+				return
+			}
+			if syncedRec != nil {
+				_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), syncedRec, b.renewOriginForPen(syncedRec.Plan))
 			}
 			b.lifecycleMu.Unlock()
 			out = append(out, tr)
@@ -1993,12 +2445,16 @@ func (b *broker) sweepExpiredRenewWakes(ctx context.Context, now time.Time) ([]l
 			if done, perr := b.applyPendingOwner(ctx, pen, pendingOwner); perr != nil {
 				log.Printf("renew-wake watcher %s: retry pending_owner %s: %v", pen, pendingOwner, perr)
 			} else if done {
+				p := b.lifecyclePath(pen)
 				b.lifecycleMu.Lock()
-				if cur, cerr := loadPenLifecycle(b.lifecyclePath(pen)); cerr == nil && cur.PendingOwner == pendingOwner {
-					cur.PendingOwner = ""
-					cur.UpdatedAt = nowUnix
-					_ = savePenLifecycle(b.lifecyclePath(pen), cur)
-				}
+				_ = withPenLifecycleFileLock(p, func() error {
+					if cur, cerr := loadPenLifecycle(p); cerr == nil && cur.PendingOwner == pendingOwner {
+						cur.PendingOwner = ""
+						cur.UpdatedAt = nowUnix
+						return savePenLifecycle(p, cur)
+					}
+					return nil
+				})
 				b.lifecycleMu.Unlock()
 			}
 		}
@@ -2022,13 +2478,13 @@ func (b *broker) sweepExpiredRenewWakes(ctx context.Context, now time.Time) ([]l
 				return
 			}
 
-			_, code, stderr := b.runUnbounded(ctx, "sleep", pen)
+			_, code, stderr := b.runUnbounded(ctx, "sleep", "--no-lifecycle", pen)
 			b.invalidateCapacityCache()
 			if code != 0 {
 				log.Printf("renew-wake watcher %s: sleep failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
 				return
 			}
-			if serr := savePenLifecycle(path, &next); serr != nil {
+			if serr := withPenLifecycleFileLock(path, func() error { return savePenLifecycle(path, &next) }); serr != nil {
 				log.Printf("renew-wake watcher %s: save sleeping: %v", pen, serr)
 				return
 			}
