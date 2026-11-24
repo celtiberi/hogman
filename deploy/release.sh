@@ -91,7 +91,7 @@ fi
 echo "client version checked: $got_ver_out"
 
 # Only now that the compiled parts check out, package release assets from $REF.
-git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md deploy/signup deploy/challenge-dns LICENSE README.md \
+git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md deploy/signup deploy/challenge-dns deploy/ops deploy/ops-snapshot.sh LICENSE README.md \
   | gzip -9n > "$out/$tarball"
 # No macOS file metadata in the bundle (Linux tar warns about it), and every
 # entry owned by root (0:0). Without that the archive carries the builder's

@@ -96,6 +96,13 @@ main() {
   if [ -d "$tmp/x/deploy/signup" ]; then
     rsync -a --delete "$tmp/x/deploy/signup/" "$home/signup-src/"
   fi
+  if [ -d "$tmp/x/deploy/ops" ]; then
+    rsync -a --delete "$tmp/x/deploy/ops/" "$home/ops-src/"
+  fi
+  if [ -f "$tmp/x/deploy/ops-snapshot.sh" ]; then
+    install -d -m 0755 /usr/local/lib/hogman
+    install -m 0755 "$tmp/x/deploy/ops-snapshot.sh" /usr/local/lib/hogman/ops-snapshot
+  fi
   echo "$ver" > "$home/VERSION"
 
   if [ "$first" = true ]; then

@@ -290,6 +290,43 @@ caps alerts the operator via `ntfy`. Payment restores normal policy live via `ho
 (`sync`) without restarting containers; otherwise the broker returns the pen to sleep at its
 persisted deadline while preserving the original `sleep_since` / `delete_after` timestamps.
 
+## Fleet Ops dashboard (v1, read-only)
+
+Run a private, strictly read-only host dashboard inside your own internal ops pen (`deploy/ops/`),
+using a host-pushed snapshot file and zero host RPC listeners:
+
+1. Enable the 60-second host snapshot collector (creates `/run/hogman-ops` via `tmpfiles.d` with
+   numeric GID `65532` and writes `/run/hogman-ops/snapshot.json` atomically):
+
+   ```bash
+   sudo hogman-host ops-setup
+   ```
+
+2. Build `hogman-sidecar` (from `core/join/Dockerfile.sidecar`) and configure `/opt/hogman/ops-src/.env`:
+
+   ```bash
+   OPS_HANDLES=alice,bob
+   OPS_SHARE_NAME=fleet
+   ```
+
+3. Enroll the sidecar once on your ops pen with a one-time share link and start the stack:
+
+   ```bash
+   cd /opt/hogman/ops-src
+   docker compose build
+   docker compose run --rm -i hogman-sidecar \
+     share fleet unix:///run/hogman-in/app.sock \
+     --state-dir=/var/lib/hogman --enroll-only --link-stdin
+   docker compose up -d
+   ```
+
+**Security boundaries:**
+- `ops-web` runs as UID/GID `65532:65532` inside `network_mode: service:hogman-bridge` (`network_mode: none`), with no Docker socket, no SSH keys, and no signup broker token.
+- `/run/hogman-ops` is mounted read-only as a **directory** (not the single file) so atomic snapshot renames are picked up on every request.
+- `hogman-sidecar` runs with `--identity-headers`; `ops-web` fails closed (`403`) unless `X-Hogman-Handle` is present, non-tagged (personal devices only), and listed in `OPS_HANDLES`.
+- Waitlist output contains only counts (`waiting`, `invited`) and the age of the oldest waiting entry — never emails or notes. Customer pen data directories (`pens/<name>/data/`) are never read.
+- All mutations (`waitlist invite/remove`, `sleep`, `wake`, `purge`, `plan`, `theme`) stay CLI-only via Tailscale SSH + `hogman-host`.
+
 ## Publishing releases
 
 `deploy/release.sh [git-ref]` publishes a release to GitHub Releases on `celtiberi/hogman`:
