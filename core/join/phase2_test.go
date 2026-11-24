@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -503,5 +506,112 @@ func TestInterruptedUpdateRecoveryAndVersionGuard(t *testing.T) {
 		if ok != tc.wantOK || got != tc.wantCmp {
 			t.Errorf("compareReleaseVersions(%q, %q) = (%d, %v), want (%d, %v)", tc.a, tc.b, got, ok, tc.wantCmp, tc.wantOK)
 		}
+	}
+}
+
+func TestUpdateContinuesPastUnreachablePenAndLegacySHA256MessageI10(t *testing.T) {
+	// 1. Two legacy pens where the first pen's server is unreachable and the
+	// second pen is healthy: pen 1 rewrites its login item without waiting for
+	// restartNew, and pen 2 still migrates and restarts cleanly.
+	tmp := t.TempDir()
+	deadDir := filepath.Join(tmp, "aaa-dead.example.test")
+	goodDir := filepath.Join(tmp, "zzz-good.example.test")
+	_ = os.MkdirAll(deadDir, 0o700)
+	_ = os.MkdirAll(goodDir, 0o700)
+	deadLegacy := filepath.Join(deadDir, "hogman-join")
+	goodLegacy := filepath.Join(goodDir, "hogman-join")
+	_ = os.WriteFile(deadLegacy, []byte("old"), 0o755)
+	_ = os.WriteFile(goodLegacy, []byte("old"), 0o755)
+
+	pens := []penTarget{
+		{zone: "aaa-dead.example.test", dir: deadDir, cfg: &agentConfig{Zone: "aaa-dead.example.test", LoginServer: "https://dead.example.test"}},
+		{zone: "zzz-good.example.test", dir: goodDir, cfg: &agentConfig{Zone: "zzz-good.example.test", LoginServer: "https://good.example.test"}},
+	}
+	var stopped, startedNoWait, restarted []string
+	ops := penUpdateOps{
+		isRunning:  func(string, *agentConfig) bool { return true },
+		hasService: func(string) bool { return true },
+		probeReachable: func(p *penTarget, _ options) error {
+			if p.zone == "aaa-dead.example.test" {
+				return errors.New("dial tcp: connection refused")
+			}
+			return nil
+		},
+		stop: func(_ string, c *agentConfig) { stopped = append(stopped, c.Zone) },
+		startNoWait: func(p *penTarget, bin string, _ bool, _ options) error {
+			startedNoWait = append(startedNoWait, p.zone+":"+bin)
+			return nil
+		},
+		restartNew: func(p *penTarget, _ string, _ bool, _ options) error {
+			restarted = append(restarted, p.zone)
+			return nil
+		},
+	}
+
+	results := migratePensForUpdate(pens, "/tmp/canon/hogman", "/tmp/self", func(dir string) string {
+		p := filepath.Join(dir, "hogman-join")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		return ""
+	}, true, options{}, ops)
+
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+	if results[0].Err == nil || !strings.Contains(results[0].Err.Error(), "hogman leave aaa-dead.example.test") {
+		t.Fatalf("dead pen result = %v, want unreachable error with hogman leave hint", results[0].Err)
+	}
+	if results[1].Err != nil {
+		t.Fatalf("healthy pen should still migrate cleanly, got err=%v", results[1].Err)
+	}
+	if len(restarted) != 1 || restarted[0] != "zzz-good.example.test" {
+		t.Fatalf("restarted = %v, want only [zzz-good.example.test]", restarted)
+	}
+	if len(startedNoWait) != 1 || startedNoWait[0] != "aaa-dead.example.test:/tmp/canon/hogman" {
+		t.Fatalf("startedNoWait = %v, want unreachable pen started on canonical bin without waiting", startedNoWait)
+	}
+	if _, err := os.Stat(deadLegacy); !os.IsNotExist(err) {
+		t.Fatalf("dead pen legacy copy should be removed after moving login item (err=%v)", err)
+	}
+	if _, err := os.Stat(goodLegacy); !os.IsNotExist(err) {
+		t.Fatalf("healthy pen legacy copy should be removed after migration (err=%v)", err)
+	}
+
+	// 2. Legacy pen SHA256SUMS listing hogman-join-* gives an actionable message.
+	legacySums := []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  hogman-join-Linux-x86_64\n")
+	if _, err := parseSHA256SUMS(legacySums, "hogman-Linux-x86_64"); err == nil ||
+		!strings.Contains(err.Error(), "older release") ||
+		!strings.Contains(err.Error(), "hogman update") {
+		t.Fatalf("legacy SHA256SUMS err = %v, want older-release + plain hogman update hint", err)
+	}
+
+	// 3. probePenLoginServer probes /hogman/v1/network (the real public route used by fetchNetwork).
+	var statusCode int = http.StatusOK
+	var gotPath string
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.URL.Path != "/hogman/v1/network" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(statusCode)
+		_, _ = w.Write([]byte(`{"zone":"lab.example.test"}`))
+	}))
+	defer ts.Close()
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ts.Certificate().Raw})
+	probeTarget := &penTarget{
+		zone: "lab.example.test",
+		cfg:  &agentConfig{Zone: "lab.example.test", LoginServer: ts.URL, ControlCA: string(caPEM)},
+	}
+	if err := probePenLoginServer(probeTarget, options{}); err != nil {
+		t.Fatalf("probePenLoginServer against live /hogman/v1/network failed: %v (path=%q)", err, gotPath)
+	}
+	if gotPath != "/hogman/v1/network" {
+		t.Fatalf("probed path = %q, want /hogman/v1/network", gotPath)
+	}
+	statusCode = http.StatusServiceUnavailable
+	if err := probePenLoginServer(probeTarget, options{}); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("probePenLoginServer on 503 = %v, want 503 error", err)
 	}
 }

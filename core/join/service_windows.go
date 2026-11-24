@@ -15,11 +15,17 @@ func startAgent(dir string, c *agentConfig, o options) error {
 	if err != nil {
 		return err
 	}
+	if currentAgentHealthy(dir, c) {
+		return nil
+	}
+	stopAgent(dir, c)
 	note("on Windows the pen connection does not yet restart by itself; run this command again after a restart")
 	return startDetached(bin, dir)
 }
 
 func stopAgent(dir string, c *agentConfig) { stopDetached(dir) }
+
+func stopOrphanAgentForDir(string) {}
 
 func shareServiceConfigured(*shareConfig) bool { return false }
 

@@ -351,7 +351,14 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	defer stopSig()
 
 	step("Starting the pen connection as %q", cfg.Hostname)
+	needStart := false
 	if st, err := agentState(cfg); err != nil || !st.Up {
+		needStart = true
+	} else if hasLegacyPenBinary(dir) {
+		needStart = true
+	}
+	if needStart {
+		stopAgent(dir, cfg)
 		if err := startAgent(dir, cfg, o); err != nil {
 			return err
 		}
@@ -367,6 +374,9 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 		}
 		return err
 	}
+	// If this pen still had a legacy per-pen hogman-join binary, clean it up
+	// now that the canonical hogman agent is online.
+	cleanupLegacyPenBinary(dir)
 	if st.Server {
 		// An old server link without the for=share mark: never expose a whole
 		// computer to the pen. Undo the join.
@@ -622,29 +632,67 @@ func retireLegacySameServerPens(oldPens []penTarget, ops legacyRetireOps) {
 	}
 }
 
-// stopDetached stops an agent that was started as a plain background process.
+func hasLegacyPenBinary(dir string) bool {
+	p := filepath.Join(dir, legacyBinaryName(runtime.GOOS))
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// currentAgentHealthy reports whether the pen's agent is already up, passes
+// HMAC status verification, and is NOT accompanied by a legacy per-pen
+// hogman-join copy that still needs replacing.
+func currentAgentHealthy(dir string, c *agentConfig) bool {
+	if c == nil || hasLegacyPenBinary(dir) {
+		return false
+	}
+	st, err := agentStateInDir(dir, c)
+	return err == nil && st.Up
+}
+
+func cleanupLegacyPenBinary(dir string) {
+	p := filepath.Join(dir, legacyBinaryName(runtime.GOOS))
+	self, _ := resolvedExePath()
+	canon := canonicalBinaryPath(hogmanConfigBase())
+	if sameFilePath(p, self) || sameFilePath(p, canon) {
+		return
+	}
+	if _, err := os.Stat(p); err == nil {
+		_ = os.Remove(p)
+	}
+}
+
+// stopDetached stops an agent that was started as a plain background process,
+// waiting until the process has actually exited so its proxy port is released,
+// and also stops any orphaned legacy hogman-join agent still bound to dir.
 func stopDetached(dir string) {
 	pidPath := filepath.Join(dir, "agent.pid")
-	b, err := os.ReadFile(pidPath)
-	if err != nil {
-		return
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || pid <= 0 {
-		_ = os.Remove(pidPath)
-		return
-	}
-	if p, err := os.FindProcess(pid); err == nil {
-		_ = p.Signal(syscall.SIGTERM)
-		for i := 0; i < 20; i++ {
-			if _, err := os.Stat(pidPath); err != nil {
-				return
+	if b, err := os.ReadFile(pidPath); err == nil {
+		pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+		if err != nil || pid <= 0 {
+			_ = os.Remove(pidPath)
+		} else {
+			if p, err := os.FindProcess(pid); err == nil {
+				_ = p.Signal(syscall.SIGTERM)
+				for i := 0; i < 20; i++ {
+					if !processAlive(pid) {
+						break
+					}
+					time.Sleep(200 * time.Millisecond)
+				}
+				if processAlive(pid) {
+					_ = p.Kill()
+					for i := 0; i < 10; i++ {
+						if !processAlive(pid) {
+							break
+						}
+						time.Sleep(100 * time.Millisecond)
+					}
+				}
 			}
-			time.Sleep(200 * time.Millisecond)
+			_ = os.Remove(pidPath)
 		}
-		_ = p.Kill()
 	}
-	_ = os.Remove(pidPath)
+	stopOrphanAgentForDir(dir)
 }
 
 // canonicalBinaryPath is the single managed hogman binary shared by all
