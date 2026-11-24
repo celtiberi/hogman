@@ -8,11 +8,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -677,9 +680,32 @@ func TestHogmanHostPurgeSleepWakeGuardrails(t *testing.T) {
 }
 
 func TestReplacedSubscriptionQueuedAndCancelledI6(t *testing.T) {
+	var mu sync.Mutex
+	var alerts []string
+	ntfySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		alerts = append(alerts, string(body))
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer ntfySrv.Close()
+	alertCount := func() int {
+		time.Sleep(30 * time.Millisecond) // allow async notify goroutine to deliver
+		mu.Lock()
+		defer mu.Unlock()
+		return len(alerts)
+	}
+
 	b, home := newTestBroker(t, "")
+	b.ntfy = ntfySrv.URL
+	b.healthNotify = newLimiterWithCap(10, time.Minute, 16)
+	b.webhookSecret = "whsec_i6_test"
+	now := time.Date(2027, 1, 10, 12, 0, 0, 0, time.UTC)
+	b.nowFn = func() time.Time { return now }
+
 	_ = os.MkdirAll(filepath.Join(home, "pens", "lab", "data", "registrar"), 0o700)
-	t0 := time.Now().UTC().Add(-10 * 24 * time.Hour)
+	t0 := now.Add(-10 * 24 * time.Hour)
 	if err := savePenLifecycle(b.lifecyclePath("lab"), &penLifecycle{
 		Plan:           planPersonal,
 		State:          stateGrace,
@@ -691,16 +717,37 @@ func TestReplacedSubscriptionQueuedAndCancelledI6(t *testing.T) {
 	}
 
 	// Same-subscription renewal (auto-renewal invoice) must NOT queue cancellation.
-	if rec, _, _, err := b.recordRenewal("lab", "in_same_1", "sub_old_111", "cus_1", "", time.Now().UTC()); err != nil || len(rec.PendingCancelSubs) != 0 {
+	if rec, _, _, err := b.recordRenewal("lab", "in_same_1", "sub_old_111", "cus_1", "", now); err != nil || len(rec.PendingCancelSubs) != 0 {
 		t.Fatalf("same-sub renewal queued cancel: rec=%+v err=%v", rec, err)
 	}
 
-	// Manual renewal with a NEW subscription ID queues the old sub_old_111 in PendingCancelSubs.
-	rec, _, _, err := b.recordRenewal("lab", "cs_new_2", "sub_new_222", "cus_1", "", time.Now().UTC())
+	// B2: Already-cancelled old subscription (CancelledAt != 0) must NOT be queued,
+	// and CancelledAt must be cleared for the new active subscription.
+	_ = os.MkdirAll(filepath.Join(home, "pens", "ended", "data", "registrar"), 0o700)
+	if err := savePenLifecycle(b.lifecyclePath("ended"), &penLifecycle{
+		Plan:           planPersonal,
+		State:          stateGrace,
+		PaidUntil:      t0.Unix(),
+		GraceUntil:     t0.Add(30 * 24 * time.Hour).Unix(),
+		SubscriptionID: "sub_dead_999",
+		CancelledAt:    t0.Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	endedRec, _, _, err := b.recordRenewal("ended", "cs_revive_1", "sub_fresh_1000", "cus_2", "", now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.SubscriptionID != "sub_new_222" || len(rec.PendingCancelSubs) != 1 || rec.PendingCancelSubs[0] != "sub_old_111" {
+	if len(endedRec.PendingCancelSubs) != 0 || endedRec.CancelledAt != 0 || endedRec.SubscriptionID != "sub_fresh_1000" {
+		t.Fatalf("already-cancelled sub must not be queued and CancelledAt cleared: %+v", endedRec)
+	}
+
+	// Manual renewal with a NEW subscription ID queues active sub_old_111 in PendingCancelSubs.
+	rec, _, _, err := b.recordRenewal("lab", "cs_new_2", "sub_new_222", "cus_1", "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.SubscriptionID != "sub_new_222" || len(rec.PendingCancelSubs) != 1 || rec.PendingCancelSubs[0].SubscriptionID != "sub_old_111" {
 		t.Fatalf("expected sub_old_111 queued in PendingCancelSubs: %+v", rec)
 	}
 
@@ -709,10 +756,12 @@ func TestReplacedSubscriptionQueuedAndCancelledI6(t *testing.T) {
 	defer bsrv.Close()
 	wb := newWeb(bsrv.URL, testToken, "gate.example.com")
 	var failCancel bool
+	var attempts int
 	var cancelled []string
 	wb.stripe = &stripeCheckout{
 		price: "price_personal_50",
 		cancelSubFn: func(_ context.Context, subID string) error {
+			attempts++
 			if failCancel {
 				return fmt.Errorf("stripe 403 missing Subscriptions: Write")
 			}
@@ -721,15 +770,70 @@ func TestReplacedSubscriptionQueuedAndCancelledI6(t *testing.T) {
 		},
 	}
 
-	// Transient/permission error keeps sub_old_111 queued for retry (and alerts broker).
-	failCancel = true
-	wb.drainPendingSubCancels(context.Background())
-	afterFail, _ := loadPenLifecycle(b.lifecyclePath("lab"))
-	if len(afterFail.PendingCancelSubs) != 1 || afterFail.PendingCancelSubs[0] != "sub_old_111" {
-		t.Fatalf("failed cancel must stay queued: %+v", afterFail.PendingCancelSubs)
+	// Input validation on /lifecycle/cancel-alert: reject invalid pen/subID and unqueued subIDs.
+	for _, bad := range []struct {
+		body map[string]string
+		want int
+	}{
+		{map[string]string{"pen": "BAD PEN!", "subscription_id": "sub_old_111", "error": "x"}, 400},
+		{map[string]string{"pen": "lab", "subscription_id": "not_a_sub", "error": "x"}, 400},
+		{map[string]string{"pen": "lab", "subscription_id": "sub_not_queued", "error": "x"}, 404},
+	} {
+		code, _ := wb.ask(context.Background(), "POST", "/lifecycle/cancel-alert", bad.body)
+		if code != bad.want {
+			t.Fatalf("cancel-alert %v returned %d, want %d", bad.body, code, bad.want)
+		}
+	}
+	if got := alertCount(); got != 0 {
+		t.Fatalf("invalid cancel-alert requests triggered %d alerts", got)
 	}
 
-	// Next drain succeeds, cancels sub_old_111 in Stripe, and clears PendingCancelSubs.
+	// B1: First failure persists Attempts=1, backs off +5m, and sends exactly 1 alert.
+	failCancel = true
+	wb.drainPendingSubCancels(context.Background())
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+	if got := alertCount(); got != 1 {
+		t.Fatalf("first failure alerts = %d, want 1", got)
+	}
+	afterFail1, _ := loadPenLifecycle(b.lifecyclePath("lab"))
+	if len(afterFail1.PendingCancelSubs) != 1 || afterFail1.PendingCancelSubs[0].Attempts != 1 || afterFail1.PendingCancelSubs[0].NextAttemptAt <= now.Unix() {
+		t.Fatalf("expected persisted backoff after failure 1: %+v", afterFail1.PendingCancelSubs)
+	}
+
+	// Calling drain again immediately respects NextAttemptAt (no Stripe call, no alert).
+	wb.drainPendingSubCancels(context.Background())
+	if attempts != 1 {
+		t.Fatalf("backoff skipped: attempts = %d, want 1", attempts)
+	}
+
+	// Advance 6 minutes (past 5m backoff, within 24h alert cooldown): retries Stripe, NO second alert.
+	now = now.Add(6 * time.Minute)
+	wb.drainPendingSubCancels(context.Background())
+	if attempts != 2 {
+		t.Fatalf("attempts after 6m = %d, want 2", attempts)
+	}
+	if got := alertCount(); got != 1 {
+		t.Fatalf("alerts within 24h cooldown = %d, want 1", got)
+	}
+	afterFail2, _ := loadPenLifecycle(b.lifecyclePath("lab"))
+	if afterFail2.PendingCancelSubs[0].Attempts != 2 {
+		t.Fatalf("attempts persisted = %d, want 2", afterFail2.PendingCancelSubs[0].Attempts)
+	}
+
+	// Advance 25 hours (past backoff and 24h alert cooldown): retries Stripe and sends 1 daily alert.
+	now = now.Add(25 * time.Hour)
+	wb.drainPendingSubCancels(context.Background())
+	if attempts != 3 {
+		t.Fatalf("attempts after 25h = %d, want 3", attempts)
+	}
+	if got := alertCount(); got != 2 {
+		t.Fatalf("daily alert count = %d, want 2", got)
+	}
+
+	// Advance past backoff again and let Stripe succeed -> clears PendingCancelSubs, keeps ReplacedSubs.
+	now = now.Add(25 * time.Hour)
 	failCancel = false
 	wb.drainPendingSubCancels(context.Background())
 	if len(cancelled) != 1 || cancelled[0] != "sub_old_111" {
@@ -738,6 +842,79 @@ func TestReplacedSubscriptionQueuedAndCancelledI6(t *testing.T) {
 	afterOK, _ := loadPenLifecycle(b.lifecyclePath("lab"))
 	if len(afterOK.PendingCancelSubs) != 0 {
 		t.Fatalf("PendingCancelSubs should be empty after cancel-done: %+v", afterOK.PendingCancelSubs)
+	}
+	if _, ok := afterOK.ReplacedSubs["sub_old_111"]; !ok {
+		t.Fatalf("ReplacedSubs should retain sub_old_111 for double-charge invoice detection: %+v", afterOK.ReplacedSubs)
+	}
+
+	// Should-fix: a paid invoice arriving for the replaced subscription alerts for refund
+	// and does NOT extend paid_until again.
+	paidBefore := afterOK.PaidUntil
+	invPayload := `{"id":"evt_dup_1","object":"event","type":"invoice.paid","livemode":false,"data":{"object":{"id":"in_dup_1","subscription":"sub_old_111","customer":"cus_1","status":"paid","billing_reason":"subscription_cycle","amount_paid":5000,"currency":"usd"}}}`
+	code, resp := sendEvent(t, b.handler(), []byte(invPayload), signed([]byte(invPayload), b.webhookSecret, time.Now()))
+	if code != 200 || resp["ok"] != "double-charge-alerted" {
+		t.Fatalf("replaced-sub invoice.paid: code=%d resp=%v", code, resp)
+	}
+	if got := alertCount(); got != 3 {
+		t.Fatalf("double-charge invoice should trigger health alert: alerts=%d want 3", got)
+	}
+	afterDup, _ := loadPenLifecycle(b.lifecyclePath("lab"))
+	if afterDup.PaidUntil != paidBefore {
+		t.Fatalf("replaced-sub invoice must not extend paid_until: before=%d after=%d", paidBefore, afterDup.PaidUntil)
+	}
+}
+
+func TestCancelSubscriptionRetrieveFirstB2(t *testing.T) {
+	var mu sync.Mutex
+	var calls []string
+	stripeMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/subscriptions/sub_already_canceled":
+			_, _ = w.Write([]byte(`{"id":"sub_already_canceled","object":"subscription","status":"canceled"}`))
+		case r.Method == "GET" && r.URL.Path == "/v1/subscriptions/sub_missing":
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","code":"resource_missing","message":"No such subscription"}}`))
+		case r.Method == "GET" && r.URL.Path == "/v1/subscriptions/sub_active":
+			_, _ = w.Write([]byte(`{"id":"sub_active","object":"subscription","status":"active"}`))
+		case r.Method == "DELETE" && r.URL.Path == "/v1/subscriptions/sub_active":
+			_, _ = w.Write([]byte(`{"id":"sub_active","object":"subscription","status":"canceled"}`))
+		default:
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte(`{"error":{"message":"unexpected call"}}`))
+		}
+	}))
+	defer stripeMock.Close()
+
+	backend := stripe.GetBackendWithConfig(stripe.APIBackend, &stripe.BackendConfig{
+		URL:        stripe.String(stripeMock.URL),
+		HTTPClient: stripeMock.Client(),
+	})
+	sc := &stripeCheckout{
+		client: stripe.NewClient("rk_test_mock", stripe.WithBackends(&stripe.Backends{API: backend})),
+	}
+
+	if err := sc.cancelSubscription(context.Background(), "sub_already_canceled"); err != nil {
+		t.Fatalf("canceled sub should return nil: %v", err)
+	}
+	if err := sc.cancelSubscription(context.Background(), "sub_missing"); err != nil {
+		t.Fatalf("404 sub should return nil: %v", err)
+	}
+	if err := sc.cancelSubscription(context.Background(), "sub_active"); err != nil {
+		t.Fatalf("active sub cancel failed: %v", err)
+	}
+
+	want := []string{
+		"GET /v1/subscriptions/sub_already_canceled",
+		"GET /v1/subscriptions/sub_missing",
+		"GET /v1/subscriptions/sub_active",
+		"DELETE /v1/subscriptions/sub_active",
+	}
+	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("stripe calls =\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
 	}
 }
 

@@ -227,17 +227,24 @@ Link directly to the waitlist with `https://<signup-host>/#wait`.
 **Selling pens (Stripe, D-28):** a paid checkout buys one sign-up code, which then works like a
 `--vanity` code: the buyer picks a bare pen name, with no random ending. Stripe's hosted Checkout takes the card, so card details never reach this server.
 
-1. In Stripe (test mode first): make a Product with a recurring Price, a **restricted key** that can
-   only write Checkout Sessions, and a webhook endpoint at
+1. In Stripe (test mode first): make a Product with a recurring Price, a **restricted key** with
+   **Checkout Sessions: Write** and **Subscriptions: Write** (so manual renewals cancel replaced
+   subscriptions automatically), and a webhook endpoint at
    `https://<signup-host>/api/stripe/webhook` for `checkout.session.completed`,
-   `checkout.session.async_payment_succeeded` and `customer.subscription.deleted`.
+   `checkout.session.async_payment_succeeded`, `invoice.paid`, and `customer.subscription.deleted`.
 2. On the server, with the key and the webhook signing secret one per line on standard input:
 
 ```bash
 hogman-host signup-stripe price_123 [--work price_456] [tax] < stripe-keys
 hogman-host signup-stripe work-price price_456         # update Work price without re-piping keys (or: off)
+hogman-host signup-stripe floor 5000 12000 usd         # update broker webhook price/currency floor
 hogman-host signup-stripe off
 ```
+
+The broker enforces a minimum payment floor on Stripe webhooks (defaults: `5000` cents Personal,
+`12000` cents Work, `usd`). Whenever you lower a Stripe Price below those defaults or switch
+currencies, run `hogman-host signup-stripe floor <personal-cents> <work-cents> [currency]` so
+legitimate payments are not rejected.
 
 When `--work` (or `work-price`) is set, checkouts started on the Work sign-up host use the Work
 Stripe Price over the same single webhook, and both Stripe metadata and `/opt/hogman/signup/payments`

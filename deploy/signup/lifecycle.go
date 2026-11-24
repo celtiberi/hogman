@@ -55,10 +55,35 @@ const (
 var errNoLifecycle = errors.New("pen has no lifecycle.json")
 
 const (
-	renewTokenPurpose   = "hogman-renew-v1:"
-	renewTokenMaxTTL    = 20 * time.Minute
-	renewNonceRetainTTL = 24 * time.Hour // matches Stripe Checkout session max lifetime
+	renewTokenPurpose    = "hogman-renew-v1:"
+	renewTokenMaxTTL     = 20 * time.Minute
+	renewNonceRetainTTL  = 24 * time.Hour // matches Stripe Checkout session max lifetime
+	cancelAlertCooldown  = 24 * time.Hour
+	replacedSubRetainTTL = 90 * 24 * time.Hour
 )
+
+type pendingCancelSub struct {
+	SubscriptionID string `json:"subscription_id"`
+	Attempts       int    `json:"attempts,omitempty"`
+	NextAttemptAt  int64  `json:"next_attempt_at,omitempty"`
+	LastAlertAt    int64  `json:"last_alert_at,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
+}
+
+func cancelRetryBackoff(attempts int) time.Duration {
+	switch {
+	case attempts <= 1:
+		return 5 * time.Minute
+	case attempts == 2:
+		return 15 * time.Minute
+	case attempts == 3:
+		return time.Hour
+	case attempts == 4:
+		return 6 * time.Hour
+	default:
+		return 24 * time.Hour
+	}
+}
 
 type renewNonceRecord struct {
 	Handle    string `json:"handle"`
@@ -80,7 +105,8 @@ type penLifecycle struct {
 	BackdateRenewal   bool                        `json:"backdate_renewal"` // D-35 default: false
 	PendingWake       bool                        `json:"pending_wake,omitempty"`
 	PendingOwner      string                      `json:"pending_owner,omitempty"`
-	PendingCancelSubs []string                    `json:"pending_cancel_subs,omitempty"` // I-6: replaced Stripe sub IDs awaiting cancel by web
+	PendingCancelSubs []pendingCancelSub          `json:"pending_cancel_subs,omitempty"` // I-6: replaced Stripe sub IDs awaiting cancel by web
+	ReplacedSubs      map[string]int64            `json:"replaced_subs,omitempty"`       // I-6: recently replaced sub IDs -> replaced_at unix (for double-charge invoice alerts)
 	AppliedEvents     []string                    `json:"applied_events,omitempty"`
 	RenewNonces       map[string]renewNonceRecord `json:"renew_nonces,omitempty"` // broker-verified nonces; pruned by RetainExp
 	AlertEmails       []string                    `json:"alert_emails,omitempty"`
@@ -546,19 +572,32 @@ func (b *broker) recordRenewal(pen, eventID, subID, custID, renewNonce string, n
 	pruneRenewNonces(&updated, now.UTC().Unix())
 	if subID != "" && subID != "-" {
 		// I-6: if a manual renewal created a new Stripe subscription while a
-		// previous subscription_id existed, queue the old one for cancellation
-		// by signup-web (which holds the Stripe key) so it cannot double-charge.
+		// previous still-active subscription_id existed (CancelledAt == 0),
+		// queue the old one for cancellation by signup-web (which holds the
+		// Stripe key) so it cannot double-charge. Already-cancelled old
+		// subscriptions (CancelledAt != 0) are not queued.
 		if rec.SubscriptionID != "" && rec.SubscriptionID != "-" && rec.SubscriptionID != subID {
-			alreadyQueued := false
-			for _, q := range updated.PendingCancelSubs {
-				if q == rec.SubscriptionID {
-					alreadyQueued = true
-					break
+			if updated.ReplacedSubs == nil {
+				updated.ReplacedSubs = map[string]int64{}
+			}
+			updated.ReplacedSubs[rec.SubscriptionID] = now.UTC().Unix()
+			pruneReplacedSubs(&updated, now.UTC().Unix())
+			if rec.CancelledAt == 0 {
+				alreadyQueued := false
+				for _, q := range updated.PendingCancelSubs {
+					if q.SubscriptionID == rec.SubscriptionID {
+						alreadyQueued = true
+						break
+					}
+				}
+				if !alreadyQueued {
+					updated.PendingCancelSubs = append(updated.PendingCancelSubs, pendingCancelSub{
+						SubscriptionID: rec.SubscriptionID,
+					})
 				}
 			}
-			if !alreadyQueued {
-				updated.PendingCancelSubs = append(updated.PendingCancelSubs, rec.SubscriptionID)
-			}
+			// The pen now has a brand-new active subscription.
+			updated.CancelledAt = 0
 		}
 		updated.SubscriptionID = subID
 	}
@@ -1124,17 +1163,107 @@ func (b *broker) lifecycleAlertsHandler(w http.ResponseWriter, r *http.Request) 
 	jsonOut(w, 200, map[string]any{"pen": pen, "alert_emails": emails})
 }
 
+func pruneReplacedSubs(rec *penLifecycle, nowUnix int64) {
+	if len(rec.ReplacedSubs) == 0 {
+		return
+	}
+	cutoff := nowUnix - int64(replacedSubRetainTTL/time.Second)
+	for subID, ts := range rec.ReplacedSubs {
+		if ts < cutoff {
+			delete(rec.ReplacedSubs, subID)
+		}
+	}
+	if len(rec.ReplacedSubs) == 0 {
+		rec.ReplacedSubs = nil
+	}
+}
+
+// findPenByReplacedSubscription scans pens/*/lifecycle.json for a subscription
+// that is currently queued for cancellation or was recently replaced (I-6).
+// Caller must hold b.lifecycleMu.
+func (b *broker) findPenByReplacedSubscription(subID string) (string, bool) {
+	if subID == "" || subID == "-" {
+		return "", false
+	}
+	entries, err := os.ReadDir(filepath.Join(b.home, "pens"))
+	if err != nil {
+		return "", false
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		rec, err := loadPenLifecycle(b.lifecyclePath(e.Name()))
+		if err != nil {
+			continue
+		}
+		for _, q := range rec.PendingCancelSubs {
+			if q.SubscriptionID == subID {
+				return e.Name(), true
+			}
+		}
+		if _, ok := rec.ReplacedSubs[subID]; ok {
+			return e.Name(), true
+		}
+	}
+	return "", false
+}
+
+// clearPendingCancelSub removes subID from any pen's PendingCancelSubs when
+// Stripe notifies us via customer.subscription.deleted that it already ended.
+// Caller must hold b.lifecycleMu.
+func (b *broker) clearPendingCancelSub(subID string, now time.Time) {
+	if subID == "" || subID == "-" {
+		return
+	}
+	entries, err := os.ReadDir(filepath.Join(b.home, "pens"))
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		path := b.lifecyclePath(e.Name())
+		rec, err := loadPenLifecycle(path)
+		if err != nil || len(rec.PendingCancelSubs) == 0 {
+			continue
+		}
+		kept := make([]pendingCancelSub, 0, len(rec.PendingCancelSubs))
+		removed := false
+		for _, q := range rec.PendingCancelSubs {
+			if q.SubscriptionID == subID {
+				removed = true
+				continue
+			}
+			kept = append(kept, q)
+		}
+		if removed {
+			rec.PendingCancelSubs = kept
+			if rec.ReplacedSubs == nil {
+				rec.ReplacedSubs = map[string]int64{}
+			}
+			rec.ReplacedSubs[subID] = now.UTC().Unix()
+			pruneReplacedSubs(rec, now.UTC().Unix())
+			rec.UpdatedAt = now.UTC().Unix()
+			_ = savePenLifecycle(path, rec)
+		}
+	}
+}
+
 type pendingCancelItem struct {
 	Pen            string `json:"pen"`
 	SubscriptionID string `json:"subscription_id"`
 }
 
-// lifecyclePendingCancels returns replaced Stripe subscriptions queued by
+// lifecyclePendingCancels returns due replaced Stripe subscriptions queued by
 // recordRenewal so signup-web (which holds the Stripe key) can cancel them (I-6).
+// Items backing off after a previous error (next_attempt_at > now) are skipped.
 func (b *broker) lifecyclePendingCancels(w http.ResponseWriter, r *http.Request) {
 	b.lifecycleMu.Lock()
 	defer b.lifecycleMu.Unlock()
 
+	nowUnix := b.now().Unix()
 	items := []pendingCancelItem{}
 	entries, err := os.ReadDir(filepath.Join(b.home, "pens"))
 	if err != nil && !os.IsNotExist(err) {
@@ -1149,10 +1278,14 @@ func (b *broker) lifecyclePendingCancels(w http.ResponseWriter, r *http.Request)
 		if err != nil {
 			continue
 		}
-		for _, subID := range rec.PendingCancelSubs {
-			if subID != "" && subID != "-" {
-				items = append(items, pendingCancelItem{Pen: e.Name(), SubscriptionID: subID})
+		for _, q := range rec.PendingCancelSubs {
+			if q.SubscriptionID == "" || q.SubscriptionID == "-" {
+				continue
 			}
+			if q.NextAttemptAt > nowUnix {
+				continue
+			}
+			items = append(items, pendingCancelItem{Pen: e.Name(), SubscriptionID: q.SubscriptionID})
 		}
 	}
 	jsonOut(w, 200, map[string]any{"items": items})
@@ -1183,10 +1316,11 @@ func (b *broker) lifecycleCancelDone(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 404, map[string]string{"error": "pen not found"})
 		return
 	}
-	kept := make([]string, 0, len(rec.PendingCancelSubs))
+	now := b.now()
+	kept := make([]pendingCancelSub, 0, len(rec.PendingCancelSubs))
 	removed := false
 	for _, q := range rec.PendingCancelSubs {
-		if q == subID {
+		if q.SubscriptionID == subID {
 			removed = true
 			continue
 		}
@@ -1194,12 +1328,17 @@ func (b *broker) lifecycleCancelDone(w http.ResponseWriter, r *http.Request) {
 	}
 	if removed {
 		rec.PendingCancelSubs = kept
-		rec.UpdatedAt = time.Now().UTC().Unix()
+		if rec.ReplacedSubs == nil {
+			rec.ReplacedSubs = map[string]int64{}
+		}
+		rec.ReplacedSubs[subID] = now.Unix()
+		pruneReplacedSubs(rec, now.Unix())
+		rec.UpdatedAt = now.Unix()
 		if err := savePenLifecycle(path, rec); err != nil {
 			jsonOut(w, 500, map[string]string{"error": "could not save lifecycle"})
 			return
 		}
-		b.ledger(fmt.Sprintf("%s cancelled replaced Stripe subscription %s for pen %s", time.Now().UTC().Format(time.RFC3339), subID, pen))
+		b.ledger(fmt.Sprintf("%s cancelled replaced Stripe subscription %s for pen %s", now.Format(time.RFC3339), subID, pen))
 	}
 	jsonOut(w, 200, map[string]any{"ok": true})
 }
@@ -1219,9 +1358,58 @@ func (b *broker) lifecycleCancelAlert(w http.ResponseWriter, r *http.Request) {
 	}
 	pen := strings.ToLower(strings.TrimSpace(in.Pen))
 	subID := strings.TrimSpace(in.SubscriptionID)
-	msg := fmt.Sprintf("Could not cancel replaced Stripe subscription %s for pen %s (cancel manually or grant Subscriptions: Write): %s",
-		subID, pen, cleanField(in.Error, 200))
+	if _, ok := validPen(pen); !ok || !strings.HasPrefix(subID, "sub_") {
+		jsonOut(w, 400, map[string]string{"error": "invalid request"})
+		return
+	}
+
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
+
+	path := b.lifecyclePath(pen)
+	rec, err := loadPenLifecycle(path)
+	if err != nil {
+		jsonOut(w, 404, map[string]string{"error": "pen not found"})
+		return
+	}
+	idx := -1
+	for i, q := range rec.PendingCancelSubs {
+		if q.SubscriptionID == subID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		jsonOut(w, 404, map[string]string{"error": "subscription not queued"})
+		return
+	}
+
+	now := b.now()
+	errText := cleanField(in.Error, 200)
+	item := &rec.PendingCancelSubs[idx]
+	item.Attempts++
+	item.NextAttemptAt = now.Add(cancelRetryBackoff(item.Attempts)).Unix()
+	item.LastError = errText
+	shouldAlert := item.LastAlertAt == 0 || now.Unix()-item.LastAlertAt >= int64(cancelAlertCooldown/time.Second)
+	if shouldAlert {
+		item.LastAlertAt = now.Unix()
+	}
+	rec.UpdatedAt = now.Unix()
+	if err := savePenLifecycle(path, rec); err != nil {
+		jsonOut(w, 500, map[string]string{"error": "could not save lifecycle"})
+		return
+	}
+
+	msg := fmt.Sprintf("Could not cancel replaced Stripe subscription %s for pen %s (attempt %d; cancel manually or grant Subscriptions: Write): %s",
+		subID, pen, item.Attempts, errText)
 	log.Print(msg)
-	b.notifyKind("health", msg)
-	jsonOut(w, 200, map[string]any{"ok": true})
+	if shouldAlert {
+		b.notifyKind("health", msg)
+	}
+	jsonOut(w, 200, map[string]any{
+		"ok":              true,
+		"alerted":         shouldAlert,
+		"attempts":        item.Attempts,
+		"next_attempt_at": item.NextAttemptAt,
+	})
 }

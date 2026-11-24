@@ -232,19 +232,31 @@ func (sc *stripeCheckout) createCheckoutURL(ctx context.Context, p *stripe.Check
 	return s.URL, nil
 }
 
+func isStripeNotFound(err error) bool {
+	var se *stripe.Error
+	return errors.As(err, &se) && (se.HTTPStatusCode == 404 || se.Code == stripe.ErrorCodeResourceMissing)
+}
+
 // cancelSubscription cancels a replaced Stripe subscription so it cannot
-// double-charge alongside the new subscription (I-6). A missing/already-deleted
-// subscription is treated as already cancelled.
+// double-charge alongside the new subscription (I-6). It retrieves the
+// subscription first and treats already-canceled/incomplete_expired or missing
+// subscriptions as done without issuing a redundant Cancel call (B2).
 func (sc *stripeCheckout) cancelSubscription(ctx context.Context, subID string) error {
 	if sc.cancelSubFn != nil {
 		return sc.cancelSubFn(ctx, subID)
 	}
-	_, err := sc.client.V1Subscriptions.Cancel(ctx, subID, nil)
+	sub, err := sc.client.V1Subscriptions.Retrieve(ctx, subID, nil)
 	if err != nil {
-		var se *stripe.Error
-		if errors.As(err, &se) && (se.HTTPStatusCode == 404 || se.Code == stripe.ErrorCodeResourceMissing) {
+		if isStripeNotFound(err) {
 			return nil
 		}
+		return err
+	}
+	if sub != nil && (sub.Status == stripe.SubscriptionStatusCanceled || sub.Status == stripe.SubscriptionStatusIncompleteExpired) {
+		return nil
+	}
+	_, err = sc.client.V1Subscriptions.Cancel(ctx, subID, nil)
+	if err != nil && !isStripeNotFound(err) {
 		return err
 	}
 	return nil
@@ -661,16 +673,29 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 200, map[string]string{"ok": "code ready"})
 	case "invoice.paid":
 		var inv invoiceObject
-		if err := json.Unmarshal(ev.Data.Raw, &inv); err == nil && inv.Status == "paid" && inv.Subscription != "" && inv.BillingReason == "subscription_cycle" {
+		if err := json.Unmarshal(ev.Data.Raw, &inv); err == nil && inv.Status == "paid" && inv.Subscription != "" {
 			b.lifecycleMu.Lock()
-			pen, ok := b.findPenBySubscription(inv.Subscription)
+			replacedPen, isReplaced := b.findPenByReplacedSubscription(inv.Subscription)
+			pen, ok := "", false
 			var penPlan string
-			if ok {
-				if rec, rerr := loadPenLifecycle(b.lifecyclePath(pen)); rerr == nil {
-					penPlan = rec.Plan
+			if !isReplaced && inv.BillingReason == "subscription_cycle" {
+				pen, ok = b.findPenBySubscription(inv.Subscription)
+				if ok {
+					if rec, rerr := loadPenLifecycle(b.lifecyclePath(pen)); rerr == nil {
+						penPlan = rec.Plan
+					}
 				}
 			}
 			b.lifecycleMu.Unlock()
+			if isReplaced {
+				msg := fmt.Sprintf("Double-charge alert: paid invoice %s arrived for replaced subscription %s on pen %s (customer %s) — issue a Stripe refund and verify the old subscription is cancelled",
+					inv.ID, inv.Subscription, replacedPen, inv.Customer)
+				log.Print(msg)
+				b.ledger(fmt.Sprintf("%s %s", b.now().Format(time.RFC3339), msg))
+				b.notifyKind("health", msg)
+				jsonOut(w, 200, map[string]string{"ok": "double-charge-alerted"})
+				return
+			}
 			if ok {
 				if okAmt, reason := b.checkPaidAmount(inv.ID, penPlan, inv.Currency, inv.AmountPaid); !okAmt {
 					log.Printf("stripe invoice %s (%s) refused: %s", inv.ID, pen, reason)
@@ -701,7 +726,7 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(ev.Data.Raw, &sub); err == nil && sub.Metadata[penMetaKey] == penMetaValue {
 			// D-35: cancelling mid-year changes nothing; the pen runs to its paid_until date.
 			plan := planFromMeta(sub.Metadata)
-			now := time.Now().UTC()
+			now := b.now()
 			b.lifecycleMu.Lock()
 			if pen, ok := b.findPenBySubscription(sub.ID); ok {
 				if rec, err := loadPenLifecycle(b.lifecyclePath(pen)); err == nil && rec.CancelledAt == 0 {
@@ -710,6 +735,7 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 					_ = savePenLifecycle(b.lifecyclePath(pen), rec)
 				}
 			}
+			b.clearPendingCancelSub(sub.ID, now)
 			b.lifecycleMu.Unlock()
 			b.ledger(fmt.Sprintf("%s subscription %s ended (plan %s, customer %s): pen runs until paid_until",
 				now.Format(time.RFC3339), sub.ID, plan, sub.Customer))
