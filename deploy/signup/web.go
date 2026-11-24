@@ -42,6 +42,7 @@ type web struct {
 	checkouts       *limiter // starting a payment
 	globalCheckouts *limiter // server-wide cap on Stripe Checkout session creation
 	wakes           *limiter // public sleeping-pen renew-only wakes (I-7 Part 2)
+	deletes         *limiter // self-service owner pen deletion (I-24)
 	webhooks        *limiter // Stripe's calls (it retries what we refuse)
 	jobs            *jobStore
 	stripe          *stripeCheckout // nil: pens aren't for sale
@@ -108,6 +109,7 @@ func newWeb(brokerURL, token, domain string) *web {
 		checkouts:       newLimiter(10, time.Hour),
 		globalCheckouts: newLimiterWithCap(300, time.Hour, 4),
 		wakes:           newLimiter(5, time.Hour),
+		deletes:         newLimiter(5, time.Hour),
 		webhooks:        newLimiter(120, time.Minute),
 		jobs:            newJobStore(defaultMaxOpenJobs, defaultMaxStoredJobs, defaultJobTTL, defaultDeliveredTTL),
 	}
@@ -126,6 +128,7 @@ func (wb *web) handler() http.Handler {
 	mux.HandleFunc("POST /api/checkout", wb.checkout)
 	mux.HandleFunc("POST /api/renew", wb.renew)
 	mux.HandleFunc("POST /api/wake", wb.wake)
+	mux.HandleFunc("POST /api/delete", wb.penDelete)
 	mux.HandleFunc("POST /api/stripe/webhook", wb.stripeWebhook)
 	mux.HandleFunc("GET /api/paid", wb.paid)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

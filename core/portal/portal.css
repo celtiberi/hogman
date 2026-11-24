@@ -1334,3 +1334,112 @@ html[data-theme="work"] .seg.active {
 }
 
 html[data-theme="work"] .foot { border-top-color: var(--line); }
+
+/* ---------- Danger zone: Delete this pen (I-24) ---------- */
+.panel.danger-panel {
+  border-color: var(--danger-border);
+  border-top-color: var(--danger);
+}
+
+.delete-confirm-box {
+  margin-top: 0.9rem;
+  padding: 1rem 1.1rem;
+  border-radius: 6px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+}
+
+.delete-lead {
+  margin: 0 0 0.55rem;
+  color: var(--bone);
+  font-weight: 600;
+}
+
+.delete-bullets {
+  margin: 0 0 0.95rem;
+  padding-left: 1.25rem;
+  color: var(--ash);
+  font-size: 0.92rem;
+}
+
+.delete-bullets li {
+  margin: 0.3rem 0;
+}
+
+.delete-form label {
+  display: block;
+  margin-bottom: 0.45rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--bone);
+}
+
+.btn-danger-outline {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+}
+
+.btn-danger-outline:hover:not(:disabled) {
+  color: #fff;
+  background: var(--blood);
+  border-color: var(--danger);
+}
+
+.btn-danger {
+  color: #fff;
+  background: var(--blood);
+  border: 1px solid var(--danger);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #b51f15;
+  border-color: #ffb0a3;
+}
+
+.btn-danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+html[data-theme="work"] .panel.danger-panel {
+  border-color: var(--danger-border-w);
+  border-top: 2.5px solid var(--danger-w);
+}
+
+html[data-theme="work"] .delete-confirm-box {
+  background: var(--danger-bg-w);
+  border-color: var(--danger-border-w);
+}
+
+html[data-theme="work"] .delete-lead,
+html[data-theme="work"] .delete-form label {
+  color: var(--ink);
+}
+
+html[data-theme="work"] .delete-bullets {
+  color: var(--ink);
+}
+
+html[data-theme="work"] .btn-danger-outline {
+  color: var(--danger-w);
+  background: var(--danger-bg-w);
+  border-color: var(--danger-border-w);
+}
+
+html[data-theme="work"] .btn-danger-outline:hover:not(:disabled) {
+  color: #fff;
+  background: var(--danger-w);
+  border-color: var(--danger-w);
+}
+
+html[data-theme="work"] .btn-danger {
+  color: #fff;
+  background: var(--danger-w);
+  border-color: var(--danger-w);
+}
+
+html[data-theme="work"] .btn-danger:hover:not(:disabled) {
+  background: #991b1b;
+  border-color: #991b1b;
+}

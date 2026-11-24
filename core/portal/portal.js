@@ -646,6 +646,7 @@
     'name.claim': 'site added',
     'name.release': 'site removed',
     'acme.eab': 'cert fallback issued',
+    'pen.delete.token': 'delete link created',
   };
 
   const renderAudit = () => {
@@ -664,7 +665,7 @@
       const head = el('div', 'audit-head');
       const rawAct = a.action || 'event';
       const label = auditActionLabels[rawAct] || rawAct;
-      const isWarn = rawAct.includes('kick') || rawAct.includes('suspend') || rawAct.includes('revoke') || rawAct.includes('reject');
+      const isWarn = rawAct.includes('kick') || rawAct.includes('suspend') || rawAct.includes('revoke') || rawAct.includes('reject') || rawAct.includes('delete');
       const actTag = el('span', isWarn ? 'tag warn' : 'tag', label);
       head.append(actTag);
       const summary = a.target ? `${a.actor || 'system'} → ${a.target}` : (a.actor || 'system');
@@ -766,8 +767,89 @@
     el.hidden = false;
   };
 
+  const renderPenDelete = () => {
+    const sec = $('pen-delete');
+    if (!sec) return;
+    const pd = me && me.pen_delete;
+    if (!me || !me.is_owner || !pd || !pd.can_delete || !pd.pen) {
+      sec.hidden = true;
+      return;
+    }
+    const pen = String(pd.pen);
+    $('pen-delete-name').textContent = pen;
+    $('pen-delete-lead-name').textContent = pen;
+    $('pen-delete-label').textContent = `Type ${pen} to confirm`;
+    $('pen-delete-input').placeholder = pen;
+
+    const ul = $('pen-delete-bullets');
+    ul.replaceChildren();
+    const addBullet = text => {
+      const li = document.createElement('li');
+      li.textContent = text;
+      ul.append(li);
+    };
+    const mCount = typeof pd.member_count === 'number' ? pd.member_count : 0;
+    const dCount = typeof pd.device_count === 'number' ? pd.device_count : 0;
+    addBullet(`Everyone in this pen (${mCount} member${mCount === 1 ? '' : 's'}, ${dCount} device${dCount === 1 ? '' : 's'}) loses access right away.`);
+    if (Array.isArray(pd.other_owners) && pd.other_owners.length > 0) {
+      const n = pd.other_owners.length;
+      addBullet(`This also removes it for ${n} other owner${n === 1 ? '' : 's'} (${pd.other_owners.join(', ')}).`);
+    }
+    addBullet('Any active yearly subscription is cancelled immediately (remaining paid time is forfeited — no refund).');
+    addBullet(`The name ${pen} is permanently retired and cannot be reused.`);
+    addBullet('Encrypted backups are kept for 30 days and then deleted.');
+
+    const openRow = $('pen-delete-open-row');
+    const box = $('pen-delete-confirm-box');
+    const inp = $('pen-delete-input');
+    const go = $('pen-delete-go');
+    const err = $('pen-delete-err');
+    const syncMatch = () => {
+      go.disabled = inp.value.trim().toLowerCase() !== pen.toLowerCase();
+    };
+    inp.oninput = syncMatch;
+    $('pen-delete-open').onclick = () => {
+      openRow.hidden = true;
+      box.hidden = false;
+      err.hidden = true;
+      inp.value = '';
+      syncMatch();
+      inp.focus();
+    };
+    $('pen-delete-cancel').onclick = () => {
+      box.hidden = true;
+      openRow.hidden = false;
+      err.hidden = true;
+      inp.value = '';
+      syncMatch();
+    };
+    $('pen-delete-form').onsubmit = async ev => {
+      ev.preventDefault();
+      err.hidden = true;
+      const val = inp.value.trim();
+      if (val.toLowerCase() !== pen.toLowerCase()) {
+        err.textContent = `Type ${pen} to confirm.`;
+        err.hidden = false;
+        return;
+      }
+      go.disabled = true;
+      try {
+        const r = await api('POST', '/pen/delete-token', { confirm: val });
+        if (typeof r.url === 'string' && r.url.startsWith('https://')) {
+          const w = window.open(r.url, '_blank', 'noopener,noreferrer');
+          if (!w) location.href = r.url;
+        }
+      } catch (e) {
+        err.textContent = e.message;
+        err.hidden = false;
+        syncMatch();
+      }
+    };
+    sec.hidden = false;
+  };
+
   const load = async () => {
-    try { me = await api('GET', '/me'); render(); renderBillingBanner(me.billing); }
+    try { me = await api('GET', '/me'); render(); renderBillingBanner(me.billing); renderPenDelete(); }
     catch (e) { $('whoami').textContent = 'Could not load your details: ' + e.message; return; }
     if (me.billing && me.billing.state === 'renew_only') {
       ['overview', 'sites', 'mine', 'invite', 'herd', 'all-devices', 'audit', 'host'].forEach(id => { const s = $(id); if (s) s.hidden = true; });

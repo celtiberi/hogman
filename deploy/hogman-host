@@ -1303,18 +1303,20 @@ cmd_wake() {
 
 cmd_purge() {
   load_host
-  local due=0 force=0 n=""
+  local due=0 force=0 owner_delete=0 n=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --due)   due=1; shift ;;
-      --force) force=1; shift ;;
-      --yes|-y) die "purge is irreversible and cannot be bypassed with --yes" ;;
-      -*)      die "usage: hogman-host purge --force <pen>   |   hogman-host purge --due <pen>" ;;
+      --due)          due=1; shift ;;
+      --force)        force=1; shift ;;
+      --owner-delete) owner_delete=1; shift ;;
+      --yes|-y)       die "purge is irreversible and cannot be bypassed with --yes" ;;
+      -*)             die "usage: hogman-host purge --force <pen>   |   hogman-host purge --due <pen>" ;;
       *)
         [ -z "$n" ] || die "usage: hogman-host purge --force <pen>   |   hogman-host purge --due <pen>"
         n="$1"; shift ;;
     esac
   done
+  [ $((due + force + owner_delete)) -le 1 ] || die "purge accepts only one mode flag (--force, --due, or --owner-delete)"
   valid_name "$n" || die "invalid network name: $n"
   [ -d "$PENS/$n" ] || die "no pen $n"
 
@@ -1339,6 +1341,15 @@ cmd_purge() {
     [ "$st" = "sleeping" ] || die "purge --due refused: pen $n state is '${st:-unknown}', not 'sleeping'"
     [ -n "$del" ] && [ "$del" -gt 0 ] || die "purge --due refused: pen $n has no valid delete_after"
     [ "$now" -ge "$del" ] || die "purge --due refused: pen $n is not due for deletion yet (delete_after=$del, now=$now)"
+  elif [ "$owner_delete" = 1 ]; then
+    # I-24: broker-only owner self-service deletion mode, invoked after
+    # cryptographic owner-token + single-use nonce + Stripe-cancel verification.
+    # Qualifies active, grace, and renew_only pens; sleeping pens have no portal
+    # and must be woken first or left to the lifecycle.
+    [ ! -f "$PENS/$n/.retired" ] && [ ! -f "$PENS/$n/.removed" ] || die "purge --owner-delete refused: pen $n has already been deleted"
+    if [ -f "$PENS/$n/.sleeping" ] && [ ! -f "$PENS/$n/.renew-wake" ]; then
+      die "purge --owner-delete refused: sleeping pen $n must be woken first or left to the lifecycle"
+    fi
   else
     # B5: manual operator purge requires --force AND an interactive TTY typing
     # the exact pen name (never bypassed by flags or piped stdin).
@@ -1361,7 +1372,7 @@ cmd_purge() {
     cdns cred rm "$(cat "$PENS/$n/.challenge-dns-id")" >/dev/null 2>&1 \
       && rm -f "$PENS/$n/.challenge-dns-id" || info "could not remove $n's challenge DNS credential"
   fi
-  rm -rf "$PENS/$n/data" "$PENS/$n/.env" "$PENS/$n/.sleeping"
+  rm -rf "$PENS/$n/data" "$PENS/$n/.env" "$PENS/$n/.sleeping" "$PENS/$n/.renew-wake"
   touch "$PENS/$n/.removed"
   printf 'deleted_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$PENS/$n/.retired"
   write_front

@@ -758,3 +758,36 @@ html[data-theme="work"] .qr img {
 html[data-theme="work"] .foot {
   border-top-color: var(--line);
 }
+
+/* ---------- Self-service pen deletion (I-24) ---------- */
+.panel.danger-panel {
+  border-color: var(--danger-border);
+  border-top-color: var(--danger);
+}
+
+.btn.danger {
+  color: #fff;
+  background: var(--blood);
+  border-color: var(--danger);
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: #b51f15;
+  border-color: #ffb0a3;
+}
+
+html[data-theme="work"] .panel.danger-panel {
+  border-color: var(--danger-border-w);
+  border-top: 2px solid var(--danger-w);
+}
+
+html[data-theme="work"] .btn.danger {
+  color: #fff;
+  background: var(--danger-w);
+  border-color: var(--danger-w);
+}
+
+html[data-theme="work"] .btn.danger:hover:not(:disabled) {
+  background: #991b1b;
+  border-color: #991b1b;
+}

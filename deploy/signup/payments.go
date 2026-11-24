@@ -377,6 +377,89 @@ func (wb *web) renew(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, map[string]string{"url": checkoutURL})
 }
 
+// penDelete handles owner-authenticated self-service pen deletion (I-24).
+// Protected by same-origin JSON check, per-IP rate limit (5/hr), Turnstile,
+// and a single-use domain-separated HMAC token (hogman-delete-v1:) verified
+// on the broker against the pen's renew.key and live owner membership.
+//
+// Billing-first invariant: if the pen has any active/pending Stripe
+// subscription, signup-web cancels it immediately BEFORE calling broker
+// /pen-delete/commit. If Stripe cancellation fails, the pen is NOT purged.
+func (wb *web) penDelete(w http.ResponseWriter, r *http.Request) {
+	if !wb.requireSameOriginJSON(w, r) {
+		return
+	}
+	clientIP := wb.clientIP(r)
+	if wb.deletes != nil && !wb.deletes.allow(rateLimitKey(clientIP), time.Now()) {
+		jsonOut(w, 429, map[string]string{"error": "too many tries from here; wait an hour"})
+		return
+	}
+	var in struct {
+		Token          string `json:"token"`
+		TurnstileToken string `json:"turnstile_token"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		jsonOut(w, 400, map[string]string{"error": "bad request"})
+		return
+	}
+	tok := strings.TrimSpace(in.Token)
+	if len(tok) < 20 || len(tok) > 512 {
+		jsonOut(w, 400, map[string]string{"error": "invalid delete token"})
+		return
+	}
+	if !wb.verifyTurnstile(w, r, in.TurnstileToken, clientIP) {
+		return
+	}
+	code, out := wb.ask(r.Context(), "POST", "/pen-delete/prepare", map[string]string{"token": tok})
+	if code != 200 {
+		jsonOut(w, code, out)
+		return
+	}
+	pen, _ := out["pen"].(string)
+	nonce, _ := out["delete_nonce"].(string)
+	var subIDs []string
+	if rawSubs, ok := out["subscription_ids"].([]any); ok {
+		for _, s := range rawSubs {
+			if id, ok := s.(string); ok && strings.HasPrefix(id, "sub_") {
+				subIDs = append(subIDs, id)
+			}
+		}
+	}
+
+	if len(subIDs) > 0 {
+		if wb.stripe == nil {
+			log.Printf("pen delete (%s): subscription(s) %v present but Stripe is not configured; aborting purge", pen, subIDs)
+			jsonOut(w, 502, map[string]string{"error": "billing cancellation is unavailable right now; your pen was not deleted"})
+			return
+		}
+		for _, subID := range subIDs {
+			cctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+			err := wb.stripe.cancelSubscription(cctx, subID)
+			cancel()
+			if err != nil {
+				log.Printf("pen delete (%s): cancel Stripe subscription %s failed: %v (aborting purge)", pen, subID, err)
+				jsonOut(w, 502, map[string]string{"error": "could not cancel your subscription right now; your pen was not deleted — please try again"})
+				return
+			}
+		}
+	}
+
+	commitCtx, commitCancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer commitCancel()
+	commitReq := map[string]any{
+		"pen":          pen,
+		"delete_nonce": nonce,
+	}
+	if len(subIDs) > 0 {
+		commitReq["cancelled_subs"] = subIDs
+	}
+	ccode, cout := wb.ask(commitCtx, "POST", "/pen-delete/commit", commitReq)
+	jsonOut(w, ccode, cout)
+}
+
 // checkout starts a Checkout Session. Not when the server is full: nobody
 // should pay for a pen that can't be raised.
 func (wb *web) checkout(w http.ResponseWriter, r *http.Request) {
@@ -733,7 +816,11 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 					}
 					rec.CancelledAt = now.Unix()
 					rec.UpdatedAt = now.Unix()
-					return savePenLifecycle(p, rec)
+					if err := savePenLifecycle(p, rec); err != nil {
+						return err
+					}
+					_ = b.syncRegistrarHostMeta(pen, rec)
+					return nil
 				})
 			}
 			b.clearPendingCancelSub(sub.ID, now)
