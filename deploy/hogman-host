@@ -879,7 +879,15 @@ lifecycle_mark_sleeping_unlocked() {  # lifecycle_mark_sleeping_unlocked <pen>
 }
 
 lifecycle_mark_sleeping() {  # lifecycle_mark_sleeping <pen>
-  local n="$1" lock="$PENS/$1/.lifecycle.lock"
+  local n="$1" lock="$PENS/$1/.lifecycle.lock" f="$PENS/$1/lifecycle.json" had_del=0
+  if [ -f "$f" ]; then
+    local ps pd
+    ps="$(lifecycle_json_int "$f" sleep_since || true)"
+    pd="$(lifecycle_json_int "$f" delete_after || true)"
+    if [ -n "$ps" ] && [ "$ps" -gt 0 ] && [ -n "$pd" ] && [ "$pd" -gt 0 ]; then
+      had_del=1
+    fi
+  fi
   if command -v flock >/dev/null 2>&1; then
     (
       flock 9 || exit 1
@@ -889,7 +897,16 @@ lifecycle_mark_sleeping() {  # lifecycle_mark_sleeping <pen>
   elif command -v python3 >/dev/null 2>&1; then
     lifecycle_mark_locked_py "$n" sleeping "$(date -u +%s)"
   else
+    info "warning: neither flock nor python3 found; updating $f without advisory file lock"
     lifecycle_mark_sleeping_unlocked "$n"
+  fi
+  if [ "$had_del" = 0 ] && [ -f "$f" ]; then
+    local del del_date
+    del="$(lifecycle_json_int "$f" delete_after || true)"
+    if [ -n "$del" ] && [ "$del" -gt 0 ]; then
+      del_date="$(date -u -d "@$del" +%Y-%m-%d 2>/dev/null || date -u -r "$del" +%Y-%m-%d 2>/dev/null || printf '%s' "$del")"
+      info "pen $n scheduled for automatic deletion after $del_date unless woken"
+    fi
   fi
 }
 
@@ -974,6 +991,7 @@ lifecycle_mark_awake() {  # lifecycle_mark_awake <pen>
   elif command -v python3 >/dev/null 2>&1; then
     lifecycle_mark_locked_py "$n" awake "$(date -u +%s)"
   else
+    info "warning: neither flock nor python3 found; updating $PENS/$n/lifecycle.json without advisory file lock"
     lifecycle_mark_awake_unlocked "$n"
   fi
 }
@@ -1041,6 +1059,7 @@ lifecycle_mark_renew_only() {  # lifecycle_mark_renew_only <pen> <now> <until> <
   elif command -v python3 >/dev/null 2>&1; then
     lifecycle_mark_locked_py "$n" renew_only "$now" "$until" "$ceil"
   else
+    info "warning: neither flock nor python3 found; updating $PENS/$n/lifecycle.json without advisory file lock"
     lifecycle_mark_renew_only_unlocked "$n" "$now" "$until" "$ceil"
   fi
 }

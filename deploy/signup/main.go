@@ -328,6 +328,14 @@ func runBrokerLifecycleTransition(args []string) {
 		fmt.Fprintf(os.Stderr, "lifecycle-transition HTTP %d: %s\n", resp.StatusCode, strings.TrimSpace(string(body)))
 		os.Exit(1)
 	}
+	var res struct {
+		Pen             string `json:"pen"`
+		DeleteAfter     string `json:"delete_after"`
+		FirstDeleteDate bool   `json:"first_delete_date"`
+	}
+	if json.Unmarshal(body, &res) == nil && res.FirstDeleteDate && res.DeleteAfter != "" {
+		fmt.Fprintf(os.Stderr, "==> pen %s scheduled for automatic deletion after %s unless woken\n", res.Pen, res.DeleteAfter)
+	}
 	_, _ = os.Stdout.Write(body)
 }
 

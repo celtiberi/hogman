@@ -976,9 +976,13 @@ func TestBrokerLifecycleTransitionEndpointI12(t *testing.T) {
 		return rr
 	}
 
-	// 1. Sleep via broker endpoint.
-	if rr := callTransition("sleep"); rr.Code != 200 {
-		t.Fatalf("transition sleep = %d: %s", rr.Code, rr.Body.String())
+	// 1. Sleep via broker endpoint reports first_delete_date=true on first sleep.
+	rrSleep1 := callTransition("sleep")
+	if rrSleep1.Code != 200 {
+		t.Fatalf("transition sleep = %d: %s", rrSleep1.Code, rrSleep1.Body.String())
+	}
+	if !strings.Contains(rrSleep1.Body.String(), `"first_delete_date":true`) || !strings.Contains(rrSleep1.Body.String(), `"delete_after":"2027-12-01"`) {
+		t.Fatalf("first sleep should report first_delete_date=true and delete_after: %s", rrSleep1.Body.String())
 	}
 	rec, _ := loadPenLifecycle(lcPath)
 	if rec.State != stateSleeping || rec.SleepSince == 0 || rec.DeleteAfter == 0 ||
@@ -997,6 +1001,15 @@ func TestBrokerLifecycleTransitionEndpointI12(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(penDir, "data", "registrar", ".renew-only")); err != nil {
 		t.Fatalf("renew_only transition must write .renew-only marker: %v", err)
+	}
+	// Sleeping back from renew_only preserves the original deletion date -> first_delete_date=false.
+	rrSleep2 := callTransition("sleep")
+	if rrSleep2.Code != 200 || !strings.Contains(rrSleep2.Body.String(), `"first_delete_date":false`) {
+		t.Fatalf("repeat sleep should report first_delete_date=false: code=%d body=%s", rrSleep2.Code, rrSleep2.Body.String())
+	}
+	// Re-enter renew_only so step 4 still exercises wake from renew_only.
+	if rr := callTransition("renew_only"); rr.Code != 200 {
+		t.Fatalf("second transition renew_only = %d: %s", rr.Code, rr.Body.String())
 	}
 
 	// 3. In-flight guard returns 409 Conflict if another wake/sleep is running.
@@ -1134,5 +1147,31 @@ func TestConcurrentBrokerSaveAndHostRewriteKeepBothChangesI12(t *testing.T) {
 	if !hasAppliedEvent(*finalRec, "evt_concurrent_broker_1") ||
 		len(finalRec.PendingCancelSubs) != 1 || finalRec.PendingCancelSubs[0].SubscriptionID != "sub_concurrent_1" {
 		t.Fatalf("concurrent host rewrite clobbered broker updates! final=%+v", finalRec)
+	}
+	if !strings.Contains(hostOut, "scheduled for automatic deletion after ") {
+		t.Fatalf("first hogman-host sleep should announce the scheduled deletion date; out=%s", hostOut)
+	}
+
+	// Subsequent sleep on an already-sleeping pen does NOT announce a new deletion date,
+	// and running without flock or python3 in PATH prints an unlocked-fallback warning.
+	noLockBin := filepath.Join(home, "nolock-bin")
+	_ = os.MkdirAll(noLockBin, 0o700)
+	_ = os.WriteFile(filepath.Join(noLockBin, "docker"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	for _, tool := range []string{"awk", "basename", "bash", "cat", "chmod", "cp", "cut", "date", "dirname", "find", "grep", "head", "id", "install", "ls", "mkdir", "mktemp", "mv", "rm", "sed", "sh", "sort", "stat", "tail", "tee", "touch", "tr", "wc"} {
+		if p, err := exec.LookPath(tool); err == nil {
+			_ = os.Symlink(p, filepath.Join(noLockBin, tool))
+		}
+	}
+	cmd2 := exec.Command("bash", hostScript, "sleep", "lab")
+	cmd2.Env = []string{"HOME=" + home, "HOGMAN_HOME=" + home, "PATH=" + noLockBin}
+	out2, err := cmd2.CombinedOutput()
+	if err != nil {
+		t.Fatalf("unlocked fallback sleep failed: err=%v out=%s", err, string(out2))
+	}
+	if !strings.Contains(string(out2), "warning: neither flock nor python3 found") {
+		t.Fatalf("expected unlocked-fallback warning when flock and python3 are absent; out=%s", string(out2))
+	}
+	if strings.Contains(string(out2), "scheduled for automatic deletion after ") {
+		t.Fatalf("repeat sleep should not announce a first deletion date again; out=%s", string(out2))
 	}
 }
