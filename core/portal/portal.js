@@ -53,11 +53,14 @@
 
     $('sites-host-link').textContent = 'Bridge a device or app \u2193';
     $('sites-empty').replaceChildren(
-      document.createTextNode('No bridged devices or apps yet. Add one with '),
-      Object.assign(document.createElement('code'), { textContent: '~/hogman share cooler-1 http://192.168.1.40 --background' }),
-      document.createTextNode(' (see '),
-      Object.assign(document.createElement('a'), { href: '#host', textContent: 'Bridge equipment or host an app' }),
-      document.createTextNode(' below).')
+      document.createTextNode('No bridged devices or apps yet. Follow the '),
+      Object.assign(document.createElement('a'), {
+        href: 'https://work.hogman.network/docs/share.html',
+        target: '_blank',
+        rel: 'noopener noreferrer',
+        textContent: 'Bridging guide',
+      }),
+      document.createTextNode(' to bridge an existing LAN controller or internal web app into this pen.')
     );
 
     $('device-card-hint').textContent = 'Generate a one-time link for another workstation (works once, expires in 1 hour). Use Get a share link for an always-on on-site bridge computer such as a Raspberry Pi or mini PC.';
@@ -68,44 +71,13 @@
     $('herd-recovery').textContent = 'Someone lost every enrolled device? There is no account recovery: issue a new invite, restore their role, then remove the old account (demote an old owner to admin first).';
 
     $('host-title').textContent = 'Bridge equipment or host an app';
-    $('host-guide-link').textContent = 'Bridging guide \u2192';
+    $('host-guide-link').textContent = 'Read the bridging guide \u2192';
     $('host-guide-link').href = 'https://work.hogman.network/docs/share.html';
-    $('host-intro').replaceChildren(
-      document.createTextNode('Bridge a local LAN controller (plain HTTP is fine on the LAN) or an internal web app into this pen over standard HTTPS (port 443) with '),
-      Object.assign(document.createElement('code'), { textContent: 'hogman' }),
-      document.createTextNode(':')
-    );
-    $('host-code').textContent =
-      '~/hogman share cooler-1 http://192.168.1.40 --background\n' +
-      '~/hogman share inventory 8080 --note "Warehouse inventory"';
-
-    const zoneSpan = document.createElement('span');
-    zoneSpan.className = 'zone';
-    zoneSpan.textContent = me ? me.zone : '<network>.pens.hogman.network';
-    const hostUrl = document.createElement('code');
-    hostUrl.append(document.createTextNode('https://cooler-1.'), zoneSpan);
-    $('host-hint-1').replaceChildren(
-      document.createTextNode('Everyone in the pen can then open '),
-      hostUrl,
-      document.createTextNode('. Add '),
-      Object.assign(document.createElement('code'), { textContent: '--background' }),
-      document.createTextNode(' to keep it running across reboots; '),
-      Object.assign(document.createElement('code'), { textContent: '~/hogman share stop cooler-1' }),
-      document.createTextNode(' takes it down and frees the name.')
-    );
+    $('host-intro').textContent = 'Bridge an existing LAN controller (plain HTTP is fine on the LAN) or an internal web app into this pen over standard HTTPS (port 443). Read the bridging guide for step-by-step instructions on workstations, dedicated on-site bridge machines, and private site names.';
     $('host-hint-ctlog').replaceChildren(
-      document.createTextNode('Note: bridged site names are publicly visible in certificate logs (traffic and contents stay private). Use neutral labels like cooler-1 or panel-b2 — or pass '),
+      document.createTextNode('Bridged site names appear in public certificate logs (traffic stays private) — see the guide for '),
       Object.assign(document.createElement('code'), { textContent: '--private-name' }),
-      document.createTextNode(' with '),
-      Object.assign(document.createElement('code'), { textContent: '--note "Label"' }),
-      document.createTextNode(' for a random hostname.')
-    );
-    $('host-hint-2').replaceChildren(
-      document.createTextNode('Running on a dedicated on-site bridge computer (Raspberry Pi or mini PC)? Press '),
-      Object.assign(document.createElement('em'), { textContent: 'Get a share link' }),
-      document.createTextNode(' above and pass the link at the end: '),
-      Object.assign(document.createElement('code'), { textContent: "./hogman share cooler-1 http://192.168.1.40 '<share link>' --background" }),
-      document.createTextNode('. Remember: a pen hides devices from the internet, it does not patch firmware.')
+      document.createTextNode('. A pen hides devices from the internet; it does not patch firmware.')
     );
 
     $('foot-tagline').textContent = 'Hogman for Work \u00b7 Open source (AGPL-3.0)';

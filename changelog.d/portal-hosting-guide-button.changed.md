@@ -1,0 +1,1 @@
+- Simplified the pen portal's **Host something** / **Bridge equipment or host an app** card (and empty-sites hint) to remove inline example CLI snippets and link directly to the hosting/bridging guide with a primary button.
