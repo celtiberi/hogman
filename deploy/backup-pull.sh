@@ -5,7 +5,11 @@
 #
 # Uses ~/.ssh/hogman_backup, a key the server allows to list and download
 # backups and nothing else (hogman-host backup-allow). The files stay
-# encrypted: this machine never holds the key that opens them. Keeps 30 days.
+# encrypted: this machine never holds the key that opens them.
+#
+# Off-host copies age out 30 days after they were pulled (via the find rule
+# below) and are never deleted on the host's say-so, so a broken or compromised
+# host cannot wipe off-host archives of live pens.
 #
 # Run it on a schedule: cron on Linux, a LaunchDaemon on a Mac (see deploy/README.md).
 set -euo pipefail

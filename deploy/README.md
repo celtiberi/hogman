@@ -158,6 +158,16 @@ used pen names), encrypted with `age` to a key the server cannot decrypt:
 `age -d -i backup-key.txt`, place `.env` and `data/` in `/opt/hogman/pens/<name>/`, ensure
 `challenge-dns` state/credential is restored or re-issued as needed, and run `hogman-host upgrade <name>`.
 
+**Deleted pen retention (D-37):** when a pen is deleted (`hogman-host purge`), its final encrypted
+backup and any prior nightly backups are kept for **30 days** (recorded in `.retired`) so mistaken
+deletions can be recovered. After 30 days, the daily lifecycle sweep (`hogman-host lifecycle` /
+`hogman-host backup-prune`) removes all backups for that pen on the host; legacy backups of pens
+removed before D-37 are aged from their filename timestamp. On the off-host backup machine,
+`deploy/backup-pull.sh` ages out archives 30 days after they were pulled (`find ... -mtime +30`)
+and never deletes local copies on the host's say-so, so a broken or compromised host cannot wipe
+off-host archives of live pens. After 30 days, nothing of a deleted pen remains except its retired
+name (D-21).
+
 ## Knowing when it breaks
 
 Run `deploy/hogman-watch.sh` every 5 minutes on another machine. It checks `/health`,

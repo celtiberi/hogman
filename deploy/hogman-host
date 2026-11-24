@@ -44,7 +44,7 @@ usage: hogman-host <command>
   sleep <network>                put a pen to sleep (stops containers, frees slot, keeps state for 1 yr)
   wake [--renew-only] <network>  wake a sleeping pen (full wake, or temporary renew-only window)
   purge --force <network>        permanently destroy a pen's state (interactive TTY confirmation; --due for expired sleep)
-  lifecycle [--dry-run]          run the daily pen lifecycle sweep (D-35: grace -> sleep -> delete)
+  lifecycle [--dry-run]          run the daily pen lifecycle sweep (D-35: grace -> sleep -> delete) and deleted-pen backup prune (D-37)
   lifecycle-setup                install and enable the daily systemd timer for lifecycle sweeps
   ops-setup                      install and enable the 60s read-only host snapshot timer (/run/hogman-ops)
   lifecycle-alert <pen> list|add|remove [email]
@@ -53,6 +53,7 @@ usage: hogman-host <command>
   backup-setup <age-public-key>  nightly encrypted backups of every pen (age, https://age-encryption.org)
   backup-allow '<ssh-public-key>'  let another machine download the encrypted backups, and nothing else
   backup                         back up every pen now
+  backup-prune [--dry-run]       prune backups of deleted pens older than 30 days (D-37; also runs in lifecycle)
 
   signup-setup <front-door-domain> <signup-host> [max-pens]
                                  a sign-up page that raises pens for other people
@@ -1272,17 +1273,24 @@ cmd_purge() {
       && rm -f "$PENS/$n/.challenge-dns-id" || info "could not remove $n's challenge DNS credential"
   fi
   rm -rf "$PENS/$n/data" "$PENS/$n/.env" "$PENS/$n/.sleeping"
-  touch "$PENS/$n/.removed" "$PENS/$n/.retired"
+  touch "$PENS/$n/.removed"
+  printf 'deleted_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$PENS/$n/.retired"
   write_front
   reload_front
   docker network rm "pen-$n-core" >/dev/null 2>&1 || true
-  info "pen $n deleted (name stays retired per D-21)"
+  info "pen $n deleted (name stays retired per D-21; encrypted backups removed after 30 days per D-37)"
 }
 
 cmd_lifecycle() {
   load_host
-  [ -f "$SIGNUP/compose.yaml" ] || die "sign-ups are not set up: hogman-host signup-setup"
-  (cd "$SIGNUP" && docker compose exec -T broker hogman-signup lifecycle-sweep "$@")
+  local dry_run=0 arg
+  for arg in "$@"; do
+    [ "$arg" = "--dry-run" ] && dry_run=1
+  done
+  if [ -f "$SIGNUP/compose.yaml" ]; then
+    (cd "$SIGNUP" && docker compose exec -T broker hogman-signup lifecycle-sweep "$@")
+  fi
+  prune_deleted_pen_backups "$dry_run"
 }
 
 cmd_lifecycle_alert() {
@@ -1402,10 +1410,134 @@ UNIT
 # private half of. Another machine downloads the encrypted files through a
 # dedicated account that can list and fetch backups and do nothing else.
 
-BACKUPS=/var/backups/hogman
+BACKUPS="${HOGMAN_BACKUPS:-/var/backups/hogman}"
 RECIPIENT="$HOGMAN_HOME/backup-recipient.txt"
 SERVE=/usr/local/lib/hogman/backup-serve
 KEEP_LOCAL=7
+BACKUP_RETENTION_DAYS=30
+
+parse_backup_utc_epoch() {
+  local raw="${1:-}" iso=""
+  [ -n "$raw" ] || return 1
+  if [[ "$raw" =~ ^([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z$ ]]; then
+    iso="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}T${BASH_REMATCH[4]}:${BASH_REMATCH[5]}:${BASH_REMATCH[6]}Z"
+  else
+    iso="$(printf '%s' "$raw" | sed -E 's/\.[0-9]+Z$/Z/')"
+  fi
+  date -u -d "$iso" +%s 2>/dev/null \
+    || date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$iso" +%s 2>/dev/null \
+    || return 1
+}
+
+# Remove backups of deleted pens once 30 days have passed since deletion (D-37):
+# - Retired pens under $PENS/<pen>/.retired count from deleted_at= in .retired
+#   (or newest backup timestamp if .retired predates D-37).
+# - Legacy deleted pens whose folder no longer exists under $PENS/ count from
+#   each backup filename's own UTC timestamp.
+# Uses the exact -YYYYMMDDTHHMMSSZ.tar.gz.age suffix match so pen "foo" never
+# touches "foo-bar"'s files, and never touches host "challenge-dns" backups.
+prune_deleted_pen_backups() {
+  local dry_run="${1:-0}"
+  [ -d "$BACKUPS" ] || return 0
+  # Fail closed if $PENS is missing (e.g. wrong HOGMAN_HOME or failed mount):
+  # never treat live pens as orphans.
+  [ -d "$PENS" ] || return 0
+  local now_epoch="${BACKUP_NOW_EPOCH:-$(date -u +%s)}"
+  local retention_sec=$((BACKUP_RETENTION_DAYS * 86400))
+
+  # 1. Retired pens still represented by $PENS/<pen>/.retired
+  local pen_dir n del_raw del_epoch f ts ts_epoch count has_pen_dir=0
+  while IFS= read -r pen_dir; do
+    [ -d "$pen_dir" ] || continue
+    has_pen_dir=1
+    [ -f "$pen_dir/.retired" ] || continue
+    n="$(basename "$pen_dir")"
+    valid_name "$n" || continue
+
+    del_raw="$(awk -F= '$1 == "deleted_at" { print $2; exit }' "$pen_dir/.retired" 2>/dev/null | tr -d '\r\n' || true)"
+    del_epoch=""
+    if [ -n "$del_raw" ]; then
+      del_epoch="$(parse_backup_utc_epoch "$del_raw" || true)"
+    fi
+
+    local files=()
+    for f in "$BACKUPS/$n"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.tar.gz.age; do
+      [ -f "$f" ] || continue
+      files+=("$f")
+    done
+    [ "${#files[@]}" -gt 0 ] || continue
+
+    if [ -z "$del_epoch" ]; then
+      # Pre-D-37 empty .retired marker: fall back to the newest backup's own timestamp.
+      for f in "${files[@]}"; do
+        ts="${f%.tar.gz.age}"; ts="${ts##*-}"
+        ts_epoch="$(parse_backup_utc_epoch "$ts" || true)"
+        if [ -n "$ts_epoch" ] && { [ -z "$del_epoch" ] || [ "$ts_epoch" -gt "$del_epoch" ]; }; then
+          del_epoch="$ts_epoch"
+        fi
+      done
+    fi
+    [ -n "$del_epoch" ] || continue
+
+    if [ $((now_epoch - del_epoch)) -ge "$retention_sec" ]; then
+      count="${#files[@]}"
+      if [ "$dry_run" = 1 ]; then
+        info "[dry-run] would prune $count expired backup(s) for deleted pen $n (D-37)"
+      else
+        rm -f -- "${files[@]}"
+        info "pruned $count expired backup(s) for deleted pen $n (D-37)"
+      fi
+    fi
+  done < <(find "$PENS" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+
+  # 2. Orphan backups whose pen directory no longer exists under $PENS/
+  # Fail closed unless $PENS contains at least one pen directory.
+  [ "$has_pen_dir" -eq 1 ] || return 0
+  local base pen
+  local orphan_pens=""
+  for f in "$BACKUPS"/*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.tar.gz.age; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    [[ "$base" =~ ^([a-z0-9-]+)-([0-9]{8}T[0-9]{6}Z)\.tar\.gz\.age$ ]] || continue
+    pen="${BASH_REMATCH[1]}"
+    [ "$pen" = "challenge-dns" ] && continue
+    [ -d "$PENS/$pen" ] && continue
+    orphan_pens+="$pen"$'\n'
+  done
+  [ -n "$orphan_pens" ] || return 0
+
+  while IFS= read -r pen; do
+    [ -n "$pen" ] || continue
+    local expired=()
+    for f in "$BACKUPS/$pen"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.tar.gz.age; do
+      [ -f "$f" ] || continue
+      ts="${f%.tar.gz.age}"; ts="${ts##*-}"
+      ts_epoch="$(parse_backup_utc_epoch "$ts" || true)"
+      [ -n "$ts_epoch" ] || continue
+      if [ $((now_epoch - ts_epoch)) -ge "$retention_sec" ]; then
+        expired+=("$f")
+      fi
+    done
+    [ "${#expired[@]}" -gt 0 ] || continue
+    count="${#expired[@]}"
+    if [ "$dry_run" = 1 ]; then
+      info "[dry-run] would prune $count expired backup(s) for removed pen $pen (D-37)"
+    else
+      rm -f -- "${expired[@]}"
+      info "pruned $count expired backup(s) for removed pen $pen (D-37)"
+    fi
+  done < <(printf '%s' "$orphan_pens" | sort -u)
+}
+
+cmd_backup_prune() {
+  local dry_run=0
+  case "${1:-}" in
+    "") ;;
+    --dry-run) dry_run=1 ;;
+    *) die "usage: hogman-host backup-prune [--dry-run]" ;;
+  esac
+  prune_deleted_pen_backups "$dry_run"
+}
 
 cmd_backup_setup() {
   local key="${1:-}"
@@ -2672,5 +2804,6 @@ case "${1:-}" in
   backup-setup) shift; cmd_backup_setup "$@" ;;
   backup-allow) shift; cmd_backup_allow "$@" ;;
   backup)  cmd_backup ;;
+  backup-prune) shift; cmd_backup_prune "$@" ;;
   *)       usage; [ -z "${1:-}" ] || exit 1 ;;
 esac
