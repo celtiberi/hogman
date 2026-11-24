@@ -397,6 +397,7 @@ check "the sign-up's pen uses the *.gate wildcard" gate_route_tls smithy
 check "and the other pens' routes kept it after the sign-up" gate_route_tls bobo
 if [ -z "$link" ] || [ "$link" = null ]; then
   echo "        | $res"
+  docker inspect -f '        broker| state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} restarts={{.RestartCount}}' hogman-signup-broker-1 2>&1 || true
   docker logs hogman-signup-broker-1 2>&1 | tail -25 | sed 's/^/        broker| /'
 fi
 qr_ok() { jq -e '.join_qr_svg | startswith("<svg")' <<<"$res"; }

@@ -990,7 +990,9 @@ $web_extra_vols
     image: hogman/signup-broker:local
     restart: unless-stopped
     security_opt: [no-new-privileges:true]
-    mem_limit: 128m
+    # Runs hogman-signup plus docker-cli/compose/buildx during pen provisioning;
+    # 128m could OOM-kill the broker mid-provision (I-5).
+    mem_limit: 384m
     pids_limit: 256
     environment:
       ROLE: broker
