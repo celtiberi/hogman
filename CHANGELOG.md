@@ -18,6 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Hardened `shareHandler` reverse proxy to strip client-supplied `X-Forwarded-*`/`Forwarded` headers before setting them and bounded `MaxResponseHeaderBytes` (64 KiB), `ResponseHeaderTimeout` (60 s), `MaxConnsPerHost`, and `tlsSrv.MaxHeaderBytes`.
   - Added `hogman bridge` (`--listen-unix`, `--forward-tcp`, `--check`, `--max-conns`) and distroless `core/join/Dockerfile.sidecar` (UID `65532:65532`, `HOGMAN_DISABLE_NETNS=1`), plus `docs/sealed-server.md` with a 3-container `network_mode: none` Docker Compose setup and live Docker test (`core/test/sidecar-check.sh`).
 
+### Fixed
+- `deploy/hogman-host` & `deploy/test-host.sh`: raised `hogman-signup` broker `mem_limit` from `128m` to `384m` so `docker compose` / `buildx` child processes do not OOM-kill the broker mid-provision (I-5), and log broker container exit/OOM/restart state on shared-host E2E failure.
+
 ### Changed
 - `core/join`, `core/join-page`, `core/portal`, `deploy/release.sh`, `browser-ext`, `packaging/`, & tests: renamed the client CLI from `hogman-join` to **`hogman`** and completed Phase 2 consolidation, diagnostics, and packaging:
   - Renamed compiled client binaries, GitHub Release assets (`hogman-<OS>-<ARCH>` + `hogman-SHA256SUMS`), join page (`start.sh`, `index.html`, `join.js`), portal instructions, browser extension copy, E2E suites, and documentation from `hogman-join` to `hogman`.
