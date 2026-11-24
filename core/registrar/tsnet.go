@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"tailscale.com/client/local"
@@ -72,6 +73,24 @@ func whoIsPeerIP(lc *local.Client) func(ctx context.Context, remoteAddr string) 
 	}
 }
 
+// configureTestCA sets SSL_CERT_FILE to the test control host's CA root before
+// crypto/x509 caches the system root pool. Only active when TEST_MODE=true.
+func configureTestCA() {
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv("TEST_MODE")), "true") {
+		return
+	}
+	if os.Getenv("SSL_CERT_FILE") != "" {
+		return
+	}
+	caFile := env("TSNET_CA_FILE", "/edge-trust/root.crt")
+	if caFile == "" {
+		return
+	}
+	if _, err := os.Stat(caFile); err == nil {
+		_ = os.Setenv("SSL_CERT_FILE", caFile)
+	}
+}
+
 // startEmbeddedMesh brings up the pen's core Tailscale node inside the
 // registrar process via tsnet, binds authoritative DNS (:53 UDP on the node's
 // own IPv4 and optional IPv6 + :53 TCP), and serves the portal + direct API
@@ -89,15 +108,7 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("tsnet: mkdir %s: %w", stateDir, err)
 	}
-	// In TEST_MODE, trust the test control host's self-signed CA if present.
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("TEST_MODE")), "true") {
-		caFile := env("TSNET_CA_FILE", "/edge-trust/root.crt")
-		if caFile != "" && os.Getenv("SSL_CERT_FILE") == "" {
-			if _, err := os.Stat(caFile); err == nil {
-				_ = os.Setenv("SSL_CERT_FILE", caFile)
-			}
-		}
-	}
+	configureTestCA()
 
 	var authKey string
 	if authKeyFile != "" {
@@ -106,12 +117,22 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 		}
 	}
 
+	var logMu sync.Mutex
+	var recentLogs []string
 	srv := &tsnet.Server{
 		Hostname:   hostname,
 		ControlURL: controlURL,
 		AuthKey:    authKey,
 		Dir:        stateDir,
-		Logf:       func(format string, args ...any) {},
+		Logf: func(format string, args ...any) {
+			line := fmt.Sprintf(format, args...)
+			logMu.Lock()
+			if len(recentLogs) >= 25 {
+				recentLogs = recentLogs[1:]
+			}
+			recentLogs = append(recentLogs, line)
+			logMu.Unlock()
+		},
 	}
 
 	upTimeout := durEnv("TSNET_UP_TIMEOUT", 2*time.Minute)
@@ -120,6 +141,12 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 	cancel()
 	if err != nil {
 		_ = srv.Close()
+		logMu.Lock()
+		tail := strings.Join(recentLogs, "\n  ")
+		logMu.Unlock()
+		if tail != "" {
+			return nil, fmt.Errorf("tsnet Up: %w\n  %s", err, tail)
+		}
 		return nil, fmt.Errorf("tsnet Up: %w", err)
 	}
 	if authKeyFile != "" && authKey != "" {

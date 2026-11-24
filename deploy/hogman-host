@@ -362,7 +362,8 @@ EOF
   } > "$caddy"
   # The front door joins "hogman-front" (for the sign-up page) and each live
   # pen's own private network, addressing each pen by its unique container names
-  # (pen-<name>-core-mesh-1, pen-<name>-headscale-1). Pens never share a network
+  # (pen-<name>-registrar-1 and pen-<name>-headscale-1, or pen-<name>-core-mesh-1
+  # for legacy 4-container pens). Pens never share a network
   # with each other's core or join "hogman-front".
   # Pen networks are attached to the running front door (reload_front), not
   # listed here: listing them would recreate it on every new pen, cutting every

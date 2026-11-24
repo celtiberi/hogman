@@ -136,8 +136,8 @@ wait_for() {    # wait_for <description> <seconds> <command...>
     sleep 1
   done
   case "$what" in
-    headscale)  dc logs --tail 30 headscale >&2 2>&1 || true ;;
-    registrar*) dc logs --tail 30 registrar >&2 2>&1 || true ;;
+    headscale)                dc logs --tail 30 headscale >&2 2>&1 || true ;;
+    registrar*|"core mesh IP") dc logs --tail 40 registrar >&2 2>&1 || true ;;
   esac
   die "timed out waiting for $what"
 }
@@ -164,7 +164,7 @@ run_ids() {   # prints "UID GID"
 # non-root headscale can read its keys and database.
 own_runtime_files() {
   chmod 755 "$DATA/join-dl" 2>/dev/null || true
-  chmod -R a+rX "$DATA/join-dl" "$DATA/headscale/config" 2>/dev/null || true
+  chmod -R a+rX "$DATA/join-dl" "$DATA/headscale/config" "$DATA/edge-trust" 2>/dev/null || true
   [ -n "${HOGMAN_UID:-}" ] && [ "$HOGMAN_UID" != 0 ] || return 0
   if [ "$(id -u)" = 0 ]; then
     local d
@@ -356,6 +356,7 @@ cmd_up() {
       local root="${FRONT_CA:-$DATA/edge/caddy/pki/authorities/local/root.crt}"
       wait_for "edge test certificate" 60 test -s "$root"
       cp "$root" "$DATA/edge-trust/root.crt"
+      chmod 644 "$DATA/edge-trust/root.crt"
     fi
 
     info "Creating the registrar's Headscale API key"

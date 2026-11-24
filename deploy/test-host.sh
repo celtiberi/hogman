@@ -498,14 +498,23 @@ check "front door Caddy runs non-root" front_user_ok
 check "folded registrar (tsnet + DNS + portal) runs non-root, read-only, cap_drop ALL (I-15)" registrar_hardened_ok
 
 step "Legacy 4-container pen upgrade to 2-container layout (mixed fleet, rollback, live upgrade, I-15)"
-# Raise a legacy 4-container pen (core-mesh + portal Caddy + legacy registrar + headscale),
-# verify mixed-fleet front door routing alongside bobo (2-container), join a side-by-side
-# client, exercise rollback on upgrade failure, then perform the real upgrade and confirm
-# the already-joined client resolves home.legacy.pens.hogman.test with the exact same IP
-# and zero re-join.
+# Raise a legacy 4-container pen from the actual previous release tag
+# (v2026.11.24-76d2903) using that release's own ./hogman init and ./hogman up
+# (falling back to an inline legacy layout only if the tag cannot be fetched),
+# verify mixed-fleet front door routing alongside bobo (2-container), join a
+# side-by-side client, exercise rollback on upgrade failure (confirming the
+# real previous release's ./hogman up brings all 4 containers back), then
+# perform the real upgrade and confirm the already-joined client resolves
+# home.legacy.pens.hogman.test with the exact same IP and zero re-join.
 LEGACY_DIR="$HOGMAN_HOME/pens/legacy"
+LEGACY_TAG="v2026.11.24-76d2903"
 mkdir -p "$LEGACY_DIR"
-rsync -a --exclude data --exclude .env "$REPO/core/" "$LEGACY_DIR/"
+LEGACY_FROM_TAG=0
+if git -C "$REPO" -c safe.directory="$REPO" rev-parse --verify "refs/tags/${LEGACY_TAG}^{commit}" >/dev/null 2>&1 \
+   || git -C "$REPO" -c safe.directory="$REPO" fetch --no-tags --depth=1 origin "refs/tags/${LEGACY_TAG}:refs/tags/${LEGACY_TAG}" >/dev/null 2>&1; then
+  git -C "$REPO" -c safe.directory="$REPO" archive "$LEGACY_TAG" core | tar -x --strip-components=1 -C "$LEGACY_DIR"
+  LEGACY_FROM_TAG=1
+fi
 pen_net legacy
 LEGACY_CDNS_OUT="$(CDNS_ADMIN_SOCK="$ACME/cdns/admin.sock" "$ACME/cdns/challenge-dns" cred add pen legacy)"
 LEGACY_CDNS_ID="$(awk '/^id:/ {print $2}' <<<"$LEGACY_CDNS_OUT")"
@@ -524,7 +533,22 @@ ACME_CA_URL=https://pebble:14000/dir
 ACME_RESOLVERS=hogman-test-cdns:53
 HOGMAN_TEST_ACME_ROOT=$ACME/certs/ca.crt
 EOF
-cat > "$LEGACY_DIR/compose.yaml" <<'EOF'
+if [ "$LEGACY_FROM_TAG" = 1 ]; then
+  check "legacy pen extracted from actual previous release ($LEGACY_TAG)" test -x "$LEGACY_DIR/hogman"
+  (cd "$LEGACY_DIR" && ./hogman init >/dev/null)
+  printf '%s' "$LEGACY_CDNS_TOK" > "$LEGACY_DIR/data/secrets/registrar/challenge_dns_token"
+  chmod 600 "$LEGACY_DIR/data/secrets/registrar/challenge_dns_token"
+  chown 65532:65532 "$LEGACY_DIR/data/secrets/registrar/challenge_dns_token"
+  "$HOST" routes >/dev/null
+  check "mixed-fleet front door routes bobo to registrar and legacy to core-mesh" \
+    bash -c 'grep -q "import pen bobo pen-bobo-registrar-1:8081" "$1" && grep -q "import pen legacy pen-legacy-core-mesh-1:8081" "$1"' _ "$HOGMAN_HOME/front/Caddyfile"
+  (cd "$LEGACY_DIR" && FRONT_CA="$FRONT_CA" FRONT_JOIN_DL="$HOGMAN_HOME/front/join-dl" ./hogman up >/dev/null)
+  LEGACY_OLD_IP="$(awk -F= '$1=="CORE_MESH_IP"{print $2}' "$LEGACY_DIR/data/state.env" | tr -d '\r\n')"
+  check "legacy 4-container core-mesh enrolled via $LEGACY_TAG ./hogman up ($LEGACY_OLD_IP)" test -n "$LEGACY_OLD_IP"
+else
+  echo "  NOTE  $LEGACY_TAG tag unavailable; falling back to inline legacy 4-container layout"
+  rsync -a --exclude data --exclude .env "$REPO/core/" "$LEGACY_DIR/"
+  cat > "$LEGACY_DIR/compose.yaml" <<'EOF'
 name: hogman
 services:
   headscale:
@@ -627,13 +651,13 @@ networks:
     name: pen-${NETWORK}-core
     external: true
 EOF
-cat > "$LEGACY_DIR/compose.front.yaml" <<'EOF'
+  cat > "$LEGACY_DIR/compose.front.yaml" <<'EOF'
 networks:
   core:
     name: pen-${NETWORK}-core
     external: true
 EOF
-cat > "$LEGACY_DIR/config/portal.Caddyfile" <<'EOF'
+  cat > "$LEGACY_DIR/config/portal.Caddyfile" <<'EOF'
 {
 	auto_https off
 	admin unix//run/caddy-admin/admin.sock
@@ -649,7 +673,7 @@ https://home.{$ZONE}:443 {
 	}
 }
 EOF
-cat > "$LEGACY_DIR/hogman" <<'EOF'
+  cat > "$LEGACY_DIR/hogman" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -673,33 +697,33 @@ case "${1:-}" in
   *) dc exec -T registrar registrar "$@" ;;
 esac
 EOF
-chmod +x "$LEGACY_DIR/hogman"
-mkdir -p "$LEGACY_DIR/data"/{headscale/config,headscale/lib,mesh/core,edge-trust,portal,registrar,secrets/registrar,join-dl,api,home-tls,caddy-admin}
-cp -a "$HOGMAN_HOME/front/join-dl/." "$LEGACY_DIR/data/join-dl/"
-cp "$FRONT_CA" "$LEGACY_DIR/data/edge-trust/root.crt"
-printf '%s' "$LEGACY_CDNS_TOK" > "$LEGACY_DIR/data/secrets/registrar/challenge_dns_token"
-chmod 600 "$LEGACY_DIR/data/secrets/registrar/challenge_dns_token"
-chmod 700 "$LEGACY_DIR/data"/{headscale/lib,mesh,registrar,secrets/registrar,api,home-tls,caddy-admin,portal}
-cat > "$LEGACY_DIR/data/state.env" <<'EOF'
+  chmod +x "$LEGACY_DIR/hogman"
+  mkdir -p "$LEGACY_DIR/data"/{headscale/config,headscale/lib,mesh/core,edge-trust,portal,registrar,secrets/registrar,join-dl,api,home-tls,caddy-admin}
+  cp -a "$HOGMAN_HOME/front/join-dl/." "$LEGACY_DIR/data/join-dl/"
+  cp "$FRONT_CA" "$LEGACY_DIR/data/edge-trust/root.crt"
+  printf '%s' "$LEGACY_CDNS_TOK" > "$LEGACY_DIR/data/secrets/registrar/challenge_dns_token"
+  chmod 600 "$LEGACY_DIR/data/secrets/registrar/challenge_dns_token"
+  chmod 700 "$LEGACY_DIR/data"/{headscale/lib,mesh,registrar,secrets/registrar,api,home-tls,caddy-admin,portal}
+  cat > "$LEGACY_DIR/data/state.env" <<'EOF'
 INITIALISED=public
 HOGMAN_UID=65532
 HOGMAN_GID=65532
 EOF
-cat > "$LEGACY_DIR/data/headscale/config/policy.hujson" <<'EOF'
+  cat > "$LEGACY_DIR/data/headscale/config/policy.hujson" <<'EOF'
 {"tagOwners":{"tag:infra":[],"tag:server":[]},"grants":[{"src":["tag:infra"],"dst":["tag:infra"],"ip":["53","443"]}]}
 EOF
-sed -e 's/@@PUBLIC_HOST@@/legacy.gate.hogman.test/g' -e 's/@@NETWORK@@/legacy/g' -e 's/@@STUN_PORT@@/3489/g' \
-    -e 's/@@ZONE@@/legacy.pens.hogman.test/g' -e 's/@@DERP_IPV4_LINE@@//g' -e 's/@@SPLIT_DNS@@/      {}/g' \
-    "$LEGACY_DIR/templates/headscale.yaml" > "$LEGACY_DIR/data/headscale/config/config.yaml"
-chown -R 65532:65532 "$LEGACY_DIR/data"/{headscale/lib,registrar,secrets/registrar,api,home-tls,caddy-admin,portal}
-"$HOST" routes >/dev/null
-check "mixed-fleet front door routes bobo to registrar and legacy to core-mesh" \
-  bash -c 'grep -q "import pen bobo pen-bobo-registrar-1:8081" "$1" && grep -q "import pen legacy pen-legacy-core-mesh-1:8081" "$1"' _ "$HOGMAN_HOME/front/Caddyfile"
-(cd "$LEGACY_DIR" && docker compose -p pen-legacy --env-file .env --env-file data/state.env -f compose.yaml -f compose.front.yaml up -d headscale >/dev/null)
-retry 30 docker exec pen-legacy-headscale-1 headscale health
-docker exec pen-legacy-headscale-1 headscale policy set --file /etc/headscale/policy.hujson >/dev/null
-LEGACY_INFRA_KEY="$(docker exec pen-legacy-headscale-1 headscale preauthkeys create --tags tag:infra --expiration 15m -o json | jq -r '.key')"
-cat > "$LEGACY_DIR/data/mesh/core.env" <<EOF
+  sed -e 's/@@PUBLIC_HOST@@/legacy.gate.hogman.test/g' -e 's/@@NETWORK@@/legacy/g' -e 's/@@STUN_PORT@@/3489/g' \
+      -e 's/@@ZONE@@/legacy.pens.hogman.test/g' -e 's/@@DERP_IPV4_LINE@@//g' -e 's/@@SPLIT_DNS@@/      {}/g' \
+      "$LEGACY_DIR/templates/headscale.yaml" > "$LEGACY_DIR/data/headscale/config/config.yaml"
+  chown -R 65532:65532 "$LEGACY_DIR/data"/{headscale/lib,registrar,secrets/registrar,api,home-tls,caddy-admin,portal}
+  "$HOST" routes >/dev/null
+  check "mixed-fleet front door routes bobo to registrar and legacy to core-mesh" \
+    bash -c 'grep -q "import pen bobo pen-bobo-registrar-1:8081" "$1" && grep -q "import pen legacy pen-legacy-core-mesh-1:8081" "$1"' _ "$HOGMAN_HOME/front/Caddyfile"
+  (cd "$LEGACY_DIR" && docker compose -p pen-legacy --env-file .env --env-file data/state.env -f compose.yaml -f compose.front.yaml up -d headscale >/dev/null)
+  retry 30 docker exec pen-legacy-headscale-1 headscale health
+  docker exec pen-legacy-headscale-1 headscale policy set --file /etc/headscale/policy.hujson >/dev/null
+  LEGACY_INFRA_KEY="$(docker exec pen-legacy-headscale-1 headscale preauthkeys create --tags tag:infra --expiration 15m -o json | jq -r '.key')"
+  cat > "$LEGACY_DIR/data/mesh/core.env" <<EOF
 TS_AUTHKEY=$LEGACY_INFRA_KEY
 TS_HOSTNAME=core
 TS_STATE_DIR=/var/lib/tailscale
@@ -709,25 +733,26 @@ TS_AUTH_ONCE=true
 TS_EXTRA_ARGS=--login-server=https://legacy.gate.hogman.test
 SSL_CERT_FILE=/edge-trust/root.crt
 EOF
-chmod 600 "$LEGACY_DIR/data/mesh/core.env"
-(cd "$LEGACY_DIR" && docker compose -p pen-legacy --env-file .env --env-file data/state.env -f compose.yaml -f compose.front.yaml up -d core-mesh >/dev/null)
-LEGACY_OLD_IP=""
-for _ in $(seq 60); do
-  LEGACY_OLD_IP="$(docker exec pen-legacy-core-mesh-1 tailscale ip -4 2>/dev/null | head -n 1 | tr -d '\r' || true)"
-  [ -n "$LEGACY_OLD_IP" ] && break
-  sleep 1
-done
-check "legacy 4-container core-mesh enrolled ($LEGACY_OLD_IP)" test -n "$LEGACY_OLD_IP"
-sed -i.bak '/^TS_AUTHKEY=/d' "$LEGACY_DIR/data/mesh/core.env" && rm -f "$LEGACY_DIR/data/mesh/core.env.bak"
-printf 'CORE_MESH_IP=%s\n' "$LEGACY_OLD_IP" >> "$LEGACY_DIR/data/state.env"
-docker exec pen-legacy-headscale-1 headscale apikeys create --expiration 3650d | tail -1 | tr -d '\r\n' > "$LEGACY_DIR/data/secrets/registrar/headscale_api_key"
-chown 65532:65532 "$LEGACY_DIR/data/secrets/registrar/headscale_api_key" && chmod 600 "$LEGACY_DIR/data/secrets/registrar/headscale_api_key"
-awk -v ip="$LEGACY_OLD_IP" '
-  { gsub(/@@PUBLIC_HOST@@/, "legacy.gate.hogman.test"); gsub(/@@NETWORK@@/, "legacy"); gsub(/@@STUN_PORT@@/, "3489"); gsub(/@@ZONE@@/, "legacy.pens.hogman.test"); gsub(/@@DERP_IPV4_LINE@@/, ""); gsub(/@@SPLIT_DNS@@/, "      \"legacy.pens.hogman.test\":\n        - " ip); print }
-' "$LEGACY_DIR/templates/headscale.yaml" > "$LEGACY_DIR/data/headscale/config/config.yaml"
-(cd "$LEGACY_DIR" && docker compose -p pen-legacy --env-file .env --env-file data/state.env -f compose.yaml -f compose.front.yaml restart headscale >/dev/null)
-retry 30 docker exec pen-legacy-headscale-1 headscale health
-(cd "$LEGACY_DIR" && ./hogman up >/dev/null)
+  chmod 600 "$LEGACY_DIR/data/mesh/core.env"
+  (cd "$LEGACY_DIR" && docker compose -p pen-legacy --env-file .env --env-file data/state.env -f compose.yaml -f compose.front.yaml up -d core-mesh >/dev/null)
+  LEGACY_OLD_IP=""
+  for _ in $(seq 60); do
+    LEGACY_OLD_IP="$(docker exec pen-legacy-core-mesh-1 tailscale ip -4 2>/dev/null | head -n 1 | tr -d '\r' || true)"
+    [ -n "$LEGACY_OLD_IP" ] && break
+    sleep 1
+  done
+  check "legacy 4-container core-mesh enrolled ($LEGACY_OLD_IP)" test -n "$LEGACY_OLD_IP"
+  sed -i.bak '/^TS_AUTHKEY=/d' "$LEGACY_DIR/data/mesh/core.env" && rm -f "$LEGACY_DIR/data/mesh/core.env.bak"
+  printf 'CORE_MESH_IP=%s\n' "$LEGACY_OLD_IP" >> "$LEGACY_DIR/data/state.env"
+  docker exec pen-legacy-headscale-1 headscale apikeys create --expiration 3650d | tail -1 | tr -d '\r\n' > "$LEGACY_DIR/data/secrets/registrar/headscale_api_key"
+  chown 65532:65532 "$LEGACY_DIR/data/secrets/registrar/headscale_api_key" && chmod 600 "$LEGACY_DIR/data/secrets/registrar/headscale_api_key"
+  awk -v ip="$LEGACY_OLD_IP" '
+    { gsub(/@@PUBLIC_HOST@@/, "legacy.gate.hogman.test"); gsub(/@@NETWORK@@/, "legacy"); gsub(/@@STUN_PORT@@/, "3489"); gsub(/@@ZONE@@/, "legacy.pens.hogman.test"); gsub(/@@DERP_IPV4_LINE@@/, ""); gsub(/@@SPLIT_DNS@@/, "      \"legacy.pens.hogman.test\":\n        - " ip); print }
+  ' "$LEGACY_DIR/templates/headscale.yaml" > "$LEGACY_DIR/data/headscale/config/config.yaml"
+  (cd "$LEGACY_DIR" && docker compose -p pen-legacy --env-file .env --env-file data/state.env -f compose.yaml -f compose.front.yaml restart headscale >/dev/null)
+  retry 30 docker exec pen-legacy-headscale-1 headscale health
+  (cd "$LEGACY_DIR" && ./hogman up >/dev/null)
+fi
 check "legacy pen runs 4 containers before upgrade" test "$(docker ps -q --filter name=^/pen-legacy- | wc -l | tr -d ' ')" = 4
 "$HOST" pen legacy member add legacy-owner --role owner >/dev/null
 LEGACY_INV="$( "$HOST" pen legacy invite create --note legacy-test | awk '/^link:/ {print $2}' )"

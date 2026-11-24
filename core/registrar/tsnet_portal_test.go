@@ -155,3 +155,50 @@ func TestDNSServerSelfCheckAndCoreIPv6(t *testing.T) {
 		t.Fatalf("SelfCheck failed: %v", err)
 	}
 }
+
+func TestSetupAllowsEmptyCoreIPInTsnetModeAndConfigureTestCA(t *testing.T) {
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "hs.key")
+	if err := os.WriteFile(keyFile, []byte("test-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	caFile := filepath.Join(dir, "root.crt")
+	if err := os.WriteFile(caFile, []byte("test-ca\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tsDir := filepath.Join(dir, "tsnet")
+	if err := os.MkdirAll(tsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("TEST_MODE", "true")
+	t.Setenv("TSNET_CA_FILE", caFile)
+	t.Setenv("SSL_CERT_FILE", "")
+	configureTestCA()
+	if got := os.Getenv("SSL_CERT_FILE"); got != caFile {
+		t.Fatalf("SSL_CERT_FILE = %q, want %q", got, caFile)
+	}
+
+	t.Setenv("TSNET_STATE_DIR", tsDir)
+	t.Setenv("CORE_MESH_IP", "")
+	t.Setenv("ZONE", "bobo.pens.example.com")
+	t.Setenv("PUBLIC_HOST", "bobo.gate.example.com")
+	t.Setenv("DB", filepath.Join(dir, "registrar.db"))
+	t.Setenv("HEADSCALE_API_KEY_FILE", keyFile)
+	t.Setenv("CHALLENGE_DNS_URL", "")
+	svc := setup()
+	defer svc.st.Close()
+	if svc.cfg.CoreIP != "" {
+		t.Fatalf("expected empty CoreIP on first boot before mesh-ip exists, got %q", svc.cfg.CoreIP)
+	}
+
+	// Once tsnet writes mesh-ip, setup() picks it up even if CORE_MESH_IP is unset.
+	if err := os.WriteFile(filepath.Join(tsDir, "mesh-ip"), []byte("100.64.0.9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc2 := setup()
+	defer svc2.st.Close()
+	if svc2.cfg.CoreIP != "100.64.0.9" {
+		t.Fatalf("expected CoreIP from mesh-ip, got %q", svc2.cfg.CoreIP)
+	}
+}

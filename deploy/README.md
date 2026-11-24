@@ -110,7 +110,10 @@ hogman-host upgrade bobo                                                        
 
 `install.sh` resolves `latest` once, then downloads `SHA256SUMS` and every archive from that pinned
 release tag (`releases/download/v<ver>/...`) so a concurrent release cannot mix versions. Set
-`HOGMAN_VERSION=<ver>` to install a specific release tag directly. `install.sh` refreshes the
+`HOGMAN_VERSION=<ver>` to install a specific release tag directly. For the 4-container to 2-container
+migration (embedded `tsnet` registrar), upgrade one pen first, verify that an already-joined device
+still resolves `home.<zone>` and loads the portal with no re-join, and only then upgrade the remaining
+pens. `install.sh` refreshes the
 `challenge-dns` binary via `hogman-host refresh-services` and pre-pulls any missing pinned base and
 runtime container images via `hogman-host pull-images` (so the offline sign-up broker never needs
 container registry access when raising a pen after a base-image bump); `hogman-host signup-setup`

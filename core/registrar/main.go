@@ -74,7 +74,17 @@ func parseCSV(raw string) []string {
 }
 
 func setup() *Service {
-	coreIP := mustEnv("CORE_MESH_IP")
+	var coreIP string
+	if tsDir := strings.TrimSpace(os.Getenv("TSNET_STATE_DIR")); tsDir != "" {
+		coreIP = strings.TrimSpace(os.Getenv("CORE_MESH_IP"))
+		if coreIP == "" {
+			if raw, err := os.ReadFile(filepath.Join(tsDir, "mesh-ip")); err == nil {
+				coreIP = strings.TrimSpace(string(raw))
+			}
+		}
+	} else {
+		coreIP = mustEnv("CORE_MESH_IP")
+	}
 	var acmeBackend ACMEBackend
 	if chURL := strings.TrimSpace(os.Getenv("CHALLENGE_DNS_URL")); chURL != "" {
 		tokPath := env("CHALLENGE_DNS_TOKEN_FILE", "/secrets/challenge_dns_token")
@@ -158,6 +168,7 @@ func healthCmd() error {
 
 func main() {
 	log.SetFlags(0)
+	configureTestCA()
 	args := os.Args[1:]
 	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
 		fmt.Print(usage)
@@ -219,6 +230,48 @@ func serve(s *Service) {
 		}
 	}
 
+	var homeMgr *HomeCertManager
+	if homeTLSDir := strings.TrimSpace(os.Getenv("HOME_TLS_DIR")); homeTLSDir != "" {
+		mgr, err := NewHomeCertManager(HomeConfig{
+			Zone:               s.cfg.Zone,
+			HomeTLSDir:         homeTLSDir,
+			CaddyAdminSocket:   strings.TrimSpace(os.Getenv("CADDY_ADMIN_SOCKET")),
+			StorageDir:         env("ACME_STORAGE_DIR", "/var/lib/registrar/acme"),
+			PrimaryCA:          strings.TrimSpace(os.Getenv("ACME_CA_URL")),
+			FallbackCA:         strings.TrimSpace(os.Getenv("ACME_FALLBACK_CA_URL")),
+			Email:              strings.TrimSpace(os.Getenv("ACME_EMAIL")),
+			CARootFile:         strings.TrimSpace(os.Getenv("ACME_CA_ROOT")),
+			Resolvers:          parseCSV(os.Getenv("ACME_RESOLVERS")),
+			PropagationDelay:   durEnv("ACME_PROPAGATION_DELAY", 0),
+			PropagationTimeout: propTimeoutEnv("ACME_PROPAGATION_TIMEOUT"),
+			Backend:            s.acme,
+			BillingStatusPath:  s.cfg.BillingStatusPath,
+		})
+		if err != nil {
+			log.Fatalf("acme home manager: %v", err)
+		}
+		homeMgr = mgr
+		defer homeMgr.Close()
+	}
+
+	// In embedded tsnet mode, bring up the core node BEFORE starting Headscale
+	// sync, ACME background loops, or the public HTTP server so s.cfg.CoreIP
+	// is populated from the live Tailscale IPv4 before any concurrent reader
+	// (such as /hogman/v1/network) sees it, and before first-boot ./hogman up
+	// waits on TSNET_STATE_DIR/mesh-ip.
+	var em *embeddedMesh
+	if tsnetStateDir != "" {
+		controlURL := env("TSNET_CONTROL_URL", "https://"+s.cfg.PublicHost)
+		hostname := env("TSNET_HOSTNAME", "core")
+		authKeyFile := env("TSNET_AUTH_KEY_FILE", filepath.Join(tsnetStateDir, ".authkey"))
+		portalDir := env("PORTAL_DIR", "/srv/portal")
+		var err error
+		em, err = startEmbeddedMesh(ctx, s, homeMgr, tsnetStateDir, controlURL, hostname, authKeyFile, portalDir)
+		if err != nil {
+			log.Fatalf("embedded mesh: %v", err)
+		}
+	}
+
 	// Wait for Headscale, then take control of policy before serving HTTP.
 	for {
 		if err := s.Sync(ctx); err == nil {
@@ -248,30 +301,6 @@ func serve(s *Service) {
 			}
 		}
 	}()
-
-	var homeMgr *HomeCertManager
-	if homeTLSDir := strings.TrimSpace(os.Getenv("HOME_TLS_DIR")); homeTLSDir != "" {
-		mgr, err := NewHomeCertManager(HomeConfig{
-			Zone:               s.cfg.Zone,
-			HomeTLSDir:         homeTLSDir,
-			CaddyAdminSocket:   strings.TrimSpace(os.Getenv("CADDY_ADMIN_SOCKET")),
-			StorageDir:         env("ACME_STORAGE_DIR", "/var/lib/registrar/acme"),
-			PrimaryCA:          strings.TrimSpace(os.Getenv("ACME_CA_URL")),
-			FallbackCA:         strings.TrimSpace(os.Getenv("ACME_FALLBACK_CA_URL")),
-			Email:              strings.TrimSpace(os.Getenv("ACME_EMAIL")),
-			CARootFile:         strings.TrimSpace(os.Getenv("ACME_CA_ROOT")),
-			Resolvers:          parseCSV(os.Getenv("ACME_RESOLVERS")),
-			PropagationDelay:   durEnv("ACME_PROPAGATION_DELAY", 0),
-			PropagationTimeout: propTimeoutEnv("ACME_PROPAGATION_TIMEOUT"),
-			Backend:            s.acme,
-			BillingStatusPath:  s.cfg.BillingStatusPath,
-		})
-		if err != nil {
-			log.Fatalf("acme home manager: %v", err)
-		}
-		homeMgr = mgr
-		defer homeMgr.Close()
-	}
 
 	if homeMgr != nil {
 		hupCh := make(chan os.Signal, 1)
@@ -305,19 +334,8 @@ func serve(s *Service) {
 		}
 	}()
 
-	var em *embeddedMesh
 	var mesh *http.Server
-	if tsnetStateDir != "" {
-		controlURL := env("TSNET_CONTROL_URL", "https://"+s.cfg.PublicHost)
-		hostname := env("TSNET_HOSTNAME", "core")
-		authKeyFile := env("TSNET_AUTH_KEY_FILE", filepath.Join(tsnetStateDir, ".authkey"))
-		portalDir := env("PORTAL_DIR", "/srv/portal")
-		var err error
-		em, err = startEmbeddedMesh(ctx, s, homeMgr, tsnetStateDir, controlURL, hostname, authKeyFile, portalDir)
-		if err != nil {
-			log.Fatalf("embedded mesh: %v", err)
-		}
-	} else {
+	if tsnetStateDir == "" {
 		mesh = &http.Server{Addr: env("MESH_ADDR", "127.0.0.1:8082"), Handler: MeshHandler(s),
 			ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
 			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
