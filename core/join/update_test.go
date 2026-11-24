@@ -528,4 +528,3 @@ func TestFindAndRetireLegacySameServerPens(t *testing.T) {
 		t.Fatalf("expected unrelated pen dir %s kept, err = %v", otherDir, err)
 	}
 }
-

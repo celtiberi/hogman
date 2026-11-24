@@ -1,0 +1,581 @@
+package main
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"flag"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/caddyserver/certmagic"
+)
+
+func TestRedTeamLoopbackStatusTransportNoLeak(t *testing.T) {
+	if !loopbackStatusTransport.DisableKeepAlives {
+		t.Fatal("loopbackStatusTransport must disable keep-alives to avoid loopback FD leaks")
+	}
+	dir := t.TempDir()
+	zone := "bobo.pens.example.com"
+	token, err := writeStatusToken(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nonce := strings.TrimSpace(r.Header.Get("X-Hogman-Challenge"))
+		if nonce != "" {
+			w.Header().Set("X-Hogman-Proof", computeStatusProof(token, nonce, zone))
+		}
+		_ = json.NewEncoder(w).Encode(agentStatus{Zone: zone, Up: true, IPs: []string{"100.64.0.1"}})
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	cfg := &agentConfig{Zone: zone, ProxyAddr: u.Host}
+
+	// Warm up runtime goroutines, then run 40 status probes.
+	if _, err := agentStateInDir(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	baseG := runtime.NumGoroutine()
+	for i := 0; i < 40; i++ {
+		st, err := agentStateInDir(dir, cfg)
+		if err != nil || !st.Up {
+			t.Fatalf("iter %d: agentStateInDir = (%v, %v)", i, st, err)
+		}
+		state, detail := verifyAgentEndpointDetail(dir, cfg)
+		if state != agentEndpointUp || !detail.verified {
+			t.Fatalf("iter %d: verifyAgentEndpointDetail = (%v, %+v)", i, state, detail)
+		}
+	}
+	// Give short-lived closed sockets a moment to settle.
+	time.Sleep(50 * time.Millisecond)
+	afterG := runtime.NumGoroutine()
+	if afterG-baseG > 10 {
+		t.Fatalf("goroutine leak detected: before=%d after=%d", baseG, afterG)
+	}
+}
+
+func TestRedTeamCLIParseSubcommandFlagValidationAndDoubleDash(t *testing.T) {
+	badCases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"leave dry-run", []string{"leave", "--dry-run", "https://bobo.gate.example.com/join#t=abc"}, "--dry-run"},
+		{"leave dry-run after", []string{"leave", "https://bobo.gate.example.com/join#t=abc", "--dry-run"}, "--dry-run"},
+		{"leave-all dry-run", []string{"leave-all", "--dry-run"}, "--dry-run"},
+		{"uninstall dry-run", []string{"uninstall", "--dry-run", "--yes"}, "--dry-run"},
+		{"share dry-run", []string{"share", "blog", "3000", "--dry-run"}, "--dry-run"},
+		{"share stop dry-run", []string{"share", "stop", "blog", "--dry-run"}, "--dry-run"},
+		{"browser-setup dry-run", []string{"browser-setup", "--dry-run"}, "--dry-run"},
+		{"status pen", []string{"status", "--pen", "bobo.pens.example.com"}, "--pen"},
+		{"update background", []string{"update", "--background"}, "--background"},
+		{"unknown cmd dry-run", []string{"bogus", "--dry-run"}, "--dry-run"},
+	}
+	for _, tc := range badCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, err := parseCLIArgs(tc.args)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("parseCLIArgs(%v) err = %v, want mention of %q", tc.args, err, tc.want)
+			}
+		})
+	}
+
+	// Harmless global flags (--no-open, --verbose, --yes, --control-ca) are accepted
+	// everywhere so test harnesses and scripts (e.g. run.sh) keep working, and #144
+	// commands accept --force.
+	for _, okArgs := range [][]string{
+		{"--no-open", "leave", "bobo"},
+		{"--no-open", "leave", "--force", "bobo"},
+		{"--no-open", "leave-all", "--force", "--yes"},
+		{"--no-open", "uninstall", "--force", "--yes"},
+		{"--no-open", "share", "list"},
+		{"--no-open", "share", "stop", "blog", "--force"},
+		{"--no-open", "update", "--dry-run"},
+		{"--verbose", "status"},
+	} {
+		if _, _, _, err := parseCLIArgs(okArgs); err != nil {
+			t.Fatalf("parseCLIArgs(%v) failed unexpectedly: %v", okArgs, err)
+		}
+	}
+
+	// --help / -h returns flag.ErrHelp with subcommand preserved.
+	for _, tc := range []struct {
+		args []string
+		sub  string
+	}{
+		{[]string{"--help"}, ""},
+		{[]string{"-h"}, ""},
+		{[]string{"share", "--help"}, "share"},
+		{[]string{"update", "-h"}, "update"},
+	} {
+		pos, _, _, err := parseCLIArgs(tc.args)
+		if !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("parseCLIArgs(%v) err = %v, want flag.ErrHelp", tc.args, err)
+		}
+		gotSub := ""
+		if len(pos) > 0 {
+			gotSub = pos[0]
+		}
+		if gotSub != tc.sub {
+			t.Fatalf("parseCLIArgs(%v) sub = %q, want %q", tc.args, gotSub, tc.sub)
+		}
+	}
+
+	// `--` stops option parsing so following dash-prefixed args stay positional.
+	pos, o, _, err := parseCLIArgs([]string{"share", "--", "--dry-run", "./dir"})
+	if err != nil {
+		t.Fatalf("parseCLIArgs with --: %v", err)
+	}
+	if o.dryRun || strings.Join(pos, ",") != "share,--dry-run,./dir" {
+		t.Fatalf("got pos=%v dryRun=%v", pos, o.dryRun)
+	}
+
+	// `--note --` consumes `--` as the flag's value, NOT as end-of-options.
+	pos, o, _, err = parseCLIArgs([]string{"share", "--note", "--", "blog", "3000", "--background"})
+	if err != nil {
+		t.Fatalf("parseCLIArgs(--note --): %v", err)
+	}
+	if o.note != "--" || !o.noteSet || !o.background || strings.Join(pos, ",") != "share,blog,3000" {
+		t.Fatalf("got pos=%v note=%q noteSet=%v bg=%v", pos, o.note, o.noteSet, o.background)
+	}
+
+	// Valid --force on share stop.
+	pos, o, _, err = parseCLIArgs([]string{"share", "stop", "blog", "--force", "--pen", "bobo.pens.example.com"})
+	if err != nil || !o.force || o.pen != "bobo.pens.example.com" || strings.Join(pos, ",") != "share,stop,blog" {
+		t.Fatalf("share stop --force: pos=%v o=%+v err=%v", pos, o, err)
+	}
+}
+
+func TestRedTeamShareHandlerRejectsOpaqueURIAndHidesDotfiles(t *testing.T) {
+	// 1. Opaque URI SSRF guard on URL shares.
+	var hits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	h, closeH, err := shareHandler(&shareConfig{
+		Name:   "app",
+		Zone:   "farm.pens.example.com",
+		Target: upstream.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeH()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.URL = &url.URL{Scheme: "x", Opaque: "//127.0.0.1:9999/admin"}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("opaque URI status = %d, want 400", rec.Code)
+	}
+	if hits != 0 {
+		t.Fatalf("opaque URI reached upstream (%d hits)", hits)
+	}
+
+	// 2. Folder shares hide dotfiles (.git, .env, nested .secret) while serving normal files & .well-known.
+	dir := t.TempDir()
+	for rel, content := range map[string]string{
+		"index.html":               "hello",
+		".env":                     "SECRET=1",
+		".git/config":              "[core]",
+		"sub/.hidden":              "nope",
+		".well-known/security.txt": "Contact: security@example.com",
+	} {
+		p := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fh, closeFH, err := shareHandler(&shareConfig{Name: "site", Zone: "farm.pens.example.com", Target: dir, Folder: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFH()
+
+	for _, denied := range []string{"/.env", "/.git/config", "/sub/.hidden"} {
+		r := httptest.NewRequest(http.MethodGet, denied, nil)
+		w := httptest.NewRecorder()
+		fh.ServeHTTP(w, r)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("dotfile %q status = %d, want 404", denied, w.Code)
+		}
+	}
+	for _, allowed := range []string{"/", "/.well-known/security.txt"} {
+		r := httptest.NewRequest(http.MethodGet, allowed, nil)
+		w := httptest.NewRecorder()
+		fh.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("allowed path %q status = %d, want 200", allowed, w.Code)
+		}
+	}
+
+	// Directory listing (no index.html in sub/) must hide .hidden while showing visible.txt.
+	if err := os.WriteFile(filepath.Join(dir, "sub", "visible.txt"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	listReq := httptest.NewRequest(http.MethodGet, "/sub/", nil)
+	listRec := httptest.NewRecorder()
+	fh.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("dir listing status = %d, want 200", listRec.Code)
+	}
+	body := listRec.Body.String()
+	if strings.Contains(body, ".hidden") {
+		t.Fatalf("dir listing leaked dotfile: %s", body)
+	}
+	if !strings.Contains(body, "visible.txt") {
+		t.Fatalf("dir listing missing visible.txt: %s", body)
+	}
+}
+
+func TestRedTeamJoinRollbackAndReenrollPreserveInvite(t *testing.T) {
+	// 1. Unspent authkey on disk: existingPenNeedsReenroll is false (retry existing key),
+	//    and shouldRollbackFreshJoin is false on Ctrl-C / timeout so invite is never burned.
+	dir := t.TempDir()
+	cfg := &agentConfig{Zone: "bobo.pens.example.com", LoginServer: "https://bobo.gate.example.com", ProxyAddr: "127.0.0.1:18123"}
+	_ = cfg.save(dir)
+	_ = os.WriteFile(filepath.Join(dir, "authkey"), []byte("unspent-key"), 0o600)
+
+	if existingPenNeedsReenroll(dir, cfg) {
+		t.Fatal("existingPenNeedsReenroll should be false when an unspent authkey exists on disk")
+	}
+	if shouldRollbackFreshJoin(true, dir, errorf("cancelled before the pen connection came up")) {
+		t.Fatal("shouldRollbackFreshJoin must not wipe an unspent authkey on Ctrl-C or timeout")
+	}
+	if !shouldRollbackFreshJoin(true, dir, &agentJoinError{msg: "rejected"}) {
+		t.Fatal("shouldRollbackFreshJoin should roll back on definite agentJoinError")
+	}
+	// Once authkey is spent (removed), definite post-enrollment failure may roll back.
+	_ = os.Remove(filepath.Join(dir, "authkey"))
+	if !shouldRollbackFreshJoin(true, dir, errorf("portal failed")) {
+		t.Fatal("shouldRollbackFreshJoin should roll back once authkey is spent")
+	}
+
+	// 2. reenrollExistingPen must NOT stop agent or wipe node/ when redeem fails.
+	nodeMarker := filepath.Join(dir, "node", "state.json")
+	_ = os.MkdirAll(filepath.Dir(nodeMarker), 0o700)
+	_ = os.WriteFile(nodeMarker, []byte("keep"), 0o600)
+	stopped := false
+	n := &networkInfo{Zone: cfg.Zone, LoginServer: cfg.LoginServer, DNSServer: "100.64.0.1"}
+	_, _, err := reenrollExistingPen(dir, cfg, n, "laptop", options{},
+		func() (string, string, error) { return "", "", errorf("invite claimed") },
+		func(string, *agentConfig) { stopped = true },
+	)
+	if err == nil {
+		t.Fatal("expected redeem error")
+	}
+	if stopped {
+		t.Fatal("reenrollExistingPen stopped agent before redeem succeeded")
+	}
+	if _, statErr := os.Stat(nodeMarker); statErr != nil {
+		t.Fatalf("reenrollExistingPen wiped node/ despite failed redeem: %v", statErr)
+	}
+
+	// 3. When redeem succeeds, reenrollExistingPen stops old agent, clears node/, writes new authkey.
+	newCfg, handle, err := reenrollExistingPen(dir, cfg, n, "laptop", options{},
+		func() (string, string, error) { return "fresh-key", "alice", nil },
+		func(string, *agentConfig) { stopped = true },
+	)
+	if err != nil || !stopped || handle != "alice" || newCfg.ProxyAddr != cfg.ProxyAddr {
+		t.Fatalf("reenrollExistingPen success: cfg=%+v handle=%q stopped=%v err=%v", newCfg, handle, stopped, err)
+	}
+	if _, statErr := os.Stat(nodeMarker); !os.IsNotExist(statErr) {
+		t.Fatal("reenrollExistingPen did not clear stale node/ after successful redeem")
+	}
+	keyBytes, err := os.ReadFile(filepath.Join(dir, "authkey"))
+	if err != nil || string(keyBytes) != "fresh-key" {
+		t.Fatalf("authkey after reenroll = %q (err=%v), want fresh-key", keyBytes, err)
+	}
+}
+
+func TestRedTeamInstalledBinaryDirect(t *testing.T) {
+	dir := t.TempDir()
+	got, err := installedBinary(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(got)
+	if err != nil || fi.Size() == 0 {
+		t.Fatalf("installedBinary produced invalid file %s (err=%v)", got, err)
+	}
+}
+
+func TestRedTeamCopyExecutableAtomicAndSymlinkSafe(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "orig")
+	want := []byte("#!/bin/sh\necho ok\n")
+	if err := os.WriteFile(src, want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(src, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if !sameFilePath(src, link) {
+		t.Fatal("sameFilePath should recognize symlink to same file")
+	}
+	dst := filepath.Join(dir, "copy")
+	if err := copyExecutableAtomic(link, dst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || string(got) != string(want) {
+		t.Fatalf("copied binary = %q (err=%v), want %q", got, err, want)
+	}
+}
+
+func TestRedTeamParseLinkAndUpdateSourceNormalization(t *testing.T) {
+	l, err := ParseLink("  'https://BOBO.GATE.EXAMPLE.COM/join#t=abc'  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Host != "bobo.gate.example.com" || l.InviteToken != "abc" {
+		t.Fatalf("ParseLink normalized = %+v", l)
+	}
+	base, host, err := parseUpdateSourceURL(`"HTTPS://BOBO.GATE.EXAMPLE.COM"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base != "https://bobo.gate.example.com" || host != "bobo.gate.example.com" {
+		t.Fatalf("parseUpdateSourceURL = (%q, %q)", base, host)
+	}
+	c, err := updateHTTPClient("", "", "bobo.gate.example.com", 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, "https://BOBO.GATE.EXAMPLE.COM/join/dl/SHA256SUMS", nil)
+	if err := c.CheckRedirect(req, []*http.Request{req}); err != nil {
+		t.Fatalf("case-insensitive same-host redirect rejected: %v", err)
+	}
+}
+
+func TestRedTeamAskPreservesBufferedStdin(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdin
+	os.Stdin = r
+	defer func() {
+		os.Stdin = orig
+		_ = r.Close()
+	}()
+	_, _ = w.WriteString("alice\nbob\n")
+	_ = w.Close()
+
+	if got := ask(""); got != "alice" {
+		t.Fatalf("first ask = %q, want alice", got)
+	}
+	if got := ask(""); got != "bob" {
+		t.Fatalf("second ask = %q, want bob", got)
+	}
+}
+
+func makeSelfSignedPEM(t *testing.T, dnsName string, notBefore, notAfter time.Time) (certPEM, keyPEM []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: dnsName},
+		DNSNames:     []string{dnsName},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM
+}
+
+func TestRedTeamACMEFallbackUsedWhenPrimaryExpired(t *testing.T) {
+	host := "blog.bobo.pens.example.com"
+	cm, err := newShareCertManager(shareACMEConfig{
+		Zone:       "bobo.pens.example.com",
+		Host:       host,
+		StorageDir: t.TempDir(),
+		PrimaryCA:  "https://primary.acme.example.com/directory",
+		FallbackCA: "https://fallback.acme.example.com/directory",
+		HTTPClient: &http.Client{Timeout: 5 * time.Second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cm.Close()
+
+	now := time.Now()
+	expCert, expKey := makeSelfSignedPEM(t, host, now.Add(-48*time.Hour), now.Add(-1*time.Hour))
+	valCert, valKey := makeSelfSignedPEM(t, host, now.Add(-1*time.Hour), now.Add(30*24*time.Hour))
+
+	ctx := context.Background()
+	primKey := cm.primaryIss.IssuerKey()
+	fbKey := cm.fallbackIss.IssuerKey()
+	meta := []byte(`{"sans":["` + host + `"]}`)
+	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SiteCert(primKey, host), expCert); err != nil {
+		t.Fatal(err)
+	}
+	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SitePrivateKey(primKey, host), expKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SiteMeta(primKey, host), meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SiteCert(fbKey, host), valCert); err != nil {
+		t.Fatal(err)
+	}
+	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SitePrivateKey(fbKey, host), valKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SiteMeta(fbKey, host), meta); err != nil {
+		t.Fatal(err)
+	}
+
+	gotCfg, err := cm.getConfigForCert(certmagic.Certificate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCfg != cm.fallbackCfg {
+		t.Fatalf("getConfigForCert selected primary despite expired primary cert and valid fallback cert")
+	}
+	if !cm.ensureCachedLocked(ctx) {
+		t.Fatal("ensureCachedLocked should load the valid fallback cert even when an expired primary cert exists on disk")
+	}
+}
+
+func TestRedTeamNonPositivePIDGuards(t *testing.T) {
+	if processAlive(0) || processAlive(-1) {
+		t.Fatal("processAlive must return false for pid <= 0")
+	}
+	dir := t.TempDir()
+	for _, raw := range []string{"0", "-1", "not-a-pid"} {
+		if err := os.WriteFile(filepath.Join(dir, "share.pid"), []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if pid := sharePID(dir); pid != 0 {
+			t.Fatalf("sharePID(%q) = %d, want 0", raw, pid)
+		}
+		pidPath := filepath.Join(dir, "agent.pid")
+		if err := os.WriteFile(pidPath, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stopDetached(dir)
+		if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+			t.Fatalf("stopDetached(%q) did not remove stale agent.pid", raw)
+		}
+	}
+}
+
+func TestRedTeamTailscaleStatusNonJSONNoPanic(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script test")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "tailscale")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho 'tailscaled is not running'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ts := &Tailscale{bin: script}
+	if _, err := ts.Status(); err == nil {
+		t.Fatal("expected error for non-JSON tailscale status output")
+	}
+}
+
+func TestRedTeamHostnameAndPenTargetValidation(t *testing.T) {
+	if got := sanitizeHostname("My MacBook Pro.local"); got != "my-macbook-pro" {
+		t.Fatalf("sanitizeHostname = %q, want my-macbook-pro", got)
+	}
+	if got := sanitizeHostname("!!!"); got != "" {
+		t.Fatalf("sanitizeHostname(!!!) = %q, want empty", got)
+	}
+
+	base := t.TempDir()
+	// Valid pen dir
+	validDir := filepath.Join(base, "bobo.pens.example.com")
+	_ = os.MkdirAll(validDir, 0o700)
+	_ = (&agentConfig{Zone: "bobo.pens.example.com", LoginServer: "https://bobo.gate.example.com", ProxyAddr: "127.0.0.1:18000"}).save(validDir)
+
+	// Mismatched Zone vs dir name
+	badDir := filepath.Join(base, "other.pens.example.com")
+	_ = os.MkdirAll(badDir, 0o700)
+	_ = (&agentConfig{Zone: "evil.pens.example.com", LoginServer: "https://evil.gate.example.com", ProxyAddr: "127.0.0.1:18001"}).save(badDir)
+
+	// Corrupt JSON
+	corruptDir := filepath.Join(base, "broken.pens.example.com")
+	_ = os.MkdirAll(corruptDir, 0o700)
+	_ = os.WriteFile(filepath.Join(corruptDir, "config.json"), []byte("{not json"), 0o600)
+
+	pens := loadPenTargets(base)
+	if len(pens) != 1 || pens[0].zone != "bobo.pens.example.com" {
+		t.Fatalf("loadPenTargets = %+v, want only bobo.pens.example.com", pens)
+	}
+	bad := corruptPenConfigs(base)
+	if len(bad) != 2 {
+		t.Fatalf("corruptPenConfigs = %v, want 2 bad entries", bad)
+	}
+}
+
+func TestRedTeamShareTargetReservedNamesAndSystemdSingleLine(t *testing.T) {
+	for _, bad := range []string{
+		"http://user:pass@localhost:8080",
+		"http://:8080",
+		"http://localhost:99999",
+		"http://localhost:0",
+	} {
+		if _, _, err := shareTarget(bad); err == nil {
+			t.Fatalf("shareTarget(%q) succeeded, want error", bad)
+		}
+	}
+	if target, folder, err := shareTarget("http://127.0.0.1:8080/"); err != nil || folder || target != "http://127.0.0.1:8080" {
+		t.Fatalf("shareTarget valid = (%q, %v, %v)", target, folder, err)
+	}
+
+	for _, res := range []string{"home", "www", "admin", "nodes", "ns", "ns1", "ns42", "sub.home", "x.admin"} {
+		if !isReservedShareName(res) {
+			t.Fatalf("isReservedShareName(%q) = false, want true", res)
+		}
+	}
+	for _, okName := range []string{"blog", "my-notes", "app.blog", "nsa"} {
+		if isReservedShareName(okName) {
+			t.Fatalf("isReservedShareName(%q) = true, want false", okName)
+		}
+	}
+
+	got := systemdSingleLine("line1\nExecStart=/bin/evil\rline2")
+	if strings.ContainsAny(got, "\r\n") {
+		t.Fatalf("systemdSingleLine retained newline: %q", got)
+	}
+}

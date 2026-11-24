@@ -40,8 +40,8 @@ options:
 `
 
 const (
-	maxSHA256SUMSBytes = 64 << 10   // 64 KiB
-	maxBinaryBytes     = 256 << 20  // 256 MiB
+	maxSHA256SUMSBytes = 64 << 10  // 64 KiB
+	maxBinaryBytes     = 256 << 20 // 256 MiB
 )
 
 func platformBinaryName(goos, goarch string) (string, error) {
@@ -69,7 +69,7 @@ func installedBinaryName(goos string) string {
 }
 
 func parseUpdateSourceURL(raw string) (baseURL, host string, err error) {
-	raw = strings.TrimSpace(raw)
+	raw = trimMatchingQuotes(raw)
 	if raw == "" {
 		return "", "", errorf("empty update source")
 	}
@@ -92,7 +92,8 @@ func parseUpdateSourceURL(raw string) (baseURL, host string, err error) {
 	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 		return "", "", errorf("expected https://<host> or a full /join link, got %q", raw)
 	}
-	return "https://" + u.Host, u.Host, nil
+	host = strings.ToLower(u.Host)
+	return "https://" + host, host, nil
 }
 
 func parseSHA256SUMS(data []byte, wantFile string) (string, error) {
@@ -157,7 +158,7 @@ func updateHTTPClient(caFile, caPEM, expectedHost string, timeout time.Duration)
 			if len(via) >= 5 {
 				return errors.New("too many redirects")
 			}
-			if req.URL.Scheme != "https" || req.URL.Host != expectedHost {
+			if !strings.EqualFold(req.URL.Scheme, "https") || !strings.EqualFold(req.URL.Host, expectedHost) {
 				return fmt.Errorf("refusing redirect to %s", req.URL.Redacted())
 			}
 			return nil
@@ -332,7 +333,8 @@ func loadPenTargets(configBase string) []penTarget {
 		sort.Strings(pattern)
 		for _, f := range pattern {
 			dir := filepath.Dir(f)
-			if c, err := loadAgentConfig(dir); err == nil && c.LoginServer != "" {
+			if c, err := loadAgentConfig(dir); err == nil && c.LoginServer != "" &&
+				c.Zone != "" && c.Zone == filepath.Base(dir) && validPACZone(c.Zone) {
 				pens = append(pens, penTarget{zone: c.Zone, dir: dir, cfg: c})
 			}
 		}
@@ -347,7 +349,9 @@ func loadLocalTargets(configBase, sharesDir string) ([]penTarget, []shareTargetD
 		sort.Strings(pattern)
 		for _, f := range pattern {
 			dir := filepath.Dir(f)
-			if c, err := loadShare(dir); err == nil && c.LoginServer != "" {
+			if c, err := loadShare(dir); err == nil && c.LoginServer != "" &&
+				c.Zone != "" && c.Name != "" &&
+				c.Zone == filepath.Base(filepath.Dir(dir)) && c.Name == filepath.Base(dir) {
 				shares = append(shares, shareTargetDir{zone: c.Zone, name: c.Name, dir: dir, cfg: c})
 			}
 		}
@@ -502,7 +506,7 @@ func agentRunning(dir string, c *agentConfig) bool {
 		return false
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	return err == nil && processAlive(pid)
+	return err == nil && pid > 0 && processAlive(pid)
 }
 
 type penUpdateOps struct {
@@ -525,11 +529,10 @@ func defaultPenUpdateOps() penUpdateOps {
 	}
 }
 
-func restartPenAgent(p *penTarget, _ string, hadService bool, o options) error {
-	restartOpts := o
-	restartOpts.noService = o.noService || !hadService
+func restartPenAgent(p *penTarget, binPath string, hadService bool, o options) error {
+	noService := o.noService || !hadService
 	logPath := filepath.Join(p.dir, "agent.log")
-	if err := startAgent(p.dir, p.cfg, restartOpts); err != nil {
+	if err := startExistingBinary(binPath, p.dir, p.cfg, noService); err != nil {
 		return errorf("updated %s, but its new agent could not start: %v.\n"+
 			"  Log: %s\n"+
 			"  To get back on: run 'hogman-join update' again, or re-run hogman-join with your link.",
@@ -610,9 +613,9 @@ func restartShareService(s *shareTargetDir, binPath string, o options, updated b
 	if err != nil {
 		return err
 	}
-	if err := waitShareBackground(s.dir, s.cfg, managed, pid, 45*time.Second, func() {
-		stopShare(s.dir, s.cfg)
-	}); err != nil {
+	// Never pass stopShare as stopFn during update: a slow reconnect or transient
+	// network hiccup must not unregister a previously working share's login service.
+	if err := waitShareBackground(s.dir, s.cfg, managed, pid, 90*time.Second, nil); err != nil {
 		return err
 	}
 	if updated {
@@ -853,6 +856,22 @@ func updateCmd(args []string, o options) error {
 	}
 
 	cleanupLegacyRootsForUpdate(plan, false, cleanupOps)
+
+	// Warn if other installed pens were not part of this update plan (e.g. --pen
+	// or an explicit host matching only one of several pens).
+	inPlan := map[string]bool{}
+	for _, p := range plan.pens {
+		inPlan[p.zone] = true
+	}
+	var skipped []string
+	for _, p := range loadPenTargets(configBase) {
+		if !inPlan[p.zone] {
+			skipped = append(skipped, p.zone)
+		}
+	}
+	if len(skipped) > 0 {
+		note("other pens were not updated: %s (run 'hogman-join update --pen <zone>' for each)", strings.Join(skipped, ", "))
+	}
 
 	verLine := ""
 	if out, err := exec.Command(selfPath, "--version").Output(); err == nil {

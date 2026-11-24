@@ -49,6 +49,8 @@ usage:
   hogman-join browser-setup           register the browser extension native messaging host (no sudo)
   hogman-join share NAME WHAT         put a port or a folder on the pen over HTTPS
                                       (hogman-join share --help for more)
+  hogman-join version                 print version and platform
+  hogman-join help [share|update]     show usage
 
 options:
   --handle NAME     the name you want on the network (invite links only; asked if missing)
@@ -57,8 +59,10 @@ options:
   --no-system-proxy don't change this computer's automatic proxy setting
   --dry-run         check the link and the network, then stop without changing anything
   --no-open         don't open the portal in a browser at the end
+  --yes             answer prompts automatically where supported
   --verbose         show the commands being run
-  --force           leave: clean up a pen whose server can't be reached (gone for good)
+  --force           leave/share stop: override safety checks or clean up an unreachable pen
+  --version         print version and platform
   --control-ca FILE extra certificate to trust for the public control server
                     (test networks with a self-signed control host only)
 
@@ -68,29 +72,122 @@ Quote the link: it contains '#' and '&'.
 type options struct {
 	handle, hostname, controlCA string
 	yes, dryRun, noOpen         bool
-	force                       bool // leave: clean up a pen whose server can't be reached
+	force                       bool // leave/uninstall/share stop: override checks or clean up unreachable pen
 	alongside                   bool // accepted for old scripts; it's the only way now
 	noService, noSystemProxy    bool
-	pen                         string // share: which pen
+	pen                         string // share/update: which pen
 	background                  bool   // share: keep running after the window closes
 	note                        string // share: one-line note for the pen directory
 	noteSet                     bool
 	chromeID                    string // browser-setup: optional unpacked Chrome extension ID
 	firefoxID                   string // browser-setup: optional Firefox Gecko extension ID
+	seenFlags                   map[string]bool
+}
+
+func usageForSubcmd(subcmd string) string {
+	switch subcmd {
+	case "share":
+		return shareUsage
+	case "update":
+		return updateUsage
+	default:
+		return usageText
+	}
+}
+
+func isBoolFlag(fs *flag.FlagSet, name string) bool {
+	f := fs.Lookup(name)
+	if f == nil {
+		return false
+	}
+	type boolFlagger interface{ IsBoolFlag() bool }
+	bf, ok := f.Value.(boolFlagger)
+	return ok && bf.IsBoolFlag()
+}
+
+func validateSubcommandFlags(pos []string, o options) error {
+	if len(o.seenFlags) == 0 || len(pos) == 0 {
+		return nil
+	}
+	// Harmless global flags are accepted everywhere so scripts (like e2e
+	// harnesses prefixing --no-open) keep working. Only reject flags that
+	// would be unsafe or misleading if silently ignored (e.g. --dry-run on a
+	// destructive command, --force where it doesn't apply, or action flags on
+	// an unrelated subcommand).
+	sub := ""
+	var allowed map[string]bool
+	switch pos[0] {
+	case "leave":
+		sub = "leave"
+		allowed = map[string]bool{"force": true}
+	case "leave-all", "uninstall":
+		sub = pos[0]
+		allowed = map[string]bool{"force": true}
+	case "update":
+		sub = "update"
+		allowed = map[string]bool{"pen": true, "dry-run": true, "no-service": true}
+	case "share":
+		if len(pos) >= 2 && pos[1] == "list" {
+			sub = "share list"
+			allowed = map[string]bool{"pen": true}
+		} else if len(pos) >= 2 && pos[1] == "stop" {
+			sub = "share stop"
+			allowed = map[string]bool{"pen": true, "force": true}
+		} else {
+			sub = "share"
+			allowed = map[string]bool{"note": true, "background": true, "no-service": true, "pen": true}
+		}
+	case "status":
+		sub = "status"
+		allowed = map[string]bool{}
+	case "browser-setup":
+		sub = "browser-setup"
+		allowed = map[string]bool{"chrome-id": true, "firefox-id": true}
+	case "help", "version", "agent", "__agent-logout", "__share-run":
+		sub = pos[0]
+		allowed = map[string]bool{}
+	default:
+		if !strings.Contains(trimMatchingQuotes(pos[0]), "://") {
+			// Unknown command; reject unsafe flags like --dry-run instead of
+			// treating it as a join.
+			sub = pos[0]
+			allowed = map[string]bool{}
+		} else {
+			sub = "join"
+			allowed = map[string]bool{
+				"handle": true, "hostname": true, "dry-run": true,
+				"no-service": true, "no-system-proxy": true,
+			}
+		}
+	}
+	harmless := map[string]bool{
+		"no-open": true, "verbose": true, "yes": true,
+		"control-ca": true, "alongside": true,
+	}
+	var bad []string
+	for name := range o.seenFlags {
+		if !harmless[name] && !allowed[name] {
+			bad = append(bad, "--"+name)
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	// Deterministic order for error messages and tests.
+	for i := 0; i < len(bad); i++ {
+		for j := i + 1; j < len(bad); j++ {
+			if bad[j] < bad[i] {
+				bad[i], bad[j] = bad[j], bad[i]
+			}
+		}
+	}
+	return errorf("%s is not supported with %q", strings.Join(bad, ", "), sub)
 }
 
 func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err error) {
 	fs := flag.NewFlagSet("hogman-join", flag.ContinueOnError)
-	fs.Usage = func() {
-		switch {
-		case len(pos) > 0 && pos[0] == "share":
-			fmt.Print(shareUsage)
-		case len(pos) > 0 && pos[0] == "update":
-			fmt.Print(updateUsage)
-		default:
-			fmt.Print(usageText)
-		}
-	}
+	fs.SetOutput(os.Stderr)
+	fs.Usage = func() {} // printed explicitly by caller so --help goes to stdout with exit 0
 	fs.StringVar(&o.handle, "handle", "", "")
 	fs.StringVar(&o.hostname, "hostname", "", "")
 	fs.StringVar(&o.controlCA, "control-ca", "", "")
@@ -111,27 +208,58 @@ func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err 
 	fs.StringVar(&o.firefoxID, "firefox-id", "", "")
 	ver := fs.Bool("version", false, "")
 
-	// Allow options before or after the link / share target.
-	args := raw
-	for len(args) > 0 {
-		if err := fs.Parse(args); err != nil {
+	seen := map[string]bool{}
+	// Allow options before or after the link / share target, while honoring `--`
+	// as strict end-of-options and not confusing flag values (like `--note --`).
+	for i := 0; i < len(raw); {
+		arg := raw[i]
+		if arg == "--" {
+			pos = append(pos, raw[i+1:]...)
+			break
+		}
+		if len(arg) < 2 || arg[0] != '-' {
+			pos = append(pos, arg)
+			i++
+			continue
+		}
+		name := strings.TrimPrefix(arg, "-")
+		name = strings.TrimPrefix(name, "-")
+		hasEq := strings.Contains(name, "=")
+		if eq := strings.IndexByte(name, '='); eq >= 0 {
+			name = name[:eq]
+		}
+		step := 1
+		if !hasEq && fs.Lookup(name) != nil && !isBoolFlag(fs, name) && i+1 < len(raw) {
+			step = 2
+		}
+		if err := fs.Parse(raw[i : i+step]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				sub := ""
+				if len(pos) > 0 {
+					sub = pos[0]
+				}
+				return []string{sub}, o, false, flag.ErrHelp
+			}
 			return nil, o, false, err
 		}
 		fs.Visit(func(f *flag.Flag) {
+			seen[f.Name] = true
 			if f.Name == "note" {
 				o.noteSet = true
 			}
 		})
-		if fs.NArg() == 0 {
-			break
-		}
-		pos = append(pos, fs.Arg(0))
-		args = fs.Args()[1:]
+		i += step
 	}
+	o.seenFlags = seen
 	if *gone {
 		return nil, o, false, errorf("--tailscale no longer exists: every computer joins through Hogman's own connection,\n" +
 			"  which carries HTTPS to the pen and nothing else. Run the same command without it.\n" +
 			"  Why: https://hogman.network/docs/faq.html#not")
+	}
+	if !*ver {
+		if err := validateSubcommandFlags(pos, o); err != nil {
+			return nil, o, false, err
+		}
 	}
 	return pos, o, *ver, nil
 }
@@ -143,14 +271,32 @@ func main() {
 	}
 	pos, o, showVersion, err := parseCLIArgs(os.Args[1:])
 	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			sub := ""
+			if len(pos) > 0 {
+				sub = pos[0]
+			}
+			fmt.Print(usageForSubcmd(sub))
+			return
+		}
 		var u *userError
 		if errors.As(err, &u) {
 			fmt.Fprintf(os.Stderr, "\n✗ %s\n", u.msg)
+		} else {
+			fmt.Fprint(os.Stderr, usageText)
 		}
 		os.Exit(2)
 	}
-	if showVersion {
+	if showVersion || (len(pos) == 1 && pos[0] == "version") {
 		fmt.Println("hogman-join", version, runtime.GOOS+"/"+runtime.GOARCH)
+		return
+	}
+	if len(pos) >= 1 && pos[0] == "help" {
+		sub := ""
+		if len(pos) >= 2 {
+			sub = pos[1]
+		}
+		fmt.Print(usageForSubcmd(sub))
 		return
 	}
 	switch {
@@ -181,8 +327,12 @@ func main() {
 		err = updateCmd(pos[1:], o)
 	case len(pos) >= 1 && pos[0] == "share":
 		err = shareCmd(pos[1:], o)
-	case len(pos) == 1 && pos[0] == "status":
-		err = statusCmd()
+	case len(pos) >= 1 && pos[0] == "status":
+		if len(pos) != 1 {
+			err = errorf("usage: hogman-join status")
+		} else {
+			err = statusCmd()
+		}
 	case len(pos) >= 1 && pos[0] == "browser-setup":
 		err = browserSetupCmd(pos[1:], o)
 	case len(pos) >= 1 && pos[0] == "leave":
@@ -192,9 +342,14 @@ func main() {
 	case len(pos) >= 1 && pos[0] == "uninstall":
 		err = uninstallCmd(pos[1:], o)
 	case len(pos) == 1:
+		trimmed := trimMatchingQuotes(pos[0])
+		if !strings.Contains(trimmed, "://") {
+			fmt.Fprintf(os.Stderr, "\n✗ unknown command %q (run 'hogman-join --help' for usage)\n", pos[0])
+			os.Exit(2)
+		}
 		err = join(pos[0], o)
 	default:
-		fmt.Print(usageText)
+		fmt.Fprint(os.Stderr, usageText)
 		os.Exit(2)
 	}
 	if err != nil {
@@ -418,11 +573,25 @@ func (e *redeemError) Error() string { return e.msg }
 
 var handleRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`)
 
+var nonHostnameRE = regexp.MustCompile(`[^a-z0-9-]+`)
+
+func sanitizeHostname(raw string) string {
+	h := strings.ToLower(strings.TrimSpace(raw))
+	h = strings.Split(h, ".")[0]
+	h = nonHostnameRE.ReplaceAllString(h, "-")
+	h = strings.Trim(h, "-")
+	if len(h) > 63 {
+		h = strings.TrimRight(h[:63], "-")
+	}
+	return h
+}
+
 func defaultHostname() string {
 	h, _ := os.Hostname()
-	h = strings.ToLower(strings.Split(h, ".")[0])
-	h = regexp.MustCompile(`[^a-z0-9-]+`).ReplaceAllString(h, "-")
-	return strings.Trim(h, "-")
+	if h = sanitizeHostname(h); h != "" {
+		return h
+	}
+	return "device"
 }
 
 // ------------------------------------------------------------------- join --

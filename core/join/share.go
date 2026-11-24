@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -55,6 +56,7 @@ options:
   --background   keep running in the background and start automatically after a restart
   --no-service   with --background, don't register a login item, just run in the background
   --pen ZONE     which pen, if this computer is on more than one
+  --force        with stop, remove local files even if the pen cannot be reached
 `
 
 type shareConfig struct {
@@ -122,7 +124,24 @@ func allShares(zone string) []string {
 	return out
 }
 
-var shareNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?){0,3}$`)
+var (
+	shareNameRE      = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?){0,3}$`)
+	reservedShareNS  = regexp.MustCompile(`^ns[0-9]*$`)
+	reservedShareTop = map[string]bool{
+		"home": true, "ns": true, "registrar": true,
+		"search": true, "nodes": true, "www": true, "join": true, "admin": true,
+	}
+)
+
+func isReservedShareName(name string) bool {
+	labels := strings.Split(name, ".")
+	for _, l := range labels {
+		if l == "_acme-challenge" || reservedShareNS.MatchString(l) {
+			return true
+		}
+	}
+	return reservedShareTop[labels[len(labels)-1]]
+}
 
 // shareTarget reads WHAT: a port, a local web address or a folder.
 func shareTarget(what string) (target string, folder bool, err error) {
@@ -134,8 +153,17 @@ func shareTarget(what string) (target string, folder bool, err error) {
 	}
 	if strings.HasPrefix(what, "http://") || strings.HasPrefix(what, "https://") {
 		u, err := url.Parse(what)
-		if err != nil || u.Host == "" {
+		if err != nil || u.Host == "" || u.Hostname() == "" {
 			return "", false, errorf("%q is not a web address", what)
+		}
+		if u.User != nil {
+			return "", false, errorf("the share target must not contain credentials")
+		}
+		if p := u.Port(); p != "" {
+			n, perr := strconv.Atoi(p)
+			if perr != nil || n < 1 || n > 65535 {
+				return "", false, errorf("%q has an invalid port number %q", what, p)
+			}
 		}
 		return strings.TrimSuffix(u.String(), "/"), false, nil
 	}
@@ -153,19 +181,26 @@ func shareTarget(what string) (target string, folder bool, err error) {
 // ------------------------------------------------------------- commands --
 
 func shareCmd(args []string, o options) error {
-	switch {
-	case len(args) == 1 && args[0] == "list":
-		return shareList()
-	case len(args) == 2 && args[0] == "stop":
+	if len(args) >= 1 && args[0] == "list" {
+		if len(args) != 1 {
+			return errorf("usage: hogman-join share list [--pen ZONE]")
+		}
+		return shareList(o.pen)
+	}
+	if len(args) >= 1 && args[0] == "stop" {
+		if len(args) != 2 {
+			return errorf("usage: hogman-join share stop NAME [--pen ZONE] [--force]")
+		}
 		return shareStop(args[1], o)
-	case len(args) == 2 || len(args) == 3:
+	}
+	if len(args) == 2 || len(args) == 3 {
 		link := ""
 		if len(args) == 3 {
 			link = args[2]
 		}
 		return shareStart(args[0], args[1], link, o)
 	}
-	fmt.Print(shareUsage)
+	fmt.Fprint(os.Stderr, shareUsage)
 	os.Exit(2)
 	return nil
 }
@@ -184,6 +219,9 @@ func shareStart(name, what, rawLink string, o options) error {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if !shareNameRE.MatchString(name) || name == "list" || name == "stop" {
 		return errorf("%q can't be a name: use lowercase letters, digits and dashes, like blog or my-notes", name)
+	}
+	if isReservedShareName(name) {
+		return errorf("%q is reserved by the network and can't be used as a share name", name)
 	}
 	target, folder, err := shareTarget(what)
 	if err != nil {
@@ -204,13 +242,29 @@ func shareStart(name, what, rawLink string, o options) error {
 
 	dir := shareDir(cfg.Zone, name)
 	var prev *shareConfig
+	fresh := true
 	if old, err := loadShare(dir); err == nil {
 		if pid := sharePID(dir); pid != 0 {
 			return errorf("%s is already being shared from this computer (process %d). Stop it first: hogman-join share stop %s", old.url(), pid, name)
 		}
-		key = "" // this share already has its device; reuse it
-		cfg.ControlCA = old.ControlCA
-		prev = old
+		_, hasUnspentKey := os.Stat(filepath.Join(dir, "authkey"))
+		st := readShareStatus(dir)
+		staleDevice := hasUnspentKey == nil || (st.State == "error" && st.Error != "" && isPermanentNodeError(false, "", errors.New(st.Error)))
+		if rawLink != "" && key != "" && staleDevice {
+			// Replacing a dead/aborted share with a fresh server link.
+			_ = os.RemoveAll(filepath.Join(dir, "node"))
+			_ = os.RemoveAll(filepath.Join(dir, "acme"))
+			_ = os.Remove(filepath.Join(dir, "authkey"))
+			if cfg.ControlCA == "" {
+				cfg.ControlCA = old.ControlCA
+			}
+			prev = old
+		} else {
+			key = "" // this share already has its device; reuse it
+			cfg.ControlCA = old.ControlCA
+			prev = old
+			fresh = false
+		}
 	} else if key == "" {
 		return errorf("no way to add a device for this share")
 	}
@@ -228,7 +282,15 @@ func shareStart(name, what, rawLink string, o options) error {
 	}
 
 	if o.background {
-		return shareBackground(dir, cfg, o)
+		err := shareBackground(dir, cfg, o)
+		if err != nil && fresh {
+			// If undoFreshShare already removed share.json, also clean up leftover
+			// copied binary/log/status files so failed shares leave no orphan dirs.
+			if _, statErr := os.Stat(filepath.Join(dir, "share.json")); os.IsNotExist(statErr) {
+				_ = os.RemoveAll(dir)
+			}
+		}
+		return err
 	}
 	stopShareService(cfg)
 	step("Sharing %s as %s", cfg.showing(), cfg.url())
@@ -333,7 +395,10 @@ func (p *penConn) memberClient() (*http.Client, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil
 	if p.proxy != "" {
-		pu, _ := url.Parse(p.proxy)
+		pu, err := url.Parse(p.proxy)
+		if err != nil || pu == nil || pu.Host == "" {
+			return nil, errorf("invalid local proxy URL %q", p.proxy)
+		}
 		tr.Proxy = http.ProxyURL(pu)
 	}
 	pool, err := testACMECAPool()
@@ -562,7 +627,14 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 		return permanentShare(err)
 	}
 	// Foreground or background, the pid file says a share is running, so
-	// list, stop and a second start all see it.
+	// list, stop and a second start all see it. Refuse to clobber a live process
+	// whose status indicates it is actively starting or up (ignoring stale PIDs
+	// from a prior crash whose PID number may have been recycled by the OS).
+	if existing := sharePID(dir); existing != 0 && existing != os.Getpid() {
+		if st := readShareStatus(dir); st.State == "up" || st.State == "starting" {
+			return errorf("%s is already running (process %d)", c.url(), existing)
+		}
+	}
 	pidFile := filepath.Join(dir, "share.pid")
 	_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
 	defer os.Remove(pidFile)
@@ -653,7 +725,7 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 		return fail(out)
 	}
 	go cm.RunFailoverLoop(ctx)
-	tlsSrv := &http.Server{Handler: h, TLSConfig: cm.TLSConfig(), ReadHeaderTimeout: 20 * time.Second, ErrorLog: quiet}
+	tlsSrv := &http.Server{Handler: h, TLSConfig: cm.TLSConfig(), ReadHeaderTimeout: 20 * time.Second, IdleTimeout: 60 * time.Second, ErrorLog: quiet}
 	go func() { _ = tlsSrv.ServeTLS(ln443, "", "") }()
 	defer tlsSrv.Close()
 	writeShareStatus(dir, "up", "")
@@ -698,11 +770,75 @@ func formatFreshShareCertError(fqdn, name string, err error) error {
 	return errorf("no certificate for %s: %v\n  Nothing was left behind: the name %s is free again. Fix the problem above,\n  then share again with a fresh share link (this one is used up).", fqdn, err, name)
 }
 
+// noDotfilesFS wraps a folder share's fs.FS to deny hidden dotfiles/directories
+// (like .git, .env, .DS_Store) on both direct Open and directory listings,
+// while allowing .well-known.
+type noDotfilesFS struct{ inner fs.FS }
+
+func isHiddenDotEntry(name string) bool {
+	return strings.HasPrefix(name, ".") && name != "." && name != ".well-known"
+}
+
+func (f noDotfilesFS) Open(name string) (fs.File, error) {
+	if name != "." {
+		for _, seg := range strings.Split(name, "/") {
+			if isHiddenDotEntry(seg) {
+				return nil, fs.ErrNotExist
+			}
+		}
+	}
+	file, err := f.inner.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if rdf, ok := file.(fs.ReadDirFile); ok {
+		return noDotfilesDir{ReadDirFile: rdf}, nil
+	}
+	return file, nil
+}
+
+type noDotfilesDir struct{ fs.ReadDirFile }
+
+func (d noDotfilesDir) ReadDir(n int) ([]fs.DirEntry, error) {
+	if n <= 0 {
+		all, err := d.ReadDirFile.ReadDir(n)
+		return filterDotDirEntries(all), err
+	}
+	var out []fs.DirEntry
+	for len(out) < n {
+		batch, err := d.ReadDirFile.ReadDir(n - len(out))
+		out = append(out, filterDotDirEntries(batch)...)
+		if err != nil {
+			if len(out) > 0 && errors.Is(err, io.EOF) {
+				return out, nil
+			}
+			return out, err
+		}
+		if len(batch) == 0 {
+			break
+		}
+	}
+	return out, nil
+}
+
+func filterDotDirEntries(entries []fs.DirEntry) []fs.DirEntry {
+	out := entries[:0]
+	for _, e := range entries {
+		if !isHiddenDotEntry(e.Name()) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // hasPathTraversal reports whether a request's path or raw escaped path attempts
 // to traverse out of a subpath-scoped reverse-proxy target using dot-segments,
 // backslashes, or percent-encoded dots/backslashes (while allowing legitimate
 // percent-encoded slashes like %2F inside non-traversal path parameters).
 func hasPathTraversal(u *url.URL) bool {
+	if u.Opaque != "" {
+		return true
+	}
 	raw := strings.ToLower(u.EscapedPath())
 	if strings.Contains(raw, "%2e") || strings.Contains(raw, "%5c") || strings.Contains(raw, "\\") {
 		return true
@@ -718,19 +854,24 @@ func hasPathTraversal(u *url.URL) bool {
 func shareHandler(c *shareConfig) (http.Handler, func(), error) {
 	if c.Folder {
 		// os.Root keeps every read inside the folder: a symlink pointing out
-		// of it (to ~/.ssh, say) is refused, not followed.
+		// of it (to ~/.ssh, say) is refused, not followed; noDotfilesFS also
+		// hides .git/.env and similar dotfiles.
 		root, err := os.OpenRoot(c.Target)
 		if err != nil {
 			return nil, nil, errorf("cannot open the folder %s: %v", c.Target, err)
 		}
-		return http.FileServerFS(root.FS()), func() { _ = root.Close() }, nil
+		return http.FileServerFS(noDotfilesFS{inner: root.FS()}), func() { _ = root.Close() }, nil
 	}
 	u, err := url.Parse(c.Target)
 	if err != nil {
 		return nil, nil, permanentShare(err)
 	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.Proxy = nil // always connect directly to the local/LAN share target
 	rp := &httputil.ReverseProxy{
+		Transport: tr,
 		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL.Opaque = ""
 			pr.SetURL(u) // Host becomes the target's: dev servers expect their own
 			pr.SetXForwarded()
 		},
@@ -741,17 +882,14 @@ func shareHandler(c *shareConfig) (http.Handler, func(), error) {
 		},
 		ErrorLog: log.New(io.Discard, "", 0),
 	}
-	if u.Path != "" && u.Path != "/" {
-		scoped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if hasPathTraversal(r.URL) {
-				http.Error(w, "invalid path", http.StatusBadRequest)
-				return
-			}
-			rp.ServeHTTP(w, r)
-		})
-		return scoped, func() {}, nil
-	}
-	return rp, func() {}, nil
+	subpath := u.Path != "" && u.Path != "/"
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Opaque != "" || (subpath && hasPathTraversal(r.URL)) {
+			http.Error(w, "invalid path", http.StatusBadRequest)
+			return
+		}
+		rp.ServeHTTP(w, r)
+	}), func() {}, nil
 }
 
 // ------------------------------------------------- background, status --
@@ -780,7 +918,7 @@ func sharePID(dir string) int {
 		return 0
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || !processAlive(pid) {
+	if err != nil || pid <= 0 || !processAlive(pid) {
 		return 0
 	}
 	return pid
@@ -805,15 +943,30 @@ func waitShareBackground(dir string, c *shareConfig, managed bool, pid int, time
 	if timeout < poll {
 		poll = max(10*time.Millisecond, timeout/2)
 	}
-	deadline := time.Now().Add(timeout)
+	ctx, stopSig := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSig()
+	start := time.Now()
+	deadline := start.Add(timeout)
+	warnedNoStatus := false
 	for time.Now().Before(deadline) {
-		time.Sleep(poll)
+		select {
+		case <-ctx.Done():
+			if stopFn != nil {
+				stopFn()
+			}
+			return errorf("cancelled while starting %s", c.url())
+		case <-time.After(poll):
+		}
 		st := readShareStatus(dir)
 		if !managed && st.State != "up" && st.State != "error" && !processAlive(pid) {
 			if stopFn != nil {
 				stopFn()
 			}
 			return errorf("the share stopped before it came up. Log: %s", logPath)
+		}
+		if managed && st.State == "" && !warnedNoStatus && time.Since(start) >= 15*time.Second {
+			warnedNoStatus = true
+			note("still waiting for the background service to start; check %s if it does not come up", logPath)
 		}
 		switch st.State {
 		case "up":
@@ -876,10 +1029,15 @@ func shareListState(running, managed bool) string {
 	}
 }
 
-func shareList() error {
-	dirs := allShares("")
+func shareList(zone string) error {
+	zone = strings.ToLower(strings.TrimSpace(zone))
+	dirs := allShares(zone)
 	if len(dirs) == 0 {
-		say("This computer shares nothing. Start with: hogman-join share NAME WHAT")
+		if zone != "" {
+			say("This computer shares nothing on %s.", zone)
+		} else {
+			say("This computer shares nothing. Start with: hogman-join share NAME WHAT")
+		}
 		return nil
 	}
 	for _, d := range dirs {
@@ -889,13 +1047,20 @@ func shareList() error {
 		}
 		running := sharePID(d) != 0
 		managed := shareServiceConfigured(c)
-		say("%-40s %s  (%s)", c.url(), c.showing(), shareListState(running, managed))
+		state := shareListState(running, managed)
+		if !running {
+			if st := readShareStatus(d); st.State == "error" && st.Error != "" {
+				state += ": " + firstLine(st.Error)
+			}
+		}
+		say("%-40s %s  (%s)", c.url(), c.showing(), state)
 	}
 	return nil
 }
 
 func findShare(name, zone string) (string, error) {
 	name = strings.ToLower(strings.TrimSpace(name))
+	zone = strings.ToLower(strings.TrimSpace(zone))
 	var hits []string
 	for _, d := range allShares(zone) {
 		if filepath.Base(d) == name {
@@ -921,7 +1086,7 @@ func shareStop(name string, o options) error {
 		return err
 	}
 	step("Taking down %s", c.url())
-	if err := removeShare(dir, c); err != nil {
+	if err := removeShareWithOptions(dir, c, 30*time.Second, o.force); err != nil {
 		return err
 	}
 	say("\n✓ %s is down, and the name is free again.", c.url())

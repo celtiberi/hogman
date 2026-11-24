@@ -96,6 +96,7 @@ func writeUnixNativeManifests(goos, home, hostPath string, chromeIDs, firefoxIDs
 		}
 	}
 	written := 0
+	var errs []error
 	for _, t := range browserNativeManifestTargets(goos, home) {
 		var data []byte
 		switch t.kind {
@@ -112,13 +113,20 @@ func writeUnixNativeManifests(goos, home, hostPath string, chromeIDs, firefoxIDs
 			continue
 		}
 		if err := os.MkdirAll(t.dir, 0o755); err != nil {
-			return written, fmt.Errorf("create %s: %w", t.dir, err)
+			note("could not register %s browser manifest (%v)", t.browser, err)
+			errs = append(errs, fmt.Errorf("create %s: %w", t.dir, err))
+			continue
 		}
 		dst := filepath.Join(t.dir, nativeHostName+".json")
 		if err := os.WriteFile(dst, data, 0o644); err != nil {
-			return written, fmt.Errorf("write %s: %w", dst, err)
+			note("could not register %s browser manifest (%v)", t.browser, err)
+			errs = append(errs, fmt.Errorf("write %s: %w", dst, err))
+			continue
 		}
 		written++
+	}
+	if len(errs) > 0 && written == 0 {
+		return 0, errs[0]
 	}
 	return written, nil
 }

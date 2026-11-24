@@ -21,19 +21,23 @@ func startExistingBinary(bin, dir string, c *agentConfig, noService bool) error 
 	}
 	plist, err := renderLaunchPlist(launchLabel(c.Zone), bin, dir, filepath.Join(dir, "agent.log"))
 	if err != nil {
+		note("could not render login item for %s (%v); running in the background until restart", c.Zone, err)
 		return startDetached(bin, dir)
 	}
 	path := launchPlist(c.Zone)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		note("could not write login item for %s (%v); running in the background until restart", c.Zone, err)
 		return startDetached(bin, dir)
 	}
 	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
+		note("could not write login item for %s (%v); running in the background until restart", c.Zone, err)
 		return startDetached(bin, dir)
 	}
 	domain := "gui/" + strconv.Itoa(os.Getuid())
 	_, _ = run(false, "/bin/launchctl", "bootout", domain+"/"+launchLabel(c.Zone))
-	if _, err := run(false, "/bin/launchctl", "bootstrap", domain, path); err != nil {
+	if out, err := run(false, "/bin/launchctl", "bootstrap", domain, path); err != nil {
 		_ = os.Remove(path)
+		note("could not register login item for %s (%s); running in the background until restart", c.Zone, firstLine(out))
 		return startDetached(bin, dir)
 	}
 	return nil

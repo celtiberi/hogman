@@ -261,6 +261,10 @@ func systemdQuote(s string) string {
 	return `"` + r.Replace(s) + `"`
 }
 
+func systemdSingleLine(s string) string {
+	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
+}
+
 // renderSystemdUnit builds a systemd user service unit with quoted ExecStart paths.
 func renderSystemdUnit(zone, bin, dir string) string {
 	return fmt.Sprintf(`[Unit]
@@ -274,7 +278,7 @@ RestartSec=5
 
 [Install]
 WantedBy=default.target
-`, zone, systemdQuote(bin), systemdQuote(dir))
+`, systemdSingleLine(zone), systemdQuote(bin), systemdQuote(dir))
 }
 
 // renderShareSystemdUnit builds a systemd user service unit for a persistent share.
@@ -292,5 +296,5 @@ RestartSec=30
 
 [Install]
 WantedBy=default.target
-`, c.fqdn(), systemdQuote(bin), systemdQuote(dir))
+`, systemdSingleLine(c.fqdn()), systemdQuote(bin), systemdQuote(dir))
 }

@@ -3,11 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 func launchPlist(zone string) string {
@@ -109,15 +107,8 @@ func stopShareService(c *shareConfig) {
 }
 
 func startDetached(bin, dir string) error {
-	logf, err := os.OpenFile(filepath.Join(dir, "agent.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(bin, "agent", dir)
-	cmd.Stdout, cmd.Stderr = logf, logf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Env = os.Environ()
-	return cmd.Start()
+	_, err := spawnDetached(filepath.Join(dir, "agent.log"), bin, "agent", dir)
+	return err
 }
 
 // networkServices lists the Mac's enabled network services (Wi-Fi, Ethernet...).

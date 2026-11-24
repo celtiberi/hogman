@@ -33,8 +33,9 @@ func removeLegacyHogmanRoot(zone, rootFP string) (bool, error) {
 }
 
 func tailscaleCandidates() []string {
-	return []string{"tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-		"/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"}
+	// Only check the signed app bundle path (never user-writable Homebrew/local
+	// paths, because Tailscale logout/down/login may escalate with sudo).
+	return []string{"/Applications/Tailscale.app/Contents/MacOS/Tailscale"}
 }
 
 func tailscaleInstallHelp() string {

@@ -2,12 +2,10 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 func unitPath(zone string) string {
@@ -15,11 +13,19 @@ func unitPath(zone string) string {
 	return filepath.Join(base, "systemd", "user", unitName(zone))
 }
 
+func systemctlBin() string {
+	if p := linuxSystemTool("systemctl"); p != "" {
+		return p
+	}
+	return "/usr/bin/systemctl"
+}
+
 func haveUserSystemd() bool {
-	if _, err := exec.LookPath("systemctl"); err != nil {
+	sc := linuxSystemTool("systemctl")
+	if sc == "" {
 		return false
 	}
-	_, err := run(false, "systemctl", "--user", "show-environment")
+	_, err := run(false, sc, "--user", "show-environment")
 	return err == nil
 }
 
@@ -44,8 +50,9 @@ func startAgent(dir string, c *agentConfig, o options) error {
 	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
 		return err
 	}
-	_, _ = run(false, "systemctl", "--user", "daemon-reload")
-	if out, err := run(false, "systemctl", "--user", "enable", "--now", unitName(c.Zone)); err != nil {
+	sc := systemctlBin()
+	_, _ = run(false, sc, "--user", "daemon-reload")
+	if out, err := run(false, sc, "--user", "enable", "--now", unitName(c.Zone)); err != nil {
 		return errorf("could not start the background service: %v\n%s", err, out)
 	}
 	note("it will start by itself when you log in")
@@ -54,9 +61,10 @@ func startAgent(dir string, c *agentConfig, o options) error {
 
 func stopAgent(dir string, c *agentConfig) {
 	if haveUserSystemd() {
-		_, _ = run(false, "systemctl", "--user", "disable", "--now", unitName(c.Zone))
+		sc := systemctlBin()
+		_, _ = run(false, sc, "--user", "disable", "--now", unitName(c.Zone))
 		_ = os.Remove(unitPath(c.Zone))
-		_, _ = run(false, "systemctl", "--user", "daemon-reload")
+		_, _ = run(false, sc, "--user", "daemon-reload")
 	}
 	stopDetached(dir)
 }
@@ -86,7 +94,11 @@ func linuxLingerEnabled() bool {
 	if _, err := os.Stat(filepath.Join("/var/lib/systemd/linger", name)); err == nil {
 		return true
 	}
-	out, err := run(false, "loginctl", "show-user", name, "-p", "Linger", "--value")
+	lc := linuxSystemTool("loginctl")
+	if lc == "" {
+		return false
+	}
+	out, err := run(false, lc, "show-user", name, "-p", "Linger", "--value")
 	return err == nil && strings.EqualFold(strings.TrimSpace(out), "yes")
 }
 
@@ -115,10 +127,11 @@ func startShareServiceWithBinary(bin, dir string, c *shareConfig, noService bool
 	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
 		return false, 0, err
 	}
-	_, _ = run(false, "systemctl", "--user", "daemon-reload")
-	if out, err := run(false, "systemctl", "--user", "enable", "--now", shareUnitName(c)); err != nil {
+	sc := systemctlBin()
+	_, _ = run(false, sc, "--user", "daemon-reload")
+	if out, err := run(false, sc, "--user", "enable", "--now", shareUnitName(c)); err != nil {
 		_ = os.Remove(path)
-		_, _ = run(false, "systemctl", "--user", "daemon-reload")
+		_, _ = run(false, sc, "--user", "daemon-reload")
 		return false, 0, errorf("could not start the background service: %v\n%s", err, out)
 	}
 	note("it will start by itself when you log in")
@@ -135,24 +148,18 @@ func startShareServiceWithBinary(bin, dir string, c *shareConfig, noService bool
 func stopShareService(c *shareConfig) {
 	path := shareUnitPath(c)
 	if haveUserSystemd() {
-		_, _ = run(false, "systemctl", "--user", "disable", "--now", shareUnitName(c))
+		sc := systemctlBin()
+		_, _ = run(false, sc, "--user", "disable", "--now", shareUnitName(c))
 		_ = os.Remove(path)
-		_, _ = run(false, "systemctl", "--user", "daemon-reload")
+		_, _ = run(false, sc, "--user", "daemon-reload")
 		return
 	}
 	_ = os.Remove(path)
 }
 
 func startDetached(bin, dir string) error {
-	logf, err := os.OpenFile(filepath.Join(dir, "agent.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(bin, "agent", dir)
-	cmd.Stdout, cmd.Stderr = logf, logf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Env = os.Environ()
-	return cmd.Start()
+	_, err := spawnDetached(filepath.Join(dir, "agent.log"), bin, "agent", dir)
+	return err
 }
 
 // Linux desktops each keep proxy settings in their own place, so the member
