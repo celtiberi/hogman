@@ -61,8 +61,8 @@ usage: hogman-host <command>
   waitlist [invite|remove <id>]  who's waiting for a pen; invite emails them a code
   signup-mail "<from>" < key     email waiting-list codes through Resend (signup-mail test <addr>)
   signup-notify <ntfy-url>|off   a push when someone joins the waiting list or gets a pen
-  signup-stripe <price> [--work <price>] [tax]|work-price <price>|off
-                                 sell pens with Stripe Checkout (keys on stdin; optional Work price)
+  signup-stripe <price> [--work <price>] [tax]|work-price <price>|floor <pers> <work> [cur]|off
+                                 sell pens with Stripe Checkout (keys on stdin; optional Work price & price floor)
   signup-cloudflare on|off       trust CF-Connecting-IP and require Cloudflare Proxy on the sign-up host
   signup-turnstile <site-key>|off  require Cloudflare Turnstile on sign-up/waitlist (secret on stdin)
   signup-work-host <host>|off    serve a Work sign-up host (e.g. get.work.hogman.network) on the same page
@@ -1232,7 +1232,10 @@ cmd_signup_setup() {
     local expect_live="0"
     case "$(cat "$SIGNUP/stripe_key" 2>/dev/null)" in *_live_*) expect_live="1" ;; esac
     broker_stripe="      STRIPE_WEBHOOK_SECRET_FILE: $SIGNUP/stripe_webhook_secret
-      STRIPE_EXPECT_LIVEMODE: \"$expect_live\""
+      STRIPE_EXPECT_LIVEMODE: \"$expect_live\"
+      STRIPE_MIN_PERSONAL_CENTS: \"${SIGNUP_STRIPE_MIN_PERSONAL_CENTS:-5000}\"
+      STRIPE_MIN_WORK_CENTS: \"${SIGNUP_STRIPE_MIN_WORK_CENTS:-12000}\"
+      STRIPE_CURRENCY: \"${SIGNUP_STRIPE_CURRENCY:-usd}\""
   fi
   local cf_env=""
   if [ "${SIGNUP_CLOUDFLARE:-}" = 1 ]; then
@@ -1540,13 +1543,16 @@ cmd_signup_notify() {
 
 # signup-stripe <price-id> [--work <work-price-id>] [tax] < keys: sell pens on
 # the sign-up page with Stripe Checkout (D-28). Standard input: the Stripe API
-# key (best a restricted key that can only write Checkout Sessions), then the
-# webhook signing secret (whsec_...), one per line. "tax" turns on Stripe Tax.
-# "work-price <price-id>|off" updates the optional Work price without re-piping
-# keys. "off" stops selling.
+# key (best a restricted key with Checkout Sessions: Write and Subscriptions:
+# Write so replaced subscriptions can be cancelled on manual renewal, I-6),
+# then the webhook signing secret (whsec_...), one per line. "tax" turns on
+# Stripe Tax. "work-price <price-id>|off" updates the optional Work price
+# without re-piping keys. "floor <personal-cents> <work-cents> [currency]"
+# overrides the broker webhook price/currency floor (default 5000 12000 usd, M2).
+# "off" stops selling.
 # Webhook endpoint (in Stripe): https://<signup-host>/api/stripe/webhook, events
-# checkout.session.completed, checkout.session.async_payment_succeeded and
-# customer.subscription.deleted.
+# checkout.session.completed, checkout.session.async_payment_succeeded,
+# invoice.paid and customer.subscription.deleted.
 cmd_signup_stripe() {
   load_host
   local price="${1:-}" work_price="" tax=""
@@ -1555,8 +1561,25 @@ cmd_signup_stripe() {
     set_host_var SIGNUP_STRIPE_PRICE ""
     set_host_var SIGNUP_STRIPE_WORK_PRICE ""
     set_host_var SIGNUP_STRIPE_TAX ""
+    set_host_var SIGNUP_STRIPE_MIN_PERSONAL_CENTS ""
+    set_host_var SIGNUP_STRIPE_MIN_WORK_CENTS ""
+    set_host_var SIGNUP_STRIPE_CURRENCY ""
     cmd_signup_setup
     info "Pens aren't for sale on the sign-up page any more"
+    return
+  fi
+  if [ "$price" = floor ]; then
+    local pmin="${2:-}" wmin="${3:-}" cur="${4:-usd}"
+    [[ "$pmin" =~ ^[1-9][0-9]{0,7}$ ]] && [[ "$wmin" =~ ^[1-9][0-9]{0,7}$ ]] \
+      && [[ "$cur" =~ ^[a-zA-Z]{3}$ ]] \
+      || die "usage: hogman-host signup-stripe floor <personal-cents> <work-cents> [3-letter-currency]"
+    cur="$(printf '%s' "$cur" | tr 'A-Z' 'a-z')"
+    [ -n "${SIGNUP_STRIPE_PRICE:-}" ] && [ -s "$SIGNUP/stripe_key" ] || die "configure Stripe first: hogman-host signup-stripe <price_...> < keys"
+    set_host_var SIGNUP_STRIPE_MIN_PERSONAL_CENTS "$pmin"
+    set_host_var SIGNUP_STRIPE_MIN_WORK_CENTS "$wmin"
+    set_host_var SIGNUP_STRIPE_CURRENCY "$cur"
+    cmd_signup_setup
+    info "Stripe broker floor updated: personal>=${pmin}c work>=${wmin}c currency=${cur}"
     return
   fi
   if [ "$price" = work-price ]; then
