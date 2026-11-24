@@ -87,8 +87,13 @@ mkdir -p "$ACME/cdns" "$ACME/sock" "$ACME/certs"
 if [ "$(id -u)" = 0 ]; then chgrp 65532 "$ACME/sock"; fi
 chmod 0750 "$ACME/sock"
 
-docker run --rm -v "$REPO/deploy/challenge-dns:/src:ro" -v "$ACME/cdns:/out" -w /src \
-  -e CGO_ENABLED=0 -e GOFLAGS=-buildvcs=false golang:1.27-alpine go build -o /out/challenge-dns . || exit 1
+case "$(uname -m)" in x86_64|amd64) HOST_GOARCH=amd64 ;; aarch64|arm64) HOST_GOARCH=arm64 ;; *) HOST_GOARCH="" ;; esac
+if [ -n "$HOST_GOARCH" ] && [ -f "$SRC/prebuilt/challenge-dns/challenge-dns-linux-$HOST_GOARCH" ]; then
+  install -m 0755 "$SRC/prebuilt/challenge-dns/challenge-dns-linux-$HOST_GOARCH" "$ACME/cdns/challenge-dns"
+else
+  docker run --rm -v "$REPO/deploy/challenge-dns:/src:ro" -v "$ACME/cdns:/out" -w /src \
+    -e CGO_ENABLED=0 -e GOFLAGS=-buildvcs=false golang:1.27-alpine go build -o /out/challenge-dns . || exit 1
+fi
 docker network inspect hogman-test-acme >/dev/null 2>&1 || docker network create hogman-test-acme >/dev/null
 docker rm -f hogman-run-cdns hogman-run-pebble >/dev/null 2>&1 || true
 docker run -d --name hogman-run-cdns --network hogman-test-acme \
@@ -647,7 +652,13 @@ cp "$ACME/bundle.crt" "$WORK/sidecar-ca/bundle.crt"
 cat "$WORK/data/edge-trust/root.crt" "$ACME/bundle.crt" > "$WORK/sidecar-ca/combined.crt"
 chmod 755 "$WORK/sidecar-ca" && chmod 644 "$WORK/sidecar-ca"/*.crt
 
-docker build -q -f "$REPO/core/join/Dockerfile.sidecar" -t "$SIDECAR_IMG" "$REPO/core/join" >/dev/null
+if [ -f "$SRC/prebuilt/join/hogman-$(uname -s)-$(uname -m)" ] && [ -f "$REPO/core/join/Dockerfile.sidecar.prebuilt" ]; then
+  mkdir -p "$WORK/sidecar-ctx"
+  install -m 0755 "$SRC/prebuilt/join/hogman-$(uname -s)-$(uname -m)" "$WORK/sidecar-ctx/hogman.bin"
+  docker build -q -f "$REPO/core/join/Dockerfile.sidecar.prebuilt" -t "$SIDECAR_IMG" "$WORK/sidecar-ctx" >/dev/null
+else
+  docker build -q -f "$REPO/core/join/Dockerfile.sidecar" -t "$SIDECAR_IMG" "$REPO/core/join" >/dev/null
+fi
 docker volume create "$SIDECAR_STATE" >/dev/null
 docker volume create "$SIDECAR_IN" >/dev/null
 SEALED_LINK="$($H device key dave server | awk '/^link:/ {print $2}')"
@@ -804,14 +815,19 @@ run dave-laptop sh -c 'pid="$(cat /root/.config/hogman/aaa-dead.example.test/age
 DAVE_ARCH="$(run dave-laptop uname -m | tr -d '\r')"
 case "$DAVE_ARCH" in x86_64|amd64) DAVE_GOARCH=amd64 ;; aarch64|arm64) DAVE_GOARCH=arm64 ;; *) DAVE_GOARCH=amd64 ;; esac
 mkdir -p "$WORK/ver-bins"
-docker run --rm -v "$REPO/core/join:/src:ro" -v "$WORK/ver-bins:/out" -w /src \
-  -v hogman-gomod:/go/pkg/mod -v hogman-gocache:/root/.cache/go-build \
-  -e CGO_ENABLED=0 -e GOOS=linux -e GOARCH="$DAVE_GOARCH" -e GOFLAGS=-buildvcs=false \
-  golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 sh -c '
-    set -e
-    go build -trimpath -ldflags="-s -w -X main.version=2025.01.01-aaaaaaa" -o /out/hogman-old .
-    go build -trimpath -ldflags="-s -w -X main.version=2099.01.01-bbbbbbb" -o /out/hogman-new .
-  ' >/dev/null
+if [ -f "$SRC/prebuilt/test-bins/hogman-old" ] && [ -f "$SRC/prebuilt/test-bins/hogman-new" ]; then
+  install -m 0755 "$SRC/prebuilt/test-bins/hogman-old" "$WORK/ver-bins/hogman-old"
+  install -m 0755 "$SRC/prebuilt/test-bins/hogman-new" "$WORK/ver-bins/hogman-new"
+else
+  docker run --rm -v "$REPO/core/join:/src:ro" -v "$WORK/ver-bins:/out" -w /src \
+    -v hogman-gomod:/go/pkg/mod -v hogman-gocache:/root/.cache/go-build \
+    -e CGO_ENABLED=0 -e GOOS=linux -e GOARCH="$DAVE_GOARCH" -e GOFLAGS=-buildvcs=false \
+    golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 sh -c '
+      set -e
+      go build -trimpath -ldflags="-s -w -X main.version=2025.01.01-aaaaaaa" -o /out/hogman-old .
+      go build -trimpath -ldflags="-s -w -X main.version=2099.01.01-bbbbbbb" -o /out/hogman-new .
+    ' >/dev/null
+fi
 DAVE_CID="$(dc ps -q dave-laptop)"
 docker cp "$WORK/ver-bins/hogman-old" "$DAVE_CID:/tmp/hogman-old"
 docker cp "$WORK/ver-bins/hogman-new" "$DAVE_CID:/tmp/hogman-new"
