@@ -1,0 +1,1 @@
+- `core/join`: if a pen's configured `dns_server` IP is no longer in the tailnet, the side-by-side agent now falls back to the active `tag:infra` peer IP (preferring online IPv4) for DNS queries and live connection checks, failing closed if no `tag:infra` peer exists.
