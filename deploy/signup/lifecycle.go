@@ -2105,6 +2105,7 @@ func (b *broker) lifecycleTransitionHandler(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		var saved *penLifecycle
+		var firstDeleteDate bool
 		if err := withPenLifecycleFileLock(path, func() error {
 			rec, lerr := loadPenLifecycle(path)
 			if os.IsNotExist(lerr) {
@@ -2117,6 +2118,8 @@ func (b *broker) lifecycleTransitionHandler(w http.ResponseWriter, r *http.Reque
 			if rec.SleepSince > 0 && rec.DeleteAfter > 0 {
 				sleepSince = rec.SleepSince
 				deleteAfter = rec.DeleteAfter
+			} else {
+				firstDeleteDate = true
 			}
 			rec.State = stateSleeping
 			rec.SleepSince = sleepSince
@@ -2136,9 +2139,16 @@ func (b *broker) lifecycleTransitionHandler(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), saved, "")
+		deleteDate := time.Unix(saved.DeleteAfter, 0).UTC().Format("2006-01-02")
 		b.ledger(fmt.Sprintf("%s lifecycle %s: operator sleep -> sleeping (delete after %s)",
-			now.Format(time.RFC3339), pen, time.Unix(saved.DeleteAfter, 0).UTC().Format("2006-01-02")))
-		jsonOut(w, 200, map[string]any{"ok": true, "pen": pen, "state": saved.State})
+			now.Format(time.RFC3339), pen, deleteDate))
+		jsonOut(w, 200, map[string]any{
+			"ok":                true,
+			"pen":               pen,
+			"state":             saved.State,
+			"delete_after":      deleteDate,
+			"first_delete_date": firstDeleteDate,
+		})
 
 	case "wake":
 		if _, err := os.Stat(filepath.Join(penDir, ".removed")); err == nil {
