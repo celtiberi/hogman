@@ -25,8 +25,10 @@
     <nav id="nav-links" aria-label="Pen sections">
       <a href="#sites">Sites</a>
       <a href="#mine">Devices</a>
-      <a href="#invite">Invites</a>
-      <a href="#herd" id="nav-herd">The herd</a>
+      <a href="#invite" id="nav-invite" hidden>Invites</a>
+      <a href="#herd" id="nav-herd" hidden>The herd</a>
+      <a href="#all-devices" id="nav-all-devices" hidden>All devices</a>
+      <a href="#audit" id="nav-audit" hidden>Activity</a>
       <a href="#host" id="nav-host">Host</a>
       <a href="https://hogman.network/docs/" id="nav-docs" target="_blank" rel="noopener noreferrer">Docs</a>
     </nav>
@@ -40,6 +42,29 @@
     <p class="status-pill"><span class="status-dot" aria-hidden="true"></span><span id="status-pill-text">Inside your pen &middot; Private HTTPS only</span></p>
     <h1 id="hello">You're in.</h1>
     <p class="sub" id="whoami">This page is only reachable from inside the network.</p>
+  </section>
+
+  <section id="overview" class="stat-grid" aria-label="Pen summary" hidden>
+    <a class="stat-card" href="#herd">
+      <span class="stat-label" id="stat-members-label">Members</span>
+      <strong class="stat-value" id="stat-members">&mdash;</strong>
+      <span class="stat-sub" id="stat-members-sub"></span>
+    </a>
+    <a class="stat-card" href="#all-devices">
+      <span class="stat-label">Devices</span>
+      <strong class="stat-value" id="stat-devices">&mdash;</strong>
+      <span class="stat-sub" id="stat-devices-sub"></span>
+    </a>
+    <a class="stat-card" href="#sites">
+      <span class="stat-label" id="stat-sites-label">Sites</span>
+      <strong class="stat-value" id="stat-sites">&mdash;</strong>
+      <span class="stat-sub" id="stat-sites-sub"></span>
+    </a>
+    <div class="stat-card">
+      <span class="stat-label">Plan &amp; status</span>
+      <strong class="stat-value" id="stat-plan">&mdash;</strong>
+      <span class="stat-sub" id="stat-plan-sub"></span>
+    </div>
   </section>
 
   <section id="sites" class="panel" hidden>
@@ -131,6 +156,43 @@
     <ul class="devices" id="members"></ul>
     <p class="more-row"><button id="herd-more" type="button" hidden>Show more</button></p>
     <p class="error" id="herd-err" hidden></p>
+  </section>
+
+  <section id="all-devices" class="panel" hidden>
+    <div class="section-head">
+      <h2 id="all-devices-title">All devices</h2>
+      <div class="head-actions">
+        <span class="muted small herd-count" id="all-devices-count"></span>
+        <button id="all-devices-refresh" class="link" type="button">Refresh</button>
+      </div>
+    </div>
+    <p class="muted hint" id="all-devices-intro">Every enrolled workstation and server node across this pen. Remove a lost laptop or stale server at any time.</p>
+    <div class="filter-bar">
+      <input id="all-devices-q" type="search" placeholder="Filter by device, member, or mesh IP" autocomplete="off" maxlength="64">
+      <div class="seg-group" id="all-devices-kind" role="group" aria-label="Device type filter">
+        <button type="button" class="seg active" data-kind="all" aria-pressed="true">All</button>
+        <button type="button" class="seg" data-kind="personal" aria-pressed="false">Personal</button>
+        <button type="button" class="seg" data-kind="server" aria-pressed="false">Servers</button>
+      </div>
+    </div>
+    <p class="muted hint" id="all-devices-empty" hidden>No matching devices.</p>
+    <ul class="devices" id="all-devices-list"></ul>
+    <p class="error" id="all-devices-err" hidden></p>
+  </section>
+
+  <section id="audit" class="panel" hidden>
+    <div class="section-head">
+      <h2 id="audit-title">Recent activity</h2>
+      <div class="head-actions">
+        <span class="muted small herd-count" id="audit-count"></span>
+        <button id="audit-refresh" class="link" type="button">Refresh</button>
+      </div>
+    </div>
+    <p class="muted hint" id="audit-intro">Audit log of membership changes, invites, device enrollments, and site names in this pen.</p>
+    <p class="muted hint" id="audit-empty" hidden>No activity recorded yet.</p>
+    <ul class="devices audit-list" id="audit-list"></ul>
+    <p class="more-row"><button id="audit-more" type="button" hidden>Show more</button></p>
+    <p class="error" id="audit-err" hidden></p>
   </section>
 
   <section id="host" class="panel">
