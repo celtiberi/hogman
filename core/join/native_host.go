@@ -387,9 +387,8 @@ func collectNativePens(configBase string) ([]nativePenEntry, []*agentConfig) {
 		entry := nativePenEntry{
 			Zone:         cfg.Zone,
 			Port:         port,
-			Up:           state == agentEndpointUp || state == agentEndpointLegacyUp,
+			Up:           state == agentEndpointUp,
 			Hosted:       isHostedPenZone(cfg.Zone),
-			Legacy:       state == agentEndpointLegacyUp,
 			statusReason: detail.reason,
 		}
 		if state == agentEndpointSquatted {
@@ -413,7 +412,6 @@ type agentEndpointState int
 const (
 	agentEndpointDown agentEndpointState = iota
 	agentEndpointUp
-	agentEndpointLegacyUp
 	agentEndpointSquatted
 )
 
@@ -431,7 +429,6 @@ func verifyAgentEndpoint(dir string, cfg *agentConfig) agentEndpointState {
 func verifyAgentEndpointDetail(dir string, cfg *agentConfig) (agentEndpointState, agentEndpointDetail) {
 	tokBytes, tokErr := os.ReadFile(filepath.Join(dir, statusTokenFilename))
 	token := strings.TrimSpace(string(tokBytes))
-	noTokenFile := errors.Is(tokErr, os.ErrNotExist)
 
 	nonce, err := generateHexToken(16)
 	if err != nil {
@@ -469,17 +466,9 @@ func verifyAgentEndpointDetail(dir string, cfg *agentConfig) (agentEndpointState
 		return agentEndpointSquatted, agentEndpointDetail{}
 	}
 
-	// Agents started before status.token was introduced have no token file on disk.
-	// Treat a valid matching /status JSON from such an agent as legacy/unverified
-	// rather than falsely reporting a healthy pen as squatted right after update.
-	if noTokenFile {
-		if !st.Up {
-			return agentEndpointDown, agentEndpointDetail{reason: strings.TrimSpace(st.Error)}
-		}
-		return agentEndpointLegacyUp, agentEndpointDetail{}
-	}
-
-	// Token file is present (or unreadable): require valid HMAC proof.
+	// Fail closed whenever status.token is missing, unreadable, empty, or the
+	// listener fails the challenge-response HMAC proof: an unauthenticated
+	// loopback process must never be trusted as a Hogman agent.
 	if tokErr != nil || token == "" {
 		return agentEndpointSquatted, agentEndpointDetail{}
 	}

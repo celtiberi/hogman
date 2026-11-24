@@ -256,6 +256,45 @@ func evaluateLiveNodeStatus(st *ipnstate.Status, dnsServer string) (up bool, nee
 	}
 }
 
+// writeStatusToken atomically writes a fresh 128-bit status authentication
+// token to dir/status.token (mode 0600) so the file is never missing or
+// half-written across agent restarts.
+func writeStatusToken(dir string) (string, error) {
+	tok, err := generateHexToken(16)
+	if err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp(dir, ".status.token.*")
+	if err != nil {
+		return "", err
+	}
+	tmp := f.Name()
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	if _, err := f.WriteString(tok); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	if err := os.Rename(tmp, filepath.Join(dir, statusTokenFilename)); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return tok, nil
+}
+
 // runAgent is the long-running process: connect to the pen, serve the proxy.
 func runAgent(dir string) error {
 	c, err := loadAgentConfig(dir)
@@ -263,18 +302,25 @@ func runAgent(dir string) error {
 		return fmt.Errorf("agent config: %w", err)
 	}
 	c.trustControlCA()
+
+	// Bind the proxy port BEFORE writing agent.pid or rotating status.token so
+	// a duplicate agent that fails to bind never invalidates a running agent's
+	// status.token or deletes its PID file.
+	ln, err := net.Listen("tcp", c.ProxyAddr)
+	if err != nil {
+		return fmt.Errorf("proxy: %w", err)
+	}
+	defer ln.Close()
+
 	_ = os.WriteFile(filepath.Join(dir, "agent.pid"), []byte(strconv.Itoa(os.Getpid())), 0o600)
 	defer os.Remove(filepath.Join(dir, "agent.pid"))
 
-	statusTok, err := generateHexToken(16)
+	// Rotate status.token atomically on startup and intentionally keep it on
+	// exit so a crashed or stopped agent never leaves status.token missing.
+	statusTok, err := writeStatusToken(dir)
 	if err != nil {
 		return fmt.Errorf("status token: %w", err)
 	}
-	statusTokPath := filepath.Join(dir, statusTokenFilename)
-	if err := os.WriteFile(statusTokPath, []byte(statusTok), 0o600); err != nil {
-		return fmt.Errorf("status token: %w", err)
-	}
-	defer os.Remove(statusTokPath)
 
 	keyFile := filepath.Join(dir, "authkey")
 	key, _ := os.ReadFile(keyFile)
@@ -287,10 +333,6 @@ func runAgent(dir string) error {
 	a.statusToken = statusTok
 
 	// Serve the proxy straight away, so the setup step can watch us come up.
-	ln, err := net.Listen("tcp", c.ProxyAddr)
-	if err != nil {
-		return fmt.Errorf("proxy: %w", err)
-	}
 	srv := &http.Server{Handler: a, ReadHeaderTimeout: 15 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
 
@@ -338,10 +380,10 @@ type agent struct {
 	configBase  string
 	statusToken string
 	node        *tsnet.Server
-	resolver   *net.Resolver
-	dialMesh   func(ctx context.Context, network, addr string) (net.Conn, error)
-	lookupDNS  func(ctx context.Context, host string) ([]string, error)
-	peerLookup func(ctx context.Context, host string) ([]string, error)
+	resolver    *net.Resolver
+	dialMesh    func(ctx context.Context, network, addr string) (net.Conn, error)
+	lookupDNS   func(ctx context.Context, host string) ([]string, error)
+	peerLookup  func(ctx context.Context, host string) ([]string, error)
 	// isPeer reports whether ip belongs to a device this pen's node knows.
 	// Only those may be dialed: tsnet's Dial quietly uses the computer's own
 	// network for anything else, so a pen whose DNS answered 127.0.0.1, a LAN
@@ -539,6 +581,37 @@ func (a *agent) pac() string {
 	return a.cfg.pac()
 }
 
+// rejectBrowserProbe applies Fetch Metadata resource isolation to the local
+// agent's control endpoints (/proxy.pac, /status). Non-browser callers (OS PAC
+// fetchers, hogman-join, native host) send no Fetch Metadata headers, and
+// Firefox's internal PAC loader sends Sec-Fetch-Site: none (with Dest: empty).
+// Cross-site/same-site web requests and subresource loads (<script>, <img>,
+// <iframe>) are rejected with 403.
+func rejectBrowserProbe(w http.ResponseWriter, r *http.Request) bool {
+	if strings.TrimSpace(r.Header.Get("Origin")) != "" || strings.TrimSpace(r.Header.Get("Referer")) != "" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return true
+	}
+	site := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")))
+	dest := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")))
+	mode := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Mode")))
+	if site != "" {
+		if site != "none" && site != "same-origin" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return true
+		}
+	} else if dest != "" || mode != "" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return true
+	}
+	switch dest {
+	case "script", "image", "iframe", "embed", "object", "style", "media", "font":
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return true
+	}
+	return false
+}
+
 func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodConnect:
@@ -550,10 +623,18 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// some DNS name to 127.0.0.1 gets nothing here.
 		http.NotFound(w, r)
 	case r.URL.Path == "/proxy.pac":
+		if rejectBrowserProbe(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = io.WriteString(w, a.pac())
 	case r.URL.Path == "/status":
+		if rejectBrowserProbe(w, r) {
+			return
+		}
 		a.mu.Lock()
 		st := agentStatus{Zone: a.cfg.Zone, Up: a.up, Error: a.err, IPs: a.ips, Server: a.server}
 		a.mu.Unlock()
@@ -573,6 +654,9 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(st)
 	default:
 		http.NotFound(w, r)

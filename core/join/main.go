@@ -227,7 +227,23 @@ func controlClient(caFile string) (*http.Client, error) {
 		}
 		tr.TLSClientConfig = &tls.Config{RootCAs: pool}
 	}
-	return &http.Client{Timeout: 20 * time.Second, Transport: tr}, nil
+	return &http.Client{
+		Timeout:   20 * time.Second,
+		Transport: tr,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("stopped after 5 redirects")
+			}
+			orig := via[0].URL
+			if !strings.EqualFold(req.URL.Host, orig.Host) {
+				return fmt.Errorf("refusing cross-host redirect to %s", req.URL.Host)
+			}
+			if strings.EqualFold(orig.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+				return errors.New("refusing HTTPS downgrade redirect")
+			}
+			return nil
+		},
+	}, nil
 }
 
 var (

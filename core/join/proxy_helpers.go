@@ -255,7 +255,9 @@ func renderLaunchPlistArgs(label, bin string, args []string, logPath string, sto
 }
 
 func systemdQuote(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	// Strip CR/LF so a path cannot inject new unit directives, and escape
+	// systemd specifiers (%), environment expansion ($), backslashes, and quotes.
+	r := strings.NewReplacer("\r", "", "\n", "", "%", "%%", "$", "$$", `\`, `\\`, `"`, `\"`)
 	return `"` + r.Replace(s) + `"`
 }
 

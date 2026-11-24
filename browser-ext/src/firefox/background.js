@@ -9,6 +9,7 @@ import {
 
 const NATIVE_HOST = "network.hogman.browser";
 const REFRESH_TTL_MS = 10000;
+const NATIVE_ERROR_BACKOFF_MS = 5000;
 const UNKNOWN_REFRESH_COOLDOWN_MS = 15000;
 const HOST_PERMISSION_ORIGINS = [
   "*://*.pens.hogman.network/*",
@@ -18,6 +19,7 @@ const HOST_PERMISSION_ORIGINS = [
 let cachedSnapshot = null;
 let cachedRoutes = {};
 let lastFetchAt = 0;
+let lastFailedFetchAt = 0;
 let lastUnknownRefreshAt = 0;
 let inFlightRefresh = null;
 
@@ -106,9 +108,13 @@ async function rebuildRoutesFromCache() {
 }
 
 // Singleflight refresh prevents spawning concurrent native host processes on
-// browser startup / session restore.
+// browser startup / session restore. Never fall back to persisted snapshots on
+// native-host error: unverified loopback ports must fail closed.
 function refreshSnapshot(force = false) {
   if (!force && cachedSnapshot && Date.now() - lastFetchAt < REFRESH_TTL_MS) {
+    return rebuildRoutesFromCache();
+  }
+  if (!force && !cachedSnapshot && lastFailedFetchAt > 0 && Date.now() - lastFailedFetchAt < NATIVE_ERROR_BACKOFF_MS) {
     return rebuildRoutesFromCache();
   }
   if (inFlightRefresh) return inFlightRefresh;
@@ -118,20 +124,24 @@ function refreshSnapshot(force = false) {
       if (resp && resp.ok) {
         cachedSnapshot = resp;
         lastFetchAt = Date.now();
+        lastFailedFetchAt = 0;
         state.connected = true;
         state.nativeError = "";
-        await browser.storage.local.set({ cachedSnapshot: resp });
       } else {
+        cachedSnapshot = null;
+        cachedRoutes = {};
+        lastFetchAt = 0;
+        lastFailedFetchAt = Date.now();
         state.connected = false;
         state.nativeError = (resp && resp.error) || "unexpected native host response";
       }
     } catch (err) {
+      cachedSnapshot = null;
+      cachedRoutes = {};
+      lastFetchAt = 0;
+      lastFailedFetchAt = Date.now();
       state.connected = false;
       state.nativeError = String(err && err.message ? err.message : err);
-      if (!cachedSnapshot) {
-        const stored = await browser.storage.local.get("cachedSnapshot");
-        if (stored.cachedSnapshot) cachedSnapshot = stored.cachedSnapshot;
-      }
     } finally {
       inFlightRefresh = null;
       await rebuildRoutesFromCache();
@@ -154,11 +164,11 @@ async function handleProxyRequest(details) {
     return FAIL_CLOSED_FIREFOX;
   }
 
-  if (!cachedSnapshot) {
+  if (!cachedSnapshot || Date.now() - lastFetchAt >= REFRESH_TTL_MS) {
     await refreshSnapshot(false);
   }
   let resolved = resolveFirefoxProxy(host, cachedRoutes);
-  // Only refresh for a genuinely unknown pen zone (never respawn the native
+  // Only force-refresh for a genuinely unknown pen zone (never respawn the native
   // host on every request to a pen that is already known disabled/squatted/down).
   if (
     resolved === FAIL_CLOSED_FIREFOX &&
@@ -184,7 +194,7 @@ if (browser.permissions?.onRemoved) {
 }
 
 browser.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && !changes.cachedSnapshot) {
+  if (area === "local") {
     rebuildRoutesFromCache().catch(() => {});
   }
 });
@@ -200,4 +210,6 @@ browser.runtime.onMessage.addListener((msg) => {
   return undefined;
 });
 
+// Clean up any stale snapshot persisted by earlier versions.
+browser.storage.local.remove("cachedSnapshot").catch(() => {});
 refreshSnapshot(true);

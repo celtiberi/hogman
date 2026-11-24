@@ -31,8 +31,8 @@ func startExistingBinary(bin, dir string, c *agentConfig, noService bool) error 
 		return startDetached(bin, dir)
 	}
 	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_, _ = run(false, "launchctl", "bootout", domain+"/"+launchLabel(c.Zone))
-	if _, err := run(false, "launchctl", "bootstrap", domain, path); err != nil {
+	_, _ = run(false, "/bin/launchctl", "bootout", domain+"/"+launchLabel(c.Zone))
+	if _, err := run(false, "/bin/launchctl", "bootstrap", domain, path); err != nil {
 		_ = os.Remove(path)
 		return startDetached(bin, dir)
 	}

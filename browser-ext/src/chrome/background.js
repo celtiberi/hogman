@@ -5,10 +5,14 @@ import {
 } from "./pac.js";
 
 const NATIVE_HOST = "network.hogman.browser";
+const PROXY_ERROR_COOLDOWN_MS = 5000;
 
 let nativePort = null;
 let reconnectTimer = null;
 let lastSnapshot = null;
+let lastProxyErrorRefreshAt = 0;
+let applyInFlight = null;
+let applyPending = false;
 let state = {
   browser: "chrome",
   connected: false,
@@ -31,11 +35,15 @@ async function loadPrefs() {
     "paused",
     "enabledZones",
     "allowOSProxyOverride",
+    "lastKnownOSProxyConflict",
+    "lastKnownOSProxyKind",
   ]);
   return {
     paused: Boolean(stored.paused),
     enabledZones: stored.enabledZones || {},
     allowOSProxyOverride: Boolean(stored.allowOSProxyOverride),
+    lastKnownOSProxyConflict: Boolean(stored.lastKnownOSProxyConflict),
+    lastKnownOSProxyKind: typeof stored.lastKnownOSProxyKind === "string" ? stored.lastKnownOSProxyKind : "",
   };
 }
 
@@ -55,7 +63,27 @@ function updateBadge() {
   chrome.action.setBadgeBackgroundColor({ color: "#15803d" });
 }
 
-async function applyProxyConfig() {
+// Serialize proxy settings updates so concurrent startup, storage, and native
+// host events cannot race and overwrite newer state with stale PAC data.
+function applyProxyConfig() {
+  if (applyInFlight) {
+    applyPending = true;
+    return applyInFlight;
+  }
+  applyInFlight = (async () => {
+    try {
+      do {
+        applyPending = false;
+        await applyProxyConfigOnce();
+      } while (applyPending);
+    } finally {
+      applyInFlight = null;
+    }
+  })();
+  return applyInFlight;
+}
+
+async function applyProxyConfigOnce() {
   const prefs = await loadPrefs();
   state.paused = prefs.paused;
   state.allowOSProxyOverride = prefs.allowOSProxyOverride;
@@ -68,13 +96,22 @@ async function applyProxyConfig() {
     state.osProxyKind = snap.osProxyKind;
     state.vpnOverride = snap.vpnOverride;
     state.vpnInterface = snap.vpnInterface;
+    if (
+      snap.osProxyConflict !== prefs.lastKnownOSProxyConflict ||
+      snap.osProxyKind !== prefs.lastKnownOSProxyKind
+    ) {
+      await chrome.storage.local.set({
+        lastKnownOSProxyConflict: snap.osProxyConflict,
+        lastKnownOSProxyKind: snap.osProxyKind,
+      });
+    }
 
     const computed = computeEffectiveRoutes(snap.pens, prefs);
     state.entries = computed.entries;
     routes = prefs.paused ? {} : computed.routes;
   } else {
-    state.osProxyConflict = false;
-    state.osProxyKind = "";
+    state.osProxyConflict = prefs.lastKnownOSProxyConflict;
+    state.osProxyKind = prefs.lastKnownOSProxyKind;
     state.vpnOverride = false;
     state.vpnInterface = "";
     state.entries = [];
@@ -96,9 +133,11 @@ async function applyProxyConfig() {
     updateBadge();
     return;
   }
-  if (snap && snap.osProxyConflict && !prefs.allowOSProxyOverride) {
+  const osProxyActive = snap ? snap.osProxyConflict : prefs.lastKnownOSProxyConflict;
+  const osProxyKind = snap ? snap.osProxyKind : prefs.lastKnownOSProxyKind;
+  if (osProxyActive && !prefs.allowOSProxyOverride) {
     state.conflict = "os_proxy";
-    state.conflictDetail = snap.osProxyKind || "non-Hogman OS proxy";
+    state.conflictDetail = osProxyKind || "non-Hogman OS proxy";
     // Step aside so a corporate OS proxy is not overridden with DIRECT.
     await chrome.proxy.settings.clear({ scope: "regular" });
     updateBadge();
@@ -155,7 +194,13 @@ function connectWatch() {
       lastSnapshot = null;
       state.connected = false;
       state.nativeError = errMsg;
-      applyProxyConfig().catch(() => updateBadge());
+      // If the native host was uninstalled/missing, clear any persisted OS proxy
+      // conflict flag so Chrome does not stay stepped aside forever.
+      const hostMissing = /not found|does not exist|not registered/i.test(errMsg);
+      const prep = hostMissing
+        ? chrome.storage.local.remove(["lastKnownOSProxyConflict", "lastKnownOSProxyKind"]).catch(() => {})
+        : Promise.resolve();
+      prep.then(() => applyProxyConfig()).catch(() => updateBadge());
       scheduleReconnect();
     });
 
@@ -192,12 +237,16 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.proxy.onProxyError.addListener(() => {
-  // Wakes a sleeping worker when an unmapped *.pens.hogman.network hits fail-closed.
+  // Wakes a sleeping worker when an unmapped *.pens.hogman.network hits fail-closed,
+  // throttled so repeated subresource errors do not hammer the native host.
+  const now = Date.now();
+  if (now - lastProxyErrorRefreshAt < PROXY_ERROR_COOLDOWN_MS) return;
+  lastProxyErrorRefreshAt = now;
   refreshNow();
 });
 
-chrome.storage.onChanged.addListener((_changes, area) => {
-  if (area === "local") {
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && (changes.paused || changes.enabledZones || changes.allowOSProxyOverride)) {
     applyProxyConfig().catch(() => {});
   }
 });

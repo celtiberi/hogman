@@ -38,13 +38,24 @@ func confirm(prompt string) bool {
 	return a == "y" || a == "yes"
 }
 
+// sudoPath returns the absolute path to sudo from trusted system directories so
+// a poisoned PATH entry cannot hijack privileged invocations.
+func sudoPath() string {
+	for _, p := range []string{"/usr/bin/sudo", "/bin/sudo", "/run/wrappers/bin/sudo"} {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
 // run executes a command, returning combined output. With asRoot, it uses sudo
 // when not already root (the OS will ask for the password once).
 func run(asRoot bool, name string, args ...string) (string, error) {
 	if asRoot && !isRoot() {
-		if _, err := exec.LookPath("sudo"); err == nil {
+		if sp := sudoPath(); sp != "" {
 			args = append([]string{name}, args...)
-			name = "sudo"
+			name = sp
 		}
 	}
 	if verbose {
