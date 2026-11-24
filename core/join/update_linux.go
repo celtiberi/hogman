@@ -29,8 +29,8 @@ func startExistingBinary(bin, dir string, c *agentConfig, noService bool) error 
 		return startDetached(bin, dir)
 	}
 	sc := systemctlBin()
-	_, _ = run(false, sc, "--user", "daemon-reload")
-	if out, err := run(false, sc, "--user", "enable", "--now", unitName(c.Zone)); err != nil {
+	_, _ = run(sc, "--user", "daemon-reload")
+	if out, err := run(sc, "--user", "enable", "--now", unitName(c.Zone)); err != nil {
 		note("could not start user service for %s (%s); running in the background until restart", c.Zone, firstLine(out))
 		return startDetached(bin, dir)
 	}
@@ -75,7 +75,7 @@ func rewriteAgentService(bin, dir string, c *agentConfig) error {
 		return err
 	}
 	if haveUserSystemd() {
-		_, _ = run(false, systemctlBin(), "--user", "daemon-reload")
+		_, _ = run(systemctlBin(), "--user", "daemon-reload")
 	}
 	return nil
 }
@@ -86,7 +86,7 @@ func rewriteShareService(bin, dir string, c *shareConfig) error {
 		return err
 	}
 	if haveUserSystemd() {
-		_, _ = run(false, systemctlBin(), "--user", "daemon-reload")
+		_, _ = run(systemctlBin(), "--user", "daemon-reload")
 	}
 	return nil
 }

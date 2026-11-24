@@ -186,9 +186,9 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 	// 6. System proxy & VPN state
 	sys := detectSystemProxyState(configs)
 	if sys.StalePAC != "" {
-		fix := cliBinaryName() + " uninstall"
-		if len(configs) > 0 {
-			fix = "re-join a pen or clear the stale automatic proxy URL in System Settings"
+		fix := "turn off \"Automatic proxy configuration\" in System Settings → Network → Wi-Fi (or Ethernet) → Details… → Proxies"
+		if host := pickPACHost(configs); host != nil {
+			fix = "update \"Automatic proxy configuration\" in System Settings → Network → Wi-Fi (or Ethernet) → Details… → Proxies to " + host.pacURL()
 		}
 		add(doctorCheck{
 			Name:   "system-proxy",

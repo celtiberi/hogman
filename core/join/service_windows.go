@@ -4,7 +4,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -55,14 +54,13 @@ func startDetached(bin, dir string) error {
 	return cmd.Start()
 }
 
-func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, error) {
+func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, bool, error) {
 	pens = normalizePenConfigs(pens, c)
-	if len(pens) <= 1 {
-		return "set Settings → Network & Internet → Proxy → \"Use setup script\" to " + c.pacURL(), nil
+	stableURL := c.pacURL()
+	if host := pickPACHost(pens); host != nil {
+		stableURL = host.pacURL()
 	}
-	return "set Settings → Network & Internet → Proxy → \"Use setup script\" to " + c.pacURL() +
-		" (covers all " + strconv.Itoa(len(pens)) + " pens: " + strings.Join(penZoneNames(pens), ", ") +
-		"; if your proxy already uses another pen's proxy.pac, reload it)", nil
+	return formatBrowserProxyInstructions("windows", stableURL, c.Zone, penZoneNames(pens)), false, nil
 }
 
 func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {

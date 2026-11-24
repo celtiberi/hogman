@@ -415,17 +415,6 @@ func leaveOne(t leaveTarget) error {
 			}
 		}
 	}
-	// Legacy private-CA cleanup goes before removing the device, so cancelling
-	// an OS trust prompt leaves this computer still on the pen.
-	rootFP := ""
-	if t.cfg != nil {
-		rootFP = t.cfg.RootFP
-	}
-	if removed, err := removeLegacyHogmanRoot(t.zone, rootFP); err != nil {
-		return err
-	} else if removed {
-		note("removed the old %s certificate", t.zone)
-	}
 	if t.cfg != nil {
 		// This computer's own device, through its connection while it's still
 		// up, so old devices don't pile up in "Your devices". Best effort: the

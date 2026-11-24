@@ -409,11 +409,15 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 		note("could not register browser extension host: %v", err)
 	}
 	browsers := "set your browser's automatic proxy configuration to " + cfg.pacURL()
+	proxyConfigured := false
 	if !o.noSystemProxy {
-		if msg, err := setSystemProxy(cfg, pens); err != nil {
+		if msg, ok, err := setSystemProxy(cfg, pens); err != nil {
 			note("could not point browsers at the pen automatically: %v", err)
-		} else if msg != "" {
-			browsers = msg
+		} else {
+			proxyConfigured = ok
+			if msg != "" {
+				browsers = msg
+			}
 		}
 	}
 	say("\n✓ You're in. You are %s on %s.", handle, n.Zone)
@@ -434,7 +438,13 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	say("  The pen carries HTTPS only.")
 	say("  To leave: hogman leave '<this link>'")
 	if !o.noOpen {
-		openURL(n.Portal)
+		// On macOS, only auto-open home.<zone> when a Hogman proxy or browser
+		// extension is already configured; otherwise opening immediately would
+		// flash a broken DNS error tab before the user pastes the PAC URL.
+		shouldOpen := runtime.GOOS != "darwin" || proxyConfigured || extensionRecentlySeen(hogmanConfigBase(), 7*24*time.Hour)
+		if shouldOpen {
+			openURL(n.Portal)
+		}
 	}
 	return nil
 }
@@ -556,7 +566,7 @@ func leaveAlongside(zone string, deviceGone bool) bool {
 	stopAgent(dir, cfg)
 	if !deviceGone {
 		if self, err := os.Executable(); err == nil {
-			_, _ = run(false, self, "__agent-logout", dir)
+			_, _ = run(self, "__agent-logout", dir)
 		}
 	}
 	_ = os.RemoveAll(dir)
@@ -585,9 +595,8 @@ func findLegacySameServerPens(configBase, newZone, loginServer string) []penTarg
 }
 
 type legacyRetireOps struct {
-	stop       func(dir string, c *agentConfig)
-	logout     func(dir string)
-	removeRoot func(zone, rootFP string) (bool, error)
+	stop   func(dir string, c *agentConfig)
+	logout func(dir string)
 }
 
 func defaultLegacyRetireOps() legacyRetireOps {
@@ -595,10 +604,9 @@ func defaultLegacyRetireOps() legacyRetireOps {
 		stop: stopAgent,
 		logout: func(dir string) {
 			if self, err := os.Executable(); err == nil && self != "" {
-				_, _ = run(false, self, "__agent-logout", dir)
+				_, _ = run(self, "__agent-logout", dir)
 			}
 		},
-		removeRoot: removeLegacyHogmanRoot,
 	}
 }
 
@@ -613,13 +621,6 @@ func retireLegacySameServerPens(oldPens []penTarget, ops legacyRetireOps) {
 		}
 		if ops.logout != nil {
 			ops.logout(old.dir)
-		}
-		if ops.removeRoot != nil {
-			if removed, err := ops.removeRoot(old.zone, old.cfg.RootFP); err != nil {
-				note("could not remove old %s certificate: %v", old.zone, err)
-			} else if removed {
-				note("removed old %s certificate from trust store", old.zone)
-			}
 		}
 		if err := os.RemoveAll(old.dir); err != nil {
 			note("could not remove old settings folder %s: %v", old.dir, err)

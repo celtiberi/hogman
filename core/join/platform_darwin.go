@@ -1,0 +1,16 @@
+package main
+
+import "os"
+
+func isRoot() bool { return os.Geteuid() == 0 }
+
+func tailscaleCandidates() []string {
+	// Only check the signed app bundle path.
+	return []string{"/Applications/Tailscale.app/Contents/MacOS/Tailscale"}
+}
+
+func tailscaleInstallHelp() string {
+	return "Install Tailscale from the Mac App Store or https://tailscale.com/download/mac, open it once, then run this again."
+}
+
+func openURL(u string) { _, _ = run("/usr/bin/open", u) }

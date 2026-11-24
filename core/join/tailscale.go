@@ -34,7 +34,7 @@ type TSStatus struct {
 }
 
 func (t *Tailscale) Status() (*TSStatus, error) {
-	out, err := run(false, t.bin, "status", "--json")
+	out, err := run(t.bin, "status", "--json")
 	idx := strings.Index(out, "{")
 	if err != nil && idx < 0 {
 		return nil, errorf("tailscale is installed but not running (%v). Start it and run this again.\n%s", err, out)
@@ -70,23 +70,22 @@ func (t *Tailscale) Login(loginServer, key, hostname string) error {
 	if hostname != "" {
 		args = append(args, "--hostname="+hostname)
 	}
-	out, err := run(false, t.bin, args...)
-	if err != nil && needsPrivilege(out) && !isRoot() {
-		note("Tailscale needs administrator rights here")
-		out, err = run(true, t.bin, args...)
-	}
+	out, err := run(t.bin, args...)
 	if err != nil {
+		if needsPrivilege(out) && !isRoot() {
+			return errorf("Tailscale needs operator permission to join without root (Hogman never runs sudo). Grant it once with:\n  sudo %s set --operator=$USER\nThen run this command again.\n%s", t.bin, redact(out, key))
+		}
 		return errorf("tailscale could not join: %v\n%s", err, redact(out, key))
 	}
 	return nil
 }
 
 func (t *Tailscale) Logout() error {
-	out, err := run(false, t.bin, "logout")
-	if err != nil && needsPrivilege(out) && !isRoot() {
-		out, err = run(true, t.bin, "logout")
-	}
+	out, err := run(t.bin, "logout")
 	if err != nil {
+		if needsPrivilege(out) && !isRoot() {
+			return errorf("Tailscale needs operator permission to log out (Hogman never runs sudo). Run this yourself:\n  sudo %s logout\n%s", t.bin, out)
+		}
 		return errorf("tailscale logout: %v\n%s", err, out)
 	}
 	return nil
@@ -95,7 +94,7 @@ func (t *Tailscale) Logout() error {
 // RemoveProfiles deletes this device's saved Tailscale profiles for the
 // network (named after its control host), except the one in use.
 func (t *Tailscale) RemoveProfiles(controlHost string) int {
-	out, err := run(false, t.bin, "switch", "--list", "--json")
+	out, err := run(t.bin, "switch", "--list", "--json")
 	if err != nil {
 		return 0
 	}
@@ -112,21 +111,22 @@ func (t *Tailscale) RemoveProfiles(controlHost string) int {
 		if p.Tailnet != controlHost || p.Selected {
 			continue
 		}
-		out, err := run(false, t.bin, "switch", "remove", p.ID)
-		if err != nil && needsPrivilege(out) && !isRoot() {
-			_, err = run(true, t.bin, "switch", "remove", p.ID)
+		out, err := run(t.bin, "switch", "remove", p.ID)
+		if err != nil {
+			if needsPrivilege(out) && !isRoot() {
+				note("could not remove old Tailscale profile %s without operator permission; remove it yourself with: sudo %s switch remove %s", p.ID, t.bin, p.ID)
+			}
+			continue
 		}
-		if err == nil {
-			n++
-		}
+		n++
 	}
 	return n
 }
 
 func (t *Tailscale) Down() error {
-	out, err := run(false, t.bin, "down")
+	out, err := run(t.bin, "down")
 	if err != nil && needsPrivilege(out) && !isRoot() {
-		_, err = run(true, t.bin, "down")
+		return errorf("Tailscale needs operator permission to disconnect (Hogman never runs sudo). Run this yourself:\n  sudo %s down\n%s", t.bin, out)
 	}
 	return err
 }

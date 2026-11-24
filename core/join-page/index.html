@@ -70,17 +70,15 @@
       </details>
 
       <div class="expect-box">
-        <p class="note-head">On a Mac, two things may pop up. Both are expected.</p>
+        <p class="note-head">One-time browser setup (Hogman never asks for your Mac or computer password)</p>
         <ul class="note">
-          <li><strong>&ldquo;Allow hogman to find devices on local networks?&rdquo;</strong> Either answer works.
+          <li id="pw-note"><strong>Set your browser's automatic proxy URL once</strong> using the <code>http://127.0.0.1:&lt;port&gt;/proxy.pac</code> address printed by <code>hogman</code> (only pen sites use it; normal browsing goes direct):
+            <br><strong>macOS:</strong> <em>System Settings &rarr; Network &rarr; Wi-Fi (or Ethernet) &rarr; Details&hellip; &rarr; Proxies &rarr; Automatic proxy configuration</em> &rarr; paste the URL &rarr; OK.
+            <br><strong>Linux / Firefox:</strong> Firefox <em>Settings &rarr; Network Settings &rarr; Automatic proxy configuration URL</em> (or GNOME <em>Settings &rarr; Network &rarr; Network Proxy &rarr; Automatic</em>).
+            <br>We're working on a signed Mac app and Chrome/Firefox extensions so this step will be automatic soon.</li>
+          <li><strong>On a Mac: &ldquo;Allow hogman to find devices on local networks?&rdquo;</strong> Either answer works.
             <strong>Allow</strong> lets your devices in the same home or office talk to each other directly, which is faster.
             <strong>Don't Allow</strong> sends that traffic the long way, over the internet. Nothing on your network is shared with the pen either way.</li>
-          <li id="pw-note"><strong>A macOS password prompt</strong> (your Mac login password, once): macOS
-            requires administrator permission to set your automatic proxy URL so Chrome, Safari, and Firefox
-            can open pen sites (your normal internet browsing stays untouched, and Hogman never sees your
-            password). Over SSH or without a desktop window, it asks in Terminal instead — nothing appears on
-            screen as you type; press Enter when done. If you cancel, Hogman prints the one proxy URL to set
-            by hand.</li>
         </ul>
         <p class="note vpn-callout" id="vpn-note"><strong>Using a VPN (ProtonVPN, Mullvad, or a work VPN)?</strong> macOS VPN apps override the system proxy while connected.
           Pause your VPN while visiting pen sites, or set Firefox's built-in <em>Automatic proxy configuration URL</em> to the address printed by <code>hogman</code>.</p>

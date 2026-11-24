@@ -28,7 +28,7 @@ func haveUserSystemd() bool {
 	if sc == "" {
 		return false
 	}
-	_, err := run(false, sc, "--user", "show-environment")
+	_, err := run(sc, "--user", "show-environment")
 	return err == nil
 }
 
@@ -59,8 +59,8 @@ func startAgent(dir string, c *agentConfig, o options) error {
 		return err
 	}
 	sc := systemctlBin()
-	_, _ = run(false, sc, "--user", "daemon-reload")
-	if out, err := run(false, sc, "--user", "enable", "--now", unitName(c.Zone)); err != nil {
+	_, _ = run(sc, "--user", "daemon-reload")
+	if out, err := run(sc, "--user", "enable", "--now", unitName(c.Zone)); err != nil {
 		return errorf("could not start the background service: %v\n%s", err, out)
 	}
 	note("it will start by itself when you log in")
@@ -70,9 +70,9 @@ func startAgent(dir string, c *agentConfig, o options) error {
 func stopAgent(dir string, c *agentConfig) {
 	if haveUserSystemd() {
 		sc := systemctlBin()
-		_, _ = run(false, sc, "--user", "disable", "--now", unitName(c.Zone))
+		_, _ = run(sc, "--user", "disable", "--now", unitName(c.Zone))
 		_ = os.Remove(unitPath(c.Zone))
-		_, _ = run(false, sc, "--user", "daemon-reload")
+		_, _ = run(sc, "--user", "daemon-reload")
 	}
 	stopDetached(dir)
 }
@@ -171,7 +171,7 @@ func linuxLingerEnabled() bool {
 	if lc == "" {
 		return false
 	}
-	out, err := run(false, lc, "show-user", name, "-p", "Linger", "--value")
+	out, err := run(lc, "show-user", name, "-p", "Linger", "--value")
 	return err == nil && strings.EqualFold(strings.TrimSpace(out), "yes")
 }
 
@@ -201,10 +201,10 @@ func startShareServiceWithBinary(bin, dir string, c *shareConfig, noService bool
 		return false, 0, err
 	}
 	sc := systemctlBin()
-	_, _ = run(false, sc, "--user", "daemon-reload")
-	if out, err := run(false, sc, "--user", "enable", "--now", shareUnitName(c)); err != nil {
+	_, _ = run(sc, "--user", "daemon-reload")
+	if out, err := run(sc, "--user", "enable", "--now", shareUnitName(c)); err != nil {
 		_ = os.Remove(path)
-		_, _ = run(false, sc, "--user", "daemon-reload")
+		_, _ = run(sc, "--user", "daemon-reload")
 		return false, 0, errorf("could not start the background service: %v\n%s", err, out)
 	}
 	note("it will start by itself when you log in")
@@ -222,9 +222,9 @@ func stopShareService(c *shareConfig) {
 	path := shareUnitPath(c)
 	if haveUserSystemd() {
 		sc := systemctlBin()
-		_, _ = run(false, sc, "--user", "disable", "--now", shareUnitName(c))
+		_, _ = run(sc, "--user", "disable", "--now", shareUnitName(c))
 		_ = os.Remove(path)
-		_, _ = run(false, sc, "--user", "daemon-reload")
+		_, _ = run(sc, "--user", "daemon-reload")
 		return
 	}
 	_ = os.Remove(path)
@@ -237,14 +237,13 @@ func startDetached(bin, dir string) error {
 
 // Linux desktops each keep proxy settings in their own place, so the member
 // sets it in the browser. The message says how.
-func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, error) {
+func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, bool, error) {
 	pens = normalizePenConfigs(pens, c)
-	if len(pens) <= 1 {
-		return "set your browser's (or desktop's) automatic proxy configuration URL to " + c.pacURL(), nil
+	stableURL := c.pacURL()
+	if host := pickPACHost(pens); host != nil {
+		stableURL = host.pacURL()
 	}
-	return "set your browser's (or desktop's) automatic proxy configuration URL to " + c.pacURL() +
-		" (covers all " + strconv.Itoa(len(pens)) + " pens: " + strings.Join(penZoneNames(pens), ", ") +
-		"; if your browser already uses another pen's proxy.pac, reload proxy settings)", nil
+	return formatBrowserProxyInstructions("linux", stableURL, c.Zone, penZoneNames(pens)), false, nil
 }
 
 func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {

@@ -476,32 +476,6 @@ func TestAgentForwardRejectsHTTPSScheme(t *testing.T) {
 	}
 }
 
-func TestWriteTempCertPermissions(t *testing.T) {
-	path, cleanup, err := writeTempCert("PEMDATA")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := filepath.Dir(path)
-	dInfo, err := os.Stat(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dInfo.Mode().Perm() != 0o700 {
-		t.Fatalf("temp cert dir mode = %o, want 0700", dInfo.Mode().Perm())
-	}
-	fInfo, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fInfo.Mode().Perm() != 0o600 {
-		t.Fatalf("temp cert file mode = %o, want 0600", fInfo.Mode().Perm())
-	}
-	cleanup()
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("cleanup did not remove %s", dir)
-	}
-}
-
 func TestRenderSystemdUnitQuotesSpaces(t *testing.T) {
 	u := renderSystemdUnit("bobo.hogman", `/opt/my bin/hogman`, `/home/a user/.config/hogman/bobo.hogman`)
 	want := `ExecStart="/opt/my bin/hogman" agent "/home/a user/.config/hogman/bobo.hogman"`

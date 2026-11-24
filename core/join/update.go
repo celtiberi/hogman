@@ -1280,11 +1280,7 @@ func updateCmd(args []string, o options) error {
 	}
 
 	anyUpdate := selfNeedsUpdate || canonicalNeedsUpdate || nhNeedsUpdate || anyLegacy || anyInterrupted || anyStaleAgent
-	cleanupOps := defaultLegacyCleanupOps()
 	if !anyUpdate {
-		if !o.dryRun {
-			cleanupLegacyRootsForUpdate(plan, false, cleanupOps)
-		}
 		say("\n✓ %s is already up to date (%s).", cliBinaryName(), wantHex[:12])
 		return nil
 	}
@@ -1319,7 +1315,6 @@ func updateCmd(args []string, o options) error {
 		if hasOldBinCanonical {
 			note("consolidate %s -> %s", oldBinCanonical, canonicalBin)
 		}
-		cleanupLegacyRootsForUpdate(plan, true, cleanupOps)
 		return nil
 	}
 
@@ -1444,8 +1439,6 @@ func updateCmd(args []string, o options) error {
 		}
 	}
 
-	cleanupLegacyRootsForUpdate(plan, false, cleanupOps)
-
 	// Warn if other installed pens were not part of this update plan (e.g. --pen
 	// or an explicit host matching only one of several pens).
 	inPlan := map[string]bool{}
@@ -1484,68 +1477,6 @@ func updateCmd(args []string, o options) error {
 		say("\n✓ Updated hogman (SHA-256 %s).", wantHex[:12])
 	}
 	return nil
-}
-
-type legacyCleanupOps struct {
-	removeRoot func(zone, rootFP string) (bool, error)
-	saveConfig func(dir string, c *agentConfig) error
-}
-
-func defaultLegacyCleanupOps() legacyCleanupOps {
-	return legacyCleanupOps{
-		removeRoot: removeLegacyHogmanRoot,
-		saveConfig: func(dir string, c *agentConfig) error {
-			return c.save(dir)
-		},
-	}
-}
-
-func cleanupLegacyRootsForUpdate(plan *updatePlan, dryRun bool, ops legacyCleanupOps) []string {
-	if plan == nil {
-		return nil
-	}
-	var cleaned []string
-	for _, p := range plan.pens {
-		if p.cfg == nil || p.cfg.RootFP == "" {
-			continue
-		}
-		if dryRun {
-			note("would remove old %s certificate from trust store", p.zone)
-			cleaned = append(cleaned, p.zone)
-			continue
-		}
-		if ops.removeRoot == nil {
-			continue
-		}
-		removed, err := ops.removeRoot(p.zone, p.cfg.RootFP)
-		if err != nil {
-			note("could not remove old %s certificate: %v", p.zone, err)
-			continue
-		}
-		if removed {
-			note("removed old %s network certificate from this computer's trust store", p.zone)
-			cleaned = append(cleaned, p.zone)
-		}
-		p.cfg.RootFP = ""
-		if ops.saveConfig != nil {
-			if ser := ops.saveConfig(p.dir, p.cfg); ser != nil {
-				note("could not update %s settings after certificate cleanup: %v", p.zone, ser)
-			}
-		}
-	}
-
-	if dryRun {
-		note("would check for and remove any leftover old network root certificates")
-	} else if ops.removeRoot != nil {
-		removed, err := ops.removeRoot("", "")
-		if err != nil {
-			note("could not remove leftover old network certificate(s): %v", err)
-		} else if removed {
-			note("removed leftover old network certificate(s) from this computer's trust store")
-			cleaned = append(cleaned, "*")
-		}
-	}
-	return cleaned
 }
 
 func shortDigest(h string) string {
