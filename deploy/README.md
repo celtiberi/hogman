@@ -343,15 +343,32 @@ using a host-pushed snapshot file and zero host RPC listeners:
 
 ## Publishing releases
 
-`deploy/release.sh [git-ref]` publishes a release directly from any green commit on `main` and
-builds the GitHub Release notes from `changelog.d/` fragments (plus any remaining `## [Unreleased]`
-entries) at that commit:
+Releases are published by GitHub, not from anyone's machine: `.github/workflows/release.yml`.
+
+1. Start it: **Actions → release → Run workflow** (leave the commit empty to release `main` as it is when you start the run), or
+   `gh workflow run release.yml -f commit=<full sha>`.
+2. Approve it: the job waits in the `release` environment until a required reviewer approves. That
+   approval is the decision to release.
+
+**One-time setup (repository owner):** Settings → Environments → New environment `release`; add
+yourself under *Required reviewers*; under *Deployment branches and tags* choose *Selected branches*
+and add `main`. Without required reviewers, anyone who can start a workflow could publish.
+
+The workflow refuses a commit that is not on `main`, or that lacks a successful `build`, `e2e` or
+`vuln` run on `main`. It then runs `deploy/release.sh` in two steps (`NO_DEPLOY=1 OUT_DIR=…` to
+package, `PUBLISH_FROM=…` to publish exactly those files) and, in between, gives every packaged file
+GitHub build provenance. Check any download with
+`gh attestation verify <file> --repo celtiberi/hogman`.
+
+`deploy/release.sh [git-ref]` can still be run by hand as a fallback. Either way it releases
+directly from a green commit on `main` and builds the GitHub Release notes from `changelog.d/`
+fragments (plus any remaining `## [Unreleased]` entries) at that commit:
 
 1. Verifies a successful non-PR `.github/workflows/build.yml` run for the exact commit and checks
    GitHub build provenance (`gh attestation verify`) on every compiled binary before packaging.
 2. Packages `hogman-<ver>.tar.gz`, `hogman-bin-<ver>.tar.gz`, `install.sh` (from the committed ref),
    `SHA256SUMS`, and `latest`.
-3. Uploads all five assets into a **draft** release (`v<ver>`), verifies the asset list, then
+3. Uploads every asset into a **draft** release (`v<ver>`), verifies the asset list, then
    publishes and marks it `latest` atomically (`gh release edit --draft=false --latest`).
 
 After publishing `v<ver>`, fold the released `changelog.d/` fragments into `CHANGELOG.md` under

@@ -1,0 +1,105 @@
+# Publish a Hogman release from GitHub, never from a laptop.
+#
+# Start it by hand (Actions -> release -> Run workflow, or
+# `gh workflow run release.yml -f commit=<sha>`). It then waits in the
+# "release" environment until a required reviewer approves it; that approval
+# is the maintainer's "release". The environment must exist with required
+# reviewers and be limited to the main branch (Settings -> Environments):
+# without that, anyone who can start workflows could publish.
+#
+# It releases only a commit that is on main and whose build, e2e and vuln runs
+# all succeeded there. deploy/release.sh does the packaging and the checks
+# (GitHub's own build of that commit, provenance on every compiled file, client
+# version, root-owned archives). The packaged files get build provenance of
+# their own before anything is published.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Commit on main to release (full SHA). Empty = main as it is when you start this run."
+        required: false
+        default: ""
+
+# One release at a time; never cancel one that is part-way through publishing.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: publish release
+    # Only from the main branch's copy of this workflow.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write       # create the GitHub Release
+      actions: read         # read run results and download the build artifact
+      attestations: write   # verify the build's provenance, store the release's
+      id-token: write       # sign the release's provenance (Sigstore, keyless)
+    env:
+      GH_TOKEN: ${{ github.token }}
+      COMMIT_INPUT: ${{ inputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0    # release.sh archives the chosen commit from history
+
+      - name: Choose and check the commit
+        id: pick
+        run: |
+          set -euo pipefail
+          want="${COMMIT_INPUT:-}"
+          if [ -z "$want" ]; then
+            # The commit main pointed at when the run was started, which is the
+            # one shown on the approval screen. Not origin/main: with auto-merge
+            # a pull request can land between starting the run and approving it.
+            full="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          else
+            [[ "$want" =~ ^[0-9a-f]{40}$ ]] || { echo "commit must be a full 40-character SHA" >&2; exit 1; }
+            full="$(git rev-parse --verify "$want^{commit}")"
+          fi
+          git merge-base --is-ancestor "$full" origin/main \
+            || { echo "$full is not on main: not releasing" >&2; exit 1; }
+          # Every workflow that gates main must have succeeded for this commit,
+          # on main itself (a pull-request run tests a merge commit, not this one).
+          for wf in build.yml e2e.yml vuln.yml; do
+            ok="$(gh run list --workflow "$wf" --commit "$full" --status success --limit 20 \
+                    --json event --jq '[.[] | select(.event != "pull_request")] | length')"
+            [ "${ok:-0}" -gt 0 ] || { echo "no successful $wf run on main for $full: not releasing" >&2; exit 1; }
+          done
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+          echo "releasing $full"
+
+      - name: Package (no publish)
+        env:
+          FULL: ${{ steps.pick.outputs.full }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/out"
+          NO_DEPLOY=1 OUT_DIR="$RUNNER_TEMP/out" deploy/release.sh "$FULL"
+          ls -l "$RUNNER_TEMP/out"
+
+      # Provenance for the files people actually download: which workflow,
+      # commit and runner packaged them. Check with
+      # `gh attestation verify FILE --repo celtiberi/hogman`.
+      - name: Attest release files
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/out/hogman-*
+            ${{ runner.temp }}/out/install.sh
+
+      - name: Publish
+        env:
+          FULL: ${{ steps.pick.outputs.full }}
+        run: |
+          set -euo pipefail
+          PUBLISH_FROM="$RUNNER_TEMP/out" deploy/release.sh "$FULL"
