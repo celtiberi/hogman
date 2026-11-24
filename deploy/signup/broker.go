@@ -154,6 +154,9 @@ func (b *broker) handler() http.Handler {
 	mux.HandleFunc("GET /paid-code", b.paidCode)
 	mux.HandleFunc("POST /lifecycle/sweep", b.lifecycleSweepHandler)
 	mux.HandleFunc("POST /lifecycle/alerts", b.lifecycleAlertsHandler)
+	mux.HandleFunc("GET /lifecycle/pending-cancels", b.lifecyclePendingCancels)
+	mux.HandleFunc("POST /lifecycle/cancel-done", b.lifecycleCancelDone)
+	mux.HandleFunc("POST /lifecycle/cancel-alert", b.lifecycleCancelAlert)
 	mux.HandleFunc("POST /renew-verify", b.renewVerify)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, hasBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")

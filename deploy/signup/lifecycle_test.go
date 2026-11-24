@@ -675,3 +675,149 @@ func TestHogmanHostPurgeSleepWakeGuardrails(t *testing.T) {
 		t.Fatal(".retired marker must exist after purge --due")
 	}
 }
+
+func TestReplacedSubscriptionQueuedAndCancelledI6(t *testing.T) {
+	b, home := newTestBroker(t, "")
+	_ = os.MkdirAll(filepath.Join(home, "pens", "lab", "data", "registrar"), 0o700)
+	t0 := time.Now().UTC().Add(-10 * 24 * time.Hour)
+	if err := savePenLifecycle(b.lifecyclePath("lab"), &penLifecycle{
+		Plan:           planPersonal,
+		State:          stateGrace,
+		PaidUntil:      t0.Unix(),
+		GraceUntil:     t0.Add(30 * 24 * time.Hour).Unix(),
+		SubscriptionID: "sub_old_111",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same-subscription renewal (auto-renewal invoice) must NOT queue cancellation.
+	if rec, _, _, err := b.recordRenewal("lab", "in_same_1", "sub_old_111", "cus_1", "", time.Now().UTC()); err != nil || len(rec.PendingCancelSubs) != 0 {
+		t.Fatalf("same-sub renewal queued cancel: rec=%+v err=%v", rec, err)
+	}
+
+	// Manual renewal with a NEW subscription ID queues the old sub_old_111 in PendingCancelSubs.
+	rec, _, _, err := b.recordRenewal("lab", "cs_new_2", "sub_new_222", "cus_1", "", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.SubscriptionID != "sub_new_222" || len(rec.PendingCancelSubs) != 1 || rec.PendingCancelSubs[0] != "sub_old_111" {
+		t.Fatalf("expected sub_old_111 queued in PendingCancelSubs: %+v", rec)
+	}
+
+	// Web drains pending cancels via broker /lifecycle/pending-cancels -> Stripe Cancel -> /lifecycle/cancel-done.
+	bsrv := httptest.NewServer(b.handler())
+	defer bsrv.Close()
+	wb := newWeb(bsrv.URL, testToken, "gate.example.com")
+	var failCancel bool
+	var cancelled []string
+	wb.stripe = &stripeCheckout{
+		price: "price_personal_50",
+		cancelSubFn: func(_ context.Context, subID string) error {
+			if failCancel {
+				return fmt.Errorf("stripe 403 missing Subscriptions: Write")
+			}
+			cancelled = append(cancelled, subID)
+			return nil
+		},
+	}
+
+	// Transient/permission error keeps sub_old_111 queued for retry (and alerts broker).
+	failCancel = true
+	wb.drainPendingSubCancels(context.Background())
+	afterFail, _ := loadPenLifecycle(b.lifecyclePath("lab"))
+	if len(afterFail.PendingCancelSubs) != 1 || afterFail.PendingCancelSubs[0] != "sub_old_111" {
+		t.Fatalf("failed cancel must stay queued: %+v", afterFail.PendingCancelSubs)
+	}
+
+	// Next drain succeeds, cancels sub_old_111 in Stripe, and clears PendingCancelSubs.
+	failCancel = false
+	wb.drainPendingSubCancels(context.Background())
+	if len(cancelled) != 1 || cancelled[0] != "sub_old_111" {
+		t.Fatalf("cancelled = %v, want [sub_old_111]", cancelled)
+	}
+	afterOK, _ := loadPenLifecycle(b.lifecyclePath("lab"))
+	if len(afterOK.PendingCancelSubs) != 0 {
+		t.Fatalf("PendingCancelSubs should be empty after cancel-done: %+v", afterOK.PendingCancelSubs)
+	}
+}
+
+func TestHogmanHostStripeFloorM2(t *testing.T) {
+	hostScript, err := filepath.Abs("../hogman-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(hostScript); err != nil {
+		t.Skip("deploy/hogman-host not found")
+	}
+
+	home := t.TempDir()
+	binDir := filepath.Join(home, "bin")
+	_ = os.MkdirAll(binDir, 0o700)
+	_ = os.WriteFile(filepath.Join(binDir, "docker"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	_ = os.MkdirAll(filepath.Join(home, "front"), 0o700)
+	_ = os.MkdirAll(filepath.Join(home, "src"), 0o700)
+	_ = os.MkdirAll(filepath.Join(home, "signup-src"), 0o700)
+	_ = os.WriteFile(filepath.Join(home, "signup-src", "Dockerfile"), []byte("FROM scratch\n"), 0o600)
+	_ = os.MkdirAll(filepath.Join(home, "signup"), 0o700)
+	_ = os.WriteFile(filepath.Join(home, "backup-recipient.txt"), []byte("age1testrecipient\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(home, "signup", "stripe_key"), []byte("rk_live_test\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(home, "signup", "stripe_webhook_secret"), []byte("whsec_test\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(home, "host.env"), []byte(
+		"GATE_DOMAIN=gate.example.com\nPENS_DOMAIN=gate.example.com\nPENS_ZONE=example.com\nSIGNUP_HOST=get.example.com\nMAX_PENS=8\nSIGNUP_STRIPE_PRICE=price_personal\n",
+	), 0o600)
+
+	runHost := func(args ...string) (string, error) {
+		cmd := exec.Command("bash", append([]string{hostScript}, args...)...)
+		cmd.Env = append(os.Environ(), "HOGMAN_HOME="+home, "PATH="+binDir+":"+os.Getenv("PATH"))
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	// Default signup-setup wires 5000 / 12000 / usd into broker compose.yaml.
+	if out, err := runHost("signup-setup"); err != nil {
+		t.Fatalf("signup-setup failed: err=%v out=%s", err, out)
+	}
+	composeRaw, err := os.ReadFile(filepath.Join(home, "signup", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`STRIPE_EXPECT_LIVEMODE: "1"`,
+		`STRIPE_MIN_PERSONAL_CENTS: "5000"`,
+		`STRIPE_MIN_WORK_CENTS: "12000"`,
+		`STRIPE_CURRENCY: "usd"`,
+	} {
+		if !strings.Contains(string(composeRaw), want) {
+			t.Fatalf("compose.yaml missing %q:\n%s", want, composeRaw)
+		}
+	}
+
+	// Reject malformed floor arguments.
+	for _, bad := range [][]string{
+		{"signup-stripe", "floor", "0", "12000"},
+		{"signup-stripe", "floor", "5000", "abc"},
+		{"signup-stripe", "floor", "5000", "12000", "us"},
+	} {
+		if out, err := runHost(bad...); err == nil {
+			t.Fatalf("expected failure for %v, got ok: %s", bad, out)
+		}
+	}
+
+	// Valid floor override writes lowercase currency and custom floors into compose.yaml.
+	if out, err := runHost("signup-stripe", "floor", "6000", "15000", "EUR"); err != nil {
+		t.Fatalf("signup-stripe floor failed: err=%v out=%s", err, out)
+	}
+	composeRaw, err = os.ReadFile(filepath.Join(home, "signup", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`STRIPE_MIN_PERSONAL_CENTS: "6000"`,
+		`STRIPE_MIN_WORK_CENTS: "15000"`,
+		`STRIPE_CURRENCY: "eur"`,
+	} {
+		if !strings.Contains(string(composeRaw), want) {
+			t.Fatalf("updated compose.yaml missing %q:\n%s", want, composeRaw)
+		}
+	}
+}

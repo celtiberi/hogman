@@ -68,24 +68,25 @@ type renewNonceRecord struct {
 }
 
 type penLifecycle struct {
-	Plan            string                      `json:"plan"` // "free" | "personal" | "work"
-	State           string                      `json:"state"`
-	PaidUntil       int64                       `json:"paid_until,omitempty"`
-	GraceUntil      int64                       `json:"grace_until,omitempty"`
-	SleepSince      int64                       `json:"sleep_since,omitempty"`
-	DeleteAfter     int64                       `json:"delete_after,omitempty"`
-	SubscriptionID  string                      `json:"subscription_id,omitempty"`
-	CustomerID      string                      `json:"customer_id,omitempty"`
-	CancelledAt     int64                       `json:"cancelled_at,omitempty"`
-	BackdateRenewal bool                        `json:"backdate_renewal"` // D-35 default: false
-	PendingWake     bool                        `json:"pending_wake,omitempty"`
-	PendingOwner    string                      `json:"pending_owner,omitempty"`
-	AppliedEvents   []string                    `json:"applied_events,omitempty"`
-	RenewNonces     map[string]renewNonceRecord `json:"renew_nonces,omitempty"` // broker-verified nonces; pruned by RetainExp
-	AlertEmails     []string                    `json:"alert_emails,omitempty"`
-	AlertsSent      map[string]int64            `json:"alerts_sent,omitempty"`
-	RenewURL        string                      `json:"renew_url,omitempty"`
-	UpdatedAt       int64                       `json:"updated_at,omitempty"`
+	Plan              string                      `json:"plan"` // "free" | "personal" | "work"
+	State             string                      `json:"state"`
+	PaidUntil         int64                       `json:"paid_until,omitempty"`
+	GraceUntil        int64                       `json:"grace_until,omitempty"`
+	SleepSince        int64                       `json:"sleep_since,omitempty"`
+	DeleteAfter       int64                       `json:"delete_after,omitempty"`
+	SubscriptionID    string                      `json:"subscription_id,omitempty"`
+	CustomerID        string                      `json:"customer_id,omitempty"`
+	CancelledAt       int64                       `json:"cancelled_at,omitempty"`
+	BackdateRenewal   bool                        `json:"backdate_renewal"` // D-35 default: false
+	PendingWake       bool                        `json:"pending_wake,omitempty"`
+	PendingOwner      string                      `json:"pending_owner,omitempty"`
+	PendingCancelSubs []string                    `json:"pending_cancel_subs,omitempty"` // I-6: replaced Stripe sub IDs awaiting cancel by web
+	AppliedEvents     []string                    `json:"applied_events,omitempty"`
+	RenewNonces       map[string]renewNonceRecord `json:"renew_nonces,omitempty"` // broker-verified nonces; pruned by RetainExp
+	AlertEmails       []string                    `json:"alert_emails,omitempty"`
+	AlertsSent        map[string]int64            `json:"alerts_sent,omitempty"`
+	RenewURL          string                      `json:"renew_url,omitempty"`
+	UpdatedAt         int64                       `json:"updated_at,omitempty"`
 }
 
 type portalBillingStatus struct {
@@ -544,6 +545,21 @@ func (b *broker) recordRenewal(pen, eventID, subID, custID, renewNonce string, n
 	}
 	pruneRenewNonces(&updated, now.UTC().Unix())
 	if subID != "" && subID != "-" {
+		// I-6: if a manual renewal created a new Stripe subscription while a
+		// previous subscription_id existed, queue the old one for cancellation
+		// by signup-web (which holds the Stripe key) so it cannot double-charge.
+		if rec.SubscriptionID != "" && rec.SubscriptionID != "-" && rec.SubscriptionID != subID {
+			alreadyQueued := false
+			for _, q := range updated.PendingCancelSubs {
+				if q == rec.SubscriptionID {
+					alreadyQueued = true
+					break
+				}
+			}
+			if !alreadyQueued {
+				updated.PendingCancelSubs = append(updated.PendingCancelSubs, rec.SubscriptionID)
+			}
+		}
 		updated.SubscriptionID = subID
 	}
 	if custID != "" && custID != "-" {
@@ -1106,4 +1122,106 @@ func (b *broker) lifecycleAlertsHandler(w http.ResponseWriter, r *http.Request) 
 		emails = []string{}
 	}
 	jsonOut(w, 200, map[string]any{"pen": pen, "alert_emails": emails})
+}
+
+type pendingCancelItem struct {
+	Pen            string `json:"pen"`
+	SubscriptionID string `json:"subscription_id"`
+}
+
+// lifecyclePendingCancels returns replaced Stripe subscriptions queued by
+// recordRenewal so signup-web (which holds the Stripe key) can cancel them (I-6).
+func (b *broker) lifecyclePendingCancels(w http.ResponseWriter, r *http.Request) {
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
+
+	items := []pendingCancelItem{}
+	entries, err := os.ReadDir(filepath.Join(b.home, "pens"))
+	if err != nil && !os.IsNotExist(err) {
+		jsonOut(w, 500, map[string]string{"error": "could not scan pens"})
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		rec, err := loadPenLifecycle(b.lifecyclePath(e.Name()))
+		if err != nil {
+			continue
+		}
+		for _, subID := range rec.PendingCancelSubs {
+			if subID != "" && subID != "-" {
+				items = append(items, pendingCancelItem{Pen: e.Name(), SubscriptionID: subID})
+			}
+		}
+	}
+	jsonOut(w, 200, map[string]any{"items": items})
+}
+
+func (b *broker) lifecycleCancelDone(w http.ResponseWriter, r *http.Request) {
+	var in pendingCancelItem
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		jsonOut(w, 400, map[string]string{"error": "bad request"})
+		return
+	}
+	pen := strings.ToLower(strings.TrimSpace(in.Pen))
+	subID := strings.TrimSpace(in.SubscriptionID)
+	if _, ok := validPen(pen); !ok || !strings.HasPrefix(subID, "sub_") {
+		jsonOut(w, 400, map[string]string{"error": "invalid request"})
+		return
+	}
+
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
+
+	path := b.lifecyclePath(pen)
+	rec, err := loadPenLifecycle(path)
+	if err != nil {
+		jsonOut(w, 404, map[string]string{"error": "pen not found"})
+		return
+	}
+	kept := make([]string, 0, len(rec.PendingCancelSubs))
+	removed := false
+	for _, q := range rec.PendingCancelSubs {
+		if q == subID {
+			removed = true
+			continue
+		}
+		kept = append(kept, q)
+	}
+	if removed {
+		rec.PendingCancelSubs = kept
+		rec.UpdatedAt = time.Now().UTC().Unix()
+		if err := savePenLifecycle(path, rec); err != nil {
+			jsonOut(w, 500, map[string]string{"error": "could not save lifecycle"})
+			return
+		}
+		b.ledger(fmt.Sprintf("%s cancelled replaced Stripe subscription %s for pen %s", time.Now().UTC().Format(time.RFC3339), subID, pen))
+	}
+	jsonOut(w, 200, map[string]any{"ok": true})
+}
+
+func (b *broker) lifecycleCancelAlert(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Pen            string `json:"pen"`
+		SubscriptionID string `json:"subscription_id"`
+		Error          string `json:"error"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		jsonOut(w, 400, map[string]string{"error": "bad request"})
+		return
+	}
+	pen := strings.ToLower(strings.TrimSpace(in.Pen))
+	subID := strings.TrimSpace(in.SubscriptionID)
+	msg := fmt.Sprintf("Could not cancel replaced Stripe subscription %s for pen %s (cancel manually or grant Subscriptions: Write): %s",
+		subID, pen, cleanField(in.Error, 200))
+	log.Print(msg)
+	b.notifyKind("health", msg)
+	jsonOut(w, 200, map[string]any{"ok": true})
 }

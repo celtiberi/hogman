@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- `deploy/hogman-host` & `deploy/signup`: Stripe payment safeguards before real money (I-6, M2):
+  - Wired `STRIPE_MIN_PERSONAL_CENTS` (default `5000`), `STRIPE_MIN_WORK_CENTS` (default `12000`), and `STRIPE_CURRENCY` (default `usd`) into `hogman-host signup-setup` (with `hogman-host signup-stripe floor <personal> <work> [currency]` override) so production enforces webhook price and currency floors (M2).
+  - Queued replaced Stripe `subscription_id`s in `lifecycle.json` (`pending_cancel_subs`) on manual renewal so `signup-web` (which holds the Stripe key) cancels the previous subscription immediately and retries every 5 minutes (alerting the operator via `ntfy` if cancellation fails), preventing double-billing (I-6).
 - `deploy/signup`, `core/join-page`, `core/config/edge.Caddyfile`, & `deploy/install.sh`: public web security review hardening (M1, M3, M4, L1–L3, L5):
   - Enforced `requireSameOriginJSON` (before rate limits) and `DisallowUnknownFields` on `POST /api/create` and `POST /api/waitlist`, added Turnstile verification on `POST /api/waitlist/leave`, removed the public `"already"` waitlist membership oracle, added `X-Frame-Options: DENY` and `Cache-Control: no-store` on `/paid.html` & `/`, and drove Work signup theme from `/api/status` / hostname rather than `?theme=work`.
   - Added `--proto =https --proto-redir =https` and `HOGMAN_EXPECTED_HOST` pinning in `core/join-page/join.js` (routing share commands through `/start` for temp-dir SHA-256 verification), anchored `core/join-page/start.sh` strictly to `https://<host>/join#t=` or `#k=`, added `handle /start` and site-level `-Server` to standalone `core/config/edge.Caddyfile`, and trapped `INT TERM` on cleanup in `deploy/install.sh`.

@@ -44,6 +44,7 @@ type web struct {
 	webhooks        *limiter // Stripe's calls (it retries what we refuse)
 	jobs            *jobStore
 	stripe          *stripeCheckout // nil: pens aren't for sale
+	cancelMu        sync.Mutex      // serializes pending Stripe subscription cancellations (I-6)
 	workHost        string          // optional secondary sign-up host (e.g. get.work.hogman.network)
 	trustedProxies  []netip.Prefix
 	turnstile       *turnstileVerifier
@@ -72,6 +73,9 @@ func runWeb() {
 	}
 	if wb.turnstile != nil {
 		log.Printf("Cloudflare Turnstile enabled (expected hosts: %v)", wb.turnstile.expectedHosts)
+	}
+	if wb.stripe != nil {
+		go wb.runPendingSubCancelLoop()
 	}
 	addr := env("LISTEN", ":8080")
 	log.Printf("sign-up page on %s", addr)
