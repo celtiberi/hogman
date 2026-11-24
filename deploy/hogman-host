@@ -2154,24 +2154,24 @@ waitlist_set_status() {  # waitlist_set_status <id> <status>  (empty status: del
 }
 
 waitlist_invite() {
-  local id="$1" status email pen code link
+  local id="$1" status email code link
   [[ "$id" =~ ^[0-9]+$ ]] || die "usage: hogman-host waitlist invite <id>"
   status="$(waitlist_field "$id" 3)"
   [ -n "$status" ] || die "nobody with id $id on the waiting list"
   [ "$status" = waiting ] || die "$id is already: $status"
-  email="$(waitlist_field "$id" 4)"; pen="$(waitlist_field "$id" 5)"
+  email="$(waitlist_field "$id" 4)"
   code="$(make_code "waitlist #$id")"
   link="https://$SIGNUP_HOST/#code=$code"
   waitlist_set_status "$id" "invited $code"
   if [ -s "$SIGNUP/resend_key" ] && [ -n "${SIGNUP_FROM:-}" ]; then
-    if send_invite_mail "$email" "$code" "$link" "$pen"; then
+    if send_invite_mail "$email" "$code" "$link"; then
       info "emailed $email their code $code"
     else
-      info "could not email $email; send this yourself:"; invite_text "$code" "$link" "$pen"
+      info "could not email $email; send this yourself:"; invite_text "$code" "$link"
     fi
   else
     info "no mail set up (hogman-host signup-mail); send this to $email yourself:"
-    echo; invite_text "$code" "$link" "$pen"
+    echo; invite_text "$code" "$link"
   fi
 }
 
@@ -2183,27 +2183,24 @@ waitlist_remove() {
   info "removed $id from the waiting list"
 }
 
-invite_text() {  # invite_text <code> <link> <pen>
-  # (The pen line is built here: bash 3.2 can't parse ${3:+...} with a quote in a heredoc.)
-  local penline=""
-  [ -n "$3" ] && penline="You asked for the name $3; it's yours if nobody took it first.
-"
+invite_text() {  # invite_text <code> <link>
   cat <<EOF
 There's room on the farm. Here is your Hogman sign-up code:
 
     $1
 
 Get your pen here (the code is filled in): $2
-${penline}It works once. We'll delete your email from our waiting list once you've
-signed up. If you didn't ask for this, ignore this email.
+It works once and creates a free pen (your chosen name gets a short random
+ending like my-pen-7k2m). We'll delete your email from our waiting list once
+you've signed up. If you didn't ask for this, ignore this email.
 
 Clean pigs only.
 Hogman
 EOF
 }
 
-send_invite_mail() {  # send_invite_mail <to> <code> <link> <pen>
-  local body; body="$(invite_text "$2" "$3" "$4" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{ printf "%s\\n", $0 }')"
+send_invite_mail() {  # send_invite_mail <to> <code> <link>
+  local body; body="$(invite_text "$2" "$3" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{ printf "%s\\n", $0 }')"
   resend_send "$1" "Your Hogman sign-up code" "$body"
 }
 

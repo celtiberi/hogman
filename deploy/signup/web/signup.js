@@ -19,6 +19,19 @@
   const vanityHint = /(?:^|[#&])vanity=1(?:&|$)/.test(location.hash);
   if (vanityHint && $('rand-suffix')) $('rand-suffix').hidden = true;
 
+  // Keep pen-creation fields collapsed until a syntactically complete code is
+  // entered (purely client-side format check — no server code-check oracle).
+  const codeFormatRE = /^PIG-[A-Z0-9]{4}-[A-Z0-9]{4}$/i;
+  const hasValidCodeFormat = () => codeFormatRE.test($('code').value.trim());
+  const syncCodeGate = () => {
+    const unlocked = hasValidCodeFormat();
+    if ($('code-fields')) $('code-fields').hidden = !unlocked;
+    if ($('form-actions')) $('form-actions').hidden = !unlocked;
+  };
+  $('code').addEventListener('input', syncCodeGate);
+  $('code').addEventListener('change', syncCodeGate);
+  syncCodeGate();
+
   // What pens' names end in (<pen>.pens.hogman.network), from the server.
   let sites = 'pens.hogman.network';
   const setSites = () => document.querySelectorAll('.sites').forEach(e => { e.textContent = sites; });
@@ -102,12 +115,7 @@
 
     $('go').textContent = 'Create pen';
     $('wait-title').textContent = 'Request early access';
-    $('wait-intro').textContent = 'Leave your work email and we\u2019ll send a sign-up code as capacity opens.';
-    $('w-pen-label').replaceChildren(
-      document.createTextNode('Preferred pen name '),
-      Object.assign(document.createElement('span'), { className: 'opt', textContent: '(optional)' })
-    );
-    $('w-pen').placeholder = 'store-north';
+    $('wait-intro').textContent = 'Leave your work email and we\u2019ll send a sign-up code for a free pen as capacity opens.';
     $('w-note-label').replaceChildren(
       document.createTextNode('What are you protecting? '),
       Object.assign(document.createElement('span'), { className: 'opt', textContent: '(optional)' })
@@ -120,8 +128,8 @@
     $('stage').textContent = 'Provisioning isolated network\u2026';
 
     $('done-title').textContent = 'Your pen is ready';
-    $('done-intro-rest').textContent = 'is ready. Once your workstation joins, your management portal will be';
-    $('done-step-3-rest').textContent = 'where you can add workstations, bridge on-site equipment, and manage members.';
+    $('done-intro-rest').textContent = 'is ready. Because it\u2019s private, your browser can\u2019t reach it until you run the join command below.';
+    $('done-step-3-rest').textContent = 'that\u2019s where you can add workstations, bridge on-site equipment, and manage members.';
     $('done-backup-warn').replaceChildren(
       Object.assign(document.createElement('strong'), { textContent: 'Appoint a backup owner right away: ' }),
       document.createTextNode('promote a second trusted person to Owner under '),
@@ -358,7 +366,7 @@
     if (tsSiteKey && !tsWaitToken) { $('w-err').textContent = 'Please complete the verification check first.'; $('w-err').hidden = false; return; }
     $('w-go').disabled = true;
     try {
-      const payload = { email, pen: $('w-pen').value.trim(), note: $('w-note').value.trim() };
+      const payload = { email, note: $('w-note').value.trim() };
       if (tsSiteKey) payload.turnstile_token = tsWaitToken;
       const r = await api('POST', '/waitlist', payload);
       $('waited-title').textContent = "You're on the list";
@@ -377,12 +385,43 @@
                          [20, 'Opening the gate'], [35, 'Raking the last of the straw'], [90, 'Taking longer than usual; hang on']];
   const workStages = [[0, 'Provisioning isolated network'], [8, 'Issuing HTTPS certificate'],
                       [20, 'Opening pen gate'], [35, 'Finalizing setup'], [90, 'Taking longer than usual; still working']];
+  const makeStartCmd = (host, quoted) => `curl -fsSL --proto '=https' --proto-redir '=https' https://${host}/start | HOGMAN_EXPECTED_HOST='${host}' sh -s -- ${quoted}`;
+  const buildJoinCmd = rawLink => {
+    try {
+      const u = new URL(rawLink);
+      const k = new URLSearchParams(u.hash.slice(1)).get('k');
+      if (u.protocol !== 'https:' || u.pathname !== '/join' || !k) return '';
+      if (!/^[a-zA-Z0-9._:-]+$/.test(u.host) || !/^[a-zA-Z0-9._-]+$/.test(k)) return '';
+      return makeStartCmd(u.host, `'https://${u.host}/join#k=${k}'`);
+    } catch {
+      return '';
+    }
+  };
   const showDone = r => {
     $('done-zone').textContent = r.zone;
     const homeURL = 'https://home.' + r.zone;
-    $('done-home').textContent = homeURL;
     $('done-home-step').textContent = homeURL;
     $('link').textContent = r.join_link;
+    const joinCmd = buildJoinCmd(r.join_link);
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    if ($('done-cmd') && joinCmd && !isMobile) {
+      $('done-cmd').textContent = joinCmd;
+      $('done-cmd-step').hidden = false;
+      $('copy-cmd').onclick = async () => { await navigator.clipboard.writeText(joinCmd); $('copy-cmd').textContent = 'Copied'; };
+    } else if ($('done-cmd-step')) {
+      $('done-cmd-step').hidden = true;
+      if ($('done-alt-link')) $('done-alt-link').open = true;
+    }
+    const openBtn = $('open-setup');
+    if (openBtn) {
+      if (/^https:\/\//i.test(r.join_link || '')) {
+        openBtn.href = r.join_link;
+        openBtn.hidden = false;
+      } else {
+        openBtn.removeAttribute('href');
+        openBtn.hidden = true;
+      }
+    }
     if (r.join_qr_svg) { $('qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(r.join_qr_svg); $('qr').closest('.qr').hidden = false; }
     else $('qr').closest('.qr').hidden = true;
     $('copy').onclick = async () => { await navigator.clipboard.writeText(r.join_link); $('copy').textContent = 'Copied'; };
@@ -432,8 +471,11 @@
     setNames();
     const body = { code: $('code').value, pen: $('pen').value, handle: $('handle').value };
     if (penTheme) body.theme = penTheme;
-    if (!body.code.trim() || !body.pen.trim() || !body.handle.trim()) {
-      $('err').textContent = 'Fill in all three.'; $('err').hidden = false; return;
+    if (!hasValidCodeFormat()) {
+      $('err').textContent = 'Enter a full sign-up code (like PIG-XXXX-XXXX) first.'; $('err').hidden = false; $('code').focus(); return;
+    }
+    if (!body.pen.trim() || !body.handle.trim()) {
+      $('err').textContent = 'Fill in both the network name and your name.'; $('err').hidden = false; return;
     }
     if (tsSiteKey && !tsFormToken) {
       $('err').textContent = 'Please complete the verification check first.'; $('err').hidden = false; return;
@@ -463,7 +505,7 @@
     if (/^[a-z0-9.-]+$/.test(s.sites_domain || '')) { sites = s.sites_domain; setSites(); }
     if (s.theme === 'work') { penTheme = 'work'; applyWorkTheme(); }
     if (s.turnstile_site_key) mountTurnstile(s.turnstile_site_key);
-    if (s.for_sale && s.open) {
+    if (s.for_sale && s.open && !vanityHint) {
       $('buy-line').hidden = false;
       $('buy').addEventListener('click', async () => {
         $('buy-err').hidden = true;
