@@ -323,6 +323,24 @@ type subscriptionObject struct {
 	Metadata map[string]string `json:"metadata"`
 }
 
+type invoiceObject struct {
+	ID            string `json:"id"`
+	Status        string `json:"status"`
+	BillingReason string `json:"billing_reason"`
+	Customer      string `json:"customer"`
+	Subscription  string `json:"subscription"`
+	AmountPaid    int64  `json:"amount_paid"`
+}
+
+func hasCodeWord(note, word string) bool {
+	for _, f := range strings.Fields(note) {
+		if f == word {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 	if b.webhookSecret == "" {
 		jsonOut(w, 404, map[string]string{"error": "payments are off"})
@@ -356,8 +374,32 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 			jsonOut(w, 400, map[string]string{"error": "unreadable checkout session"})
 			return
 		}
-		if s.Metadata[penMetaKey] != penMetaValue || s.Mode != "subscription" || s.PaymentStatus != "paid" {
+		if s.Metadata[penMetaKey] != penMetaValue || s.PaymentStatus != "paid" {
 			jsonOut(w, 200, map[string]string{"ok": "ignored"}) // not ours, or not paid yet
+			return
+		}
+		// D-35: Owner/Admin renewal checkout for an existing pen in grace or sleep.
+		if s.Metadata["action"] == "renew" {
+			pen := strings.ToLower(strings.TrimSpace(s.Metadata["pen"]))
+			if _, ok := validPen(pen); !ok {
+				jsonOut(w, 400, map[string]string{"error": "invalid renewal pen"})
+				return
+			}
+			payerHandle := s.Metadata["payer_handle"]
+			b.mu.Lock()
+			_, err := b.renewPen(r.Context(), pen, payerHandle, s.Subscription, s.Customer, time.Now().UTC())
+			b.mu.Unlock()
+			if err != nil {
+				log.Printf("stripe renew %s (%s): %v", s.ID, pen, err)
+				jsonOut(w, 500, map[string]string{"error": "renewal failed"})
+				return
+			}
+			b.notifyKind("raise", "Pen renewed ("+pen+")")
+			jsonOut(w, 200, map[string]string{"ok": "renewed"})
+			return
+		}
+		if s.Mode != "subscription" {
+			jsonOut(w, 200, map[string]string{"ok": "ignored"})
 			return
 		}
 		plan := planFromMeta(s.Metadata)
@@ -390,14 +432,38 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 			b.notifyKind("raise", "A pen was paid for ("+plan+")")
 		}
 		jsonOut(w, 200, map[string]string{"ok": "code ready"})
+	case "invoice.paid":
+		var inv invoiceObject
+		if err := json.Unmarshal(ev.Data.Raw, &inv); err == nil && inv.Status == "paid" && inv.Subscription != "" && inv.BillingReason == "subscription_cycle" {
+			b.mu.Lock()
+			if pen, ok := b.findPenBySubscription(inv.Subscription); ok {
+				if _, err := b.renewPen(r.Context(), pen, "", inv.Subscription, inv.Customer, time.Now().UTC()); err != nil {
+					b.mu.Unlock()
+					log.Printf("stripe invoice %s renew %s: %v", inv.ID, pen, err)
+					jsonOut(w, 500, map[string]string{"error": "renewal failed"})
+					return
+				}
+			}
+			b.mu.Unlock()
+		}
+		jsonOut(w, 200, map[string]string{"ok": "noted"})
 	case "customer.subscription.deleted":
 		var sub subscriptionObject
 		if err := json.Unmarshal(ev.Data.Raw, &sub); err == nil && sub.Metadata[penMetaKey] == penMetaValue {
-			// What a cancelled pen should do (warn, suspend, remove) is a later
-			// decision; for now the operator hears about it and acts by hand.
+			// D-35: cancelling mid-year changes nothing; the pen runs to its paid_until date.
 			plan := planFromMeta(sub.Metadata)
-			b.ledger(fmt.Sprintf("%s subscription %s ended (plan %s, customer %s): see payments for its code",
-				time.Now().UTC().Format(time.RFC3339), sub.ID, plan, sub.Customer))
+			now := time.Now().UTC()
+			b.mu.Lock()
+			if pen, ok := b.findPenBySubscription(sub.ID); ok {
+				if rec, err := loadPenLifecycle(b.lifecyclePath(pen)); err == nil && rec.CancelledAt == 0 {
+					rec.CancelledAt = now.Unix()
+					rec.UpdatedAt = now.Unix()
+					_ = savePenLifecycle(b.lifecyclePath(pen), rec)
+				}
+			}
+			b.mu.Unlock()
+			b.ledger(fmt.Sprintf("%s subscription %s ended (plan %s, customer %s): pen runs until paid_until",
+				now.Format(time.RFC3339), sub.ID, plan, sub.Customer))
 			b.notifyKind("raise", "A pen's subscription ended ("+plan+")")
 		}
 		jsonOut(w, 200, map[string]string{"ok": "noted"})
@@ -442,6 +508,34 @@ func (b *broker) paidCode(w http.ResponseWriter, r *http.Request) {
 type payment struct{ session, code, customer, subscription, plan string }
 
 func (b *broker) paymentsPath() string { return filepath.Join(b.home, "signup", "payments") }
+
+func (b *broker) findPaymentByCode(code string) (payment, bool, error) {
+	unlock, err := b.lock(b.paymentsPath() + ".lock")
+	if err != nil {
+		return payment{}, false, err
+	}
+	defer unlock()
+	f, err := os.Open(b.paymentsPath())
+	if os.IsNotExist(err) {
+		return payment{}, false, nil
+	}
+	if err != nil {
+		return payment{}, false, err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		p := strings.Fields(sc.Text())
+		if len(p) >= 4 && subtle.ConstantTimeCompare([]byte(p[1]), []byte(code)) == 1 {
+			plan := planPersonal
+			if len(p) >= 6 && p[5] == planWork {
+				plan = planWork
+			}
+			return payment{session: p[0], code: p[1], customer: p[2], subscription: p[3], plan: plan}, true, nil
+		}
+	}
+	return payment{}, false, sc.Err()
+}
 
 func (b *broker) findPayment(session string) (payment, bool, error) {
 	unlock, err := b.lock(b.paymentsPath() + ".lock")

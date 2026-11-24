@@ -442,7 +442,48 @@
   $('herd-form').onsubmit = ev => ev.preventDefault();
   $('herd-more').onclick = () => loadHerd(true).catch(errIn('herd-err'));
 
+  const loadBillingBanner = async () => {
+    const el = $('billing-banner');
+    if (!el) return;
+    try {
+      const r = await fetch('/billing-status.json', { cache: 'no-store' });
+      if (!r.ok) { el.hidden = true; return; }
+      const st = await r.json();
+      if (!st || st.state !== 'grace') { el.hidden = true; return; }
+      const p = document.createElement('p');
+      const strong = document.createElement('strong');
+      strong.textContent = 'Renewal needed: ';
+      p.append(strong);
+      let until = 'soon';
+      if (st.grace_until) {
+        const d = new Date(st.grace_until);
+        if (!Number.isNaN(d.getTime())) {
+          const days = Math.max(0, Math.ceil((d.getTime() - Date.now()) / 86400000));
+          until = `${d.toISOString().slice(0, 10)} (${days} day${days === 1 ? '' : 's'} left)`;
+        }
+      }
+      p.append(document.createTextNode(
+        `this pen is in its 30-day grace period and will go to sleep on ${until}. ` +
+        'Any owner or admin can renew for a fresh year (an admin who pays becomes an owner).'
+      ));
+      if (typeof st.renew_url === 'string' && st.renew_url.startsWith('https://')) {
+        p.append(document.createTextNode(' '));
+        const a = document.createElement('a');
+        a.href = st.renew_url;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = 'Renew now';
+        p.append(a);
+      }
+      el.replaceChildren(p);
+      el.hidden = false;
+    } catch (_) {
+      el.hidden = true;
+    }
+  };
+
   const load = async () => {
+    loadBillingBanner();
     try { me = await api('GET', '/me'); render(); }
     catch (e) { $('whoami').textContent = 'Could not load your details: ' + e.message; return; }
     loadDirectory().catch(errIn('sites-err'));

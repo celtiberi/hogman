@@ -240,7 +240,7 @@ write_front() {
 
 EOF
     for n in $(pen_names); do
-      [ -f "$PENS/$n/.removed" ] && continue
+      [ -f "$PENS/$n/.removed" ] || [ -f "$PENS/$n/.sleeping" ] && continue
       host="$(pen_env "$n" PUBLIC_HOST)"
       [ -n "$host" ] || continue
       valid_host "$host" || die "invalid PUBLIC_HOST in pen $n: $host"
@@ -520,7 +520,10 @@ cmd_list() {
   printf "%-16s %-28s %-6s %s\n" NETWORK PUBLIC-HOST RELAY STATE
   for n in $(pen_names); do
     local state="running"
-    [ -f "$PENS/$n/.removed" ] && state="stopped"
+    if [ -f "$PENS/$n/.retired" ]; then state="deleted"
+    elif [ -f "$PENS/$n/.sleeping" ]; then state="sleeping"
+    elif [ -f "$PENS/$n/.removed" ]; then state="stopped"
+    fi
     if [ "$state" = running ] && ! grep -qx "pen-$n-headscale-1" <<<"$running"; then state="down"; fi
     printf "%-16s %-28s %-6s %s\n" "$n" "$(pen_env "$n" PUBLIC_HOST)" "$(pen_env "$n" STUN_PORT)" "$state"
   done
@@ -620,6 +623,74 @@ cmd_remove() {
   reload_front
   docker network rm "pen-$n-core" >/dev/null 2>&1 || true
   info "pen $n stopped and unrouted. Its folder is kept at $PENS/$n"
+}
+
+cmd_sleep() {
+  load_host
+  local n="${1:-}"
+  valid_name "$n" || die "invalid network name: $n"
+  [ -d "$PENS/$n" ] || die "no pen $n"
+  [ ! -f "$PENS/$n/.retired" ] || die "pen $n has already been deleted"
+  (cd "$PENS/$n" && ./hogman down) || true
+  touch "$PENS/$n/.sleeping"
+  write_front
+  reload_front
+  docker network rm "pen-$n-core" >/dev/null 2>&1 || true
+  info "pen $n put to sleep (slot freed; state kept at $PENS/$n)"
+}
+
+cmd_wake() {
+  load_host
+  local n="${1:-}"
+  valid_name "$n" || die "invalid network name: $n"
+  [ -d "$PENS/$n" ] || die "no pen $n"
+  [ ! -f "$PENS/$n/.retired" ] || die "pen $n has already been deleted"
+  [ -f "$PENS/$n/.env" ] || die "pen $n has no .env"
+  local live max
+  live="$(live_pens)"
+  max="${MAX_PENS:-8}"
+  if { [ -f "$PENS/$n/.sleeping" ] || [ -f "$PENS/$n/.removed" ]; } && [ "$live" -ge "$max" ]; then
+    die "host is at capacity ($live/$max live pens); cannot wake $n"
+  fi
+  rm -f "$PENS/$n/.sleeping" "$PENS/$n/.removed"
+  docker network inspect "pen-$n-core" >/dev/null 2>&1 || docker network create "pen-$n-core" >/dev/null
+  write_front
+  reload_front
+  local front_ca=""
+  [ -n "${FRONT_TLS_MODE:-}" ] && front_ca="$FRONT/data/caddy/pki/authorities/local/root.crt"
+  (cd "$PENS/$n" && FRONT_CA="$front_ca" FRONT_JOIN_DL="$FRONT/join-dl" ./hogman up)
+  info "pen $n woken and routed"
+}
+
+cmd_purge() {
+  load_host
+  local n="${1:-}"
+  valid_name "$n" || die "invalid network name: $n"
+  [ -d "$PENS/$n" ] || die "no pen $n"
+  (cd "$PENS/$n" && ./hogman down -v --remove-orphans) || true
+  if [ -s "$PENS/$n/.challenge-dns-id" ] && [ -x "$CDNS_BIN" ]; then
+    cdns cred rm "$(cat "$PENS/$n/.challenge-dns-id")" >/dev/null 2>&1 \
+      && rm -f "$PENS/$n/.challenge-dns-id" || info "could not remove $n's challenge DNS credential"
+  fi
+  rm -rf "$PENS/$n/data" "$PENS/$n/.env" "$PENS/$n/.sleeping"
+  touch "$PENS/$n/.removed" "$PENS/$n/.retired"
+  write_front
+  reload_front
+  docker network rm "pen-$n-core" >/dev/null 2>&1 || true
+  info "pen $n deleted (name stays retired per D-21)"
+}
+
+cmd_lifecycle() {
+  load_host
+  local qs=""
+  if [ "${1:-}" = "--dry-run" ]; then qs="?dry_run=1"; fi
+  local tok_file="$SIGNUP/broker.token"
+  [ -s "$tok_file" ] || die "signup broker not configured ($tok_file missing)"
+  local tok; tok="$(cat "$tok_file")"
+  local addr="${BROKER_ADDR:-127.0.0.1:9090}"
+  [[ "$addr" == :* ]] && addr="127.0.0.1$addr"
+  curl -fsS -X POST -H "Authorization: Bearer $tok" "http://$addr/lifecycle/sweep$qs"
+  echo
 }
 
 
@@ -766,7 +837,7 @@ name_free() {
   esac
 }
 
-live_pens() { local n c=0; for n in $(pen_names); do [ -f "$PENS/$n/.removed" ] || c=$((c + 1)); done; echo "$c"; }
+live_pens() { local n c=0; for n in $(pen_names); do [ -f "$PENS/$n/.removed" ] || [ -f "$PENS/$n/.sleeping" ] || c=$((c + 1)); done; echo "$c"; }
 
 set_host_var() {  # set_host_var KEY value: in host.env, replacing any old value
   # host.env is sourced, so quote the value (a sender like "Hogman <x@y>"
@@ -1835,6 +1906,10 @@ case "${1:-}" in
   upgrade) shift; cmd_upgrade "$@" ;;
   routes)  load_host; write_front; reload_front; info "routes rewritten" ;;
   remove)  shift; cmd_remove "$@" ;;
+  sleep)   shift; cmd_sleep "$@" ;;
+  wake)    shift; cmd_wake "$@" ;;
+  purge)   shift; cmd_purge "$@" ;;
+  lifecycle) shift; cmd_lifecycle "$@" ;;
   backup-setup) shift; cmd_backup_setup "$@" ;;
   backup-allow) shift; cmd_backup_allow "$@" ;;
   backup)  cmd_backup ;;
