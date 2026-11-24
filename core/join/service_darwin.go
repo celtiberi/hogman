@@ -210,6 +210,7 @@ func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, error) {
 	want := pacURLWithVersion(c, known)
 	manual := "set System Settings → Network → (your network) → Proxies → Automatic proxy configuration to " + c.pacURL()
 	var done, left []string
+	var ops []darwinProxyOp
 	for _, svc := range networkServices() {
 		cur, enabled := autoProxyState(svc)
 		switch planAutoProxyAction(cur, enabled, known, want) {
@@ -220,11 +221,16 @@ func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, error) {
 		case "noop":
 			done = append(done, svc)
 		case "set":
-			explainSudo("to point this Mac's automatic proxy at the pen")
-			if out, err := run(true, "/usr/sbin/networksetup", "-setautoproxyurl", svc, want); err != nil {
-				return "", fmt.Errorf("%s (%s). To do it by hand, %s", firstLine(out), svc, manual)
-			}
-			done = append(done, svc)
+			ops = append(ops, darwinProxyOp{Action: "set", Service: svc, URL: want})
+		}
+	}
+	if len(ops) > 0 {
+		err := applyDarwinProxyOps(darwinProxyCopyFor("set"), ops, defaultDarwinProxyRunner())
+		if err != nil {
+			return "", fmt.Errorf("%v Re-run to try again, or set it by hand: %s", err, manual)
+		}
+		for _, op := range ops {
+			done = append(done, op.Service)
 		}
 	}
 	if len(done) == 0 {
@@ -249,26 +255,34 @@ func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {
 	if host := pickPACHost(remaining); host != nil {
 		nextURL = pacURLWithVersion(host, remaining)
 	}
-	turnedOff, updated := false, false
+	var ops []darwinProxyOp
+	hasOff, hasSet := false, false
 	for _, svc := range networkServices() {
 		cur, enabled := autoProxyState(svc)
 		switch planClearAutoProxyAction(cur, enabled, known, nextURL) {
 		case "off":
-			explainSudo("to remove the pen from this Mac's automatic proxy setting")
-			if _, err := run(true, "/usr/sbin/networksetup", "-setautoproxystate", svc, "off"); err == nil {
-				turnedOff = true
-			}
+			ops = append(ops, darwinProxyOp{Action: "off", Service: svc})
+			hasOff = true
 		case "set":
-			explainSudo("to update this Mac's automatic proxy setting")
-			if _, err := run(true, "/usr/sbin/networksetup", "-setautoproxyurl", svc, nextURL); err == nil {
-				updated = true
-			}
+			ops = append(ops, darwinProxyOp{Action: "set", Service: svc, URL: nextURL})
+			hasSet = true
 		}
 	}
-	if updated {
+	if len(ops) == 0 {
+		return ""
+	}
+	mode := "remove"
+	if hasSet {
+		mode = "update"
+	}
+	if err := applyDarwinProxyOps(darwinProxyCopyFor(mode), ops, defaultDarwinProxyRunner()); err != nil {
+		note("%v", err)
+		return ""
+	}
+	if hasSet {
 		return "updated the automatic proxy setting for your remaining pen(s): " + strings.Join(penZoneNames(remaining), ", ")
 	}
-	if turnedOff {
+	if hasOff {
 		return "removed the pen's automatic proxy setting"
 	}
 	return ""

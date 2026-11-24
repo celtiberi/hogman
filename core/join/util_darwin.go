@@ -1,24 +1,70 @@
 package main
 
-import "os/exec"
+import (
+	"os"
+	"os/exec"
+	"strings"
+)
 
-// sudoExplained records that explainSudo already spoke this run.
-var sudoExplained bool
+const (
+	darwinOsascriptPath    = "/usr/bin/osascript"
+	darwinNetworksetupPath = "/usr/sbin/networksetup"
+	darwinLaunchctlPath    = "/bin/launchctl"
+)
 
-// explainSudo says once, before the OS asks, why a password is needed, so a
-// bare "Password:" never appears unexplained. Silent when no prompt will come.
-// It uses the same trusted sudo as run, never a PATH lookup.
-func explainSudo(why string) {
-	if sudoExplained || isRoot() {
-		return
+func darwinHasGUISession() bool {
+	if os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_TTY") != "" || os.Getenv("SSH_CLIENT") != "" {
+		return false
 	}
+	if info, err := os.Stat(darwinOsascriptPath); err != nil || info.IsDir() {
+		return false
+	}
+	out, err := exec.Command(darwinLaunchctlPath, "managername").Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "Aqua"
+}
+
+func darwinSudoCached() bool {
 	sudo := sudoPath()
 	if sudo == "" {
-		return
+		return false
 	}
-	if exec.Command(sudo, "-n", "true").Run() == nil {
-		return // sudo won't ask: already authorized
+	return exec.Command(sudo, "-n", "true").Run() == nil
+}
+
+func darwinRunSudoAuth(sudoPrompt string) error {
+	sudo := sudoPath()
+	if sudo == "" {
+		return exec.ErrNotFound
 	}
-	sudoExplained = true
-	note("Your computer's password is needed %s. It goes to the system, not to Hogman.", why)
+	cmd := exec.Command(sudo, "-v", "-p", sudoPrompt)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func defaultDarwinProxyRunner() darwinProxyRunner {
+	return darwinProxyRunner{
+		isRoot:     isRoot,
+		sudoCached: darwinSudoCached,
+		hasGUI:     darwinHasGUISession,
+		stdinTTY:   func() bool { return isTerminalFn() },
+		runOsascript: func(args []string) (string, error) {
+			return run(false, darwinOsascriptPath, args...)
+		},
+		runSudoAuth: darwinRunSudoAuth,
+		runNetworksetup: func(useSudo bool, args ...string) (string, error) {
+			if useSudo && !isRoot() {
+				if sudo := sudoPath(); sudo != "" {
+					sudoArgs := append([]string{"-n", darwinNetworksetupPath}, args...)
+					return run(false, sudo, sudoArgs...)
+				}
+			}
+			return run(false, darwinNetworksetupPath, args...)
+		},
+		note: note,
+	}
 }
