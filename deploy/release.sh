@@ -30,6 +30,13 @@ git cat-file -e "$REF:deploy/install.sh" 2>/dev/null || {
   exit 1
 }
 
+unfolded="$(git ls-tree --name-only "$REF" changelog.d/ 2>/dev/null | grep -v '^changelog\.d/README\.md$' || true)"
+if [ -n "$unfolded" ]; then
+  echo "unfolded changelog.d/ fragments in $REF (run deploy/changelog-fold.sh <version> and commit first):" >&2
+  printf '%s\n' "$unfolded" >&2
+  exit 1
+fi
+
 tarball="hogman-$ver.tar.gz"
 bins="hogman-bin-$ver.tar.gz"
 

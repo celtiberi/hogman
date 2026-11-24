@@ -292,6 +292,13 @@ persisted deadline while preserving the original `sleep_since` / `delete_after` 
 
 ## Publishing releases
 
+Before releasing, fold any per-PR `changelog.d/<name>.<section>.md` fragments into `CHANGELOG.md`
+and commit the result (`deploy/release.sh` refuses to publish a commit with unfolded fragments):
+
+```bash
+deploy/changelog-fold.sh <version>
+```
+
 `deploy/release.sh [git-ref]` publishes a release to GitHub Releases on `celtiberi/hogman`:
 
 1. Verifies a successful non-PR `.github/workflows/build.yml` run for the exact commit and checks
