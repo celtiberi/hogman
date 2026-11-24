@@ -24,5 +24,9 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 
 FROM scratch
 COPY --from=build /rootfs/ /
+# Pure userspace tsnet container with no kernel TUN / host VPN: disable Tailscale's
+# netns SO_BINDTODEVICE fallback (matching tailscaled's !onlyNetstack) so multi-network
+# and --internal Docker bridges work cleanly under --cap-drop ALL on Linux 5.7+.
+ENV HOGMAN_DISABLE_NETNS=1
 USER 65532:65532
 ENTRYPOINT ["/hogman"]
