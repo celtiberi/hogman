@@ -248,10 +248,12 @@ func meshMux(s *Service) http.Handler {
 			// What the page should offer. The API checks again on every call.
 			"can_invite": a.IsAdmin() || s.cfg.MembersCanInvite,
 			"is_admin":   a.IsAdmin(), "is_owner": a.IsOwner(),
-			// A lone owner is warned: another owner is the only way back in (D-16).
-			"owners": ownerCount(s, a),
 			// What `hogman share` needs to start a server of its own.
 			"network": s.NetworkInfo(),
+		}
+		// Owners and admins see the owner count (D-16 / I-22); omit for plain members.
+		if n, ok := ownerCount(s, a); ok {
+			resp["owners"] = n
 		}
 		if billing := readBillingStatus(s.cfg.BillingStatusPath); billing != nil {
 			resp["billing"] = billingView{
@@ -1047,13 +1049,14 @@ func readBillingStatus(path string) *billingStatus {
 	return &st
 }
 
-// ownerCount tells an owner how many owners the pen has; others get 0.
-func ownerCount(s *Service, a Actor) int {
-	if !a.IsOwner() {
-		return 0
+// ownerCount tells owners and admins how many owners the pen has; plain members
+// omit the field entirely.
+func ownerCount(s *Service, a Actor) (int, bool) {
+	if !a.IsAdmin() {
+		return 0, false
 	}
 	n, _ := s.st.CountOwners()
-	return n
+	return n, true
 }
 
 // The mesh API trusts X-Forwarded-For to say who is asking, so who can reach

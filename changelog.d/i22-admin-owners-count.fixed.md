@@ -1,0 +1,1 @@
+- `GET /api/me` now returns the real `owners` count to both owners and admins (and omits `owners` for plain members instead of returning `0`), and the portal overview card omits owner wording when the field is absent (I-22).
