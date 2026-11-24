@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -348,9 +349,9 @@ func TestCapsOverrideAndParse(t *testing.T) {
 			h, w, g, gh, err, defaultGlobalHourlyCap, defaultGlobalHardHourlyCap)
 	}
 	// Raising CDNS_GLOBAL_HOURLY_CAP above default hard cap without setting hard lifts hard to match.
-	h, w, g, gh, err = parseCapsFromEnv("", "", "80", "")
-	if err != nil || h != defaultHourlyCap || w != defaultCapNames || g != 80 || gh != 80 {
-		t.Fatalf("soft-above-default-hard = (%d,%d,%d,%d,%v), want (5,20,80,80,nil)", h, w, g, gh, err)
+	h, w, g, gh, err = parseCapsFromEnv("", "", "150", "")
+	if err != nil || h != defaultHourlyCap || w != defaultCapNames || g != 150 || gh != 150 {
+		t.Fatalf("soft-above-default-hard = (%d,%d,%d,%d,%v), want (5,20,150,150,nil)", h, w, g, gh, err)
 	}
 	for _, tc := range []struct {
 		name, h, w, g, gh string
@@ -826,17 +827,17 @@ func TestPerPlanCertCapsAndQuietPenReservation(t *testing.T) {
 }
 
 func TestParseWorkCapsFromEnv(t *testing.T) {
-	if wh, ww, err := parseWorkCapsFromEnv("", "", 40); err != nil || wh != defaultWorkHourlyCap || ww != defaultWorkWeeklyCap {
+	if wh, ww, err := parseWorkCapsFromEnv("", "", 80); err != nil || wh != defaultWorkHourlyCap || ww != defaultWorkWeeklyCap {
 		t.Fatalf("defaults = (%d, %d, %v)", wh, ww, err)
 	}
 	// Clamps default work hourly cap down to small globalHourly when unset (backwards compat for tests).
 	if wh, ww, err := parseWorkCapsFromEnv("", "", 6); err != nil || wh != 6 || ww != defaultWorkWeeklyCap {
 		t.Fatalf("clamped = (%d, %d, %v)", wh, ww, err)
 	}
-	if _, _, err := parseWorkCapsFromEnv("20", "10", 40); err == nil {
+	if _, _, err := parseWorkCapsFromEnv("20", "10", 80); err == nil {
 		t.Fatal("work hourly > work weekly accepted")
 	}
-	if _, _, err := parseWorkCapsFromEnv("50", "60", 40); err == nil {
+	if _, _, err := parseWorkCapsFromEnv("90", "120", 80); err == nil {
 		t.Fatal("work hourly > global hourly accepted")
 	}
 }
@@ -954,5 +955,178 @@ func TestRollbackReleaseIfUnused(t *testing.T) {
 	adm.ServeHTTP(rec2, httptest.NewRequest("DELETE", "/admin/creds/"+cHTTPUsed.ID+"?release_if_unused=1", nil))
 	if rec2.Code != 204 || rec2.Header().Get("X-Name-Released") != "false" || !s2.NameUsed("httpused") {
 		t.Fatalf("DELETE challenged: code=%d hdr=%q used=%v", rec2.Code, rec2.Header().Get("X-Name-Released"), s2.NameUsed("httpused"))
+	}
+}
+
+func TestDefaultWorkAndPersonalCapsD38(t *testing.T) {
+	s, now := newTestStore(t)
+	if s.hourlyCap() != 5 || s.weeklyCap() != 20 {
+		t.Fatalf("personal defaults = (%d, %d), want (5, 20)", s.hourlyCap(), s.weeklyCap())
+	}
+	if s.workHourlyCap() != 40 || s.workWeeklyCap() != 120 {
+		t.Fatalf("work defaults = (%d, %d), want (40, 120)", s.workHourlyCap(), s.workWeeklyCap())
+	}
+	if s.globalHourlyCap() != 80 || s.globalHardHourlyCap() != 120 {
+		t.Fatalf("global defaults = (%d, %d), want (80, 120)", s.globalHourlyCap(), s.globalHardHourlyCap())
+	}
+	if s.weeklyAlertThreshold() != 240 {
+		t.Fatalf("default weekly alert threshold = %d, want 240 (80%% of 300)", s.weeklyAlertThreshold())
+	}
+
+	cPersonal, _, err := s.AddCred("pen", penA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cWork, _, err := s.AddCredWithPlan("pen", penB, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Personal pen still stops at 5/hour (6th refused).
+	for i := 1; i <= 5; i++ {
+		if err := s.PutTXT(cPersonal, ch(fmt.Sprintf("p%d", i), penA), val1); err != nil {
+			t.Fatalf("personal %d/5 failed: %v", i, err)
+		}
+	}
+	if err := s.PutTXT(cPersonal, ch("p6", penA), val1); !errors.Is(err, errHourlyCap) {
+		t.Fatalf("personal 6th name = %v, want errHourlyCap", err)
+	}
+
+	// Work pen gets its 1st through 40th name in the hour and is refused on the 41st.
+	for i := 1; i <= 40; i++ {
+		if err := s.PutTXT(cWork, ch(fmt.Sprintf("w%d", i), penB), val1); err != nil {
+			t.Fatalf("work %d/40 failed: %v", i, err)
+		}
+	}
+	if err := s.PutTXT(cWork, ch("w41", penB), val1); !errors.Is(err, errHourlyCap) {
+		t.Fatalf("work 41st name in hour = %v, want errHourlyCap", err)
+	}
+
+	// Across 3 rolling hours, Work pen reaches 120 names in 7 days and stops on the 121st.
+	for batch := 1; batch <= 2; batch++ {
+		*now = now.Add(time.Hour + time.Second)
+		for i := 1; i <= 40; i++ {
+			idx := batch*40 + i
+			if err := s.PutTXT(cWork, ch(fmt.Sprintf("w%d", idx), penB), val1); err != nil {
+				t.Fatalf("work %d/120 failed: %v", idx, err)
+			}
+		}
+	}
+	*now = now.Add(time.Hour + time.Second)
+	if err := s.PutTXT(cWork, ch("w121", penB), val1); !errors.Is(err, errCap) {
+		t.Fatalf("work 121st name in 7d = %v, want errCap", err)
+	}
+}
+
+func TestGlobalWeeklyBudget80PctNtfyAlert(t *testing.T) {
+	if _, err := parseNtfyURL("http://ntfy.sh/not-https"); err == nil {
+		t.Fatal("non-https remote ntfy URL accepted")
+	}
+	if _, err := parseNtfyURL("https://ntfy.sh/"); err == nil {
+		t.Fatal("ntfy URL without topic accepted")
+	}
+	if got, err := parseNtfyURL("https://ntfy.sh/hogman-ops-alerts"); err != nil || got != "https://ntfy.sh/hogman-ops-alerts" {
+		t.Fatalf("valid https ntfy URL = (%q, %v)", got, err)
+	}
+
+	type alertMsg struct {
+		title string
+		body  string
+	}
+	gotCh := make(chan alertMsg, 4)
+	ntfySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotCh <- alertMsg{title: r.Header.Get("Title"), body: string(b)}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ntfySrv.Close()
+
+	ntfyURL, err := parseNtfyURL(ntfySrv.URL + "/hogman-budget")
+	if err != nil {
+		t.Fatalf("parseNtfyURL loopback: %v", err)
+	}
+
+	s, now := newTestStore(t)
+	s.leWeeklyAllowance = 10 // 80% threshold = 8
+	s.onWeeklyAlert = newNtfyAlerter(ntfyURL, ntfySrv.Client())
+
+	cA, _, err := s.AddCredWithPlan("pen", penA, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cB, _, err := s.AddCredWithPlan("pen", penB, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 7 distinct names across two pens: below 80% threshold (8/10), so no alert.
+	for i := 1; i <= 4; i++ {
+		if err := s.PutTXT(cA, ch(fmt.Sprintf("a%d", i), penA), val1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 1; i <= 3; i++ {
+		if err := s.PutTXT(cB, ch(fmt.Sprintf("b%d", i), penB), val1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case m := <-gotCh:
+		t.Fatalf("unexpected early alert at 7/10: %+v", m)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// 8th name crosses 80% -> alert fires once.
+	if err := s.PutTXT(cB, ch("b4", penB), val1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case m := <-gotCh:
+		if !strings.Contains(m.title, "80%") || !strings.Contains(m.body, "8/10 (80%)") {
+			t.Fatalf("unexpected alert payload: %+v", m)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for 80% ntfy alert")
+	}
+
+	// 9th name within 24h cooldown does not duplicate.
+	if err := s.PutTXT(cB, ch("b5", penB), val1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case m := <-gotCh:
+		t.Fatalf("duplicate alert within cooldown: %+v", m)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Reopen from disk within 24h: persisted last_weekly_alert prevents duplicate after restart.
+	s2, err := OpenStore(s.path, s.zones)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2.now = func() time.Time { return *now }
+	s2.leWeeklyAllowance = 10
+	s2.onWeeklyAlert = newNtfyAlerter(ntfyURL, ntfySrv.Client())
+	if err := s2.PutTXT(cB, ch("b6", penB), val1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case m := <-gotCh:
+		t.Fatalf("duplicate alert after restart within cooldown: %+v", m)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// After 24h cooldown expires while still >= 80%, next new name alerts again.
+	*now = now.Add(24*time.Hour + time.Minute)
+	if err := s2.PutTXT(cB, ch("b7", penB), val1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case m := <-gotCh:
+		if !strings.Contains(m.body, "11/10") {
+			t.Fatalf("unexpected post-cooldown alert payload: %+v", m)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for post-cooldown alert")
 	}
 }

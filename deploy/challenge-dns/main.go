@@ -64,11 +64,13 @@ Settings (environment):
                      handing out fallback account keys (Google refuses accounts without one)
   CDNS_HOURLY_CAP       distinct new certificate names per personal pen per rolling hour, default 5
   CDNS_WEEKLY_CAP       distinct new certificate names per personal pen per 7 days, default 20
-  CDNS_WORK_HOURLY_CAP  distinct new certificate names per work pen per rolling hour, default 10
-  CDNS_WORK_WEEKLY_CAP  distinct new certificate names per work pen per 7 days, default 60
-  CDNS_GLOBAL_HOURLY_CAP       soft global cap across all pens per rolling hour, default 40
+  CDNS_WORK_HOURLY_CAP  distinct new certificate names per work pen per rolling hour, default 40
+  CDNS_WORK_WEEKLY_CAP  distinct new certificate names per work pen per 7 days, default 120
+  CDNS_GLOBAL_HOURLY_CAP       soft global cap across all pens per rolling hour, default 80
   CDNS_GLOBAL_HARD_HOURLY_CAP  hard global cap across all pens per rolling hour (headroom above soft
-                               is reserved for quiet/new pens with <2 names this hour), default 60
+                               is reserved for quiet/new pens with <2 names this hour), default 120
+  CDNS_LE_WEEKLY_ALLOWANCE     Let's Encrypt 7-day registered-domain allowance (alerts at 80%), default 300
+  CDNS_NTFY_URL                optional https:// ntfy topic URL for the 80% global 7-day budget alert
 `
 
 func main() {
@@ -195,6 +197,75 @@ func parseWorkCapsFromEnv(workHourlyRaw, workWeeklyRaw string, globalHourly int)
 	return workHourly, workWeekly, nil
 }
 
+func parseLEWeeklyAllowance(raw string) (int, error) {
+	return parseCap("CDNS_LE_WEEKLY_ALLOWANCE", raw, defaultLEWeeklyAllowance, 100000)
+}
+
+func parseNtfyURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.Path == "" || u.Path == "/" {
+		return "", fmt.Errorf("CDNS_NTFY_URL must be an https:// URL with a topic path (got %q)", raw)
+	}
+	if u.Scheme != "https" {
+		host := u.Hostname()
+		if u.Scheme != "http" || (host != "127.0.0.1" && host != "::1") {
+			return "", fmt.Errorf("CDNS_NTFY_URL must use https:// (got %q)", raw)
+		}
+	}
+	return raw, nil
+}
+
+func newNtfyAlerter(ntfyURL string, hc *http.Client) func(used, allowance, threshold int) {
+	if hc == nil {
+		hc = &http.Client{Timeout: 10 * time.Second}
+	}
+	sem := make(chan struct{}, 2)
+	return func(used, allowance, threshold int) {
+		pct := 0
+		if allowance > 0 {
+			pct = (used * 100) / allowance
+		}
+		msg := fmt.Sprintf("Hogman challenge-dns: %d/%d (%d%%) of Let's Encrypt 7-day certificate allowance used across all pens (alert threshold %d). Google Trust Services fallback handles HTTP 429 overflow automatically.",
+			used, allowance, pct, threshold)
+		log.Printf("WARNING: %s", msg)
+		if ntfyURL == "" {
+			return
+		}
+		select {
+		case sem <- struct{}{}:
+		default:
+			log.Printf("ntfy: skipping 7-day budget alert (too many pushes in flight)")
+			return
+		}
+		go func() {
+			defer func() { <-sem }()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, ntfyURL, strings.NewReader(msg))
+			if err != nil {
+				log.Printf("ntfy: build request: %v", err)
+				return
+			}
+			req.Header.Set("Title", "Hogman: Let's Encrypt 7-day cert budget >= 80%")
+			req.Header.Set("Priority", "high")
+			req.Header.Set("Tags", "warning")
+			resp, err := hc.Do(req)
+			if err != nil {
+				log.Printf("ntfy: push failed: %v", err)
+				return
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode >= 300 {
+				log.Printf("ntfy: push returned HTTP %d", resp.StatusCode)
+			}
+		}()
+	}
+}
+
 func serve() error {
 	listen := os.Getenv("CDNS_LISTEN")
 	if listen == "" {
@@ -217,6 +288,14 @@ func serve() error {
 	if err != nil {
 		return err
 	}
+	leWeeklyAllowance, err := parseLEWeeklyAllowance(os.Getenv("CDNS_LE_WEEKLY_ALLOWANCE"))
+	if err != nil {
+		return err
+	}
+	ntfyURL, err := parseNtfyURL(os.Getenv("CDNS_NTFY_URL"))
+	if err != nil {
+		return err
+	}
 	zones := zonesFromEnv()
 	statePath := env("CDNS_STATE", "/var/lib/challenge-dns/state.json")
 	if err := os.MkdirAll(dirOf(statePath), 0o700); err != nil {
@@ -232,8 +311,11 @@ func serve() error {
 	store.workCapNames = workWeeklyCap
 	store.globalHourlyCapNames = globalHourlyCap
 	store.globalHardHourlyCapNames = globalHardHourlyCap
-	log.Printf("certificate caps: personal %d/hour %d/7d, work %d/hour %d/7d, global %d/hour soft (%d/hour hard with quiet-pen floor)",
-		store.hourlyCap(), store.weeklyCap(), store.workHourlyCap(), store.workWeeklyCap(), store.globalHourlyCap(), store.globalHardHourlyCap())
+	store.leWeeklyAllowance = leWeeklyAllowance
+	store.onWeeklyAlert = newNtfyAlerter(ntfyURL, nil)
+	log.Printf("certificate caps: personal %d/hour %d/7d, work %d/hour %d/7d, global %d/hour soft (%d/hour hard with quiet-pen floor); 7d alert at %d/%d (ntfy=%v)",
+		store.hourlyCap(), store.weeklyCap(), store.workHourlyCap(), store.workWeeklyCap(), store.globalHourlyCap(), store.globalHardHourlyCap(),
+		store.weeklyAlertThreshold(), store.leWeeklyAllowanceVal(), ntfyURL != "")
 	d := &DNS{store: store, zones: zones, ns: env("CDNS_NS", "ns1.hogman.network"),
 		mbox: env("CDNS_MBOX", "hostmaster.hogman.network"), caa: defaultCAA()}
 

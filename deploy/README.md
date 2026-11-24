@@ -49,7 +49,12 @@ door and a host-level ACME DNS-01 challenge server (`challenge-dns`):
 
    Runs `hogman-challenge-dns` as a locked-down systemd service (dedicated user, read-only root,
    only UDP/TCP 53 open, API socket in `/run/hogman-acme`), answering only for the delegated
-   pens zone and `_acme-challenge.<gate-domain>`. Test delegation with `dig @<ip> pens.hogman.network SOA`
+   pens zone and `_acme-challenge.<gate-domain>`. Default per-pen caps are 5/hour and 20/7 days on
+   Free/Personal pens, 40/hour and 120/7 days on Work pens (D-38), and 80/hour soft / 120/hour hard
+   globally (reserving 40/hour for quiet/new pens). When `hogman-host signup-notify` is configured,
+   `challenge-dns` also receives `CDNS_NTFY_URL` via a `0600` systemd drop-in and pushes an ntfy
+   warning once total 7-day certificate usage across all pens reaches 80% of Let's Encrypt's
+   300/7-day allowance (`240/300`, at most once per 24 hours). Test delegation with `dig @<ip> pens.hogman.network SOA`
    (and `+tcp`). Google refuses ACME accounts without a contact, so with its key set the
    server hands out fallback account keys only once `fallback-contact` names an operator address;
    pens put that address on their Google accounts only. Let's Encrypt accounts stay without one,
