@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1
+# Builds the minimal scratch hogman-sidecar image (UID 65532:65532, no shell).
+# Serves both the pen-facing `hogman share` sidecar and the `network_mode: none`
+# `hogman bridge` Unix-socket <-> loopback-TCP forwarder.
+#
+#   docker build -f core/join/Dockerfile.sidecar -t hogman-sidecar core/join
+FROM golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY *.go ./
+ARG VERSION=dev
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    GOOS=$TARGETOS GOARCH=$TARGETARCH CGO_ENABLED=0 \
+    go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /out/hogman . && \
+    mkdir -p /dirs/var/lib/hogman /dirs/run/hogman-in /dirs/etc && \
+    chmod 0700 /dirs/var/lib/hogman /dirs/run/hogman-in && \
+    printf 'nonroot:x:65532:65532:nonroot:/nonexistent:/sbin/nologin\n' > /dirs/etc/passwd && \
+    printf 'nonroot:x:65532:\n' > /dirs/etc/group
+
+FROM scratch
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /dirs/etc/passwd /etc/passwd
+COPY --from=build /dirs/etc/group /etc/group
+COPY --from=build /out/hogman /hogman
+COPY --from=build --chown=65532:65532 /dirs/var/lib/hogman /var/lib/hogman
+COPY --from=build --chown=65532:65532 /dirs/run/hogman-in /run/hogman-in
+USER 65532:65532
+ENTRYPOINT ["/hogman"]

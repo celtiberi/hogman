@@ -76,6 +76,8 @@ jobs:
         run: sudo --preserve-env=PATH core/test/run.sh
       - name: Run the ACME Pebble suite
         run: sudo --preserve-env=PATH core/test/acme-pebble.sh
+      - name: Run the sealed sidecar check
+        run: core/test/sidecar-check.sh
 
   host:
     name: shared host (deploy/test-host.sh)

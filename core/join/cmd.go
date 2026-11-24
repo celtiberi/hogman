@@ -107,6 +107,7 @@ type cliHandlers struct {
 	shareStart   func(name, target, rawLink string, o options) error
 	shareList    func(pen string, asJSON bool) error
 	shareStop    func(name string, o options) error
+	bridge       func(bo bridgeOptions) error
 	agent        func(dir string) error
 	agentLogout  func(dir string)
 	shareRun     func(dir string) error
@@ -127,6 +128,7 @@ func defaultCLIHandlers() cliHandlers {
 		shareStart:   shareStart,
 		shareList:    shareList,
 		shareStop:    shareStop,
+		bridge:       bridgeCmd,
 		agent:        runAgent,
 		agentLogout:  agentLogout,
 		shareRun:     runShareProcess,
@@ -362,7 +364,16 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 			o.noteSet = cmd.Flags().Changed("note")
 			link := ""
 			if len(args) == 3 {
+				if o.linkStdin {
+					return usageErrorf("cannot pass both a share link argument and --link-stdin")
+				}
 				link = args[2]
+			} else if o.linkStdin {
+				raw, err := readJoinLinkInteractive(o, os.Stdin)
+				if err != nil {
+					return err
+				}
+				link = raw
 			}
 			return h.shareStart(args[0], args[1], link, o)
 		},
@@ -371,6 +382,10 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 	shareC.Flags().BoolVar(&o.background, "background", false, "keep running in the background and start automatically after a restart")
 	shareC.Flags().BoolVar(&o.noService, "no-service", false, "with --background, don't register a login item, just run in the background")
 	shareC.Flags().StringVar(&o.pen, "pen", "", "which pen, if this computer is on more than one (short name or full zone; or set HOGMAN_PEN)")
+	shareC.Flags().StringVar(&o.stateDir, "state-dir", "", "store share state in this directory instead of the default config folder (for containers)")
+	shareC.Flags().BoolVar(&o.enrollOnly, "enroll-only", false, "enroll the share, claim its name and certificate, then exit 0 (for one-shot container setup)")
+	shareC.Flags().BoolVar(&o.linkStdin, "link-stdin", false, "read the server share link from standard input instead of an argument")
+	shareC.Flags().StringVar(&o.upstreamHost, "upstream-host", "", "optional Host header to send to a unix:// upstream (default: <name>.<zone>)")
 
 	shareListC := &cobra.Command{
 		Use:   "list",
@@ -395,6 +410,21 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 	shareStopC.Flags().BoolVar(&o.force, "force", false, "remove local files even if the pen cannot be reached")
 
 	shareC.AddCommand(shareListC, shareStopC)
+
+	// `bridge` (Unix socket <-> loopback TCP bridge for sealed container deployments)
+	var bo bridgeOptions
+	bridgeC := &cobra.Command{
+		Use:   "bridge",
+		Short: "Bridge a Unix domain socket to a loopback TCP port (for sealed containers)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return h.bridge(bo)
+		},
+	}
+	bridgeC.Flags().StringVar(&bo.listenUnix, "listen-unix", "", "absolute filesystem path for the listening Unix domain socket")
+	bridgeC.Flags().StringVar(&bo.forwardTCP, "forward-tcp", "", "loopback TCP target to forward connections to (e.g. 127.0.0.1:8080)")
+	bridgeC.Flags().StringVar(&bo.checkUnix, "check", "", "healthcheck mode: verify the given Unix socket is accepting connections and exit 0")
+	bridgeC.Flags().IntVar(&bo.maxConns, "max-conns", 256, "maximum concurrent forwarded connections")
 
 	// `version`
 	versionC := &cobra.Command{
@@ -466,6 +496,7 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 		doctorC,
 		browserSetupC,
 		shareC,
+		bridgeC,
 		versionC,
 		completionC,
 		agentC,

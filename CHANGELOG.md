@@ -9,6 +9,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Security
 - `deploy/release.sh` & `deploy/install.sh`: release archives now record every file as owned by root (0:0), and `release.sh` refuses to publish one that doesn't or that contains the builder's account name. `install.sh` unpacks with `--no-same-owner` and sets root ownership before copying, which also corrects files left by earlier installs. Before this, the compiled-parts archive carried the builder's uid, so on a server with a local user of that uid the installed binaries were writable by that user.
 
+### Added
+- `core/join` & `docs/sealed-server.md`: Minimal sealed pen-only server sidecar (`Dockerfile.sidecar` + `hogman bridge` + container-safe `hogman share` flags):
+  - Added `unix:///...` Unix-domain-socket targets to `hogman share` (refusing symlinks and abstract sockets), `--state-dir` with advisory `flock` locking (preventing PID-1 container restart deadlocks and `read_only` rootfs failures), `--enroll-only --link-stdin` for one-shot enrollment without persistent host secret files, and `--upstream-host`.
+  - Hardened `shareHandler` reverse proxy to strip client-supplied `X-Forwarded-*`/`Forwarded` headers before setting them and bounded `MaxResponseHeaderBytes` (64 KiB), `ResponseHeaderTimeout` (60 s), `MaxConnsPerHost`, and `tlsSrv.MaxHeaderBytes`.
+  - Added `hogman bridge` (`--listen-unix`, `--forward-tcp`, `--check`, `--max-conns`) and distroless `core/join/Dockerfile.sidecar` (UID `65532:65532`, `HOGMAN_DISABLE_NETNS=1`), plus `docs/sealed-server.md` with a 3-container `network_mode: none` Docker Compose setup and live Docker test (`core/test/sidecar-check.sh`).
+
 ### Changed
 - `core/join`, `core/join-page`, `core/portal`, `deploy/release.sh`, `browser-ext`, `packaging/`, & tests: renamed the client CLI from `hogman-join` to **`hogman`** and completed Phase 2 consolidation, diagnostics, and packaging:
   - Renamed compiled client binaries, GitHub Release assets (`hogman-<OS>-<ARCH>` + `hogman-SHA256SUMS`), join page (`start.sh`, `index.html`, `join.js`), portal instructions, browser extension copy, E2E suites, and documentation from `hogman-join` to `hogman`.
