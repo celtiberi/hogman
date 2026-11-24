@@ -1921,7 +1921,10 @@ cmd_signup_mail() {
   [[ "$key" =~ ^re_[A-Za-z0-9_]+$ ]] || die "that doesn't look like a Resend API key (re_...)"
   ( umask 077; printf '%s' "$key" > "$SIGNUP/resend_key" )
   set_host_var SIGNUP_FROM "$from"
-  info "Codes for the waiting list will be emailed from $from. Try: hogman-host signup-mail test <your email>"
+  info "Mail will be sent from $from. Try: hogman-host signup-mail test <your email>"
+  if [ -f "$SIGNUP/compose.yaml" ]; then
+    info "Run 'hogman-host signup-setup' so the sign-up broker picks up the updated mail settings."
+  fi
 }
 
 # signup-notify <ntfy topic URL>: a push when someone joins the waiting list or

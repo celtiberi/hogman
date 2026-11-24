@@ -206,7 +206,7 @@ Caddy can obtain its origin certificate immediately).
 
 The `web` container runs read-only and unprivileged (`65534:65534`), speaking over an internal
 network to `broker` (which runs `hogman-host provision` and has outbound internet only if
-`hogman-host signup-notify` is configured). Failed provisions automatically clean up containers and
+`hogman-host signup-notify` or `hogman-host signup-mail` is configured). Failed provisions automatically clean up containers and
 revoke their challenge-DNS credentials, releasing the pen name if no ACME challenge was ever written
 (and keeping D-21 permanent retirement once any certificate challenge occurred). Raised pens are
 logged in `/opt/hogman/signup/raised.log`.
@@ -219,10 +219,15 @@ hogman-host waitlist invite 3
 hogman-host waitlist remove 3
 hogman-host signup-mail "Hogman <pens@example.com>" < resend-api-key
 hogman-host signup-mail test you@example.com
+hogman-host signup-setup
 hogman-host signup-notify https://ntfy.sh/<topic>
 ```
 
-Link directly to the waitlist with `https://<signup-host>/#wait`.
+Link directly to the waitlist with `https://<signup-host>/#wait`. When `hogman-host signup-mail` is
+configured (re-run `hogman-host signup-setup` afterwards so the broker picks up the mail settings),
+joining the waiting list sends a one-time confirmation email via Resend (capped at 1 per address per
+24 hours in memory and 30 per hour globally) and `hogman-host waitlist invite <id>` emails the
+sign-up code.
 
 **Selling pens (Stripe, D-28):** a paid checkout buys one sign-up code, which then works like a
 `--vanity` code: the buyer picks a bare pen name, with no random ending. Stripe's hosted Checkout takes the card, so card details never reach this server.

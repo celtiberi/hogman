@@ -733,8 +733,15 @@ func (wb *web) waitlist(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 429, map[string]string{"error": "too many tries right now; try again later"})
 		return
 	}
-	code, out := wb.ask(r.Context(), "POST", "/waitlist", map[string]string{
-		"email": in.Email, "pen": strings.ToLower(strings.TrimSpace(in.Pen)), "note": cleanField(in.Note, 280)})
+	reqBody := map[string]string{
+		"email": in.Email,
+		"pen":   strings.ToLower(strings.TrimSpace(in.Pen)),
+		"note":  cleanField(in.Note, 280),
+	}
+	if wb.isWorkHost(r) {
+		reqBody["theme"] = "work"
+	}
+	code, out := wb.ask(r.Context(), "POST", "/waitlist", reqBody)
 	// L2: strip the "already" membership oracle from the public response so
 	// callers cannot probe whether a third party's email is on the waiting list.
 	if code == 200 {
