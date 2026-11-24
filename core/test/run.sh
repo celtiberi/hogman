@@ -528,8 +528,8 @@ paste_join() {  # paste_join <container> <shell> <handle>
   run "$c" "$shell" -c "$cmd" 2>&1
 }
 pasted_portal_ok() {  # pasted_portal_ok <container> <handle>
-  run "$1" sh -c 'p="$(jq -r .proxy_addr "$HOME/.config/hogman/$2/config.json")" &&
-    curl -sf -m 10 -x "http://$p" "https://home.$2/api/me"' _ "$ZONE" | jq -e --arg h "$2" '.member.handle == $h' >/dev/null
+  run "$1" sh -c 'p="$(jq -r .proxy_addr "$HOME/.config/hogman/$1/config.json")" &&
+    curl -sf -m 10 --cacert "$2" -x "http://$p" "https://home.$1/api/me"' _ "$ZONE" "$ROOT" | jq -e --arg h "$2" '.member.handle == $h' >/dev/null
 }
 for pair in "zsh-laptop zsh zara" "bash-laptop bash bart"; do
   set -- $pair
