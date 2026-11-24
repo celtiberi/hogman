@@ -397,6 +397,9 @@ func runAgent(dir string) error {
 	a := newAgent(c, node)
 	a.configBase = filepath.Dir(dir)
 	a.statusToken = statusTok
+	if exe, err := resolvedExePath(); err == nil {
+		a.binSHA256, _ = fileSHA256(exe)
+	}
 
 	// Serve the proxy straight away, so the setup step can watch us come up.
 	srv := &http.Server{Handler: a, ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
@@ -445,6 +448,7 @@ type agent struct {
 	cfg         *agentConfig
 	configBase  string
 	statusToken string
+	binSHA256   string
 	node        *tsnet.Server
 	resolver    *net.Resolver
 	dialMesh    func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -579,6 +583,7 @@ type agentStatus struct {
 	Error      string   `json:"error,omitempty"`
 	IPs        []string `json:"ips,omitempty"`
 	Server     bool     `json:"server,omitempty"` // the pen tagged this device a server (refused)
+	BinSHA256  string   `json:"bin_sha256,omitempty"`
 }
 
 // dial opens a connection to a pen host. Anything outside the pen is refused:
@@ -715,7 +720,7 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.mu.Lock()
-		st := agentStatus{Zone: a.cfg.Zone, Up: a.up, Error: a.err, IPs: a.ips, Server: a.server}
+		st := agentStatus{Zone: a.cfg.Zone, Up: a.up, Error: a.err, IPs: a.ips, Server: a.server, BinSHA256: a.binSHA256}
 		a.mu.Unlock()
 		if st.Up && a.liveStatus != nil {
 			ctx, cancel := context.WithTimeout(r.Context(), 200*time.Millisecond)

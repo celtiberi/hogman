@@ -645,6 +645,7 @@ func agentRunning(dir string, c *agentConfig) bool {
 
 type penUpdateOps struct {
 	isRunning      func(dir string, c *agentConfig) bool
+	runningStale   func(p *penTarget) bool
 	hasService     func(zone string) bool
 	probeReachable func(p *penTarget, o options) error
 	stop           func(dir string, c *agentConfig)
@@ -653,6 +654,21 @@ type penUpdateOps struct {
 	restartNew     func(p *penTarget, binPath string, hadService bool, o options) error
 	restartOld     func(p *penTarget, binPath string, hadService bool, o options) error
 	rewriteService func(binPath, dir string, c *agentConfig) error
+}
+
+// agentRunningStaleBinary reports whether p's running agent is executing a
+// different binary than wantHex (including older agents that don't report
+// bin_sha256 yet), so `hogman update` self-heals stale agents even when the
+// on-disk binaries are already up to date (I-20).
+func agentRunningStaleBinary(p *penTarget, wantHex string) bool {
+	if p == nil || p.cfg == nil || wantHex == "" {
+		return false
+	}
+	st, err := agentState(p.cfg)
+	if err != nil {
+		return false
+	}
+	return !digestEqualHex(st.BinSHA256, wantHex)
 }
 
 func defaultPenUpdateOps() penUpdateOps {
@@ -1073,7 +1089,8 @@ func migratePensForUpdate(pens []penTarget, serviceBin, selfPath string, legacyC
 			legacy = legacyCopyIn(p.dir)
 		}
 		interrupted, _ := readUpdatingMarker(p.dir)
-		if !forceAll && legacy == "" && !interrupted {
+		stale := ops.runningStale != nil && ops.runningStale(p)
+		if !forceAll && legacy == "" && !interrupted && !stale {
 			continue
 		}
 		err := migrateAndRestartPen(p, serviceBin, legacy, selfPath, o, ops)
@@ -1241,12 +1258,16 @@ func updateCmd(args []string, o options) error {
 
 	anyLegacy := hasOldBinCanonical
 	anyInterrupted := false
+	anyStaleAgent := false
 	for i := range plan.pens {
 		if hasLegacyCopy(plan.pens[i].dir) {
 			anyLegacy = true
 		}
 		if interrupted, _ := readUpdatingMarker(plan.pens[i].dir); interrupted {
 			anyInterrupted = true
+		}
+		if agentRunningStaleBinary(&plan.pens[i], wantHex) {
+			anyStaleAgent = true
 		}
 	}
 	for i := range plan.shares {
@@ -1258,7 +1279,7 @@ func updateCmd(args []string, o options) error {
 		}
 	}
 
-	anyUpdate := selfNeedsUpdate || canonicalNeedsUpdate || nhNeedsUpdate || anyLegacy || anyInterrupted
+	anyUpdate := selfNeedsUpdate || canonicalNeedsUpdate || nhNeedsUpdate || anyLegacy || anyInterrupted || anyStaleAgent
 	cleanupOps := defaultLegacyCleanupOps()
 	if !anyUpdate {
 		if !o.dryRun {
@@ -1286,6 +1307,8 @@ func updateCmd(args []string, o options) error {
 		for i := range plan.pens {
 			if legacy := legacyCopyIn(plan.pens[i].dir); legacy != "" {
 				note("consolidate %s -> %s", legacy, canonicalBin)
+			} else if agentRunningStaleBinary(&plan.pens[i], wantHex) {
+				note("restart stale %s agent onto %s", plan.pens[i].zone, canonicalBin)
 			}
 		}
 		for i := range plan.shares {
@@ -1390,6 +1413,7 @@ func updateCmd(args []string, o options) error {
 		serviceBin = selfPath
 	}
 	ops := defaultPenUpdateOps()
+	ops.runningStale = func(p *penTarget) bool { return agentRunningStaleBinary(p, wantHex) }
 	shareOps := defaultShareUpdateOps()
 	forceAll := selfNeedsUpdate || canonicalNeedsUpdate || hasOldBinCanonical
 	penResults := migratePensForUpdate(plan.pens, serviceBin, selfPath, legacyCopyIn, forceAll, o, ops)

@@ -809,9 +809,9 @@ AFTER_MULTI_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>
 check "... still migrated and restarted the healthy pen ($BEFORE_MULTI_PID -> $AFTER_MULTI_PID)" test -n "$BEFORE_MULTI_PID" -a -n "$AFTER_MULTI_PID" -a "$BEFORE_MULTI_PID" != "$AFTER_MULTI_PID"
 check "... removed legacy hogman-join copy on BOTH pens" run dave-laptop sh -c 'test ! -e /root/.config/hogman/aaa-dead.example.test/hogman-join && test ! -e "/root/.config/hogman/'"$ZONE"'/hogman-join"'
 check "... and healthy pen still loads alice.$ZONE" retry 20 alice_via
-run dave-laptop sh -c 'pid="$(cat /root/.config/hogman/aaa-dead.example.test/agent.pid 2>/dev/null || true)"; [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; rm -rf /root/.config/hogman/aaa-dead.example.test /usr/local/share/ca-certificates/rel-ca.crt && update-ca-certificates --fresh >/dev/null 2>&1'
+run dave-laptop sh -c 'pid="$(cat /root/.config/hogman/aaa-dead.example.test/agent.pid 2>/dev/null || true)"; [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; rm -rf /root/.config/hogman/aaa-dead.example.test'
 
-# Downgrade guard E2E (I-8 follow-up): an older-dated client must not replace a newer shared binary.
+# Downgrade guard E2E (I-8 follow-up) + I-20 stale running-agent self-heal E2E.
 DAVE_ARCH="$(run dave-laptop uname -m | tr -d '\r')"
 case "$DAVE_ARCH" in x86_64|amd64) DAVE_GOARCH=amd64 ;; aarch64|arm64) DAVE_GOARCH=arm64 ;; *) DAVE_GOARCH=amd64 ;; esac
 mkdir -p "$WORK/ver-bins"
@@ -831,7 +831,42 @@ fi
 DAVE_CID="$(dc ps -q dave-laptop)"
 docker cp "$WORK/ver-bins/hogman-old" "$DAVE_CID:/tmp/hogman-old"
 docker cp "$WORK/ver-bins/hogman-new" "$DAVE_CID:/tmp/hogman-new"
-run dave-laptop sh -c 'chmod 0755 /tmp/hogman-old /tmp/hogman-new && cp /tmp/hogman-old /root/.config/hogman/bin/hogman.tmp && mv -f /root/.config/hogman/bin/hogman.tmp /root/.config/hogman/bin/hogman'
+run dave-laptop chmod 0755 /tmp/hogman-old /tmp/hogman-new
+
+# I-20 E2E: on-disk binaries already match the release, a deleted pen returns
+# HTTP 404 from the front door, and the live pen's running agent is still on an
+# older (then-deleted) binary. `hogman update` must NOT say "already up to date";
+# it must skip the 404 pen's 60s wait and restart the live pen onto bin/hogman.
+run dave-laptop sh -c '
+  cp /tmp/hogman-old /tmp/hogman-stale-deleted && chmod 0755 /tmp/hogman-stale-deleted
+  pid="$(cat "/root/.config/hogman/'"$ZONE"'/agent.pid" 2>/dev/null || true)"
+  [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  sleep 1
+  nohup /tmp/hogman-stale-deleted agent "/root/.config/hogman/'"$ZONE"'" >/root/.config/hogman/'"$ZONE"'/agent.log 2>&1 </dev/null &
+  mkdir -p /root/.config/hogman/aaa-gone.example.test
+  printf "{\"zone\":\"aaa-gone.example.test\",\"login_server\":\"https://dave-server:8443/gone\",\"dns_server\":\"100.64.0.1\",\"hostname\":\"gone\",\"proxy_addr\":\"127.0.0.1:19998\"}\n" > /root/.config/hogman/aaa-gone.example.test/config.json
+  printf "0\n" > /root/.config/hogman/aaa-gone.example.test/.updating
+  nohup sleep 300 >/dev/null 2>&1 </dev/null & echo $! > /root/.config/hogman/aaa-gone.example.test/agent.pid
+'
+retry 20 alice_via
+run dave-laptop rm -f /tmp/hogman-stale-deleted
+STALE_LIVE_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>/dev/null | tr -d '\r')"
+t0="$(date +%s)"
+out="$(run dave-laptop sh -c 'HOGMAN_RELEASE_BASE="https://dave-server:8443" "/dl/hogman-$(uname -s)-$(uname -m)" --no-open update' 2>&1)"; rc=$?
+t_i20=$(( $(date +%s) - t0 ))
+check "I-20: update with 404 deleted pen + stale live agent does not say already up to date (exit $rc, ${t_i20}s)" bash -c 'test "$1" != 0 && ! grep -q "already up to date" <<<"$2" && grep -q "aaa-gone.example.test" <<<"$2"' _ "$rc" "$out"
+check "... skipped 60s wait on HTTP 404 deleted pen (${t_i20}s < 45s)" test "$t_i20" -lt 45
+HEALED_LIVE_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>/dev/null | tr -d '\r')"
+check "... restarted live pen off deleted old binary onto canonical bin/hogman ($STALE_LIVE_PID -> $HEALED_LIVE_PID)" bash -c \
+  'test -n "$1" && test -n "$2" && test "$1" != "$2"' _ "$STALE_LIVE_PID" "$HEALED_LIVE_PID"
+check "... live pen agent now runs /root/.config/hogman/bin/hogman" run dave-laptop sh -c 'test "$(readlink -f "/proc/$1/exe" 2>/dev/null)" = "/root/.config/hogman/bin/hogman"' _ "$HEALED_LIVE_PID"
+check "... and healed live pen still loads alice.$ZONE" retry 20 alice_via
+run dave-laptop sh -c 'pid="$(cat /root/.config/hogman/aaa-gone.example.test/agent.pid 2>/dev/null || true)"; [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; rm -rf /root/.config/hogman/aaa-gone.example.test'
+out="$(run dave-laptop sh -c 'HOGMAN_RELEASE_BASE="https://dave-server:8443" "/dl/hogman-$(uname -s)-$(uname -m)" --no-open update' 2>&1)"; rc=$?
+check "... follow-up update with healthy current agent reports already up to date (exit $rc)" bash -c 'test "$1" = 0 && grep -q "already up to date" <<<"$2"' _ "$rc" "$out"
+run dave-laptop sh -c 'rm -f /usr/local/share/ca-certificates/rel-ca.crt && update-ca-certificates --fresh >/dev/null 2>&1'
+
+run dave-laptop sh -c 'cp /tmp/hogman-old /root/.config/hogman/bin/hogman.tmp && mv -f /root/.config/hogman/bin/hogman.tmp /root/.config/hogman/bin/hogman'
 out="$(run dave-laptop /tmp/hogman-new --no-open "$DAVE_LINK" 2>&1)"; rc=$?
 check "newer-dated client upgrades older shared binary (exit $rc)" test "$rc" = 0
 check "... shared binary now reports 2099.01.01-bbbbbbb" match '2099\.01\.01-bbbbbbb' run dave-laptop /root/.config/hogman/bin/hogman --version
