@@ -54,24 +54,38 @@ const (
 
 var errNoLifecycle = errors.New("pen has no lifecycle.json")
 
+const (
+	renewTokenPurpose   = "hogman-renew-v1:"
+	renewTokenMaxTTL    = 20 * time.Minute
+	renewNonceRetainTTL = 24 * time.Hour // matches Stripe Checkout session max lifetime
+)
+
+type renewNonceRecord struct {
+	Handle    string `json:"handle"`
+	Exp       int64  `json:"exp"`
+	RetainExp int64  `json:"retain_exp"`
+	Consumed  bool   `json:"consumed,omitempty"`
+}
+
 type penLifecycle struct {
-	Plan            string           `json:"plan"` // "free" | "personal" | "work"
-	State           string           `json:"state"`
-	PaidUntil       int64            `json:"paid_until,omitempty"`
-	GraceUntil      int64            `json:"grace_until,omitempty"`
-	SleepSince      int64            `json:"sleep_since,omitempty"`
-	DeleteAfter     int64            `json:"delete_after,omitempty"`
-	SubscriptionID  string           `json:"subscription_id,omitempty"`
-	CustomerID      string           `json:"customer_id,omitempty"`
-	CancelledAt     int64            `json:"cancelled_at,omitempty"`
-	BackdateRenewal bool             `json:"backdate_renewal"` // D-35 default: false
-	PendingWake     bool             `json:"pending_wake,omitempty"`
-	AppliedEvents   []string         `json:"applied_events,omitempty"`
-	UsedRenewNonces map[string]int64 `json:"used_renew_nonces,omitempty"` // nonce -> exp unix; pruned on use
-	AlertEmails     []string         `json:"alert_emails,omitempty"`
-	AlertsSent      map[string]int64 `json:"alerts_sent,omitempty"`
-	RenewURL        string           `json:"renew_url,omitempty"`
-	UpdatedAt       int64            `json:"updated_at,omitempty"`
+	Plan            string                      `json:"plan"` // "free" | "personal" | "work"
+	State           string                      `json:"state"`
+	PaidUntil       int64                       `json:"paid_until,omitempty"`
+	GraceUntil      int64                       `json:"grace_until,omitempty"`
+	SleepSince      int64                       `json:"sleep_since,omitempty"`
+	DeleteAfter     int64                       `json:"delete_after,omitempty"`
+	SubscriptionID  string                      `json:"subscription_id,omitempty"`
+	CustomerID      string                      `json:"customer_id,omitempty"`
+	CancelledAt     int64                       `json:"cancelled_at,omitempty"`
+	BackdateRenewal bool                        `json:"backdate_renewal"` // D-35 default: false
+	PendingWake     bool                        `json:"pending_wake,omitempty"`
+	PendingOwner    string                      `json:"pending_owner,omitempty"`
+	AppliedEvents   []string                    `json:"applied_events,omitempty"`
+	RenewNonces     map[string]renewNonceRecord `json:"renew_nonces,omitempty"` // broker-verified nonces; pruned by RetainExp
+	AlertEmails     []string                    `json:"alert_emails,omitempty"`
+	AlertsSent      map[string]int64            `json:"alerts_sent,omitempty"`
+	RenewURL        string                      `json:"renew_url,omitempty"`
+	UpdatedAt       int64                       `json:"updated_at,omitempty"`
 }
 
 type portalBillingStatus struct {
@@ -491,10 +505,11 @@ func (b *broker) initPenLifecycle(pen, plan, code string, paid bool, now time.Ti
 }
 
 // recordRenewal idempotently records a Stripe renewal event (invoice or checkout
-// session) into lifecycle.json and clears the grace banner. Waking a sleeping
-// pen happens asynchronously or via the sweep so the Stripe webhook returns 200
-// immediately without double-crediting retries.
-func (b *broker) recordRenewal(pen, eventID, subID, custID string, now time.Time) (next *penLifecycle, alreadyApplied bool, wasSleeping bool, err error) {
+// session) into lifecycle.json and clears the grace banner. If renewNonce
+// matches a broker-recorded entry in RenewNonces (from /renew-verify), the
+// broker-verified handle is persisted as PendingOwner so promotion survives
+// broker restarts and transient wake delays (B9) without trusting web metadata.
+func (b *broker) recordRenewal(pen, eventID, subID, custID, renewNonce string, now time.Time) (next *penLifecycle, alreadyApplied bool, wasSleeping bool, err error) {
 	b.lifecycleMu.Lock()
 	defer b.lifecycleMu.Unlock()
 
@@ -515,6 +530,19 @@ func (b *broker) recordRenewal(pen, eventID, subID, custID string, now time.Time
 	backdate := b.backdateRenewal || rec.BackdateRenewal
 	updated, sleeping := applyRenewal(*rec, now, backdate)
 	recordAppliedEvent(&updated, eventID)
+	// Resolve payer handle strictly from the broker's own recorded nonce (never
+	// from web-supplied Stripe metadata).
+	nonce := strings.ToLower(strings.TrimSpace(renewNonce))
+	if nonce != "" && updated.RenewNonces != nil {
+		if nr, ok := updated.RenewNonces[nonce]; ok && !nr.Consumed && nr.Handle != "" {
+			if _, valid := validHandle(nr.Handle); valid {
+				updated.PendingOwner = nr.Handle
+			}
+			nr.Consumed = true
+			updated.RenewNonces[nonce] = nr
+		}
+	}
+	pruneRenewNonces(&updated, now.UTC().Unix())
 	if subID != "" && subID != "-" {
 		updated.SubscriptionID = subID
 	}
@@ -530,44 +558,91 @@ func (b *broker) recordRenewal(pen, eventID, subID, custID string, now time.Time
 	if err := syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &updated, b.renewOriginForPen(updated.Plan)); err != nil {
 		log.Printf("lifecycle %s: clear grace banner: %v", pen, err)
 	}
-	b.ledger(fmt.Sprintf("%s renewed %s until %s (event=%s, backdate=%v, pending_wake=%v)",
-		now.UTC().Format(time.RFC3339), pen, time.Unix(updated.PaidUntil, 0).UTC().Format("2006-01-02"), eventID, backdate, sleeping))
+	b.ledger(fmt.Sprintf("%s renewed %s until %s (event=%s, backdate=%v, pending_wake=%v, pending_owner=%s)",
+		now.UTC().Format(time.RFC3339), pen, time.Unix(updated.PaidUntil, 0).UTC().Format("2006-01-02"), eventID, backdate, sleeping, updated.PendingOwner))
 	return &updated, false, sleeping, nil
 }
 
+func pruneRenewNonces(rec *penLifecycle, nowUnix int64) {
+	if len(rec.RenewNonces) == 0 {
+		return
+	}
+	for n, nr := range rec.RenewNonces {
+		exp := nr.RetainExp
+		if exp == 0 {
+			exp = nr.Exp
+		}
+		if exp < nowUnix {
+			delete(rec.RenewNonces, n)
+		}
+	}
+	if len(rec.RenewNonces) == 0 {
+		rec.RenewNonces = nil
+	}
+}
+
 // memberRole looks up handle's current role and status via `hogman-host pen <pen> member list`.
-func (b *broker) memberRole(ctx context.Context, pen, handle string) (role, status string, ok bool) {
+// Returns transient=true if the pen could not be queried (e.g. still starting after wake).
+func (b *broker) memberRole(ctx context.Context, pen, handle string) (role, status string, ok bool, transient bool) {
 	if b.memberRoleFn != nil {
-		return b.memberRoleFn(ctx, pen, handle)
+		r, st, found := b.memberRoleFn(ctx, pen, handle)
+		return r, st, found, false
 	}
 	out, code, _ := b.run(ctx, "pen", pen, "member", "list")
 	if code != 0 {
-		return "", "", false
+		return "", "", false, true
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		f := strings.Fields(line)
 		// `registrar member list` columns: ID HANDLE ROLE STATUS ...
 		if len(f) >= 4 && strings.EqualFold(f[1], handle) {
-			return f[2], f[3], true
+			return f[2], f[3], true, false
 		}
 	}
-	return "", "", false
-}
-
-func (b *broker) isPenAdmin(ctx context.Context, pen, handle string) bool {
-	role, status, ok := b.memberRole(ctx, pen, handle)
-	return ok && role == "admin" && status == "active"
+	return "", "", false, false
 }
 
 func (b *broker) isPenAdminOrOwner(ctx context.Context, pen, handle string) bool {
-	role, status, ok := b.memberRole(ctx, pen, handle)
+	role, status, ok, _ := b.memberRole(ctx, pen, handle)
 	return ok && (role == "admin" || role == "owner") && status == "active"
 }
 
-// finishRenewalWork executes post-webhook wake and verified admin-to-owner
-// promotion (D-35) outside the webhook's synchronous response path, alerting
-// the operator if waking a paid pen fails.
-func (b *broker) finishRenewalWork(ctx context.Context, pen, payerHandle string, wake bool) error {
+// applyPendingOwner promotes rec.PendingOwner to owner if they are currently an
+// active admin of pen, clearing PendingOwner on success or permanent refusal,
+// and keeping PendingOwner + alerting the operator on transient failures (B9).
+func (b *broker) applyPendingOwner(ctx context.Context, pen, handle string) (done bool, err error) {
+	h := strings.ToLower(strings.TrimSpace(handle))
+	if h == "" {
+		return true, nil
+	}
+	if _, ok := validHandle(h); !ok {
+		return true, nil
+	}
+	role, status, found, transient := b.memberRole(ctx, pen, h)
+	if transient {
+		err := fmt.Errorf("member list failed while promoting %s on %s (will retry)", h, pen)
+		b.notifyKind("health", fmt.Sprintf("Pen %s renewed, pending owner promotion for %s deferred: %v", pen, h, err))
+		return false, err
+	}
+	if !found || status != "active" || (role != "admin" && role != "owner") {
+		log.Printf("lifecycle %s: not promoting %q to owner (role=%q status=%q found=%v)", pen, h, role, status, found)
+		return true, nil
+	}
+	if role == "owner" {
+		return true, nil
+	}
+	_, code, stderr := b.runUnbounded(ctx, "pen", pen, "member", "role", h, "owner")
+	if code != 0 {
+		err := fmt.Errorf("promote admin %s to owner on %s failed (exit %d): %s", h, pen, code, strings.TrimSpace(stderr))
+		b.notifyKind("health", fmt.Sprintf("Pen %s renewed, but promoting admin %s to owner failed: %v", pen, h, err))
+		return false, err
+	}
+	return true, nil
+}
+
+// finishRenewalWork executes post-webhook wake and persisted PendingOwner
+// promotion (D-35, B9) outside the webhook's synchronous response path.
+func (b *broker) finishRenewalWork(ctx context.Context, pen string, wake bool) error {
 	if wake {
 		_, code, stderr := b.runUnbounded(ctx, "wake", pen)
 		b.invalidateCapacityCache()
@@ -584,19 +659,27 @@ func (b *broker) finishRenewalWork(ctx context.Context, pen, payerHandle string,
 		}
 		b.lifecycleMu.Unlock()
 	}
-	if h := strings.ToLower(strings.TrimSpace(payerHandle)); h != "" {
-		if _, ok := validHandle(h); ok {
-			if b.isPenAdmin(ctx, pen, h) {
-				_, code, stderr := b.runUnbounded(ctx, "pen", pen, "member", "role", h, "owner")
-				if code != 0 {
-					log.Printf("lifecycle %s: promote admin %s to owner (exit %d): %s", pen, h, code, strings.TrimSpace(stderr))
-				}
-			} else {
-				log.Printf("lifecycle %s: not promoting %q to owner (not an active admin of %s)", pen, h, pen)
-			}
-		}
+
+	b.lifecycleMu.Lock()
+	var pendingOwner string
+	if rec, err := loadPenLifecycle(b.lifecyclePath(pen)); err == nil && !rec.PendingWake {
+		pendingOwner = rec.PendingOwner
 	}
-	return nil
+	b.lifecycleMu.Unlock()
+	if pendingOwner == "" {
+		return nil
+	}
+	done, err := b.applyPendingOwner(ctx, pen, pendingOwner)
+	if done {
+		b.lifecycleMu.Lock()
+		if rec, lerr := loadPenLifecycle(b.lifecyclePath(pen)); lerr == nil && rec.PendingOwner == pendingOwner {
+			rec.PendingOwner = ""
+			rec.UpdatedAt = time.Now().UTC().Unix()
+			_ = savePenLifecycle(b.lifecyclePath(pen), rec)
+		}
+		b.lifecycleMu.Unlock()
+	}
+	return err
 }
 
 // findPenBySubscription locates a pen whose lifecycle.json matches subID.
@@ -676,7 +759,27 @@ func (b *broker) sweepLifecycles(ctx context.Context, now time.Time, dryRun bool
 				}
 			}
 			out = append(out, tr)
-			continue
+			if rec.PendingWake {
+				continue
+			}
+		}
+
+		// B9: Retry any pending admin-to-owner promotion persisted from a verified renewal.
+		if rec.State == stateActive && !rec.PendingWake && rec.PendingOwner != "" {
+			tr := lifecycleTransition{Pen: pen, From: stateActive, To: stateActive, DryRun: dryRun, ActionNote: "promote:" + rec.PendingOwner}
+			if !dryRun {
+				done, perr := b.applyPendingOwner(ctx, pen, rec.PendingOwner)
+				if perr != nil {
+					log.Printf("lifecycle %s: retry pending_owner %s: %v", pen, rec.PendingOwner, perr)
+					tr.ActionNote = "promote_retry_failed:" + rec.PendingOwner
+				}
+				if done {
+					rec.PendingOwner = ""
+					rec.UpdatedAt = now.UTC().Unix()
+					_ = savePenLifecycle(path, rec)
+				}
+			}
+			out = append(out, tr)
 		}
 
 		next, changed := evaluateLifecycle(*rec, now)
@@ -771,11 +874,6 @@ func (b *broker) lifecycleSweepHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, 200, map[string]any{"dry_run": dryRun, "transitions": transitions})
 }
-
-const (
-	renewTokenPurpose = "hogman-renew-v1:"
-	renewTokenMaxTTL  = 20 * time.Minute
-)
 
 type verifiedRenewToken struct {
 	Pen    string
@@ -886,15 +984,11 @@ func (b *broker) renewVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	// Prune expired nonces (keep-less-data) and reject replay.
 	nowUnix := now.Unix()
-	if rec.UsedRenewNonces == nil {
-		rec.UsedRenewNonces = map[string]int64{}
+	pruneRenewNonces(rec, nowUnix)
+	if rec.RenewNonces == nil {
+		rec.RenewNonces = map[string]renewNonceRecord{}
 	}
-	for n, exp := range rec.UsedRenewNonces {
-		if exp < nowUnix {
-			delete(rec.UsedRenewNonces, n)
-		}
-	}
-	if _, used := rec.UsedRenewNonces[tok.Nonce]; used {
+	if _, used := rec.RenewNonces[tok.Nonce]; used {
 		jsonOut(w, 403, map[string]string{"error": "this renewal link was already used; click Renew now inside your pen for a fresh link"})
 		return
 	}
@@ -903,8 +997,13 @@ func (b *broker) renewVerify(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 403, map[string]string{"error": "only active owners or admins can renew this pen"})
 		return
 	}
-	// Mark nonce used BEFORE returning so Checkout creation cannot replay it.
-	rec.UsedRenewNonces[tok.Nonce] = tok.Exp
+	// Mark nonce used and bind the broker-verified handle BEFORE Checkout creation
+	// so neither replay nor a compromised signup-web can forge payer identity.
+	rec.RenewNonces[tok.Nonce] = renewNonceRecord{
+		Handle:    tok.Handle,
+		Exp:       tok.Exp,
+		RetainExp: now.Add(renewNonceRetainTTL).Unix(),
+	}
 	rec.UpdatedAt = nowUnix
 	if err := savePenLifecycle(path, rec); err != nil {
 		log.Printf("lifecycle %s: save used renew nonce: %v", tok.Pen, err)
@@ -912,11 +1011,11 @@ func (b *broker) renewVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, 200, map[string]any{
-		"ok":           true,
-		"pen":          tok.Pen,
-		"plan":         rec.Plan,
-		"state":        rec.State,
-		"payer_handle": tok.Handle,
+		"ok":          true,
+		"pen":         tok.Pen,
+		"plan":        rec.Plan,
+		"state":       rec.State,
+		"renew_nonce": tok.Nonce,
 	})
 }
 

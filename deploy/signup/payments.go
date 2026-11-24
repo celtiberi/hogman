@@ -187,7 +187,7 @@ func (sc *stripeCheckout) paramsFor(origin, plan string) *stripe.CheckoutSession
 	return p
 }
 
-func (sc *stripeCheckout) renewParamsFor(origin, pen, plan, payerHandle string) *stripe.CheckoutSessionCreateParams {
+func (sc *stripeCheckout) renewParamsFor(origin, pen, plan, renewNonce string) *stripe.CheckoutSessionCreateParams {
 	if origin == "" {
 		origin = sc.publicURL
 	}
@@ -195,11 +195,11 @@ func (sc *stripeCheckout) renewParamsFor(origin, pen, plan, payerHandle string) 
 		plan = planPersonal
 	}
 	meta := map[string]string{
-		penMetaKey:     penMetaValue,
-		planMetaKey:    plan,
-		"action":       "renew",
-		"pen":          pen,
-		"payer_handle": payerHandle,
+		penMetaKey:    penMetaValue,
+		planMetaKey:   plan,
+		"action":      "renew",
+		"pen":         pen,
+		"renew_nonce": renewNonce,
 	}
 	subMeta := map[string]string{penMetaKey: penMetaValue, planMetaKey: plan, "pen": pen}
 	p := &stripe.CheckoutSessionCreateParams{
@@ -280,7 +280,7 @@ func (wb *web) renew(w http.ResponseWriter, r *http.Request) {
 	}
 	pen, _ := out["pen"].(string)
 	plan, _ := out["plan"].(string)
-	payerHandle, _ := out["payer_handle"].(string)
+	renewNonce, _ := out["renew_nonce"].(string)
 	if plan != planWork {
 		plan = planPersonal
 	}
@@ -290,7 +290,7 @@ func (wb *web) renew(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	checkoutURL, err := wb.stripe.createCheckoutURL(ctx, wb.stripe.renewParamsFor(wb.stripe.originForHost(r.Host), pen, plan, payerHandle))
+	checkoutURL, err := wb.stripe.createCheckoutURL(ctx, wb.stripe.renewParamsFor(wb.stripe.originForHost(r.Host), pen, plan, renewNonce))
 	if err != nil || !strings.HasPrefix(checkoutURL, "https://") {
 		log.Printf("stripe renew checkout (%s): %v", pen, err)
 		jsonOut(w, 502, map[string]string{"error": "the payment page didn't open; try again in a minute"})
@@ -537,7 +537,7 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 				jsonOut(w, 500, map[string]string{"error": "payment below configured minimum"})
 				return
 			}
-			_, alreadyApplied, wasSleeping, err := b.recordRenewal(pen, s.ID, s.Subscription, s.Customer, time.Now().UTC())
+			updatedRec, alreadyApplied, wasSleeping, err := b.recordRenewal(pen, s.ID, s.Subscription, s.Customer, s.Metadata["renew_nonce"], time.Now().UTC())
 			if errors.Is(err, errNoLifecycle) {
 				jsonOut(w, 200, map[string]string{"ok": "ignored"})
 				return
@@ -548,15 +548,14 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if !alreadyApplied {
-				payerHandle := strings.ToLower(strings.TrimSpace(s.Metadata["payer_handle"]))
-				if wasSleeping || payerHandle != "" {
-					go func(pen, payer string, wake bool) {
+				if wasSleeping || (updatedRec != nil && updatedRec.PendingOwner != "") {
+					go func(pen string, wake bool) {
 						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 						defer cancel()
-						if err := b.finishRenewalWork(ctx, pen, payer, wake); err != nil {
+						if err := b.finishRenewalWork(ctx, pen, wake); err != nil {
 							log.Printf("stripe renew %s (%s) post-work: %v", s.ID, pen, err)
 						}
-					}(pen, payerHandle, wasSleeping)
+					}(pen, wasSleeping)
 				}
 				b.notifyKind("raise", "Pen renewed ("+pen+")")
 			}
@@ -602,7 +601,7 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 					jsonOut(w, 500, map[string]string{"error": "payment below configured minimum"})
 					return
 				}
-				_, alreadyApplied, wasSleeping, err := b.recordRenewal(pen, inv.ID, inv.Subscription, inv.Customer, time.Now().UTC())
+				_, alreadyApplied, wasSleeping, err := b.recordRenewal(pen, inv.ID, inv.Subscription, inv.Customer, "", time.Now().UTC())
 				if err != nil && !errors.Is(err, errNoLifecycle) {
 					log.Printf("stripe invoice %s renew %s: %v", inv.ID, pen, err)
 					jsonOut(w, 500, map[string]string{"error": "renewal failed"})
@@ -612,7 +611,7 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 					go func(pen string) {
 						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 						defer cancel()
-						if err := b.finishRenewalWork(ctx, pen, "", true); err != nil {
+						if err := b.finishRenewalWork(ctx, pen, true); err != nil {
 							log.Printf("stripe invoice %s (%s) wake: %v", inv.ID, pen, err)
 						}
 					}(pen)

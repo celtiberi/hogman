@@ -272,6 +272,17 @@ check "bob (non-admin) cannot mint a renewal token (403)" \
 renew_tok="$(api alice-laptop-tools POST /api/billing/renew-token '{}')"
 check "alice (admin) mints a signed fragment renewal URL" \
   jq -e '.url | startswith("https://get.example.com/#renew=")' <<<"$renew_tok"
+# Verify registrar created a 0600 renew.key and that the minted token's HMAC matches it (host/broker compatibility).
+renew_verify_hmac() {
+  local tok payload sig key_hex expected
+  [ "$(stat -c '%a' "$WORK/data/registrar/renew.key")" = "600" ] || return 1
+  tok="$(jq -r '.url | split("#renew=")[1]' <<<"$renew_tok")"
+  payload="${tok%%.*}"; sig="${tok#*.}"
+  key_hex="$(tr -d ' \r\n' < "$WORK/data/registrar/renew.key")"
+  expected="$(printf 'hogman-renew-v1:%s' "$payload" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$key_hex" -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')"
+  [ -n "$expected" ] && [ "$sig" = "$expected" ]
+}
+check "registrar wrote 0600 renew.key and minted token HMAC verifies against it" renew_verify_hmac
 rm -f "$WORK/data/registrar/billing-status.json" "$WORK/data/registrar/renew.key"
 me_clear="$(api bob-tools GET /api/me)"
 check "removing billing-status.json clears /api/me billing field" \

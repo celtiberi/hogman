@@ -201,6 +201,7 @@ func TestBrokerLifecycleSweepBannerAlertsWakeRetryAndAdminPromotion(t *testing.T
 	home := t.TempDir()
 	logFile := filepath.Join(home, "host-calls.log")
 	failWakeFlag := filepath.Join(home, "fail-wake")
+	failPromoteFlag := filepath.Join(home, "fail-promote")
 	fakeHost := filepath.Join(home, "fake-hogman-host")
 	script := `#!/bin/sh
 echo "$@" >> "` + logFile + `"
@@ -213,6 +214,12 @@ case "$cmd" in
       exit 1
     fi
     rm -f "` + home + `/pens/$2/.sleeping"
+    ;;
+  pen)
+    if [ -f "` + failPromoteFlag + `" ]; then
+      echo "pen still starting" >&2
+      exit 1
+    fi
     ;;
   purge)
     pen="$2"
@@ -294,38 +301,58 @@ exit 0
 		t.Fatalf("sleeping pen must not use a host slot: cap=%+v ok=%v", capNow, ok)
 	}
 
-	// 3. B1: Renewal is idempotent on eventID, and a failed wake leaves PendingWake=true
-	// so the next sweep retries wake without double-crediting paid_until.
+	// 3. B1 & B9: Renewal is idempotent on eventID, persists both PendingWake and
+	// broker-verified PendingOwner (from RenewNonces), and retries both on sweeps
+	// after transient failures.
 	_ = os.WriteFile(failWakeFlag, []byte("1"), 0o600)
+	_ = os.WriteFile(failPromoteFlag, []byte("1"), 0o600)
 	wakeAt := sleepAt.Add(60 * 24 * time.Hour)
-	rec1, dup1, wasSleeping, err := b.recordRenewal(pen, "cs_test_renew_1", "sub_new", "cus_new", wakeAt)
-	if err != nil || dup1 || !wasSleeping || !rec1.PendingWake {
+	// Seed a broker-verified nonce for active admin "alice" before renewal webhook arrives.
+	sleepLoaded, _ := loadPenLifecycle(b.lifecyclePath(pen))
+	sleepLoaded.RenewNonces = map[string]renewNonceRecord{
+		"aabbccddeeff0011": {Handle: "alice", Exp: wakeAt.Add(15 * time.Minute).Unix(), RetainExp: wakeAt.Add(24 * time.Hour).Unix()},
+	}
+	_ = savePenLifecycle(b.lifecyclePath(pen), sleepLoaded)
+
+	rec1, dup1, wasSleeping, err := b.recordRenewal(pen, "cs_test_renew_1", "sub_new", "cus_new", "aabbccddeeff0011", wakeAt)
+	if err != nil || dup1 || !wasSleeping || !rec1.PendingWake || rec1.PendingOwner != "alice" {
 		t.Fatalf("recordRenewal 1 = (%+v, dup=%v, sleeping=%v, err=%v)", rec1, dup1, wasSleeping, err)
 	}
 	// Duplicate webhook retry with same event ID must NOT extend PaidUntil again.
-	rec2, dup2, _, err := b.recordRenewal(pen, "cs_test_renew_1", "sub_new", "cus_new", wakeAt.Add(10*time.Minute))
+	rec2, dup2, _, err := b.recordRenewal(pen, "cs_test_renew_1", "sub_new", "cus_new", "aabbccddeeff0011", wakeAt.Add(10*time.Minute))
 	if err != nil || !dup2 || rec2.PaidUntil != rec1.PaidUntil {
 		t.Fatalf("duplicate renewal must be idempotent: rec2=%+v dup2=%v err=%v", rec2, dup2, err)
 	}
-	// Post-webhook wake fails while host is full -> PendingWake stays true.
-	if err := b.finishRenewalWork(context.Background(), pen, "", true); err == nil {
+	// Post-webhook wake fails while host is full -> PendingWake & PendingOwner stay persisted.
+	if err := b.finishRenewalWork(context.Background(), pen, true); err == nil {
 		t.Fatal("expected wake to fail while fail-wake flag exists")
 	}
-	// Once capacity frees up, next sweep retries wake and clears PendingWake.
+	// Once capacity frees up, sweep wakes pen, attempts promotion (fails transiently -> PendingOwner kept).
 	_ = os.Remove(failWakeFlag)
 	retryTrs, err := b.sweepLifecycles(context.Background(), wakeAt.Add(time.Hour), false)
-	if err != nil || len(retryTrs) != 1 || !retryTrs[0].Woken {
+	if err != nil || len(retryTrs) < 1 || !retryTrs[0].Woken {
 		t.Fatalf("sweep wake retry = (%+v, %v)", retryTrs, err)
 	}
-	afterWake, err := loadPenLifecycle(b.lifecyclePath(pen))
-	if err != nil || afterWake.PendingWake {
-		t.Fatalf("PendingWake should be cleared after successful wake retry: %+v (%v)", afterWake, err)
+	midState, err := loadPenLifecycle(b.lifecyclePath(pen))
+	if err != nil || midState.PendingWake || midState.PendingOwner != "alice" {
+		t.Fatalf("after wake with failed promote, PendingWake should clear and PendingOwner stay 'alice': %+v (%v)", midState, err)
 	}
-	// 4. D-35: finishRenewalWork promotes verified active admin ("alice") to owner
-	// and refuses to promote non-admin ("bob", "mallory").
-	_ = b.finishRenewalWork(context.Background(), pen, "bob", false)
-	_ = b.finishRenewalWork(context.Background(), pen, "mallory", false)
-	_ = b.finishRenewalWork(context.Background(), pen, "alice", false)
+	// Next sweep after pen finishes starting succeeds and clears PendingOwner.
+	_ = os.Remove(failPromoteFlag)
+	if _, err := b.sweepLifecycles(context.Background(), wakeAt.Add(2*time.Hour), false); err != nil {
+		t.Fatalf("sweep promote retry failed: %v", err)
+	}
+	finalState, err := loadPenLifecycle(b.lifecyclePath(pen))
+	if err != nil || finalState.PendingOwner != "" {
+		t.Fatalf("PendingOwner should be cleared after successful promotion retry: %+v (%v)", finalState, err)
+	}
+	// 4. D-35: applyPendingOwner refuses to promote non-admin ("bob", "mallory") permanently (done=true).
+	if done, err := b.applyPendingOwner(context.Background(), pen, "bob"); !done || err != nil {
+		t.Fatalf("non-admin bob should be permanently declined: done=%v err=%v", done, err)
+	}
+	if done, err := b.applyPendingOwner(context.Background(), pen, "mallory"); !done || err != nil {
+		t.Fatalf("unknown mallory should be permanently declined: done=%v err=%v", done, err)
+	}
 	calls, _ := os.ReadFile(logFile)
 	callStr := string(calls)
 	if !strings.Contains(callStr, "wake lab") || !strings.Contains(callStr, "pen lab member role alice owner") {
@@ -361,12 +388,14 @@ func TestStripeRenewalWebhookChecksAndWebRenewFlow(t *testing.T) {
 	}
 	t0 := time.Now().UTC().Add(-10 * 24 * time.Hour)
 	if err := savePenLifecycle(b.lifecyclePath("acme"), &penLifecycle{
-		Plan:            planWork,
-		State:           stateGrace,
-		PaidUntil:       t0.Unix(),
-		GraceUntil:      t0.Add(30 * 24 * time.Hour).Unix(),
-		SubscriptionID:  "sub_work_1",
-		UsedRenewNonces: map[string]int64{"0011223344556677": time.Now().Add(-time.Hour).Unix()},
+		Plan:           planWork,
+		State:          stateGrace,
+		PaidUntil:      t0.Unix(),
+		GraceUntil:     t0.Add(30 * 24 * time.Hour).Unix(),
+		SubscriptionID: "sub_work_1",
+		RenewNonces: map[string]renewNonceRecord{
+			"0011223344556677": {Handle: "alice", Exp: time.Now().Add(-2 * time.Hour).Unix(), RetainExp: time.Now().Add(-time.Hour).Unix()},
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -427,66 +456,76 @@ func TestStripeRenewalWebhookChecksAndWebRenewFlow(t *testing.T) {
 		t.Fatalf("non-admin member token = %d, want 403 (%s)", rec.Code, rec.Body.String())
 	}
 
-	// Valid active admin token succeeds, binds Work price + payer_handle from broker,
+	// Valid active admin token succeeds, binds Work price + broker-recorded renew_nonce,
 	// prunes expired nonce, and refuses replay of the same nonce.
-	validTok := signTestRenewToken(acmeKey, "acme", "alice", "admin", now.Add(10*time.Minute).Unix(), "11223344556677889900aabbccddeeff")
+	validNonce := "11223344556677889900aabbccddeeff"
+	validTok := signTestRenewToken(acmeKey, "acme", "alice", "admin", now.Add(10*time.Minute).Unix(), validNonce)
 	rec := postRenew(fmt.Sprintf(`{"token":%q}`, validTok))
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "https://checkout.stripe.com/c/pay/cs_test_renew") {
 		t.Fatalf("POST /api/renew = %d %s", rec.Code, rec.Body.String())
 	}
-	if capturedParams == nil || *capturedParams.LineItems[0].Price != "price_work_120" || capturedParams.Metadata["action"] != "renew" || capturedParams.Metadata["pen"] != "acme" || capturedParams.Metadata["payer_handle"] != "alice" {
+	if capturedParams == nil || *capturedParams.LineItems[0].Price != "price_work_120" || capturedParams.Metadata["action"] != "renew" || capturedParams.Metadata["pen"] != "acme" || capturedParams.Metadata["renew_nonce"] != validNonce {
 		t.Fatalf("unexpected stripe renew params: %+v", capturedParams)
 	}
 	// Replay of the exact same single-use token is rejected (403).
 	if replay := postRenew(fmt.Sprintf(`{"token":%q}`, validTok)); replay.Code != 403 {
 		t.Fatalf("replayed renew token = %d, want 403 (%s)", replay.Code, replay.Body.String())
 	}
-	// Expired nonce was pruned and fresh nonce recorded.
+	// Expired nonce was pruned and fresh nonce recorded with broker-verified handle.
 	savedRec, err := loadPenLifecycle(b.lifecyclePath("acme"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, stillOld := savedRec.UsedRenewNonces["0011223344556677"]; stillOld {
+	if _, stillOld := savedRec.RenewNonces["0011223344556677"]; stillOld {
 		t.Fatal("expired renew nonce should have been pruned")
 	}
-	if _, hasNew := savedRec.UsedRenewNonces["11223344556677889900aabbccddeeff"]; !hasNew {
-		t.Fatal("used renew nonce must be recorded in lifecycle.json")
+	if nr, hasNew := savedRec.RenewNonces[validNonce]; !hasNew || nr.Handle != "alice" {
+		t.Fatalf("used renew nonce must bind handle 'alice' in lifecycle.json: %+v", savedRec.RenewNonces)
 	}
 
 	// B2: Renewal checkout with wrong amount (Personal $50 for Work pen) or 100% coupon ($0) is rejected.
-	makeRenewEv := func(id, mode, currency string, amountTotal, amountSubtotal int64, pen string) []byte {
+	makeRenewEv := func(id, mode, currency string, amountTotal, amountSubtotal int64, pen, nonce string) []byte {
+		meta := map[string]string{"hogman": "pen", "action": "renew", "pen": pen, "plan": "personal", "payer_handle": "mallory"}
+		if nonce != "" {
+			meta["renew_nonce"] = nonce
+		}
 		obj := map[string]any{
 			"id": id, "object": "checkout.session", "mode": mode, "payment_status": "paid",
 			"currency": currency, "amount_total": amountTotal, "amount_subtotal": amountSubtotal,
 			"customer": "cus_1", "subscription": "sub_work_2",
-			"metadata": map[string]string{"hogman": "pen", "action": "renew", "pen": pen, "plan": "personal"},
+			"metadata": meta,
 		}
 		ev := map[string]any{"id": "evt_" + id, "object": "event", "type": "checkout.session.completed", "api_version": "2099-01-01", "data": map[string]any{"object": obj}}
 		raw, _ := json.Marshal(ev)
 		return raw
 	}
 	// Underpaid ($50 instead of $120 Work) -> 500
-	evLow := makeRenewEv("cs_test_renewlow000001", "subscription", "usd", 5000, 12000, "acme")
+	evLow := makeRenewEv("cs_test_renewlow000001", "subscription", "usd", 5000, 12000, "acme", validNonce)
 	if code, _ := sendEvent(t, h, evLow, signed(evLow, testWebhookSecret, time.Now())); code != 500 {
 		t.Fatalf("underpaid Work renewal must be rejected (got %d, want 500)", code)
 	}
 	// Wrong currency -> 500
-	evCur := makeRenewEv("cs_test_renewcur000001", "subscription", "eur", 12000, 12000, "acme")
+	evCur := makeRenewEv("cs_test_renewcur000001", "subscription", "eur", 12000, 12000, "acme", validNonce)
 	if code, _ := sendEvent(t, h, evCur, signed(evCur, testWebhookSecret, time.Now())); code != 500 {
 		t.Fatalf("wrong currency renewal must be rejected (got %d, want 500)", code)
 	}
 	// Non-subscription mode -> 200 ignored (must not renew)
-	evMode := makeRenewEv("cs_test_renewmode00001", "payment", "usd", 12000, 12000, "acme")
+	evMode := makeRenewEv("cs_test_renewmode00001", "payment", "usd", 12000, 12000, "acme", validNonce)
 	if code, out := sendEvent(t, h, evMode, signed(evMode, testWebhookSecret, time.Now())); code != 200 || out["ok"] != "ignored" {
 		t.Fatalf("non-subscription mode must be ignored: %d %v", code, out)
 	}
 	// SF-5: Pre-I-3 pen without lifecycle.json returns 200 ignored (no retry storm).
-	evMissing := makeRenewEv("cs_test_renewmiss00001", "subscription", "usd", 12000, 12000, "oldpen")
+	evMissing := makeRenewEv("cs_test_renewmiss00001", "subscription", "usd", 12000, 12000, "oldpen", validNonce)
 	if code, out := sendEvent(t, h, evMissing, signed(evMissing, testWebhookSecret, time.Now())); code != 200 || out["ok"] != "ignored" {
 		t.Fatalf("pen without lifecycle.json must return 200 ignored: %d %v", code, out)
 	}
-	// Valid $120 USD subscription renewal succeeds and is idempotent on retry.
-	evOK := makeRenewEv("cs_test_renewok0000001", "subscription", "usd", 12000, 12000, "acme")
+	// Forged payer_handle ("mallory") with an unrecorded nonce must NOT promote anyone.
+	if recForged, _, _, err := b.recordRenewal("acme", "cs_test_forged0000001", "sub_work_2", "cus_1", "deadbeefdeadbeef", time.Now().UTC()); err != nil || recForged.PendingOwner != "" {
+		t.Fatalf("unrecorded nonce must not set PendingOwner: rec=%+v err=%v", recForged, err)
+	}
+	// Valid $120 USD subscription renewal with broker-recorded validNonce resolves
+	// PendingOwner="alice" (ignoring forged metadata payer_handle="mallory") and is idempotent on retry.
+	evOK := makeRenewEv("cs_test_renewok0000001", "subscription", "usd", 12000, 12000, "acme", validNonce)
 	if code, out := sendEvent(t, h, evOK, signed(evOK, testWebhookSecret, time.Now())); code != 200 || out["ok"] != "renewed" {
 		t.Fatalf("valid renewal failed: %d %v", code, out)
 	}
