@@ -105,10 +105,11 @@ type renewNonceRecord struct {
 }
 
 type deleteNonceRecord struct {
-	Handle    string `json:"handle"`
-	Exp       int64  `json:"exp"`
-	RetainExp int64  `json:"retain_exp"`
-	Committed bool   `json:"committed,omitempty"`
+	Handle             string   `json:"handle"`
+	Exp                int64    `json:"exp"`
+	RetainExp          int64    `json:"retain_exp"`
+	RequiredCancelSubs []string `json:"required_cancel_subs,omitempty"`
+	Committed          bool     `json:"committed,omitempty"`
 }
 
 type penLifecycle struct {
@@ -1492,12 +1493,6 @@ func (b *broker) penDeletePrepare(w http.ResponseWriter, r *http.Request) {
 			replayErr = true
 			return nil
 		}
-		cur.DeleteNonces[tok.Nonce] = deleteNonceRecord{
-			Handle:    tok.Handle,
-			Exp:       tok.Exp,
-			RetainExp: now.Add(deleteNonceRetainTTL).Unix(),
-		}
-		cur.UpdatedAt = nowUnix
 		seen := map[string]bool{}
 		if cur.SubscriptionID != "" && cur.CancelledAt == 0 && strings.HasPrefix(cur.SubscriptionID, "sub_") {
 			seen[cur.SubscriptionID] = true
@@ -1509,6 +1504,13 @@ func (b *broker) penDeletePrepare(w http.ResponseWriter, r *http.Request) {
 				subIDs = append(subIDs, p.SubscriptionID)
 			}
 		}
+		cur.DeleteNonces[tok.Nonce] = deleteNonceRecord{
+			Handle:             tok.Handle,
+			Exp:                tok.Exp,
+			RetainExp:          now.Add(deleteNonceRetainTTL).Unix(),
+			RequiredCancelSubs: append([]string(nil), subIDs...),
+		}
+		cur.UpdatedAt = nowUnix
 		return savePenLifecycle(path, cur)
 	}); err != nil {
 		log.Printf("pen delete %s: save delete nonce: %v", tok.Pen, err)
@@ -1577,29 +1579,44 @@ func (b *broker) penDeleteCommit(w http.ResponseWriter, r *http.Request) {
 	path := b.lifecyclePath(pen)
 
 	var handle string
+	var authStatus int
 	var authErr string
 	if err := withPenLifecycleFileLock(path, func() error {
 		cur, lerr := loadPenLifecycle(path)
 		if lerr != nil {
+			authStatus = 403
 			authErr = "invalid delete request"
 			return nil
 		}
 		nr, ok := cur.DeleteNonces[nonce]
 		if !ok || nr.Committed || nowUnix > nr.Exp+300 {
+			authStatus = 403
 			authErr = "this delete request has expired or was already completed"
 			return nil
 		}
+
+		// Billing-first enforcement in the broker: refuse to purge unless every
+		// subscription ID recorded at /pen-delete/prepare is confirmed in
+		// cancelled_subs, so the guarantee never relies on signup-web alone.
+		cancelled := map[string]bool{}
+		for _, id := range in.CancelledSubs {
+			if strings.HasPrefix(id, "sub_") {
+				cancelled[id] = true
+			}
+		}
+		for _, reqSub := range nr.RequiredCancelSubs {
+			if !cancelled[reqSub] {
+				authStatus = 409
+				authErr = "billing cancellation was not confirmed for all active subscriptions; your pen was not deleted"
+				return nil
+			}
+		}
+
 		nr.Committed = true
 		cur.DeleteNonces[nonce] = nr
 		handle = nr.Handle
 
-		if len(in.CancelledSubs) > 0 {
-			cancelled := map[string]bool{}
-			for _, id := range in.CancelledSubs {
-				if strings.HasPrefix(id, "sub_") {
-					cancelled[id] = true
-				}
-			}
+		if len(cancelled) > 0 {
 			if cur.SubscriptionID != "" && cancelled[cur.SubscriptionID] && cur.CancelledAt == 0 {
 				cur.CancelledAt = nowUnix
 			}
@@ -1625,7 +1642,7 @@ func (b *broker) penDeleteCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if authErr != "" {
-		jsonOut(w, 403, map[string]string{"error": authErr})
+		jsonOut(w, authStatus, map[string]string{"error": authErr})
 		return
 	}
 

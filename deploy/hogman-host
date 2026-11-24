@@ -1310,9 +1310,9 @@ cmd_purge() {
       --force)        force=1; shift ;;
       --owner-delete) owner_delete=1; shift ;;
       --yes|-y)       die "purge is irreversible and cannot be bypassed with --yes" ;;
-      -*)             die "usage: hogman-host purge --force <pen>   |   hogman-host purge --due <pen>" ;;
+      -*)             die "usage: hogman-host purge --force <pen>   |   hogman-host purge --due <pen>  (--owner-delete is for the signup broker only)" ;;
       *)
-        [ -z "$n" ] || die "usage: hogman-host purge --force <pen>   |   hogman-host purge --due <pen>"
+        [ -z "$n" ] || die "usage: hogman-host purge --force <pen>   |   hogman-host purge --due <pen>  (--owner-delete is for the signup broker only)"
         n="$1"; shift ;;
     esac
   done

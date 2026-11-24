@@ -284,7 +284,66 @@ exit 0
 		t.Fatalf("expected operator ntfy alert on partial failure, got alerts=%v", alerts)
 	}
 
-	// 7. Per-IP rate limiting on POST /api/delete.
+	// 7. Broker-enforced billing-first guard: direct /pen-delete/commit MUST refuse (409)
+	//    and leave the pen intact unless EVERY subscription ID recorded at /pen-delete/prepare
+	//    is present in cancelled_subs.
+	owners["unconfirmed:alice"] = "owner"
+	unconfKey := setupPen("unconfirmed", &penLifecycle{
+		Plan:           planPersonal,
+		State:          stateActive,
+		PaidUntil:      now.Add(180 * 24 * time.Hour).Unix(),
+		SubscriptionID: "sub_req_1",
+		PendingCancelSubs: []pendingCancelSub{
+			{SubscriptionID: "sub_req_2"},
+		},
+	})
+	unconfTok := makeTestSignedToken(unconfKey, deleteTokenPurpose, "unconfirmed", "alice", "owner", exp, "5555555555555555")
+	brokerCall := func(path string, payload any) (int, map[string]any) {
+		raw, _ := json.Marshal(payload)
+		req, _ := http.NewRequest("POST", bsrv.URL+path, bytes.NewReader(raw))
+		req.Header.Set("Authorization", "Bearer "+testToken)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+	pcode, pout := brokerCall("/pen-delete/prepare", map[string]string{"token": unconfTok})
+	if pcode != 200 {
+		t.Fatalf("prepare unconfirmed = %d %v", pcode, pout)
+	}
+	unconfNonce, _ := pout["delete_nonce"].(string)
+	// Empty cancelled_subs -> 409, no purge.
+	if ccode, cout := brokerCall("/pen-delete/commit", map[string]any{"pen": "unconfirmed", "delete_nonce": unconfNonce}); ccode != 409 {
+		t.Fatalf("commit with empty cancelled_subs = %d (%v), want 409", ccode, cout)
+	}
+	if _, err := os.Stat(filepath.Join(home, "pens", "unconfirmed", ".retired")); !os.IsNotExist(err) {
+		t.Fatal("unconfirmed pen must NOT be purged when cancelled_subs is empty")
+	}
+	// Partial cancelled_subs (missing sub_req_2) -> 409, no purge.
+	if ccode, cout := brokerCall("/pen-delete/commit", map[string]any{
+		"pen": "unconfirmed", "delete_nonce": unconfNonce, "cancelled_subs": []string{"sub_req_1"},
+	}); ccode != 409 {
+		t.Fatalf("commit with partial cancelled_subs = %d (%v), want 409", ccode, cout)
+	}
+	if _, err := os.Stat(filepath.Join(home, "pens", "unconfirmed", ".retired")); !os.IsNotExist(err) {
+		t.Fatal("unconfirmed pen must NOT be purged when cancelled_subs is incomplete")
+	}
+	// All required subs confirmed -> 200 and purged.
+	if ccode, cout := brokerCall("/pen-delete/commit", map[string]any{
+		"pen": "unconfirmed", "delete_nonce": unconfNonce, "cancelled_subs": []string{"sub_req_1", "sub_req_2"},
+	}); ccode != 200 || cout["ok"] != true {
+		t.Fatalf("commit with all required cancelled_subs = %d %v, want 200", ccode, cout)
+	}
+	if _, err := os.Stat(filepath.Join(home, "pens", "unconfirmed", ".retired")); err != nil {
+		t.Fatalf("unconfirmed pen should be retired after full confirmation: %v", err)
+	}
+
+	// 8. Per-IP rate limiting on POST /api/delete.
 	wb.deletes = newLimiter(2, time.Hour)
 	for i := 0; i < 2; i++ {
 		_, _ = postDelete("not-a-valid-token-at-all-1234567890", "198.51.100.99")
