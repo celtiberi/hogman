@@ -76,10 +76,11 @@ func TestRedTeamCLIParseSubcommandFlagValidationAndDoubleDash(t *testing.T) {
 		leave:        func([]string, options) error { return nil },
 		leaveAll:     func([]string, options) error { return nil },
 		uninstall:    func([]string, options) error { return nil },
-		status:       func() error { return nil },
+		status:       func(options) error { return nil },
+		doctor:       func(options) error { return nil },
 		browserSetup: func([]string, options) error { return nil },
 		shareStart:   func(string, string, string, options) error { return nil },
-		shareList:    func(string) error { return nil },
+		shareList:    func(string, bool) error { return nil },
 		shareStop:    func(string, options) error { return nil },
 	}
 	badCases := []struct {
@@ -136,8 +137,8 @@ func TestRedTeamCLIParseSubcommandFlagValidationAndDoubleDash(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"--help"}, "hogman-join"},
-		{[]string{"-h"}, "hogman-join"},
+		{[]string{"--help"}, "hogman"},
+		{[]string{"-h"}, "hogman"},
 		{[]string{"share", "--help"}, "share <name> <target>"},
 		{[]string{"update", "-h"}, "GitHub Releases"},
 	} {

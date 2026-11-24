@@ -1,0 +1,19 @@
+# WinGet manifest template for the Hogman CLI (`hogman`).
+# Fill {{VERSION}} and {{SHA256_WINDOWS_AMD64}} from `hogman-SHA256SUMS`
+# on the immutable GitHub Release `v{{VERSION}}` in celtiberi/hogman.
+PackageIdentifier: Celtiberi.Hogman
+PackageVersion: {{VERSION}}
+PackageLocale: en-US
+Publisher: Celtiberi
+PackageName: Hogman
+License: AGPL-3.0-only
+ShortDescription: Join and share sites on private Hogman networks
+Installers:
+  - Architecture: x64
+    InstallerType: portable
+    InstallerUrl: https://github.com/celtiberi/hogman/releases/download/v{{VERSION}}/hogman-windows-amd64.exe
+    InstallerSha256: {{SHA256_WINDOWS_AMD64}}
+    Commands:
+      - hogman
+ManifestType: singleton
+ManifestVersion: 1.6.0

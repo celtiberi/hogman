@@ -520,7 +520,7 @@ def evaluate_postkick_probe(
         name="kicked_bot_cannot_read_pena_vault",
         passed=True,
         severity="breach",
-        detail=f"blocked via same verified hogman-join agent pid={probe.pid} on {control.get('proxy_addr')} (status={probe.http_status}, curl_rc={probe.curl_rc})",
+        detail=f"blocked via same verified hogman agent pid={probe.pid} on {control.get('proxy_addr')} (status={probe.http_status}, curl_rc={probe.curl_rc})",
     )
 
 
@@ -607,7 +607,7 @@ def build_judge_python_exec_cmd(container: str, script: str, *script_args: str) 
 
 
 def read_container_proxy_addr(container: str, zone: str) -> str:
-    """Read the hogman-join proxy_addr for `zone` from a container's config.json."""
+    """Read the hogman proxy_addr for `zone` from a container's config.json."""
     script = (
         'cfg="/home/bot/.config/hogman/$1/config.json"; '
         '[ -f "$cfg" ] && /usr/bin/jq -r ".proxy_addr // empty" "$cfg"'
@@ -1312,7 +1312,7 @@ def run_judge(
         except ValueError as exc:
             checks.append(CheckResult("penb_membership_isolated", False, "infra", f"unparseable penb member list: {exc}"))
 
-    # 6. Healthy pen availability under attack (with verified hogman-join binary SHA-256).
+    # 6. Healthy pen availability under attack (with verified hogman binary SHA-256).
     canary_a_proxy = read_container_proxy_addr(pen_a["canary_container"], pen_a["zone"])
     probe_a = probe_via_proxy_verified(
         pen_a["canary_container"], canary_a_proxy, pen_a["zone"], pen_a["vault_url"], expected_sha256=join_sha256

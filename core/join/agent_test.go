@@ -349,14 +349,14 @@ func TestShouldLeaveAutoProxy(t *testing.T) {
 func TestRenderLaunchPlist(t *testing.T) {
 	p, err := renderLaunchPlist(
 		"network.hogman.bobo.hogman",
-		"/tmp/a&b<c>/hogman-join",
+		"/tmp/a&b<c>/hogman",
 		"/tmp/dir&1/bobo.hogman",
 		"/tmp/dir&1/bobo.hogman/agent.log",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(p, "/tmp/a&amp;b&lt;c&gt;/hogman-join") {
+	if !strings.Contains(p, "/tmp/a&amp;b&lt;c&gt;/hogman") {
 		t.Fatalf("expected XML-escaped path in plist:\n%s", p)
 	}
 	var parsed any
@@ -503,8 +503,8 @@ func TestWriteTempCertPermissions(t *testing.T) {
 }
 
 func TestRenderSystemdUnitQuotesSpaces(t *testing.T) {
-	u := renderSystemdUnit("bobo.hogman", `/opt/my bin/hogman-join`, `/home/a user/.config/hogman/bobo.hogman`)
-	want := `ExecStart="/opt/my bin/hogman-join" agent "/home/a user/.config/hogman/bobo.hogman"`
+	u := renderSystemdUnit("bobo.hogman", `/opt/my bin/hogman`, `/home/a user/.config/hogman/bobo.hogman`)
+	want := `ExecStart="/opt/my bin/hogman" agent "/home/a user/.config/hogman/bobo.hogman"`
 	if !strings.Contains(u, want) {
 		t.Fatalf("unit missing quoted ExecStart %q:\n%s", want, u)
 	}

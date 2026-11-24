@@ -22,8 +22,8 @@ func sha1Hex(b []byte) string {
 var verbose bool
 
 func say(f string, a ...any)  { fmt.Printf(f+"\n", a...) }
-func step(f string, a ...any) { fmt.Printf("\n• "+f+"\n", a...) }
-func note(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }
+func step(f string, a ...any) { fmt.Fprintf(os.Stderr, "\n• "+f+"\n", a...) }
+func note(f string, a ...any) { fmt.Fprintf(os.Stderr, "  "+f+"\n", a...) }
 
 func isTerminal() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
@@ -36,7 +36,7 @@ var (
 )
 
 func ask(prompt string) string {
-	fmt.Print(prompt)
+	fmt.Fprint(os.Stderr, prompt)
 	stdinMu.Lock()
 	if stdinReader == nil || stdinFile != os.Stdin {
 		stdinFile = os.Stdin

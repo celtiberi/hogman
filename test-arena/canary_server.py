@@ -2,7 +2,7 @@
 """Minimal localhost-only threaded HTTP server serving a rotatable canary secret.
 
 Binds strictly to 127.0.0.1 so it is unreachable over Docker bridges and
-can only be reached through Hogman's pen mesh via `hogman-join share`.
+can only be reached through Hogman's pen mesh via `hogman share`.
 """
 
 import argparse

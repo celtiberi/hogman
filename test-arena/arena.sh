@@ -274,11 +274,11 @@ start_canary() {
   retry 15 docker exec "$ctr" curl -sf http://127.0.0.1:8080/ \
     || die "canary HTTP server failed to start in ${ctr}"
 
-  docker exec "$ctr" hogman-join --no-open --no-service --no-system-proxy \
+  docker exec "$ctr" hogman --no-open --no-service --no-system-proxy \
     --hostname "$handle" "$link" >/dev/null \
     || die "canary ${handle} failed to join ${pen}"
 
-  docker exec "$ctr" hogman-join share vault 8080 \
+  docker exec "$ctr" hogman share vault 8080 \
     --note "${pen} canary vault" --background --no-service >/dev/null \
     || die "canary ${handle} failed to share vault.${zone}"
 
@@ -527,13 +527,13 @@ EOF
 
   local arch join_bin join_sha256 build_ctx
   arch="$(uname -m)"
-  join_bin="$ARENA_HOME/pens/pena/data/join-dl/hogman-join-Linux-${arch}"
-  [ -x "$join_bin" ] || die "expected hogman-join binary at ${join_bin}"
+  join_bin="$ARENA_HOME/pens/pena/data/join-dl/hogman-Linux-${arch}"
+  [ -x "$join_bin" ] || die "expected hogman binary at ${join_bin}"
   join_sha256="$(sha256sum "$join_bin" | awk '{print $1}')"
 
   build_ctx="$ARENA_HOME/bot-build"
   mkdir -p "$build_ctx"
-  cp "$join_bin" "$build_ctx/hogman-join"
+  cp "$join_bin" "$build_ctx/hogman"
   cp "$SCRIPT_DIR/canary_server.py" "$build_ctx/canary_server.py"
   cp "$SCRIPT_DIR/Dockerfile.bot" "$build_ctx/Dockerfile.bot"
   docker build -q -t hogman-arena-bot:latest -f "$build_ctx/Dockerfile.bot" "$build_ctx" >/dev/null

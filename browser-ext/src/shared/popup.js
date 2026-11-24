@@ -55,7 +55,7 @@ function render(st) {
   incognitoRow.hidden = !(st.browser === "firefox" && !st.incognitoAllowed);
 
   if (st.nativeError) {
-    banner.textContent = `Could not reach hogman-native-host (${st.nativeError}). Run "hogman-join browser-setup" in a terminal.`;
+    banner.textContent = `Could not reach hogman-native-host (${st.nativeError}). Run "hogman browser-setup" in a terminal.`;
     banner.hidden = false;
   } else if (st.conflict === "other_extension" || st.conflict === "policy") {
     banner.textContent = st.conflictDetail;
@@ -94,7 +94,7 @@ function render(st) {
     } else if (!e.allowedByProfile) {
       detail.textContent = "blocked in this profile";
     } else if (e.port && e.legacy) {
-      detail.textContent = `127.0.0.1:${e.port} · older agent (run hogman-join update)`;
+      detail.textContent = `127.0.0.1:${e.port} · older agent (run hogman update)`;
     } else if (e.port) {
       detail.textContent = `127.0.0.1:${e.port}`;
     } else {

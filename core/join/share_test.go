@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -139,7 +141,7 @@ func TestShareServiceTemplates(t *testing.T) {
 		t.Fatalf("shareUnitName = %q, pen unit = %q", got, pen)
 	}
 
-	bin := "/tmp/a & b/hogman-join"
+	bin := "/tmp/a & b/hogman"
 	dir := "/tmp/dir <1> & 2/shares/blog"
 	plist, err := renderShareLaunchPlist(c, bin, dir)
 	if err != nil {
@@ -152,7 +154,7 @@ func TestShareServiceTemplates(t *testing.T) {
 	for _, want := range []string{
 		"network.hogman.share.blog.bobo.hogman",
 		"__share-run",
-		"/tmp/a &amp; b/hogman-join",
+		"/tmp/a &amp; b/hogman",
 		"/tmp/dir &lt;1&gt; &amp; 2/shares/blog",
 		"/tmp/dir &lt;1&gt; &amp; 2/shares/blog/share.log",
 		"<key>RunAtLoad</key><true/>",
@@ -345,5 +347,103 @@ func TestFormatFreshShareCertErrorRateLimit(t *testing.T) {
 	got = formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", errors.New("dns timeout")).Error()
 	if !strings.Contains(got, "Fix the problem above") {
 		t.Fatalf("non-429 error changed unexpectedly: %s", got)
+	}
+}
+
+func TestShareTargetLoopbackOnly(t *testing.T) {
+	allowed := []string{
+		"3000",
+		"http://localhost:8080/",
+		"https://localhost:8443/app",
+		"http://LOCALHOST:3000",
+		"http://127.0.0.1:8080",
+		"http://127.0.0.2:8080",
+		"http://[::1]:8080/",
+	}
+	for _, in := range allowed {
+		if _, folder, err := shareTarget(in); err != nil || folder {
+			t.Errorf("shareTarget(%q) = folder=%v, err=%v; want allowed URL target", in, folder, err)
+		}
+	}
+
+	rejected := []string{
+		"https://example.com",
+		"https://example.com/",
+		"http://box.example.ts.net:8091/",
+		"http://192.168.1.1/",
+		"http://10.0.0.5:8080",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://0.0.0.0:8080",
+		"http://[::]:8080",
+		"http://[::1%25en0]:8080",
+		"http://sub.localhost:8080",
+	}
+	for _, in := range rejected {
+		if got, _, err := shareTarget(in); err == nil {
+			t.Errorf("shareTarget(%q) succeeded (%q); want loopback rejection", in, got)
+		}
+	}
+
+	// shareHandler must also reject non-loopback targets already persisted in share.json.
+	for _, bad := range []string{"https://example.com", "http://192.168.1.1:8080", "http://169.254.169.254"} {
+		if _, _, err := shareHandler(&shareConfig{Name: "x", Zone: "z.hogman", Target: bad}); err == nil {
+			t.Errorf("shareHandler(Target=%q) succeeded; want error", bad)
+		}
+	}
+}
+
+func TestLoopbackDialContext(t *testing.T) {
+	// Rejects non-loopback hostname directly without calling lookup or dial.
+	dialed := ""
+	dialFn := loopbackDialContext(
+		func(context.Context, string) ([]net.IPAddr, error) {
+			t.Fatal("lookup should not run for non-loopback host")
+			return nil, nil
+		},
+		func(_ context.Context, _, addr string) (net.Conn, error) {
+			dialed = addr
+			return nil, errors.New("unexpected dial")
+		},
+	)
+	if _, err := dialFn(context.Background(), "tcp", "example.com:443"); err == nil {
+		t.Fatal("expected non-loopback host dial to fail")
+	}
+
+	// Rejects localhost when /etc/hosts or DNS resolves it to a non-loopback IP.
+	dialFn = loopbackDialContext(
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("169.254.169.254")}}, nil
+		},
+		func(_ context.Context, _, addr string) (net.Conn, error) {
+			dialed = addr
+			return nil, errors.New("unexpected dial")
+		},
+	)
+	if _, err := dialFn(context.Background(), "tcp", "localhost:8080"); err == nil {
+		t.Fatal("expected spoofed localhost resolution to fail")
+	}
+	if dialed != "" {
+		t.Fatalf("dial should not have been called for spoofed localhost, got %q", dialed)
+	}
+
+	// Accepts localhost when it resolves strictly to loopback IPs, dialing the literal IP.
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	dialFn = loopbackDialContext(
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+		},
+		func(_ context.Context, _, addr string) (net.Conn, error) {
+			dialed = addr
+			return c1, nil
+		},
+	)
+	conn, err := dialFn(context.Background(), "tcp", "localhost:8080")
+	if err != nil {
+		t.Fatalf("expected loopback dial to succeed, got %v", err)
+	}
+	if conn != c1 || dialed != "127.0.0.1:8080" {
+		t.Fatalf("dialed=%q want 127.0.0.1:8080", dialed)
 	}
 }

@@ -130,7 +130,7 @@ class TestLLMClientAndLedger(unittest.TestCase):
         good = {
             "thought": "check status",
             "action": "exec",
-            "command": "hogman-join status",
+            "command": "hogman status",
             "to": "",
             "message": "",
             "summary": "",

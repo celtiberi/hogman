@@ -42,7 +42,7 @@ const (
 
 // Published browser extension IDs authorized to speak to the native messaging
 // host. Additional developer/unpacked IDs can be registered explicitly via
-// `hogman-join browser-setup --chrome-id <id> --firefox-id <id>`.
+// `hogman browser-setup --chrome-id <id> --firefox-id <id>`.
 var (
 	defaultChromeExtIDs = []string{
 		"mgokdogedagoejnjmjpmbcmicbmhplkk", // Chrome Web Store (Chrome, Brave, Edge, Arc, Vivaldi, Chromium)
@@ -428,7 +428,7 @@ func verifyAgentEndpoint(dir string, cfg *agentConfig) agentEndpointState {
 
 // loopbackStatusTransport disables keep-alive pooling so frequent 1-second
 // loopback /status probes never accumulate idle sockets or readLoop/writeLoop
-// goroutines in hogman-native-host or hogman-join agent.
+// goroutines in hogman-native-host or hogman agent.
 var loopbackStatusTransport = &http.Transport{
 	Proxy:             nil,
 	DisableKeepAlives: true,
@@ -649,9 +649,10 @@ func renderFirefoxNativeManifest(hostPath string, firefoxIDs []string) ([]byte, 
 	return append(b, '\n'), nil
 }
 
-// installNativeHost copies the current hogman-join binary to the pen-independent
-// <configBase>/bin/hogman-native-host path and writes browser Native Messaging
-// manifests for installed browsers. Always user-space (no sudo).
+// installNativeHost ensures the canonical hogman binary under
+// <configBase>/bin/hogman is present, links (Unix) or copies (Windows)
+// <configBase>/bin/hogman-native-host to it, and writes browser Native
+// Messaging manifests for installed browsers. Always user-space (no sudo).
 func installNativeHost(configBase string, extraChromeIDs, extraFirefoxIDs []string) (string, int, error) {
 	self, err := os.Executable()
 	if err != nil {
@@ -661,11 +662,15 @@ func installNativeHost(configBase string, extraChromeIDs, extraFirefoxIDs []stri
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		return "", 0, err
 	}
-	hostPath := nativeHostBinaryPath(configBase)
-	if !sameFilePath(self, hostPath) {
-		if err := copyExecutableAtomic(self, hostPath); err != nil {
+	canonicalBin := canonicalBinaryPath(configBase)
+	if !sameFilePath(self, canonicalBin) {
+		if err := copyExecutableAtomic(self, canonicalBin); err != nil {
 			return "", 0, err
 		}
+	}
+	hostPath := nativeHostBinaryPath(configBase)
+	if err := installNativeHostBinary(canonicalBin, hostPath); err != nil {
+		return "", 0, err
 	}
 
 	saved := loadSavedBrowserIDs(configBase)
@@ -743,7 +748,7 @@ func browserSetupCmd(args []string, o options) error {
 		extraFirefox = append(extraFirefox, id)
 	}
 	if len(args) > 0 {
-		return errorf("usage: hogman-join browser-setup [--chrome-id <32-char-id>] [--firefox-id <gecko-id>]")
+		return errorf("usage: hogman browser-setup [--chrome-id <32-char-id>] [--firefox-id <gecko-id>]")
 	}
 	base := hogmanConfigBase()
 	hostPath, n, err := installNativeHost(base, extraChrome, extraFirefox)
@@ -755,7 +760,7 @@ func browserSetupCmd(args []string, o options) error {
 	if len(defaultChromeExtIDs) == 0 && len(saved.ChromeIDs) == 0 && len(defaultFirefoxExtIDs) == 0 && len(saved.FirefoxIDs) == 0 {
 		note("No published extension IDs are built in yet. For developer testing, pass --chrome-id <32-char-id> and/or --firefox-id <gecko-id>.")
 	} else if n == 0 {
-		note("No supported browser profile directories were found yet; re-run hogman-join browser-setup after launching your browser.")
+		note("No supported browser profile directories were found yet; re-run hogman browser-setup after launching your browser.")
 	}
 	return nil
 }
@@ -775,32 +780,116 @@ func corruptPenConfigs(configBase string) []string {
 	return bad
 }
 
-func statusCmd() error {
+type statusPenJSON struct {
+	Zone     string `json:"zone"`
+	Port     int    `json:"port"`
+	Up       bool   `json:"up"`
+	Hosted   bool   `json:"hosted"`
+	Legacy   bool   `json:"legacy,omitempty"`
+	Squatted bool   `json:"squatted,omitempty"`
+	State    string `json:"state"`
+}
+
+type statusNativeHostJSON struct {
+	Installed bool   `json:"installed"`
+	Active    bool   `json:"active"`
+	Path      string `json:"path"`
+}
+
+type statusSystemProxyJSON struct {
+	VPNOverride     bool   `json:"vpn_override"`
+	VPNInterface    string `json:"vpn_interface,omitempty"`
+	OSProxyConflict bool   `json:"os_proxy_conflict"`
+	OSProxyDetail   string `json:"os_proxy_detail,omitempty"`
+	StalePAC        string `json:"stale_pac,omitempty"`
+}
+
+type statusOutputJSON struct {
+	Version           string                `json:"version"`
+	Platform          string                `json:"platform"`
+	Pens              []statusPenJSON       `json:"pens"`
+	Shares            []shareListItemJSON   `json:"shares"`
+	NativeHost        statusNativeHostJSON  `json:"native_host"`
+	SystemProxy       statusSystemProxyJSON `json:"system_proxy"`
+	CorruptPenConfigs []string              `json:"corrupt_pen_configs"`
+}
+
+func penStateLabel(p nativePenEntry) string {
+	switch {
+	case p.Squatted:
+		return "port squatted by another process"
+	case p.Legacy:
+		return "up (older agent; run hogman update to enable status verification)"
+	case p.Up:
+		return "up"
+	case p.statusReason != "":
+		return "down (" + p.statusReason + ")"
+	default:
+		return "down"
+	}
+}
+
+func buildStatusOutput(base, sharesDir string) statusOutputJSON {
+	pens, configs := collectNativePens(base)
+	outPens := make([]statusPenJSON, 0, len(pens))
+	for _, p := range pens {
+		outPens = append(outPens, statusPenJSON{
+			Zone:     p.Zone,
+			Port:     p.Port,
+			Up:       p.Up,
+			Hosted:   p.Hosted,
+			Legacy:   p.Legacy,
+			Squatted: p.Squatted,
+			State:    penStateLabel(p),
+		})
+	}
+	sys := detectSystemProxyState(configs)
+	hostPath := nativeHostBinaryPath(base)
+	_, hostErr := os.Stat(hostPath)
+	bad := corruptPenConfigs(base)
+	if bad == nil {
+		bad = []string{}
+	}
+	return statusOutputJSON{
+		Version:  version,
+		Platform: runtime.GOOS + "/" + runtime.GOARCH,
+		Pens:     outPens,
+		Shares:   collectShareListItems(allSharesIn(sharesDir, "")),
+		NativeHost: statusNativeHostJSON{
+			Installed: hostErr == nil,
+			Active:    hostErr == nil && extensionRecentlySeen(base, 7*24*time.Hour),
+			Path:      hostPath,
+		},
+		SystemProxy: statusSystemProxyJSON{
+			VPNOverride:     sys.VPNOverride,
+			VPNInterface:    sys.VPNInterface,
+			OSProxyConflict: sys.OSProxyConflict,
+			OSProxyDetail:   sys.OSProxyDetail,
+			StalePAC:        sys.StalePAC,
+		},
+		CorruptPenConfigs: bad,
+	}
+}
+
+func statusCmd(o options) error {
 	base := hogmanConfigBase()
+	if o.jsonOut {
+		return writeJSON(os.Stdout, buildStatusOutput(base, sharesBase()))
+	}
 	pens, configs := collectNativePens(base)
 	if len(pens) == 0 {
 		say("No pens installed on this computer.")
 		if shares := allShares(""); len(shares) > 0 {
-			say("  (%d local share(s) configured; run 'hogman-join share list' to see them)", len(shares))
+			say("  (%d local share(s) configured; run 'hogman share list' to see them)", len(shares))
 		}
 	} else {
 		say("Pens:")
 		for _, p := range pens {
-			state := "down"
-			if p.Squatted {
-				state = "port squatted by another process"
-			} else if p.Legacy {
-				state = "up (older agent; run hogman-join update to enable status verification)"
-			} else if p.Up {
-				state = "up"
-			} else if p.statusReason != "" {
-				state = "down (" + p.statusReason + ")"
-			}
 			addr := "-"
 			if p.Port > 0 {
 				addr = fmt.Sprintf("127.0.0.1:%d", p.Port)
 			}
-			say("  %-42s  %-16s  %s", p.Zone, addr, state)
+			say("  %-42s  %-16s  %s", p.Zone, addr, penStateLabel(p))
 		}
 	}
 	if bad := corruptPenConfigs(base); len(bad) > 0 {
@@ -815,7 +904,7 @@ func statusCmd() error {
 	if sys.StalePAC != "" {
 		say("\n! A proxy setting left by a pen this computer no longer runs is still on: %s", sys.StalePAC)
 		if len(configs) == 0 {
-			say("  Clear it with: hogman-join uninstall")
+			say("  Clear it with: hogman uninstall")
 		} else {
 			say("  It's replaced the next time this computer joins a pen. To turn it off now (System Settings → Network → Proxies,")
 			say("  or: sudo networksetup -setautoproxystate \"<network>\" off), then re-join a pen to set the right one.")
@@ -843,7 +932,7 @@ func extensionHostLine(installed, recentlySeen, vpnOverride bool) string {
 	case installed:
 		return "Browser extension host: installed (not yet contacted by browser extension)"
 	case vpnOverride:
-		return "Browser extension host: not installed (run: hogman-join browser-setup)"
+		return "Browser extension host: not installed (run: hogman browser-setup)"
 	}
 	return ""
 }

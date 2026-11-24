@@ -72,6 +72,32 @@ func dirExists(path string) bool {
 	return err == nil && fi.IsDir()
 }
 
+// installNativeHostBinary links <configBase>/bin/hogman-native-host to the
+// canonical hogman binary in the same directory so the native host stays in
+// sync automatically without duplicating ~25 MiB on disk.
+func installNativeHostBinary(canonicalBin, hostPath string) error {
+	if sameFilePath(canonicalBin, hostPath) {
+		// Already pointing at canonicalBin (check it is actually a symlink, not an old copy).
+		if fi, err := os.Lstat(hostPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+	}
+	target := filepath.Base(canonicalBin)
+	if filepath.Dir(canonicalBin) != filepath.Dir(hostPath) {
+		target = canonicalBin
+	}
+	tmp := hostPath + ".tmp"
+	_ = os.Remove(tmp)
+	if err := os.Symlink(target, tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, hostPath); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 func registerNativeManifests(_ string, hostPath string, chromeIDs, firefoxIDs []string) (int, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {

@@ -1,0 +1,39 @@
+# Homebrew formula template for the Hogman CLI (`hogman`).
+# Fill {{VERSION}} and the four SHA-256 values from `hogman-SHA256SUMS`
+# on the immutable GitHub Release `v{{VERSION}}` in celtiberi/hogman.
+class Hogman < Formula
+  desc "Join and share sites on private Hogman networks"
+  homepage "https://hogman.network"
+  version "{{VERSION}}"
+  license "AGPL-3.0-only"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/celtiberi/hogman/releases/download/v{{VERSION}}/hogman-Darwin-arm64"
+      sha256 "{{SHA256_DARWIN_ARM64}}"
+    end
+    on_intel do
+      url "https://github.com/celtiberi/hogman/releases/download/v{{VERSION}}/hogman-Darwin-x86_64"
+      sha256 "{{SHA256_DARWIN_AMD64}}"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/celtiberi/hogman/releases/download/v{{VERSION}}/hogman-Linux-aarch64"
+      sha256 "{{SHA256_LINUX_ARM64}}"
+    end
+    on_intel do
+      url "https://github.com/celtiberi/hogman/releases/download/v{{VERSION}}/hogman-Linux-x86_64"
+      sha256 "{{SHA256_LINUX_AMD64}}"
+    end
+  end
+
+  def install
+    bin.install Dir["hogman-*"].first => "hogman"
+  end
+
+  test do
+    assert_match "hogman ", shell_output("#{bin}/hogman --version")
+  end
+end

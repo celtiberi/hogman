@@ -158,7 +158,7 @@ services:
       - ./data/join-dl:/dl:ro
       - ${ACME_DIR:?}:/acme:ro
 
-  # Alice's website, running via `hogman-join share` outside her laptop/server.
+  # Alice's website, running via `hogman share` outside her laptop/server.
   alice-share:
     image: nicolaka/netshoot:v0.14
     hostname: alice-share

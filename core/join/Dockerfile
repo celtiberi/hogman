@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Cross-compiles hogman-join for every supported platform.
+# Cross-compiles the hogman client CLI for every supported platform.
 #   docker build --output type=local,dest=../data/join-dl join
 # File names match `uname -s`-`uname -m`, so a one-line shell command can
 # fetch the right one.
@@ -16,8 +16,8 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
              windows-amd64.exe:windows/amd64; do \
       name=${t%%:*}; plat=${t#*:}; \
       GOOS=${plat%/*} GOARCH=${plat#*/} CGO_ENABLED=0 \
-        go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /out/hogman-join-$name . || exit 1; \
-    done && cd /out && sha256sum hogman-join-* > SHA256SUMS
+        go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /out/hogman-$name . || exit 1; \
+    done && cd /out && sha256sum hogman-* > SHA256SUMS
 
 FROM scratch AS dist
 COPY --from=build /out/ /

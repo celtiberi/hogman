@@ -42,3 +42,51 @@ func startExistingBinary(bin, dir string, c *agentConfig, noService bool) error 
 	}
 	return nil
 }
+
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".hogman-unit-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	keep := false
+	defer func() {
+		_ = tmp.Close()
+		if !keep {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	keep = true
+	return nil
+}
+
+func rewriteAgentService(bin, dir string, c *agentConfig) error {
+	plist, err := renderLaunchPlist(launchLabel(c.Zone), bin, dir, filepath.Join(dir, "agent.log"))
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(launchPlist(c.Zone), []byte(plist), 0o644)
+}
+
+func rewriteShareService(bin, dir string, c *shareConfig) error {
+	plist, err := renderShareLaunchPlist(c, bin, dir)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(sharePlist(c), []byte(plist), 0o644)
+}

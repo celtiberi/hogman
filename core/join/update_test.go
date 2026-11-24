@@ -27,11 +27,11 @@ func TestPlatformBinaryName(t *testing.T) {
 		want         string
 		wantErr      bool
 	}{
-		{"darwin", "arm64", "hogman-join-Darwin-arm64", false},
-		{"darwin", "amd64", "hogman-join-Darwin-x86_64", false},
-		{"linux", "amd64", "hogman-join-Linux-x86_64", false},
-		{"linux", "arm64", "hogman-join-Linux-aarch64", false},
-		{"windows", "amd64", "hogman-join-windows-amd64.exe", false},
+		{"darwin", "arm64", "hogman-Darwin-arm64", false},
+		{"darwin", "amd64", "hogman-Darwin-x86_64", false},
+		{"linux", "amd64", "hogman-Linux-x86_64", false},
+		{"linux", "arm64", "hogman-Linux-aarch64", false},
+		{"windows", "amd64", "hogman-windows-amd64.exe", false},
 		{"freebsd", "amd64", "", true},
 	}
 	for _, tc := range cases {
@@ -49,26 +49,26 @@ func TestParseSHA256SUMS(t *testing.T) {
 	sumA := strings.Repeat("ab", 32)
 	sumB := strings.Repeat("CD", 32)
 
-	sums := []byte(sumA + "  hogman-join-Darwin-arm64\n" +
-		sumB + " *hogman-join-Linux-x86_64\r\n\n")
+	sums := []byte(sumA + "  hogman-Darwin-arm64\n" +
+		sumB + " *hogman-Linux-x86_64\r\n\n")
 
-	gotA, err := parseSHA256SUMS(sums, "hogman-join-Darwin-arm64")
+	gotA, err := parseSHA256SUMS(sums, "hogman-Darwin-arm64")
 	if err != nil || gotA != sumA {
 		t.Fatalf("Darwin-arm64: got (%q, %v), want %q", gotA, err, sumA)
 	}
-	gotB, err := parseSHA256SUMS(sums, "hogman-join-Linux-x86_64")
+	gotB, err := parseSHA256SUMS(sums, "hogman-Linux-x86_64")
 	if err != nil || gotB != strings.ToLower(sumB) {
 		t.Fatalf("Linux-x86_64: got (%q, %v), want %q", gotB, err, strings.ToLower(sumB))
 	}
-	if _, err := parseSHA256SUMS(sums, "hogman-join-windows-amd64.exe"); err == nil {
+	if _, err := parseSHA256SUMS(sums, "hogman-windows-amd64.exe"); err == nil {
 		t.Fatal("expected error for missing entry")
 	}
-	if _, err := parseSHA256SUMS([]byte("zzzz"+sumA[4:]+"  hogman-join-Darwin-arm64\n"), "hogman-join-Darwin-arm64"); err == nil {
+	if _, err := parseSHA256SUMS([]byte("zzzz"+sumA[4:]+"  hogman-Darwin-arm64\n"), "hogman-Darwin-arm64"); err == nil {
 		t.Fatal("expected error for non-hex digest")
 	}
 	dup := append([]byte{}, sums...)
-	dup = append(dup, []byte(sumA+"  hogman-join-Darwin-arm64\n")...)
-	if _, err := parseSHA256SUMS(dup, "hogman-join-Darwin-arm64"); err == nil {
+	dup = append(dup, []byte(sumA+"  hogman-Darwin-arm64\n")...)
+	if _, err := parseSHA256SUMS(dup, "hogman-Darwin-arm64"); err == nil {
 		t.Fatal("expected error for duplicate entry")
 	}
 }
@@ -110,9 +110,9 @@ func testServerPEM(srv *httptest.Server) string {
 }
 
 func TestDownloadVerifiedBinary(t *testing.T) {
-	payload := []byte("verified-hogman-join-binary-bytes")
+	payload := []byte("verified-hogman-binary-bytes")
 	wantHex := hexSHA256(payload)
-	binName := "hogman-join-Linux-x86_64"
+	binName := "hogman-Linux-x86_64"
 
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -174,7 +174,7 @@ func TestStageAndVerifyAtomicReplace(t *testing.T) {
 	newHex := hexSHA256(newBytes)
 
 	src := filepath.Join(dir, "src")
-	dst := filepath.Join(dir, "hogman-join")
+	dst := filepath.Join(dir, "hogman")
 	if err := os.WriteFile(src, newBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -309,14 +309,14 @@ func TestGitHubReleaseFlowAndRedirects(t *testing.T) {
 	}
 
 	// End-to-end version-pinned download against local TLS test server.
-	binName := "hogman-join-Darwin-arm64"
+	binName := "hogman-Darwin-arm64"
 	payload := []byte("release-binary-payload-v1")
 	wantHex := hexSHA256(payload)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/releases/latest/download/latest":
 			_, _ = w.Write([]byte("2026.11.23-abc1234\n"))
-		case "/releases/download/v2026.11.23-abc1234/hogman-join-SHA256SUMS":
+		case "/releases/download/v2026.11.23-abc1234/hogman-SHA256SUMS":
 			_, _ = w.Write([]byte(wantHex + "  " + binName + "\n"))
 		case "/releases/download/v2026.11.23-abc1234/" + binName:
 			_, _ = w.Write(payload)
@@ -336,7 +336,7 @@ func TestGitHubReleaseFlowAndRedirects(t *testing.T) {
 	if err != nil || gotVer != "2026.11.23-abc1234" || gotTag != "v2026.11.23-abc1234" {
 		t.Fatalf("fetchLatestReleaseTag = (%q, %q, %q, %v)", gotVer, gotTag, dlBase, err)
 	}
-	gotHex, err := fetchExpectedSHA256URL(client, dlBase+"/hogman-join-SHA256SUMS", binName)
+	gotHex, err := fetchExpectedSHA256URL(client, dlBase+"/hogman-SHA256SUMS", binName)
 	if err != nil || gotHex != wantHex {
 		t.Fatalf("fetchExpectedSHA256URL = (%q, %v), want %q", gotHex, err, wantHex)
 	}
@@ -351,7 +351,7 @@ func TestGitHubReleaseFlowAndRedirects(t *testing.T) {
 
 	// Unreachable GitHub Releases fails clearly with explicit override hint (no silent fallback).
 	srv.Close()
-	if _, _, _, err := fetchLatestReleaseTag(client, relBase); err == nil || !strings.Contains(err.Error(), "hogman-join update --pen") {
+	if _, _, _, err := fetchLatestReleaseTag(client, relBase); err == nil || !strings.Contains(err.Error(), "hogman update --pen") {
 		t.Fatalf("unreachable error = %v, want override hint", err)
 	}
 }
@@ -382,7 +382,7 @@ func TestParseCLIArgsUpdate(t *testing.T) {
 
 func TestUpdatePenAgentRollbackAndRecovery(t *testing.T) {
 	pen := &penTarget{zone: "bobo.hogman", dir: "/tmp/pen", cfg: &agentConfig{Zone: "bobo.hogman"}}
-	binPath := "/tmp/pen/hogman-join"
+	binPath := "/tmp/pen/hogman"
 
 	// 1. Stage fails while running -> old agent restarted, restartNew not called.
 	var calls []string
@@ -441,7 +441,7 @@ func TestUpdatePenAgentRollbackAndRecovery(t *testing.T) {
 
 func TestUpdateShareBinaryRestartAndRollback(t *testing.T) {
 	dir := t.TempDir()
-	binPath := filepath.Join(dir, "hogman-join")
+	binPath := filepath.Join(dir, "hogman")
 	s := &shareTargetDir{
 		dir:  dir,
 		name: "blog",

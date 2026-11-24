@@ -5,9 +5,9 @@
 #   deploy/release.sh [git-ref]      default: origin/main
 #
 # Packages committed code only (never the working folder):
-#   hogman-<version>.tar.gz, hogman-bin-<version>.tar.gz (compiled join tool,
-#   registrar, sign-up page and challenge DNS), standalone hogman-join-* client
-#   binaries + hogman-join-SHA256SUMS (for `hogman-join update`), install.sh,
+#   hogman-<version>.tar.gz, hogman-bin-<version>.tar.gz (compiled client CLI,
+#   registrar, sign-up page and challenge DNS), standalone hogman-* client
+#   binaries + hogman-SHA256SUMS (for `hogman update`), install.sh,
 #   SHA256SUMS and latest.
 #
 # Creates the GitHub Release as a draft with every asset uploaded first, verifies
@@ -83,26 +83,26 @@ git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstr
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$work" -czf "$out/$bins" prebuilt
 git show "$REF:deploy/install.sh" > "$out/install.sh"
 
-# Standalone attested hogman-join client binaries + checksums for `hogman-join update`.
-join_bins=(
-  hogman-join-Darwin-arm64
-  hogman-join-Darwin-x86_64
-  hogman-join-Linux-x86_64
-  hogman-join-Linux-aarch64
-  hogman-join-windows-amd64.exe
+# Standalone attested hogman client binaries + checksums for `hogman update`.
+cli_bins=(
+  hogman-Darwin-arm64
+  hogman-Darwin-x86_64
+  hogman-Linux-x86_64
+  hogman-Linux-aarch64
+  hogman-windows-amd64.exe
 )
 [ -f "$work/prebuilt/join/SHA256SUMS" ] || { echo "missing prebuilt/join/SHA256SUMS: not releasing" >&2; exit 1; }
-for jb in "${join_bins[@]}"; do
-  [ -f "$work/prebuilt/join/$jb" ] || { echo "missing prebuilt/join/$jb: not releasing" >&2; exit 1; }
-  cp "$work/prebuilt/join/$jb" "$out/$jb"
+for cb in "${cli_bins[@]}"; do
+  [ -f "$work/prebuilt/join/$cb" ] || { echo "missing prebuilt/join/$cb: not releasing" >&2; exit 1; }
+  cp "$work/prebuilt/join/$cb" "$out/$cb"
 done
-cp "$work/prebuilt/join/SHA256SUMS" "$out/hogman-join-SHA256SUMS"
+cp "$work/prebuilt/join/SHA256SUMS" "$out/hogman-SHA256SUMS"
 ( cd "$out"
   if command -v sha256sum >/dev/null; then
-    sha256sum -c --quiet hogman-join-SHA256SUMS
+    sha256sum -c --quiet hogman-SHA256SUMS
   else
-    shasum -a 256 -c --quiet hogman-join-SHA256SUMS
-  fi ) || { echo "hogman-join-SHA256SUMS verification failed: not releasing" >&2; exit 1; }
+    shasum -a 256 -c --quiet hogman-SHA256SUMS
+  fi ) || { echo "hogman-SHA256SUMS verification failed: not releasing" >&2; exit 1; }
 
 ( cd "$out"
   if command -v sha256sum >/dev/null; then
@@ -122,10 +122,10 @@ if [ "${NO_DEPLOY:-}" != 1 ]; then
   fi
   release_files=(
     "$out/$tarball" "$out/$bins" "$out/SHA256SUMS" "$out/latest" "$out/install.sh"
-    "$out/hogman-join-SHA256SUMS"
+    "$out/hogman-SHA256SUMS"
   )
-  for jb in "${join_bins[@]}"; do
-    release_files+=("$out/$jb")
+  for cb in "${cli_bins[@]}"; do
+    release_files+=("$out/$cb")
   done
   # Upload every asset into a draft release first, verify the asset list, then
   # publish and mark latest atomically (required for immutable releases).
@@ -137,7 +137,7 @@ if [ "${NO_DEPLOY:-}" != 1 ]; then
     --notes "Release \`$ver\` from commit \`$full\` (compiled binaries verified via GitHub build provenance)." \
     "${release_files[@]}"
 
-  want_assets="$(printf '%s\n' "$bins" "$tarball" "SHA256SUMS" "install.sh" "latest" "hogman-join-SHA256SUMS" "${join_bins[@]}" | sort)"
+  want_assets="$(printf '%s\n' "$bins" "$tarball" "SHA256SUMS" "install.sh" "latest" "hogman-SHA256SUMS" "${cli_bins[@]}" | sort)"
   got_assets="$(gh release view "$tag" --repo "$repo" --json assets --jq '[.assets[].name] | sort | join("\n")')"
   if [ "$got_assets" != "$want_assets" ]; then
     echo "draft release $tag asset mismatch (leaving as draft): got '$got_assets'" >&2

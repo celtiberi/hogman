@@ -38,8 +38,8 @@ func TestIsNativeHostBinary(t *testing.T) {
 	if !isNativeHostBinary(`hogman-native-host.exe`) {
 		t.Fatal("expected hogman-native-host.exe to match")
 	}
-	if isNativeHostBinary("/usr/local/bin/hogman-join") {
-		t.Fatal("hogman-join must not dispatch as native host")
+	if isNativeHostBinary("/usr/local/bin/hogman") {
+		t.Fatal("hogman must not dispatch as native host")
 	}
 }
 
