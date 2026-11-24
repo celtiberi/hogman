@@ -19,17 +19,6 @@ import (
 	"time"
 )
 
-func TestHeadscaleTemplateDisablesNodeKeyExpiry(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "templates", "headscale.yaml"))
-	if err != nil {
-		t.Fatalf("read headscale.yaml template: %v", err)
-	}
-	text := string(raw)
-	if !strings.Contains(text, "node:\n  expiry: 0") {
-		t.Fatalf("headscale.yaml must set node.expiry: 0 so sleeping-pen owner keys never expire:\n%s", text)
-	}
-}
-
 func TestRenewOnlyPolicyAndHTTPEnforcementI7(t *testing.T) {
 	e := newTestEnv(t)
 	if _, err := e.svc.AddMember(context.Background(), Actor{CLI: true}, "owner1", "owner"); err != nil {

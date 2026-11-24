@@ -767,10 +767,13 @@ timed t 30 fetch alice.$ZONE "hello"
 check "resumed bob has access again (${t}s)" fetch alice.$ZONE "hello"
 
 step "Renew-only wake (I-7 Part 2)"
+check "headscale template disables node key expiry for sleeping pens" awk '/^node:[[:space:]]*$/{f=1;next} f && /^  expiry: 0[[:space:]]*$/{ok=1;exit} f && /^[^[:space:]]/{f=0} END{exit !ok}' "$SRC/templates/headscale.yaml"
+check "rendered headscale config disables node key expiry for sleeping pens" awk '/^node:[[:space:]]*$/{f=1;next} f && /^  expiry: 0[[:space:]]*$/{ok=1;exit} f && /^[^[:space:]]/{f=0} END{exit !ok}' "$WORK/data/headscale/config/config.yaml"
 printf 'renew_only\n' > "$WORK/data/registrar/.renew-only"
 cat > "$WORK/data/registrar/billing-status.json" <<'EOF'
-{"pen":"test","state":"renew_only","wake_until":"2030-01-01T00:10:00Z","renew_url":"https://get.example.com"}
+{"pen":"bobo","state":"renew_only","wake_until":"2030-01-01T00:10:00Z","renew_url":"https://get.example.com"}
 EOF
+chmod 0644 "$WORK/data/registrar/.renew-only" "$WORK/data/registrar/billing-status.json"
 $H sync >/dev/null
 timed t 30 not fetch alice.$ZONE "hello"
 check "during renew_only, regular member bob cannot reach alice's share (${t}s)" not fetch alice.$ZONE "hello"
@@ -778,9 +781,10 @@ check "during renew_only, regular member bob cannot reach the portal" not api bo
 check "during renew_only, admin alice still reaches /api/me with renew_only state" match '"state":"renew_only"' api alice-laptop-tools GET /api/me
 check "during renew_only, admin alice can mint a renewal token" match 'https://get.example.com/#renew=' api alice-laptop-tools POST /api/billing/renew-token '{}'
 check "during renew_only, admin alice gets 403 on /api/directory" expect 403 alice-laptop-tools GET /api/directory
-check "during renew_only, public /hogman/v1/redeem returns 403" bash -c 'code="$(run alice-share curl -sk -m5 -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" -d "{\"token\":\"bad\",\"handle\":\"x\"}" "https://'"$PUBLIC_HOST"'/hogman/v1/redeem")"; test "$code" = 403'
+r="$(redeem bad x)"
+check "during renew_only, public /hogman/v1/redeem returns 403 (HTTP ${r##* })" test "${r##* }" = 403
 # Simulate payment completion: clear .renew-only and billing-status.json and reconcile with ZERO container restarts.
-rm -f "$WORK/data/registrar/.renew-only" "$WORK/data/registrar/billing-status.json"
+rm -f "$WORK/data/registrar/.renew-only" "$WORK/data/registrar/billing-status.json" "$WORK/data/registrar/renew.key"
 $H sync >/dev/null
 timed t 30 fetch alice.$ZONE "hello"
 check "after payment clears renew_only (no restart), bob reaches alice's share again (${t}s)" fetch alice.$ZONE "hello"
