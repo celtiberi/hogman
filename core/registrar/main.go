@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -166,6 +167,20 @@ func healthCmd() error {
 	return nil
 }
 
+func derpMapCmd() error {
+	hc := &http.Client{Timeout: 3 * time.Second}
+	resp, err := hc.Get("http://" + embeddedHealthAddr + "/derp-map")
+	if err != nil {
+		return fmt.Errorf("embedded mesh derp-map: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("embedded mesh derp-map: HTTP %d", resp.StatusCode)
+	}
+	_, err = io.Copy(os.Stdout, resp.Body)
+	return err
+}
+
 func main() {
 	log.SetFlags(0)
 	configureTestCA()
@@ -177,6 +192,13 @@ func main() {
 	if args[0] == "health" {
 		if err := healthCmd(); err != nil {
 			fmt.Fprintln(os.Stderr, "unhealthy:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if args[0] == "derp-map" {
+		if err := derpMapCmd(); err != nil {
+			fmt.Fprintln(os.Stderr, "derp-map:", err)
 			os.Exit(1)
 		}
 		return

@@ -51,9 +51,6 @@ services:
       outside:
         aliases: ["${PUBLIC_HOST}"]
 
-  registrar:
-    networks: [core, acme]
-
   alice-laptop:
     <<: *device
     hostname: alice-laptop
@@ -197,6 +194,9 @@ services:
       - ${ACME_DIR:?}:/acme:ro
 
 networks:
+  core:
+    name: ${COMPOSE_PROJECT_NAME:-hogman-test}_core
+    external: true
   outside: {}
   acme:
     name: hogman-test-acme

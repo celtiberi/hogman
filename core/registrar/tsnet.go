@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -267,6 +268,19 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
+	})
+	healthMux.HandleFunc("/derp-map", func(w http.ResponseWriter, r *http.Request) {
+		dm, err := lc.CurrentDERPMap(r.Context())
+		if err != nil {
+			http.Error(w, "derp-map: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if dm == nil {
+			http.Error(w, "derp-map: not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(dm)
 	})
 	healthLn, err := net.Listen("tcp", embeddedHealthAddr)
 	if err != nil {

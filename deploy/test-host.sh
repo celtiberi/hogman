@@ -191,9 +191,8 @@ for pen in bobo zebra; do
   check "the registrar of $pen recorded the device" retry 10 match 'member1.*laptop' "$HOST" pen "$pen" device list
   stun="$(grep -h ^STUN_PORT= "$HOGMAN_HOME/pens/$pen/.env" | cut -d= -f2)"
   derp_port() {
-    local dm="$HOGMAN_HOME/pens/$pen/data/registrar/tsnet/derpmap.cached.json"
-    [ -s "$dm" ] || return 1
-    jq -e --argjson p "$stun" 'any(.Regions[].Nodes[]?; .STUNPort == $p)' "$dm" >/dev/null
+    docker exec "pen-$pen-registrar-1" registrar derp-map 2>/dev/null \
+      | jq -e --argjson p "$stun" 'any(.Regions[].Nodes[]?; .STUNPort == $p)' >/dev/null
   }
   check "$pen's relay advertises its own port ($stun)" retry 20 derp_port
 done

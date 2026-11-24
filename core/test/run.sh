@@ -71,7 +71,7 @@ cleanup() {
     docker volume rm -f "hogman-e2e-state-$$" "hogman-e2e-in-$$" >/dev/null 2>&1 || true
     docker rmi -f "hogman-sidecar-e2e:$$" >/dev/null 2>&1 || true
     dc down -v --remove-orphans >/dev/null 2>&1
-    docker network rm hogman-test-acme >/dev/null 2>&1 || true
+    docker network rm "${COMPOSE_PROJECT_NAME}_core" hogman-test-acme >/dev/null 2>&1 || true
     rm -rf "$WORK"
   fi
 }
@@ -114,6 +114,11 @@ JSON
 docker run -d --name hogman-run-pebble --network hogman-test-acme --network-alias pebble -e PEBBLE_VA_NOSLEEP=1 \
   -v "$ACME/certs:/certs:ro" -v "$ACME/pebble.json:/pebble.json:ro" \
   ghcr.io/letsencrypt/pebble:2.10.3 -config /pebble.json -dnsserver hogman-run-cdns:53 >/dev/null
+# Connect Pebble and challenge-dns to the pen's single core network so registrar
+# stays single-homed (matching production) while still reaching the test CA/DNS.
+docker network inspect "${COMPOSE_PROJECT_NAME}_core" >/dev/null 2>&1 || docker network create "${COMPOSE_PROJECT_NAME}_core" >/dev/null
+docker network connect "${COMPOSE_PROJECT_NAME}_core" hogman-run-cdns >/dev/null 2>&1 || true
+docker network connect --alias pebble "${COMPOSE_PROJECT_NAME}_core" hogman-run-pebble >/dev/null 2>&1 || true
 retry 30 docker run --rm --network hogman-test-acme -v "$ACME/certs:/c:ro" nicolaka/netshoot:v0.14 \
   curl -sf --cacert /c/ca.crt https://pebble:14000/dir || exit 1
 docker run --rm --network hogman-test-acme -v "$ACME/certs:/c:ro" nicolaka/netshoot:v0.14 \
