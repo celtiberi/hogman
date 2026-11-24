@@ -291,10 +291,11 @@ func TestRedTeamJoinRollbackAndReenrollPreserveInvite(t *testing.T) {
 	if !shouldRollbackFreshJoin(true, dir, &agentJoinError{msg: "rejected"}) {
 		t.Fatal("shouldRollbackFreshJoin should roll back on definite agentJoinError")
 	}
-	// Once authkey is spent (removed), definite post-enrollment failure may roll back.
+	// Once authkey is spent (removed), the device has enrolled on the server:
+	// follow-up check failures must NOT log it out and leave an orphan device (I-21).
 	_ = os.Remove(filepath.Join(dir, "authkey"))
-	if !shouldRollbackFreshJoin(true, dir, errorf("portal failed")) {
-		t.Fatal("shouldRollbackFreshJoin should roll back once authkey is spent")
+	if shouldRollbackFreshJoin(true, dir, errorf("portal failed")) {
+		t.Fatal("shouldRollbackFreshJoin must not log out an already-enrolled device on follow-up failure")
 	}
 
 	// 2. reenrollExistingPen must NOT stop agent or wipe node/ when redeem fails.

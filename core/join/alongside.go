@@ -134,18 +134,30 @@ func waitAgentUp(c *agentConfig, d time.Duration) (*agentStatus, error) {
 
 func waitAgentUpCtx(ctx context.Context, c *agentConfig, d time.Duration) (*agentStatus, error) {
 	deadline := time.Now().Add(d)
+	lastStatusErr := ""
 	for {
 		st, err := agentState(c)
 		if err == nil && st.Up {
 			return st, nil
 		}
 		if err == nil && st.Error != "" {
-			return nil, &agentJoinError{msg: fmt.Sprintf("could not join the pen: %s", st.Error)}
+			// Only abort immediately on a fatal startup error (!Enrolled, e.g.
+			// rejected authkey) or an explicit NeedsLogin rejection. Once the
+			// device has enrolled (st.Enrolled), "not connected to pen" is a
+			// transient state while the registrar's Sync loop adds this device's
+			// IP to Headscale's ACL policy (I-21).
+			if !st.Enrolled || st.NeedsLogin {
+				return nil, &agentJoinError{msg: fmt.Sprintf("could not join the pen: %s", st.Error)}
+			}
+			lastStatusErr = st.Error
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, errorf("cancelled before the pen connection came up (saved credentials were kept; re-run the same command to resume)")
 		}
 		if time.Now().After(deadline) {
+			if lastStatusErr != "" {
+				return nil, errorf("enrolled on %s, but the pen connection did not come up within %s (last status: %s).\n  Saved credentials were kept so this device is not orphaned; re-run hogman to retry, or run 'hogman leave %s' to remove it.\n  Log: %s", c.Zone, d, lastStatusErr, c.Zone, filepath.Join(stateDir(c.Zone), "agent.log"))
+			}
 			return nil, errorf("the pen connection did not come up within %s. Log: %s", d, filepath.Join(stateDir(c.Zone), "agent.log"))
 		}
 		select {
@@ -221,22 +233,20 @@ func reenrollExistingPen(dir string, existing *agentConfig, n *networkInfo, host
 }
 
 // shouldRollbackFreshJoin decides whether a failed fresh join should tear down
-// local state. Never roll back when an unspent authkey is still on disk (e.g.,
-// Ctrl-C, timeout, or transient start failure) so a single-use invite is never
-// burned; roll back only on definite enrollment failures once the key is spent
-// or explicitly rejected by the agent.
+// local state. Roll back only when enrollment itself failed before the device
+// joined the control plane (an unspent authkey is still on disk and the agent
+// reported a definite rejection). Once the device has enrolled on the server
+// (authkey removed by the agent), never log it out on a follow-up check failure
+// so the user never ends up with an orphaned device on the server (I-21).
 func shouldRollbackFreshJoin(freshJoin bool, dir string, err error) bool {
 	if !freshJoin || err == nil {
 		return false
 	}
-	var aje *agentJoinError
-	if errors.As(err, &aje) {
-		return true
-	}
-	if _, statErr := os.Stat(filepath.Join(dir, "authkey")); statErr == nil {
+	if _, statErr := os.Stat(filepath.Join(dir, "authkey")); statErr != nil {
 		return false
 	}
-	return true
+	var aje *agentJoinError
+	return errors.As(err, &aje)
 }
 
 // joinAlongside sets up side-by-side mode. why explains, in a few words, why

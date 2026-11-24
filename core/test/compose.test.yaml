@@ -179,6 +179,14 @@ services:
       - ./data/join-dl:/dl:ro
       - ${ACME_DIR:?}:/acme:ro
 
+  dave-server-tools:
+    image: nicolaka/netshoot:v0.14
+    profiles: [clients]
+    network_mode: service:dave-server
+    command: ["sleep", "infinity"]
+    volumes:
+      - ${ACME_DIR:?}:/acme:ro
+
   # Alice's website, running via `hogman share` outside her laptop/server.
   alice-share:
     image: nicolaka/netshoot:v0.14
