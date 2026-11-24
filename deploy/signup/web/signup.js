@@ -80,7 +80,20 @@
     $('down').textContent = 'The sign-up service is temporarily unavailable. Please try again shortly.';
 
     $('code-hint-lead').textContent = 'Sign-ups are invite-only during the testbed. Opened a link? Your code is already filled in. Need access?';
-    $('buy-copy').textContent = 'Need a custom bare pen name without waiting?';
+    $('buy-copy').replaceChildren(
+      document.createTextNode('Need an always-on Work pen with a bare name and higher cert limits without waiting? '),
+      Object.assign(document.createElement('strong'), { textContent: '$120/year' }),
+      document.createTextNode(' (renews yearly; '),
+      Object.assign(document.createElement('a'), {
+        id: 'buy-policies',
+        href: 'https://work.hogman.network/docs/policies.html',
+        target: '_blank',
+        rel: 'noopener noreferrer',
+        textContent: 'policies',
+      }),
+      document.createTextNode(').')
+    );
+    $('buy').textContent = 'Buy a pen ($120/yr)';
     $('pen-label').textContent = 'Network name (pen)';
     $('pen').placeholder = 'store-north';
     $('handle-label').textContent = 'Your admin handle';
@@ -131,7 +144,9 @@
       ['Overview', 'https://work.hogman.network/'],
       ['Docs', 'https://work.hogman.network/docs/'],
       ['Security', 'https://work.hogman.network/docs/security.html'],
+      ['Policies', 'https://work.hogman.network/docs/policies.html'],
       ['FAQ', 'https://work.hogman.network/docs/faq.html'],
+      ['Contact', 'mailto:hogman-support@proton.me'],
       ['GitHub', 'https://github.com/celtiberi/hogman'],
     ], ' \u00b7 ');
   };

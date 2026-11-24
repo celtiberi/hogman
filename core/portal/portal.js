@@ -101,6 +101,7 @@
       ['Docs', 'https://work.hogman.network/docs/'],
       ['Bridging guide', 'https://work.hogman.network/docs/share.html'],
       ['Security', 'https://work.hogman.network/docs/security.html'],
+      ['Policies', 'https://work.hogman.network/docs/policies.html'],
       ['FAQ', 'https://work.hogman.network/docs/faq.html'],
     ].forEach(([label, href], idx) => {
       if (idx > 0) fl.append(document.createTextNode(' \u00b7 '));

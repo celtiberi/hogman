@@ -12,10 +12,10 @@ equipment controllers off the open internet. Invited members reach private HTTPS
 any ordinary browser (Chrome, Safari, Firefox) with standard browser certificates; to everyone else
 on Earth, there is no public IP address to scan.
 
-- **For businesses & operations:** [work.hogman.network](https://work.hogman.network)
-- **Consumer site:** [hogman.network](https://hogman.network)
-- **Create a pen:** [get.hogman.network](https://get.hogman.network) (invite-only testbed; free while testing)
-- **Documentation:** [work.hogman.network/docs](https://work.hogman.network/docs/)
+- **For businesses & operations:** [work.hogman.network](https://work.hogman.network) ($120/year per pen)
+- **Personal site:** [hogman.network](https://hogman.network) ($50/year per pen, or $0 Free suffixed pens)
+- **Create a pen:** [get.work.hogman.network](https://get.work.hogman.network) (Work) · [get.hogman.network](https://get.hogman.network) (Personal) — invite-only testbed while live billing finishes setup
+- **Documentation & policies:** [work.hogman.network/docs](https://work.hogman.network/docs/) · [Policies & billing](https://work.hogman.network/docs/policies.html)
 - **Architecture & threat model:** [Architecture & security](https://work.hogman.network/docs/security.html)
 
 Hogman runs pen control planes hosted-only on `hogman.network` (no self-hosted pen server support),
@@ -60,8 +60,8 @@ Paste your invite link: https://store-north.gate.hogman.network/join#t=(your inv
   internet, LAN, and any existing Tailscale setup untouched.
 - On macOS, it prompts for local-network access and asks once for your Mac password to configure the
   system automatic proxy (`networksetup`).
-- Add more devices from your pen's home page (*Add a device*), update anytime with
-  `~/hogman-join update`, or leave with `~/hogman-join leave`.
+- Add more devices from your pen's home page (*Add a device*), update with
+  `~/hogman-join update`, or disconnect from a pen with `~/hogman-join leave <zone>`.
 
 ### Hosting HTTPS servers (`share`)
 
@@ -70,8 +70,8 @@ over HTTPS on port 443) — a local port, a static directory, or a local LAN con
 a small always-on computer on site (using a share link from your pen's home page):
 
 ```text
-$ ~/hogman-join share cooler-1 http://192.168.1.40 --background '<share-link>'
-$ ~/hogman-join share photos ~/holiday --note "Shared archive"
+$ ~/hogman-join share cooler-1 http://192.168.1.40 '<share-link>' --background
+$ ~/hogman-join share sops ~/site-manuals --note "Equipment manuals"
 $ ~/hogman-join share app 3000 --background
 
 ✓ https://app.store-north.pens.hogman.network is up.
@@ -83,9 +83,10 @@ inbound connections and zero inbound router ports are opened. Take a share down 
 `~/hogman-join share stop app`.
 
 Full guides: [Quickstart](https://work.hogman.network/docs/) ·
-[Joining a pen](https://work.hogman.network/docs/join.html) ·
-[Hosting HTTPS servers](https://work.hogman.network/docs/share.html) ·
-[Running a pen](https://work.hogman.network/docs/keeper.html) ·
+[Onboarding staff & devices](https://work.hogman.network/docs/join.html) ·
+[Bridging equipment & apps](https://work.hogman.network/docs/share.html) ·
+[Managing access & offboarding](https://work.hogman.network/docs/keeper.html) ·
+[Policies & billing](https://work.hogman.network/docs/policies.html) ·
 [FAQ & troubleshooting](https://work.hogman.network/docs/faq.html)
 
 ---
@@ -102,8 +103,8 @@ stays up.
 - **Browser extension ([`browser-ext/`](browser-ext/README.md)):** Manifest V3 extension for
   Chrome, Brave, Edge, and Firefox (128+) that routes only the pens you explicitly allow per
   browser profile straight to `hogman-join` (fail-closed for everything else) while leaving regular
-  traffic on your VPN. Chrome Web Store and Mozilla Add-ons listings are in review; developers can
-  load unpacked builds from `browser-ext/` today.
+  traffic on your VPN. Store listings are not yet published on the Chrome Web Store or Mozilla
+  Add-ons; developers can load unpacked builds from `browser-ext/` today.
 - **Safari:** Apple does not expose proxy APIs to Safari extensions, so pause your VPN while
   visiting pen sites in Safari.
 
@@ -134,9 +135,12 @@ A stranger looking up the same name publicly: NODATA from ns1. Zero A/AAAA recor
 - **HTTPS (`:443`) to servers only:** default-deny ACLs block SSH, raw TCP/UDP, exit nodes, and all
   inbound connections to personal devices. `hogman-join`'s loopback proxy pins every dialed IP to a
   verified mesh peer via `WhoIs`, never touching `127.0.0.1` or LAN hosts.
-- **Isolated hosted pens:** each pen runs in 4 non-root containers (`uid 65532`) on its own Docker
-  bridge (~75 MB RAM) behind a shared `*.gate.hogman.network` front door, with nightly encrypted
-  off-host backups and automated health checks.
+- **Isolated hosted pens:** each pen runs in 4 isolated containers on its own Docker bridge (~75 MB
+  idle RSS) — `headscale`, `registrar`, and `edge` run non-root (`uid 65532`) with read-only root
+  filesystems and dropped capabilities, while `core-mesh` holds only the minimal
+  `NET_ADMIN`/`NET_RAW`/`CHOWN`/`DAC_OVERRIDE` capabilities needed for WireGuard `/dev/net/tun` —
+  behind a shared `*.gate.hogman.network` front door, with nightly encrypted off-host backups and
+  automated health checks.
 - **Verifiable releases:** every `hogman-join` release binary is built by GitHub Actions with SLSA
   provenance:
   ```bash
@@ -162,17 +166,20 @@ Read the full breakdown in [Architecture & security](https://work.hogman.network
   WireGuard + TLS 1.3.
 - **Zero account recovery:** lose every device in a pen and that account is gone — no support
   backdoor exists. **If you own a pen, appoint a second owner.**
-- **Shared parent suffix (`pens.hogman.network`):** for multi-site operations, use separate pens per
-  region or store group to limit blast radius. Until `pens.hogman.network` is listed on the Public
-  Suffix List, use a separate browser profile for any pen you don't fully trust so cookies stay
-  isolated.
-- **Current limits & platforms:** macOS and Linux work today; Windows is built but untested; a
-  mobile app is in the works. Pens default to 5 new certificate names per rolling hour and 20 per
-  rolling 7 days (`home.<pen>` uses one slot; attempts count, not issued certs, and renewals are
-  exempt). Pen names, member handles, and kicked site names are permanently retired.
+- **Shared parent suffix (`pens.hogman.network`):** for multi-location operations, use separate pens
+  per region or store group to limit blast radius. Until `pens.hogman.network` is listed on the
+  Public Suffix List, use a separate browser profile for any pen you don't fully trust so cookies
+  stay isolated.
+- **Current limits & platforms:** macOS and Linux work today; Windows is built as an untested
+  preview; a mobile app is in the works. Per-pen certificate caps are **5 distinct new names/hour
+  and 20/7 days** on Free/Personal pens, or **10/hour and 60/7 days** on Work pens (with a shared
+  40/hour soft / 60/hour hard global ceiling; `home.<pen>` uses one slot; attempts count, not issued
+  certs; retries of names already counted within the last 7 days are free). Pen names, member
+  handles, and removed members' site names are permanently retired.
 
-**Found a security vulnerability?** Don't open a public issue — report it privately using GitHub's
-**Security → Report a vulnerability** button on this repository.
+**Found a security vulnerability?** Don't open a public issue — report it privately via GitHub's
+**Security → Report a vulnerability** button on this repository or email
+`hogman-support@proton.me`.
 
 ---
 

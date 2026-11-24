@@ -59,6 +59,7 @@
       ['work.hogman.network', 'https://work.hogman.network/'],
       ['Onboarding guide', 'https://work.hogman.network/docs/join.html'],
       ['Security', 'https://work.hogman.network/docs/security.html'],
+      ['Policies', 'https://work.hogman.network/docs/policies.html'],
       ['FAQ', 'https://work.hogman.network/docs/faq.html'],
     ], ' \u00b7 ');
     if (forShare) {
