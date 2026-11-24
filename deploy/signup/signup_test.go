@@ -1116,10 +1116,11 @@ func TestWaitlistAckEmailPersonalWorkDedupAndNoNoteReflection(t *testing.T) {
 	wb.workHost = "get.work.example.com"
 	wb.waits = newLimiter(20, time.Hour)
 	wb.globalWaits = newLimiter(20, time.Hour)
+	wb.leaves = newLimiter(20, time.Hour)
 	wh := wb.handler()
 
-	postWait := func(host, body string) (int, map[string]any) {
-		req := httptest.NewRequest("POST", "/api/waitlist", strings.NewReader(body))
+	postJSON := func(host, path, body string) (int, map[string]any) {
+		req := httptest.NewRequest("POST", path, strings.NewReader(body))
 		req.Host = host
 		req.Header.Set("Origin", "https://"+host)
 		req.Header.Set("Content-Type", "application/json")
@@ -1128,6 +1129,9 @@ func TestWaitlistAckEmailPersonalWorkDedupAndNoNoteReflection(t *testing.T) {
 		out := map[string]any{}
 		_ = json.Unmarshal(rec.Body.Bytes(), &out)
 		return rec.Code, out
+	}
+	postWait := func(host, body string) (int, map[string]any) {
+		return postJSON(host, "/api/waitlist", body)
 	}
 
 	// 1. Personal host join sends a Hogman ack email without echoing the free-form note.
@@ -1162,7 +1166,23 @@ func TestWaitlistAckEmailPersonalWorkDedupAndNoNoteReflection(t *testing.T) {
 	case <-time.After(150 * time.Millisecond):
 	}
 
-	// 3. Work host join sends a Hogman Work ack email linking to get.work.example.com/#wait.
+	// 2b. Join -> leave -> join again for the same address MUST NOT send a second
+	//     email within 24h AND must NOT burn global waitAckMail budget (limit is 2,
+	//     so bob below must still receive his email).
+	if code, _ := postJSON("get.example.com", "/api/waitlist/leave", `{"email":"alice@example.com"}`); code != 200 {
+		t.Fatalf("waitlist leave = %d, want 200", code)
+	}
+	if code, out := postWait("get.example.com", `{"email":"ALICE@example.com"}`); code != 200 || out["place"] != float64(1) {
+		t.Fatalf("re-join after leave = %d %v", code, out)
+	}
+	select {
+	case m := <-sentCh:
+		t.Fatalf("join->leave->join within 24h should not re-send ack email: %+v", m)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// 3. Work host join sends a Hogman Work ack email linking to get.work.example.com/#wait
+	//    (proving alice's suppressed join->leave->join did not spend global waitAckMail budget).
 	if code, out := postWait("get.work.example.com", `{"email":"bob@example.com","pen":"acme"}`); code != 200 || out["place"] != float64(2) {
 		t.Fatalf("work waitlist join = %d %v", code, out)
 	}
@@ -1171,11 +1191,11 @@ func TestWaitlistAckEmailPersonalWorkDedupAndNoNoteReflection(t *testing.T) {
 		if len(m.to) != 1 || m.to[0] != "bob@example.com" {
 			t.Fatalf("work ack to = %v", m.to)
 		}
-		if m.subject != "You're on the Hogman Work waiting list" {
+		if m.subject != "You're on the Hogman for Work waiting list" {
 			t.Fatalf("work ack subject = %q", m.subject)
 		}
-		if !strings.Contains(m.text, "Hogman Work waiting list (spot #2)") || !strings.Contains(m.text, "https://get.work.example.com/#wait") {
-			t.Fatalf("work ack body missing Work branding/URL:\n%s", m.text)
+		if !strings.Contains(m.text, "Hogman for Work waiting list (spot #2)") || !strings.Contains(m.text, "https://get.work.example.com/#wait") || !strings.Contains(m.text, "hogman-support@proton.me") {
+			t.Fatalf("work ack body missing Work branding/URL/support:\n%s", m.text)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for work waitlist ack email")
@@ -1189,5 +1209,21 @@ func TestWaitlistAckEmailPersonalWorkDedupAndNoNoteReflection(t *testing.T) {
 	case m := <-sentCh:
 		t.Fatalf("waitAckMail rate cap should suppress 3rd email: %+v", m)
 	case <-time.After(150 * time.Millisecond):
+	}
+
+	// 5. Full mailSem skips without burning per-address or global rate-limit budget.
+	b.waitAckMail = newLimiterWithCap(1, time.Hour, 4)
+	b.mailSem = make(chan struct{}, 1)
+	b.mailSem <- struct{}{} // occupy only slot
+	b.sendWaitlistAckAsync("dave@example.com", "", 4, false)
+	<-b.mailSem // free slot; dave's per-address + global budget must still be unspent
+	b.sendWaitlistAckAsync("dave@example.com", "", 4, false)
+	select {
+	case m := <-sentCh:
+		if len(m.to) != 1 || m.to[0] != "dave@example.com" {
+			t.Fatalf("expected dave@example.com ack after mailSem freed, got %+v", m)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("full mailSem burned rate-limit budget for unsent email")
 	}
 }

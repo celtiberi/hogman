@@ -31,7 +31,8 @@ type broker struct {
 	lifecycleMu            sync.Mutex // serializes lifecycle sweeps & renewals without blocking signup/provision
 	limitMu                sync.Mutex
 	waitJoins              *limiter
-	waitAckMail            *limiter
+	waitAckAddr            *limiter // per-address 1/24h in-memory cap (nothing written to disk)
+	waitAckMail            *limiter // global cap across all waitlist confirmation emails
 	waitNotify             *limiter
 	raiseNotify            *limiter
 	healthNotify           *limiter
@@ -148,6 +149,9 @@ func (b *broker) ensureLimits() {
 	if b.waitJoins == nil {
 		b.waitJoins = newLimiterWithCap(30, time.Hour, 4)
 	}
+	if b.waitAckAddr == nil {
+		b.waitAckAddr = newLimiter(1, 24*time.Hour)
+	}
 	if b.waitAckMail == nil {
 		b.waitAckMail = newLimiterWithCap(30, time.Hour, 4)
 	}
@@ -174,6 +178,11 @@ func (b *broker) ensureLimits() {
 func (b *broker) allowWaitlistJoin(now time.Time) bool {
 	b.ensureLimits()
 	return b.waitJoins.allow("*", now)
+}
+
+func (b *broker) allowWaitlistAckAddr(email string, now time.Time) bool {
+	b.ensureLimits()
+	return b.waitAckAddr.allow(strings.ToLower(strings.TrimSpace(email)), now)
 }
 
 func (b *broker) allowWaitlistAckMail(now time.Time) bool {

@@ -187,18 +187,19 @@ func (b *broker) waitlist(w http.ResponseWriter, r *http.Request) {
 func waitlistAckEmail(pen string, place int, isWork bool, origin string) (subject, body string) {
 	product := "Hogman"
 	if isWork {
-		product = "Hogman Work"
+		product = "Hogman for Work"
 	}
 	subject = fmt.Sprintf("You're on the %s waiting list", product)
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "You're on the %s waiting list (spot #%d).\n\n", product, place)
-	sb.WriteString("We'll email you a sign-up code as soon as there's room.\n")
+	sb.WriteString("We'll email you a sign-up code as soon as capacity opens.\n")
 	if pen != "" {
 		fmt.Fprintf(&sb, "Requested pen name: %s (not reserved until you sign up).\n", pen)
 	}
 	if origin != "" {
-		fmt.Fprintf(&sb, "\nTo take yourself off the waiting list at any time, visit:\n%s/#wait\n", strings.TrimRight(origin, "/"))
+		fmt.Fprintf(&sb, "\nDidn't request this, or want to leave the list? Remove your email anytime at:\n%s/#wait\n(Enter this email address and choose \"Take me off the list\".)\n", strings.TrimRight(origin, "/"))
 	}
+	sb.WriteString("\nQuestions? Email hogman-support@proton.me.\n")
 	return subject, sb.String()
 }
 
@@ -210,14 +211,26 @@ func (b *broker) sendWaitlistAckAsync(email, pen string, place int, isWork bool)
 		return
 	}
 	b.ensureLimits()
-	if !b.allowWaitlistAckMail(b.now()) {
-		log.Printf("waitlist ack mail: rate cap hit; skipping confirmation email")
-		return
-	}
+	// Take the in-flight slot before spending any rate-limit budget so a full
+	// semaphore never burns a quota slot for mail that will not be sent.
 	select {
 	case b.mailSem <- struct{}{}:
 	default:
 		log.Printf("waitlist ack mail: too many emails in flight; skipping confirmation email")
+		return
+	}
+	now := b.now()
+	// Check the per-address 1/24h in-memory cap BEFORE the global cap so a
+	// join -> leave -> join loop on one address cannot bomb a recipient or
+	// exhaust the shared budget for real joiners.
+	if !b.allowWaitlistAckAddr(email, now) {
+		<-b.mailSem
+		log.Printf("waitlist ack mail: per-address 24h cap hit; skipping confirmation email")
+		return
+	}
+	if !b.allowWaitlistAckMail(now) {
+		<-b.mailSem
+		log.Printf("waitlist ack mail: rate cap hit; skipping confirmation email")
 		return
 	}
 	plan := planPersonal
@@ -230,6 +243,7 @@ func (b *broker) sendWaitlistAckAsync(email, pen string, place int, isWork bool)
 		defer func() { <-b.mailSem }()
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
+		// Reuses the broker's Resend sender (RESEND_API_KEY_FILE / BILLING_FROM).
 		if _, err := b.sendBillingAlert(ctx, []string{email}, subject, body); err != nil {
 			log.Printf("waitlist ack mail: send failed: %v", err)
 		}
