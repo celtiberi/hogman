@@ -43,8 +43,8 @@ func startAgent(dir string, c *agentConfig, o options) error {
 		return err
 	}
 	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_, _ = run(false, "/bin/launchctl", "bootout", domain+"/"+launchLabel(c.Zone))
-	if out, err := run(false, "/bin/launchctl", "bootstrap", domain, path); err != nil {
+	_, _ = run("/bin/launchctl", "bootout", domain+"/"+launchLabel(c.Zone))
+	if out, err := run("/bin/launchctl", "bootstrap", domain, path); err != nil {
 		// No desktop session (for example over SSH): fall back to a plain background process.
 		_ = os.Remove(path)
 		note("could not register a login item (%s); running in the background until restart", firstLine(out))
@@ -56,7 +56,7 @@ func startAgent(dir string, c *agentConfig, o options) error {
 
 func stopAgent(dir string, c *agentConfig) {
 	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_, _ = run(false, "/bin/launchctl", "bootout", domain+"/"+launchLabel(c.Zone))
+	_, _ = run("/bin/launchctl", "bootout", domain+"/"+launchLabel(c.Zone))
 	_ = os.Remove(launchPlist(c.Zone))
 	stopDetached(dir)
 }
@@ -69,7 +69,7 @@ func stopOrphanAgentForDir(dir string) {
 	if cleanDir == "" || cleanDir == "." || cleanDir == "/" {
 		return
 	}
-	out, err := run(false, "/bin/ps", "-u", strconv.Itoa(os.Getuid()), "-o", "pid=,args=")
+	out, err := run("/bin/ps", "-u", strconv.Itoa(os.Getuid()), "-o", "pid=,args=")
 	if err != nil {
 		return
 	}
@@ -159,8 +159,8 @@ func startShareServiceWithBinary(bin, dir string, c *shareConfig, noService bool
 		return false, 0, err
 	}
 	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_, _ = run(false, "/bin/launchctl", "bootout", domain+"/"+shareLaunchLabel(c))
-	if out, err := run(false, "/bin/launchctl", "bootstrap", domain, path); err != nil {
+	_, _ = run("/bin/launchctl", "bootout", domain+"/"+shareLaunchLabel(c))
+	if out, err := run("/bin/launchctl", "bootstrap", domain, path); err != nil {
 		_ = os.Remove(path)
 		note("could not register a login item (%s); running in the background until restart", firstLine(out))
 		pid, serr := spawnDetached(logPath, bin, "__share-run", dir)
@@ -172,7 +172,7 @@ func startShareServiceWithBinary(bin, dir string, c *shareConfig, noService bool
 
 func stopShareService(c *shareConfig) {
 	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_, _ = run(false, "/bin/launchctl", "bootout", domain+"/"+shareLaunchLabel(c))
+	_, _ = run("/bin/launchctl", "bootout", domain+"/"+shareLaunchLabel(c))
 	_ = os.Remove(sharePlist(c))
 }
 
@@ -183,7 +183,7 @@ func startDetached(bin, dir string) error {
 
 // networkServices lists the Mac's enabled network services (Wi-Fi, Ethernet...).
 func networkServices() []string {
-	out, err := run(false, "/usr/sbin/networksetup", "-listallnetworkservices")
+	out, err := run("/usr/sbin/networksetup", "-listallnetworkservices")
 	if err != nil {
 		return nil
 	}
@@ -198,7 +198,7 @@ func networkServices() []string {
 }
 
 func autoProxyState(svc string) (string, bool) {
-	out, _ := run(false, "/usr/sbin/networksetup", "-getautoproxyurl", svc)
+	out, _ := run("/usr/sbin/networksetup", "-getautoproxyurl", svc)
 	return parseAutoProxyOutput(out)
 }
 
@@ -232,7 +232,7 @@ func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, bool, error) {
 
 	if len(configured) > 0 {
 		if len(known) > 1 {
-			return fmt.Sprintf("already configured on %s (%s), which covers all %d pens (%s). If your browser doesn't see %s right away, toggle Auto proxy configuration off and back on in System Settings (or restart your browser).",
+			return fmt.Sprintf("already configured on %s (%s), which covers all %d pens (%s). If your browser doesn't see %s right away, toggle \"Automatic proxy configuration\" off and back on in System Settings (or restart your browser).",
 				strings.Join(configured, ", "), configuredURL, len(known), strings.Join(penZoneNames(known), ", "), c.Zone), true, nil
 		}
 		return fmt.Sprintf("already configured on %s (%s) — Safari, Chrome and others find the pen automatically.",
@@ -273,9 +273,9 @@ func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {
 		return ""
 	}
 	if nextURL != "" {
-		return fmt.Sprintf("in System Settings → Network → %s → Details… → Proxies, update \"Auto proxy configuration\" to %s for your remaining pen(s): %s",
+		return fmt.Sprintf("in System Settings → Network → %s → Details… → Proxies, update \"Automatic proxy configuration\" to %s for your remaining pen(s): %s",
 			strings.Join(matching, " / "), nextURL, strings.Join(penZoneNames(remaining), ", "))
 	}
-	return fmt.Sprintf("turn off \"Auto proxy configuration\" in System Settings → Network → %s → Details… → Proxies (the local proxy.pac server is now stopped)",
+	return fmt.Sprintf("turn off \"Automatic proxy configuration\" in System Settings → Network → %s → Details… → Proxies (the local proxy.pac server is now stopped)",
 		strings.Join(matching, " / "))
 }

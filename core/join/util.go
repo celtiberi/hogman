@@ -3,8 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha1"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,11 +11,6 @@ import (
 
 	"golang.org/x/term"
 )
-
-func sha1Hex(b []byte) string {
-	s := sha1.Sum(b)
-	return strings.ToUpper(hex.EncodeToString(s[:]))
-}
 
 var verbose bool
 
@@ -53,35 +46,15 @@ func confirm(prompt string) bool {
 	return a == "y" || a == "yes"
 }
 
-// sudoPath returns the absolute path to sudo from trusted system directories so
-// a poisoned PATH entry cannot hijack privileged invocations.
-func sudoPath() string {
-	for _, p := range []string{"/usr/bin/sudo", "/bin/sudo", "/run/wrappers/bin/sudo"} {
-		if info, err := os.Stat(p); err == nil && !info.IsDir() {
-			return p
-		}
-	}
-	return ""
-}
-
-// run executes a command, returning combined output. With asRoot, it uses sudo
-// when not already root (the OS will ask for the password once).
-func run(asRoot bool, name string, args ...string) (string, error) {
-	if asRoot && !isRoot() {
-		if sp := sudoPath(); sp != "" {
-			args = append([]string{name}, args...)
-			name = sp
-		}
-	}
+// run executes a command unprivileged, returning combined output. Hogman never
+// invokes sudo or prompts for the computer's administrator password (D-41).
+func run(name string, args ...string) (string, error) {
 	if verbose {
 		note("$ %s %s", name, strings.Join(args, " "))
 	}
 	cmd := exec.Command(name, args...)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
-	if asRoot && !isRoot() {
-		cmd.Stdin = os.Stdin // lets sudo ask for a password without leaking native-host stdin to unprivileged children
-	}
 	err := cmd.Run()
 	return strings.TrimSpace(out.String()), err
 }

@@ -20,10 +20,10 @@ func formatBrowserProxyInstructions(goos, pacURL, zone string, zones []string) s
 		return fmt.Sprintf(
 			"Hogman never asks for your Mac password — set the automatic proxy URL once in System Settings:\n"+
 				"    1. Open System Settings → Network → Wi-Fi (or Ethernet) → Details… → Proxies\n"+
-				"    2. Turn on \"Auto proxy configuration\" and paste:\n"+
+				"    2. Turn on \"Automatic proxy configuration\" and paste:\n"+
 				"         %s\n"+
 				"    3. Click OK, then open %s%s\n"+
-				"    (Using Firefox? Settings → Network Settings → Automatic proxy configuration URL works inside Firefox too, even with a VPN on.)\n"+
+				"    (Using Firefox? Settings → Network Settings → Automatic proxy configuration URL works inside Firefox too.)\n"+
 				"    We're working on a signed Mac app and Chrome/Firefox extensions so this will be automatic soon.",
 			pacURL, portal, multiNote,
 		)

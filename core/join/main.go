@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -112,10 +111,7 @@ func controlClient(caFile string) (*http.Client, error) {
 	}, nil
 }
 
-var (
-	zoneRE     = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?\.hogman$`)
-	dnsLabelRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-)
+var dnsLabelRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func validPublicDNSName(name string) bool {
 	if name == "" || len(name) > 253 || name != strings.ToLower(name) ||
@@ -224,23 +220,6 @@ func fetchNetwork(c *http.Client, host string) (*networkInfo, error) {
 		return nil, err
 	}
 	return &n, nil
-}
-
-func writeTempCert(pemText string) (string, func(), error) {
-	tmpDir, err := os.MkdirTemp("", "hogman-*")
-	if err != nil {
-		return "", nil, err
-	}
-	if err := os.Chmod(tmpDir, 0o700); err != nil {
-		_ = os.RemoveAll(tmpDir)
-		return "", nil, err
-	}
-	certFile := filepath.Join(tmpDir, "root.crt")
-	if err := os.WriteFile(certFile, []byte(pemText), 0o600); err != nil {
-		_ = os.RemoveAll(tmpDir)
-		return "", nil, err
-	}
-	return certFile, func() { _ = os.RemoveAll(tmpDir) }, nil
 }
 
 func redeem(c *http.Client, host, token, handle string) (*enrolment, error) {

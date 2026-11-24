@@ -12,7 +12,7 @@ func TestFormatBrowserProxyInstructionsByOS(t *testing.T) {
 	for _, want := range []string{
 		"never asks for your Mac password",
 		"System Settings → Network → Wi-Fi (or Ethernet) → Details… → Proxies",
-		"Auto proxy configuration",
+		"Automatic proxy configuration",
 		pac,
 		"https://home.acme.pens.example",
 		"signed Mac app",
@@ -20,6 +20,9 @@ func TestFormatBrowserProxyInstructionsByOS(t *testing.T) {
 		if !strings.Contains(mac, want) {
 			t.Fatalf("darwin instructions missing %q:\n%s", want, mac)
 		}
+	}
+	if strings.Contains(mac, "even with a VPN on") {
+		t.Fatalf("darwin instructions should not make untested VPN claims:\n%s", mac)
 	}
 	if strings.Contains(mac, "?v=") {
 		t.Fatalf("manual PAC URL must stay stable without ?v=: %s", mac)

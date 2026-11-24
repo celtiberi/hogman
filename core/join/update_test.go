@@ -498,67 +498,6 @@ func TestUpdateShareBinaryRestartAndRollback(t *testing.T) {
 	}
 }
 
-func TestCleanupLegacyRootsForUpdate(t *testing.T) {
-	// 1. Saved RootFP cleans specific pen root, runs trailing wildcard sweep, and clears RootFP on disk.
-	pubDir := t.TempDir()
-	pubCfg := &agentConfig{Zone: "bobo.hogman", LoginServer: "https://hs.example.com", RootFP: "BB22"}
-	if err := pubCfg.save(pubDir); err != nil {
-		t.Fatal(err)
-	}
-	var calls []string
-	plan := &updatePlan{
-		baseURL: "https://bobo.gate.example.com",
-		host:    "bobo.gate.example.com",
-		pens:    []penTarget{{zone: pubCfg.Zone, dir: pubDir, cfg: pubCfg}},
-	}
-	got := cleanupLegacyRootsForUpdate(plan, false, legacyCleanupOps{
-		removeRoot: func(zone, fp string) (bool, error) {
-			calls = append(calls, zone+"|"+fp)
-			return true, nil
-		},
-		saveConfig: func(dir string, c *agentConfig) error { return c.save(dir) },
-	})
-	if !slices.Equal(calls, []string{"bobo.hogman|BB22", "|"}) {
-		t.Fatalf("cleanup calls = %v, want pen + wildcard sweep", calls)
-	}
-	if len(got) != 2 {
-		t.Fatalf("cleanup results = %v, want 2 entries", got)
-	}
-	reloaded, err := loadAgentConfig(pubDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reloaded.RootFP != "" {
-		t.Fatalf("expected saved config RootFP cleared, got %q", reloaded.RootFP)
-	}
-
-	// 2. Dry-run never invokes removeRoot and preserves RootFP.
-	calls = nil
-	plan.pens[0].cfg.RootFP = "DD44"
-	cleanupLegacyRootsForUpdate(plan, true, legacyCleanupOps{
-		removeRoot: func(zone, fp string) (bool, error) {
-			calls = append(calls, zone+"|"+fp)
-			return true, nil
-		},
-	})
-	if len(calls) != 0 {
-		t.Fatalf("dry-run called removeRoot: %v", calls)
-	}
-
-	// 3. Steady-state pen without RootFP scans only once via wildcard sweep.
-	calls = nil
-	plan.pens[0].cfg.RootFP = ""
-	cleanupLegacyRootsForUpdate(plan, false, legacyCleanupOps{
-		removeRoot: func(zone, fp string) (bool, error) {
-			calls = append(calls, zone+"|"+fp)
-			return false, nil
-		},
-	})
-	if !slices.Equal(calls, []string{"|"}) {
-		t.Fatalf("steady-state cleanup calls = %v, want single wildcard [\"|\"]", calls)
-	}
-}
-
 func TestFindAndRetireLegacySameServerPens(t *testing.T) {
 	base := t.TempDir()
 	oldDir := filepath.Join(base, "bobo.hogman")
@@ -569,13 +508,13 @@ func TestFindAndRetireLegacySameServerPens(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := (&agentConfig{Zone: "bobo.hogman", LoginServer: "https://hs.example.com", RootFP: "FP-OLD"}).save(oldDir); err != nil {
+	if err := (&agentConfig{Zone: "bobo.hogman", LoginServer: "https://hs.example.com"}).save(oldDir); err != nil {
 		t.Fatal(err)
 	}
 	if err := (&agentConfig{Zone: "bobo.pens.example.com", LoginServer: "https://hs.example.com"}).save(newDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&agentConfig{Zone: "other.hogman", LoginServer: "https://other.example.com", RootFP: "FP-OTHER"}).save(otherDir); err != nil {
+	if err := (&agentConfig{Zone: "other.hogman", LoginServer: "https://other.example.com"}).save(otherDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -595,13 +534,9 @@ func TestFindAndRetireLegacySameServerPens(t *testing.T) {
 			}
 			steps = append(steps, "logout")
 		},
-		removeRoot: func(zone, rootFP string) (bool, error) {
-			steps = append(steps, "removeRoot:"+zone+"|"+rootFP)
-			return true, nil
-		},
 	})
-	if !slices.Equal(steps, []string{"stop:bobo.hogman", "logout", "removeRoot:bobo.hogman|FP-OLD"}) {
-		t.Fatalf("retire call sequence = %v, want [stop:bobo.hogman logout removeRoot:bobo.hogman|FP-OLD]", steps)
+	if !slices.Equal(steps, []string{"stop:bobo.hogman", "logout"}) {
+		t.Fatalf("retire call sequence = %v, want [stop:bobo.hogman logout]", steps)
 	}
 	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
 		t.Fatalf("expected old pen dir %s removed, stat err = %v", oldDir, err)

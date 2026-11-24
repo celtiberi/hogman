@@ -37,12 +37,9 @@ import (
 type agentConfig struct {
 	Zone        string `json:"zone"`
 	LoginServer string `json:"login_server"`
-	// RootFP is read and cleared solely to clean up legacy private-CA roots on
-	// update or same-server re-join (D-22). Never newly populated or installed.
-	RootFP    string `json:"root_fp,omitempty"`
-	DNSServer string `json:"dns_server"` // mesh address of the pen's DNS
-	Hostname  string `json:"hostname"`
-	ProxyAddr string `json:"proxy_addr"` // 127.0.0.1:<port>
+	DNSServer   string `json:"dns_server"` // mesh address of the pen's DNS
+	Hostname    string `json:"hostname"`
+	ProxyAddr   string `json:"proxy_addr"` // 127.0.0.1:<port>
 	// ControlCA is set only for test networks whose public control host has a
 	// self-signed certificate (the --control-ca option). The agent then trusts
 	// exactly this certificate for its connection to the control host.

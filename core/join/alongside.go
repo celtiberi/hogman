@@ -556,7 +556,7 @@ func leaveAlongside(zone string, deviceGone bool) bool {
 	stopAgent(dir, cfg)
 	if !deviceGone {
 		if self, err := os.Executable(); err == nil {
-			_, _ = run(false, self, "__agent-logout", dir)
+			_, _ = run(self, "__agent-logout", dir)
 		}
 	}
 	_ = os.RemoveAll(dir)
@@ -585,9 +585,8 @@ func findLegacySameServerPens(configBase, newZone, loginServer string) []penTarg
 }
 
 type legacyRetireOps struct {
-	stop       func(dir string, c *agentConfig)
-	logout     func(dir string)
-	removeRoot func(zone, rootFP string) (bool, error)
+	stop   func(dir string, c *agentConfig)
+	logout func(dir string)
 }
 
 func defaultLegacyRetireOps() legacyRetireOps {
@@ -595,10 +594,9 @@ func defaultLegacyRetireOps() legacyRetireOps {
 		stop: stopAgent,
 		logout: func(dir string) {
 			if self, err := os.Executable(); err == nil && self != "" {
-				_, _ = run(false, self, "__agent-logout", dir)
+				_, _ = run(self, "__agent-logout", dir)
 			}
 		},
-		removeRoot: removeLegacyHogmanRoot,
 	}
 }
 
@@ -613,13 +611,6 @@ func retireLegacySameServerPens(oldPens []penTarget, ops legacyRetireOps) {
 		}
 		if ops.logout != nil {
 			ops.logout(old.dir)
-		}
-		if ops.removeRoot != nil {
-			if removed, err := ops.removeRoot(old.zone, old.cfg.RootFP); err != nil {
-				note("could not remove old %s certificate: %v", old.zone, err)
-			} else if removed {
-				note("removed old %s certificate from trust store", old.zone)
-			}
 		}
 		if err := os.RemoveAll(old.dir); err != nil {
 			note("could not remove old settings folder %s: %v", old.dir, err)

@@ -893,11 +893,10 @@ func statusCmd(o options) error {
 	}
 	if sys.StalePAC != "" {
 		say("\n! A proxy setting left by a pen this computer no longer runs is still on: %s", sys.StalePAC)
-		if len(configs) == 0 {
-			say("  Clear it with: hogman uninstall")
+		if host := pickPACHost(configs); host != nil {
+			say("  Update \"Automatic proxy configuration\" in System Settings → Network → Wi-Fi (or Ethernet) → Details… → Proxies to: %s", host.pacURL())
 		} else {
-			say("  It's replaced the next time this computer joins a pen. To turn it off now (System Settings → Network → Proxies,")
-			say("  or: sudo networksetup -setautoproxystate \"<network>\" off), then re-join a pen to set the right one.")
+			say("  Turn off \"Automatic proxy configuration\" in System Settings → Network → Wi-Fi (or Ethernet) → Details… → Proxies.")
 		}
 	}
 	if sys.VPNOverride {
