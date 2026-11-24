@@ -186,8 +186,10 @@ func (b *broker) waitlist(w http.ResponseWriter, r *http.Request) {
 // note so Hogman's mail domain cannot be abused to relay arbitrary text.
 func waitlistAckEmail(pen string, place int, isWork bool, origin string) (subject, body string) {
 	product := "Hogman"
+	leaveLabel := "Take me off the list"
 	if isWork {
 		product = "Hogman for Work"
+		leaveLabel = "Remove my email"
 	}
 	subject = fmt.Sprintf("You're on the %s waiting list", product)
 	var sb strings.Builder
@@ -197,9 +199,8 @@ func waitlistAckEmail(pen string, place int, isWork bool, origin string) (subjec
 		fmt.Fprintf(&sb, "Requested pen name: %s (not reserved until you sign up).\n", pen)
 	}
 	if origin != "" {
-		fmt.Fprintf(&sb, "\nDidn't request this, or want to leave the list? Remove your email anytime at:\n%s/#wait\n(Enter this email address and choose \"Take me off the list\".)\n", strings.TrimRight(origin, "/"))
+		fmt.Fprintf(&sb, "\nDidn't request this, or want to leave the list? Remove your email anytime at:\n%s/#wait\n(Enter this email address and choose \"%s\".)\n", strings.TrimRight(origin, "/"), leaveLabel)
 	}
-	sb.WriteString("\nQuestions? Email hogman-support@proton.me.\n")
 	return subject, sb.String()
 }
 

@@ -356,7 +356,7 @@
       if (tsSiteKey) payload.turnstile_token = tsWaitToken;
       const r = await api('POST', '/waitlist', payload);
       $('waited-title').textContent = "You're on the list";
-      $('waited-text').textContent = `You're number ${r.place}. We've emailed a confirmation to ${email} and will send a sign-up code when there's room.`;
+      $('waited-text').textContent = `You're number ${r.place}. We'll email ${email} a sign-up code when there's room (new requests may also receive a short confirmation email).`;
       show('waited');
     } catch (e) { $('w-err').textContent = e.message; $('w-err').hidden = false; }
     finally { resetTurnstile('wait'); $('w-go').disabled = false; }

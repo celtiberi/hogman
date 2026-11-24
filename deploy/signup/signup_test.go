@@ -1146,7 +1146,7 @@ func TestWaitlistAckEmailPersonalWorkDedupAndNoNoteReflection(t *testing.T) {
 		if m.subject != "You're on the Hogman waiting list" {
 			t.Fatalf("personal ack subject = %q", m.subject)
 		}
-		if !strings.Contains(m.text, "spot #1") || !strings.Contains(m.text, "Requested pen name: lab") || !strings.Contains(m.text, "https://get.example.com/#wait") {
+		if !strings.Contains(m.text, "spot #1") || !strings.Contains(m.text, "Requested pen name: lab") || !strings.Contains(m.text, "https://get.example.com/#wait") || !strings.Contains(m.text, `"Take me off the list"`) {
 			t.Fatalf("personal ack body missing expected details:\n%s", m.text)
 		}
 		if strings.Contains(m.text, "PHISH") || strings.Contains(m.text, "evil.example") {
@@ -1194,8 +1194,11 @@ func TestWaitlistAckEmailPersonalWorkDedupAndNoNoteReflection(t *testing.T) {
 		if m.subject != "You're on the Hogman for Work waiting list" {
 			t.Fatalf("work ack subject = %q", m.subject)
 		}
-		if !strings.Contains(m.text, "Hogman for Work waiting list (spot #2)") || !strings.Contains(m.text, "https://get.work.example.com/#wait") || !strings.Contains(m.text, "hogman-support@proton.me") {
-			t.Fatalf("work ack body missing Work branding/URL/support:\n%s", m.text)
+		if !strings.Contains(m.text, "Hogman for Work waiting list (spot #2)") || !strings.Contains(m.text, "https://get.work.example.com/#wait") || !strings.Contains(m.text, `"Remove my email"`) {
+			t.Fatalf("work ack body missing Work branding/URL/button label:\n%s", m.text)
+		}
+		if strings.Contains(m.text, "proton.me") {
+			t.Fatalf("ack email must not hardcode an operator support inbox:\n%s", m.text)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for work waitlist ack email")
