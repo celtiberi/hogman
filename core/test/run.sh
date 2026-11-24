@@ -732,17 +732,44 @@ run dave-laptop sh -c '
   nohup sleep 300 >/dev/null 2>&1 </dev/null & echo $! > /root/.config/hogman/aaa-dead.example.test/agent.pid
   cp "/dl/hogman-$(uname -s)-$(uname -m)" "/root/.config/hogman/'"$ZONE"'/hogman-join"
 '
+DEAD_OLD_PID="$(run dave-laptop cat /root/.config/hogman/aaa-dead.example.test/agent.pid 2>/dev/null | tr -d '\r')"
 t0="$(date +%s)"
 out="$(run dave-laptop sh -c 'HOGMAN_RELEASE_BASE="https://dave-server:8443" "/dl/hogman-$(uname -s)-$(uname -m)" --no-open update' 2>&1)"; rc=$?
 t_multi=$(( $(date +%s) - t0 ))
 check "hogman update with one dead pen + one live pen reports failure (exit $rc, ${t_multi}s)" bash -c 'test "$1" != 0 && grep -q "hogman leave aaa-dead.example.test" <<<"$2"' _ "$rc" "$out"
 check "... skipped the 60s wait on the unreachable pen (${t_multi}s < 45s)" test "$t_multi" -lt 45
-check "... started the unreachable pen's new agent without waiting (B1)" retry 10 run dave-laptop sh -c 'pid="$(cat /root/.config/hogman/aaa-dead.example.test/agent.pid 2>/dev/null || true)"; test -n "$pid" && kill -0 "$pid" 2>/dev/null'
+check "... replaced dead pen old agent ($DEAD_OLD_PID) with live canonical hogman agent without waiting (B1)" retry 10 run dave-laptop sh -c 'pid="$(cat /root/.config/hogman/aaa-dead.example.test/agent.pid 2>/dev/null || true)"; test -n "$pid" && test "$pid" != "$1" && kill -0 "$pid" 2>/dev/null && test "$(readlink -f "/proc/$pid/exe" 2>/dev/null)" = "/root/.config/hogman/bin/hogman"' _ "$DEAD_OLD_PID"
 AFTER_MULTI_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>/dev/null | tr -d '\r')"
 check "... still migrated and restarted the healthy pen ($BEFORE_MULTI_PID -> $AFTER_MULTI_PID)" test -n "$BEFORE_MULTI_PID" -a -n "$AFTER_MULTI_PID" -a "$BEFORE_MULTI_PID" != "$AFTER_MULTI_PID"
 check "... removed legacy hogman-join copy on BOTH pens" run dave-laptop sh -c 'test ! -e /root/.config/hogman/aaa-dead.example.test/hogman-join && test ! -e "/root/.config/hogman/'"$ZONE"'/hogman-join"'
 check "... and healthy pen still loads alice.$ZONE" retry 20 alice_via
 run dave-laptop sh -c 'pid="$(cat /root/.config/hogman/aaa-dead.example.test/agent.pid 2>/dev/null || true)"; [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; rm -rf /root/.config/hogman/aaa-dead.example.test /usr/local/share/ca-certificates/rel-ca.crt && update-ca-certificates --fresh >/dev/null 2>&1'
+
+# Downgrade guard E2E (I-8 follow-up): an older-dated client must not replace a newer shared binary.
+DAVE_ARCH="$(run dave-laptop uname -m | tr -d '\r')"
+case "$DAVE_ARCH" in x86_64|amd64) DAVE_GOARCH=amd64 ;; aarch64|arm64) DAVE_GOARCH=arm64 ;; *) DAVE_GOARCH=amd64 ;; esac
+mkdir -p "$WORK/ver-bins"
+docker run --rm -v "$REPO/core/join:/src:ro" -v "$WORK/ver-bins:/out" -w /src \
+  -v hogman-gomod:/go/pkg/mod -v hogman-gocache:/root/.cache/go-build \
+  -e CGO_ENABLED=0 -e GOOS=linux -e GOARCH="$DAVE_GOARCH" -e GOFLAGS=-buildvcs=false \
+  golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 sh -c '
+    set -e
+    go build -trimpath -ldflags="-s -w -X main.version=2025.01.01-aaaaaaa" -o /out/hogman-old .
+    go build -trimpath -ldflags="-s -w -X main.version=2099.01.01-bbbbbbb" -o /out/hogman-new .
+  ' >/dev/null
+DAVE_CID="$(dc ps -q dave-laptop)"
+docker cp "$WORK/ver-bins/hogman-old" "$DAVE_CID:/tmp/hogman-old"
+docker cp "$WORK/ver-bins/hogman-new" "$DAVE_CID:/tmp/hogman-new"
+run dave-laptop sh -c 'chmod 0755 /tmp/hogman-old /tmp/hogman-new && cp /tmp/hogman-old /root/.config/hogman/bin/hogman.tmp && mv -f /root/.config/hogman/bin/hogman.tmp /root/.config/hogman/bin/hogman'
+out="$(run dave-laptop /tmp/hogman-new --no-open "$DAVE_LINK" 2>&1)"; rc=$?
+check "newer-dated client upgrades older shared binary (exit $rc)" test "$rc" = 0
+check "... shared binary now reports 2099.01.01-bbbbbbb" match '2099\.01\.01-bbbbbbb' run dave-laptop /root/.config/hogman/bin/hogman --version
+NEW_BIN_SUM="$(run dave-laptop sha256sum /root/.config/hogman/bin/hogman | awk '{print $1}')"
+out="$(run dave-laptop /tmp/hogman-old --no-open "$DAVE_LINK" 2>&1)"; rc=$?
+check "older-dated client does not downgrade newer shared binary (exit $rc)" bash -c 'test "$1" = 0 && grep -q "keeping newer shared binary" <<<"$2"' _ "$rc" "$out"
+check "... shared binary version stays 2099.01.01-bbbbbbb" match '2099\.01\.01-bbbbbbb' run dave-laptop /root/.config/hogman/bin/hogman --version
+check "... shared binary hash is unchanged" test "$(run dave-laptop sha256sum /root/.config/hogman/bin/hogman | awk '{print $1}')" = "$NEW_BIN_SUM"
+run dave-laptop sh -c 'cp "/dl/hogman-$(uname -s)-$(uname -m)" /root/.config/hogman/bin/hogman.tmp && mv -f /root/.config/hogman/bin/hogman.tmp /root/.config/hogman/bin/hogman && rm -f /tmp/hogman-old /tmp/hogman-new'
 
 out="$(join_tool dave-laptop leave "$DAVE_LINK" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'

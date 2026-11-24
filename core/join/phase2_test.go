@@ -615,3 +615,36 @@ func TestUpdateContinuesPastUnreachablePenAndLegacySHA256MessageI10(t *testing.T
 		t.Fatalf("probePenLoginServer on 503 = %v, want 503 error", err)
 	}
 }
+
+func TestInstallNativeHostRespectsCanonicalBinaryDowngradeGuard(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell stub binary test")
+	}
+	home := t.TempDir()
+	configBase := filepath.Join(home, ".config", "hogman")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	canon := canonicalBinaryPath(configBase)
+	if err := os.MkdirAll(filepath.Dir(canon), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	newerStub := "#!/bin/sh\necho 'hogman 2099.01.01-bbbbbbb linux/amd64'\n"
+	if err := os.WriteFile(canon, []byte(newerStub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origVer := version
+	version = "2025.01.01-aaaaaaa"
+	t.Cleanup(func() { version = origVer })
+
+	if _, _, err := installNativeHost(configBase, nil, nil); err != nil {
+		t.Fatalf("installNativeHost failed: %v", err)
+	}
+	got, err := os.ReadFile(canon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != newerStub {
+		t.Fatalf("installNativeHost downgraded newer canonical binary! got %d bytes, want preserved stub", len(got))
+	}
+}
