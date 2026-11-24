@@ -79,8 +79,24 @@ echo "provenance checked: $checked files, each built by build.yml from $sha on G
 # Only now that the compiled parts check out, package release assets from $REF.
 git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md deploy/signup deploy/challenge-dns LICENSE README.md \
   | gzip -9n > "$out/$tarball"
-# No macOS file metadata in the bundle (Linux tar warns about it).
-COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$work" -czf "$out/$bins" prebuilt
+# No macOS file metadata in the bundle (Linux tar warns about it), and every
+# entry owned by root (0:0). Without that the archive carries the builder's
+# uid and account name: install.sh runs as root, so the files would land owned
+# by whichever local user has that uid, and the name would be public.
+if tar --version 2>/dev/null | grep -q bsdtar; then
+  COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata --uid 0 --gid 0 --uname root --gname root \
+    -C "$work" -czf "$out/$bins" prebuilt
+else
+  tar --owner=root:0 --group=root:0 -C "$work" -czf "$out/$bins" prebuilt
+fi
+# Refuse to publish an archive with any other owner (both archives).
+for a in "$out/$tarball" "$out/$bins"; do
+  bad="$(tar --numeric-owner -tvzf "$a" | awk '{ o = ($2 ~ "/") ? $2 : $3 "/" $4; if (o != "0/0") n++ } END { print n + 0 }')"
+  [ "$bad" = 0 ] || { echo "$(basename "$a"): $bad entries are not owned by 0:0: not releasing" >&2; exit 1; }
+  if tar -tvzf "$a" | grep -qw -- "$(id -un)"; then
+    echo "$(basename "$a") contains this account's name: not releasing" >&2; exit 1
+  fi
+done
 git show "$REF:deploy/install.sh" > "$out/install.sh"
 
 # Standalone attested hogman client binaries + checksums for `hogman update`.

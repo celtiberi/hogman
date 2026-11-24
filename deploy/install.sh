@@ -56,7 +56,7 @@ main() {
   awk -v f="$tarball" 'NF == 2 && $2 == f { print }' "$tmp/ALLSUMS" > "$tmp/SHA256SUMS"
   [ "$(wc -l < "$tmp/SHA256SUMS")" -eq 1 ] || die "expected exactly one checksum for $tarball"
   (cd "$tmp" && sha256sum -c --quiet SHA256SUMS) || die "checksum mismatch for $tarball: not installing"
-  mkdir "$tmp/x" && tar -xzf "$tmp/$tarball" -C "$tmp/x"
+  mkdir "$tmp/x" && tar --no-same-owner -xzf "$tmp/$tarball" -C "$tmp/x"
   echo "    version $ver ($tag), checksum OK"
 
   # The compiled join tool and registrar, so this server doesn't build them.
@@ -68,11 +68,16 @@ main() {
     [ "$(wc -l < "$tmp/BINSUMS")" -eq 1 ] || die "expected exactly one checksum for $bins"
     curl "${curl_opts[@]}" -o "$tmp/$bins" "$dl/$bins" || die "could not download $bins from $dl"
     (cd "$tmp" && sha256sum -c --quiet BINSUMS) || die "checksum mismatch for $bins: not installing"
-    tar -xzf "$tmp/$bins" -C "$tmp/x/core"
+    tar --no-same-owner -xzf "$tmp/$bins" -C "$tmp/x/core"
     echo "    compiled parts, checksum OK"
   else
     echo "    no compiled parts listed for this version; they will be built on this server (slow on small servers)"
   fi
+
+  # Everything installed from a release belongs to root, whatever uid the
+  # archive recorded. rsync -a below then also corrects files that an earlier
+  # install left owned by another uid.
+  chown -R 0:0 "$tmp/x"
 
   local first=true
   [ -f "$home/host.env" ] && first=false
