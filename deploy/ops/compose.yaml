@@ -1,0 +1,90 @@
+# Hogman Fleet Ops v1 — strictly read-only dashboard hosted on the internal ops pen.
+# Runs behind hogman-sidecar (--identity-headers) + hogman-bridge (network_mode: none).
+# The ops-web container has no network access, no Docker socket, no SSH keys, and mounts
+# only /run/hogman-ops (the directory, read-only) so atomic host snapshot renames take effect.
+#
+# Required env (in .env alongside this file):
+#   OPS_HANDLES=alice,bob          # comma-separated allowlist of pen handles (deny-all if unset)
+#   OPS_SHARE_NAME=fleet           # optional, default: fleet (https://fleet.<ops-pen>)
+#   SIDECAR_IMAGE=hogman-sidecar   # built from core/join/Dockerfile.sidecar
+#
+# First-time setup:
+#   1. sudo hogman-host ops-setup
+#   2. docker compose build
+#   3. docker compose run --rm -i hogman-sidecar \
+#        share "${OPS_SHARE_NAME:-fleet}" unix:///run/hogman-in/app.sock \
+#        --state-dir=/var/lib/hogman --enroll-only --link-stdin
+#   4. docker compose up -d
+
+services:
+  hogman-sidecar:
+    image: ${SIDECAR_IMAGE:-hogman-sidecar}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 192m
+    pids_limit: 128
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    volumes:
+      - ops_sidecar_state:/var/lib/hogman
+      - ops_ingress:/run/hogman-in:ro
+    command:
+      - share
+      - ${OPS_SHARE_NAME:-fleet}
+      - unix:///run/hogman-in/app.sock
+      - --state-dir=/var/lib/hogman
+      - --identity-headers
+    depends_on:
+      hogman-bridge:
+        condition: service_healthy
+    restart: unless-stopped
+
+  hogman-bridge:
+    image: ${SIDECAR_IMAGE:-hogman-sidecar}
+    network_mode: none
+    hostname: ${OPS_SHARE_NAME:-fleet}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    pids_limit: 64
+    tmpfs:
+      - /tmp:size=4m,noexec,nosuid,nodev
+    volumes:
+      - ops_ingress:/run/hogman-in
+    command:
+      - bridge
+      - --listen-unix=/run/hogman-in/app.sock
+      - --forward-tcp=127.0.0.1:8080
+    healthcheck:
+      test: ["CMD", "/hogman", "bridge", "--check", "/run/hogman-in/app.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  ops-web:
+    build: .
+    network_mode: service:hogman-bridge
+    depends_on:
+      hogman-bridge:
+        condition: service_healthy
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    pids_limit: 64
+    environment:
+      LISTEN_ADDR: 127.0.0.1:8080
+      SNAPSHOT_DIR: /run/hogman-ops
+      OPS_HANDLES: ${OPS_HANDLES:-}
+    volumes:
+      # Mount the directory (not snapshot.json) so atomic host renames are visible.
+      - /run/hogman-ops:/run/hogman-ops:ro
+    restart: unless-stopped
+
+volumes:
+  ops_sidecar_state:
+  ops_ingress:

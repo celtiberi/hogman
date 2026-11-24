@@ -77,6 +77,10 @@ jobs:
             deploy/changelog-fold.sh --check
             deploy/test-changelog-fold.sh
           fi
+      - name: Build Fleet Ops image and test snapshot collector
+        run: |
+          docker build --progress=plain -t hogman-ops-check deploy/ops
+          deploy/test-ops-snapshot.sh
 
   pen-core:
     name: pen core (core/test/run.sh)

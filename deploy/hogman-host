@@ -46,6 +46,7 @@ usage: hogman-host <command>
   purge --force <network>        permanently destroy a pen's state (interactive TTY confirmation; --due for expired sleep)
   lifecycle [--dry-run]          run the daily pen lifecycle sweep (D-35: grace -> sleep -> delete)
   lifecycle-setup                install and enable the daily systemd timer for lifecycle sweeps
+  ops-setup                      install and enable the 60s read-only host snapshot timer (/run/hogman-ops)
   lifecycle-alert <pen> list|add|remove [email]
                                  manage opt-in billing alert email addresses for a pen
 
@@ -1322,6 +1323,78 @@ UNIT
   info "Daily lifecycle sweep on (04:15 UTC)"
 }
 
+OPS_SNAPSHOT_BIN=/usr/local/lib/hogman/ops-snapshot
+OPS_SNAPSHOT_DIR=/run/hogman-ops
+
+cmd_ops_setup() {
+  load_host
+  command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] || die "systemd is required for ops-setup"
+  [ -x "$OPS_SNAPSHOT_BIN" ] || die "missing $OPS_SNAPSHOT_BIN: re-run install.sh from a release that includes ops-snapshot"
+
+  # Write both tmpfiles.d and RuntimeDirectory=: tmpfiles.d creates
+  # /run/hogman-ops with numeric GID 65532 at boot before Docker starts
+  # (preventing Docker from creating a root:root 0755 mount point), while
+  # RuntimeDirectory= guarantees the unit always sees the right directory.
+  cat > /etc/tmpfiles.d/hogman-ops.conf <<TMP
+d $OPS_SNAPSHOT_DIR 0750 root 65532 -
+TMP
+  systemd-tmpfiles --create /etc/tmpfiles.d/hogman-ops.conf
+
+  cat > /etc/systemd/system/hogman-ops-snapshot.service <<UNIT
+[Unit]
+Description=Hogman: write read-only host telemetry snapshot for Fleet Ops
+After=docker.service
+
+[Service]
+Type=oneshot
+Group=65532
+Environment=HOGMAN_HOME=$HOGMAN_HOME
+Environment=OPS_SNAPSHOT_DIR=$OPS_SNAPSHOT_DIR
+RuntimeDirectory=hogman-ops
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+ExecStart=$OPS_SNAPSHOT_BIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=$OPS_SNAPSHOT_DIR
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+UMask=0027
+UNIT
+  cat > /etc/systemd/system/hogman-ops-snapshot.timer <<'UNIT'
+[Unit]
+Description=Hogman: 60s read-only host telemetry snapshot timer
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now hogman-ops-snapshot.timer >/dev/null
+  systemctl start hogman-ops-snapshot.service
+  info "Host ops snapshot timer on (every 60s -> $OPS_SNAPSHOT_DIR/snapshot.json, gid 65532)"
+}
+
 
 # ---------------------------------------------------------------- backup ----
 #
@@ -2595,6 +2668,7 @@ case "${1:-}" in
   lifecycle) shift; cmd_lifecycle "$@" ;;
   lifecycle-alert) shift; cmd_lifecycle_alert "$@" ;;
   lifecycle-setup) shift; cmd_lifecycle_setup "$@" ;;
+  ops-setup) shift; cmd_ops_setup "$@" ;;
   backup-setup) shift; cmd_backup_setup "$@" ;;
   backup-allow) shift; cmd_backup_allow "$@" ;;
   backup)  cmd_backup ;;

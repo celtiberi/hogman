@@ -125,13 +125,13 @@ docker compose up -d
 Apps behind `hogman share` (or `hogman-sidecar`) can identify who in the pen is calling without building passwords or session cookies.
 
 - **Off by default:** pass `--identity-headers` on `hogman share` to enable. Only allowed for local upstream targets (`unix://` socket, `localhost`, `127.0.0.1`, or `::1` — refused for static folders and LAN targets).
-- **Always stripped on ingress:** `hogman share` strips every inbound `X-Hogman-*` header (regardless of casing or suffix) before forwarding, **whether or not `--identity-headers` is enabled**, so a caller in the pen can never forge identity headers.
+- **Always stripped on ingress:** `hogman share` strips every inbound `X-Hogman-*` header (regardless of casing, suffix, or hyphen/underscore spelling such as `X_Hogman_Handle`) before forwarding, **whether or not `--identity-headers` is enabled**, so a caller in the pen can never forge identity headers — including in CGI, PHP, WSGI, and Rack apps that fold `-` and `_` together.
 - **Headers set on the local hop** (resolved from the authenticated WireGuard peer via `tsnet` `WhoIs`):
   - `X-Hogman-Handle` — the member's Hogman handle (personal devices only; omitted for tagged server nodes).
-  - `X-Hogman-Node` — the peer's device name.
+  - `X-Hogman-Node` — the peer's device name (display/audit only — **never** use `X-Hogman-Node` for access decisions).
   - `X-Hogman-IP` — the peer's mesh IP address.
   - `X-Hogman-Tags` — comma-separated ACL tags (e.g. `tag:server`), omitted for personal devices.
-- **Fail closed in your app:** only accept traffic on the local socket or loopback interface reachable by the sidecar, and return `403 Forbidden` whenever `X-Hogman-Handle` is missing or not on your allowlist (and reject requests with `X-Hogman-Tags` if only personal devices should have access).
+- **Fail closed in your app:** only accept traffic on the local socket or loopback interface reachable by the sidecar, read caller identity **only** from `X-Hogman-Handle`, and return `403 Forbidden` whenever `X-Hogman-Handle` is missing or not on your allowlist (and reject requests with `X-Hogman-Tags` if only personal devices should have access).
 
 ## Operational Notes
 
