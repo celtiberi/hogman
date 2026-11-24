@@ -3,16 +3,30 @@ package main
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-// Seams for unit tests of interactive TTY pen picking and link prompting.
+// Seams for unit tests of interactive TTY pen picking, link prompting, and notices.
 var (
 	isTerminalFn = isTerminal
 	askFn        = ask
+	noteFn       = note
 )
+
+var penQueryRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+
+// validatePenQuery ensures a --pen / HOGMAN_PEN value is a valid DNS label or
+// zone name before it is matched or used in filesystem globs.
+func validatePenQuery(raw string) (string, error) {
+	q := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
+	if q == "" || len(q) > 253 || !penQueryRE.MatchString(q) {
+		return "", errorf("invalid pen name %q: must be a DNS name or short pen label (letters, digits, dashes, dots)", raw)
+	}
+	return q, nil
+}
 
 // penMatchesQuery reports whether a pen (zone + optional control host) matches
 // a user query: exact full zone, exact control host, or exact short name (first
@@ -37,13 +51,18 @@ func penMatchesQuery(zone, loginServer, query string) bool {
 	return false
 }
 
-// effectivePenQuery returns the explicit --pen flag value, falling back to
-// HOGMAN_PEN when --pen is empty.
-func effectivePenQuery(flagVal string) string {
-	if q := strings.TrimSpace(flagVal); q != "" {
-		return q
+// effectivePenQuery returns the validated --pen flag value, falling back to
+// HOGMAN_PEN when --pen is empty, and reports whether HOGMAN_PEN supplied it.
+func effectivePenQuery(flagVal string) (query string, fromEnv bool, err error) {
+	if raw := strings.TrimSpace(flagVal); raw != "" {
+		q, err := validatePenQuery(raw)
+		return q, false, err
 	}
-	return strings.TrimSpace(os.Getenv("HOGMAN_PEN"))
+	if raw := strings.TrimSpace(os.Getenv("HOGMAN_PEN")); raw != "" {
+		q, err := validatePenQuery(raw)
+		return q, true, err
+	}
+	return "", false, nil
 }
 
 // resolvePenConn picks a single joined pen using --pen, HOGMAN_PEN, sole pen,
@@ -53,7 +72,10 @@ func resolvePenConn(pens []penConn, want string) (*penConn, error) {
 	copy(sorted, pens)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].zone < sorted[j].zone })
 
-	query := effectivePenQuery(want)
+	query, fromEnv, err := effectivePenQuery(want)
+	if err != nil {
+		return nil, err
+	}
 	if query != "" {
 		var matches []penConn
 		for _, p := range sorted {
@@ -63,6 +85,9 @@ func resolvePenConn(pens []penConn, want string) (*penConn, error) {
 		}
 		switch len(matches) {
 		case 1:
+			if fromEnv {
+				noteFn("using pen %s (from HOGMAN_PEN)", matches[0].zone)
+			}
 			return &matches[0], nil
 		case 0:
 			if len(sorted) == 0 {
@@ -113,7 +138,10 @@ func resolvePenConn(pens []penConn, want string) (*penConn, error) {
 // resolveShareZoneFilter resolves an optional --pen / HOGMAN_PEN query against
 // installed share zones (returning "" when no filter is active).
 func resolveShareZoneFilter(dirs []string, want string) (string, error) {
-	query := effectivePenQuery(want)
+	query, fromEnv, err := effectivePenQuery(want)
+	if err != nil {
+		return "", err
+	}
 	if query == "" {
 		return "", nil
 	}
@@ -137,10 +165,16 @@ func resolveShareZoneFilter(dirs []string, want string) (string, error) {
 	sort.Strings(matches)
 	switch len(matches) {
 	case 1:
+		if fromEnv {
+			noteFn("using pen %s (from HOGMAN_PEN)", matches[0])
+		}
 		return matches[0], nil
 	case 0:
-		// Fall back to literal lowercased query so callers print "shares nothing on <q>".
-		return strings.TrimSuffix(strings.ToLower(query), "."), nil
+		if fromEnv {
+			noteFn("using pen %s (from HOGMAN_PEN)", query)
+		}
+		// Fall back to validated lowercased DNS query so callers print "shares nothing on <q>".
+		return query, nil
 	default:
 		return "", errorf("%q matches more than one pen (%s); pass the full zone name with --pen", query, strings.Join(matches, ", "))
 	}

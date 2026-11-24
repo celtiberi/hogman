@@ -5,11 +5,81 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
+
+func init() {
+	// Disable cobra's Windows Explorer mousetrap so non-console launches (such as
+	// Windows Scheduled Tasks or autostart helpers) never pause 5s and exit.
+	cobra.MousetrapHelpText = ""
+}
+
+var singleDashLongFlagRE = regexp.MustCompile(`^-([a-z][a-z0-9-]+)(=.*)?$`)
+
+// collectRegisteredLongFlags returns all registered long flag names across the
+// command tree, mapping each flag name to whether it expects a separate value
+// argument (true for non-bool flags).
+func collectRegisteredLongFlags(cmd *cobra.Command, out map[string]bool) {
+	record := func(f *pflag.Flag) {
+		if len(f.Name) <= 1 {
+			return
+		}
+		needsVal := f.Value.Type() != "bool"
+		// If any command registers a flag as taking a value, preserve that.
+		if prev, ok := out[f.Name]; !ok || needsVal {
+			out[f.Name] = prev || needsVal
+		}
+	}
+	cmd.Flags().VisitAll(record)
+	cmd.PersistentFlags().VisitAll(record)
+	for _, sub := range cmd.Commands() {
+		collectRegisteredLongFlags(sub, out)
+	}
+}
+
+// normalizeSingleDashFlags rewrites legacy Go-flag style single-dash long flags
+// (e.g. -no-open, -force, -handle=alice, -version, -help) to --flag before "--"
+// when the name is a registered long flag on the CLI. Unknown single-dash flags
+// and arguments after "--" are left untouched so they still fail closed.
+func normalizeSingleDashFlags(root *cobra.Command, args []string) []string {
+	known := map[string]bool{"help": false, "version": false}
+	collectRegisteredLongFlags(root, known)
+
+	out := make([]string, len(args))
+	copy(out, args)
+	skipNext := false
+	for i, a := range out {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		if a == "--" {
+			break
+		}
+		if strings.HasPrefix(a, "--") {
+			name := strings.TrimPrefix(a, "--")
+			if !strings.Contains(name, "=") && known[name] {
+				skipNext = true
+			}
+			continue
+		}
+		if m := singleDashLongFlagRE.FindStringSubmatch(a); m != nil {
+			name, eqVal := m[1], m[2]
+			if needsVal, ok := known[name]; ok {
+				out[i] = "--" + name + eqVal
+				if eqVal == "" && needsVal {
+					skipNext = true
+				}
+			}
+		}
+	}
+	return out
+}
 
 // usageError marks CLI syntax / flag / argument errors that should exit with code 2.
 type usageError struct{ msg string }
@@ -144,6 +214,9 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 			if len(args) == 1 {
 				trimmed := trimMatchingQuotes(args[0])
 				if strings.Contains(trimmed, "://") {
+					if o.linkStdin {
+						return usageErrorf("cannot pass both a join link argument and --link-stdin")
+					}
 					return h.join(args[0], o)
 				}
 				return usageErrorf("unknown command %q (run 'hogman-join --help' for usage)", args[0])
@@ -176,6 +249,9 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
+				if o.linkStdin {
+					return usageErrorf("cannot pass both a join link argument and --link-stdin")
+				}
 				return h.join(args[0], o)
 			}
 			raw, err := readJoinLinkInteractive(o, os.Stdin)
@@ -386,7 +462,7 @@ func runCLI(args []string, h cliHandlers) int {
 		h.errOut = os.Stderr
 	}
 	root := newRootCmd(h)
-	root.SetArgs(args)
+	root.SetArgs(normalizeSingleDashFlags(root, args))
 	err := root.Execute()
 	if err == nil {
 		return 0

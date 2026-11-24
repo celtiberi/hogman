@@ -42,8 +42,6 @@ options:
   --dry-run         check checksums and show what would change without modifying files
   --no-service      keep restarted agents in the background rather than a login item
   --control-ca FILE extra certificate to trust for a custom server
-
-(HOGMAN_RELEASE_BASE is a test-only override for offline release tests.)
 `
 
 const (
@@ -439,7 +437,14 @@ func loadLocalTargets(configBase, sharesDir string) ([]penTarget, []shareTargetD
 
 func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (*updatePlan, error) {
 	allPens, allSharesList := loadLocalTargets(configBase, sharesDir)
-	penFilter := strings.ToLower(strings.TrimSpace(o.pen))
+	penFilter := ""
+	if strings.TrimSpace(o.pen) != "" {
+		var err error
+		penFilter, err = validatePenQuery(o.pen)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// Default (no explicit server/link and no --pen): update from immutable
 	// GitHub Releases (works with 0, 1, or N pens and updates every local copy).

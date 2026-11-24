@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/xml"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // extractPlistProgramArgs parses a generated macOS LaunchAgent plist and returns
@@ -324,5 +327,161 @@ func TestUnifiedPenResolver(t *testing.T) {
 	}
 	if _, err := resolveUpdatePlan(nil, options{pen: "work"}, cfgBase, filepath.Join(root, "shares")); err == nil || !strings.Contains(err.Error(), "work.pens.a.example") {
 		t.Fatalf("update --pen ambiguous work: %v", err)
+	}
+}
+
+func TestSingleDashLongFlagsGolden(t *testing.T) {
+	t.Run("legacy single-dash flags on join", func(t *testing.T) {
+		var gotLink string
+		var gotO options
+		var out, errBuf bytes.Buffer
+		h := cliHandlers{
+			out:    &out,
+			errOut: &errBuf,
+			join:   func(raw string, o options) error { gotLink, gotO = raw, o; return nil },
+		}
+		rc := runCLI([]string{"-no-open", "-yes", "-dry-run", "-handle", "alice", "https://h.example/join#t=abc"}, h)
+		if rc != 0 || gotLink != "https://h.example/join#t=abc" || !gotO.noOpen || !gotO.yes || !gotO.dryRun || gotO.handle != "alice" {
+			t.Fatalf("rc=%d link=%q o=%+v err=%s", rc, gotLink, gotO, errBuf.String())
+		}
+	})
+
+	t.Run("legacy single-dash equals form and subcommand flags", func(t *testing.T) {
+		var gotPen string
+		var gotForce bool
+		var gotName string
+		var errBuf bytes.Buffer
+		h := cliHandlers{
+			errOut: &errBuf,
+			shareStop: func(name string, o options) error {
+				gotName, gotPen, gotForce = name, o.pen, o.force
+				return nil
+			},
+		}
+		rc := runCLI([]string{"share", "stop", "blog", "-force", "-pen=bobo"}, h)
+		if rc != 0 || gotName != "blog" || !gotForce || gotPen != "bobo" {
+			t.Fatalf("rc=%d name=%q force=%v pen=%q err=%s", rc, gotName, gotForce, gotPen, errBuf.String())
+		}
+	})
+
+	t.Run("legacy -version and -help", func(t *testing.T) {
+		var out, errBuf bytes.Buffer
+		if rc := runCLI([]string{"-version"}, cliHandlers{out: &out, errOut: &errBuf}); rc != 0 || !strings.Contains(out.String(), "hogman-join") {
+			t.Fatalf("-version: rc=%d out=%q err=%q", rc, out.String(), errBuf.String())
+		}
+		out.Reset()
+		errBuf.Reset()
+		if rc := runCLI([]string{"-help"}, cliHandlers{out: &out, errOut: &errBuf}); rc != 0 || !strings.Contains(out.String(), "Usage:") {
+			t.Fatalf("-help: rc=%d out=%q err=%q", rc, out.String(), errBuf.String())
+		}
+	})
+
+	t.Run("unknown single-dash flag still fails closed", func(t *testing.T) {
+		var errBuf bytes.Buffer
+		if rc := runCLI([]string{"-bogus"}, cliHandlers{errOut: &errBuf}); rc != 2 {
+			t.Fatalf("unknown -bogus: rc=%d want 2 (err=%s)", rc, errBuf.String())
+		}
+	})
+
+	t.Run("args after -- and flag values are not rewritten", func(t *testing.T) {
+		var gotNote string
+		var errBuf bytes.Buffer
+		h := cliHandlers{
+			errOut: &errBuf,
+			shareStart: func(_, _, _ string, o options) error {
+				gotNote = o.note
+				return nil
+			},
+		}
+		if rc := runCLI([]string{"share", "blog", "3000", "--note", "-yes"}, h); rc != 0 || gotNote != "-yes" {
+			t.Fatalf("--note -yes: rc=%d note=%q err=%s", rc, gotNote, errBuf.String())
+		}
+		var gotLeave []string
+		h2 := cliHandlers{
+			errOut: &errBuf,
+			leave:  func(args []string, _ options) error { gotLeave = args; return nil },
+		}
+		if rc := runCLI([]string{"leave", "--", "-no-open"}, h2); rc != 0 || len(gotLeave) != 1 || gotLeave[0] != "-no-open" {
+			t.Fatalf("leave -- -no-open: rc=%d args=%v", rc, gotLeave)
+		}
+	})
+}
+
+func TestPenQueryValidationAndEnvNotice(t *testing.T) {
+	pens := []penConn{
+		{zone: "alpha.pens.example.com", loginServer: "https://alpha.gate.example.com"},
+		{zone: "beta.pens.example.com", loginServer: "https://beta.gate.example.com"},
+	}
+
+	// Wildcards and path traversals must be rejected before any globbing.
+	for _, bad := range []string{"*", "../..", "foo/bar", "a?b", "[a-z]", "bad pen", "..", "-leading"} {
+		if _, err := resolvePenConn(pens, bad); err == nil {
+			t.Errorf("resolvePenConn(%q) succeeded, want validation error", bad)
+		}
+		if _, err := resolveShareZoneFilter(nil, bad); err == nil {
+			t.Errorf("resolveShareZoneFilter(%q) succeeded, want validation error", bad)
+		}
+		if _, err := resolveUpdatePlan(nil, options{pen: bad}, t.TempDir(), t.TempDir()); err == nil {
+			t.Errorf("resolveUpdatePlan(--pen %q) succeeded, want validation error", bad)
+		}
+	}
+
+	// HOGMAN_PEN with invalid traversal value is also rejected.
+	t.Setenv("HOGMAN_PEN", "../..")
+	if _, err := resolveShareZoneFilter(nil, ""); err == nil {
+		t.Fatal("HOGMAN_PEN=../.. should fail validation")
+	}
+
+	// HOGMAN_PEN prints an explicit notice whenever it makes the choice.
+	var notices []string
+	oldNote := noteFn
+	t.Cleanup(func() { noteFn = oldNote })
+	noteFn = func(f string, a ...any) { notices = append(notices, fmt.Sprintf(f, a...)) }
+
+	t.Setenv("HOGMAN_PEN", "beta")
+	p, err := resolvePenConn(pens, "")
+	if err != nil || p.zone != "beta.pens.example.com" {
+		t.Fatalf("resolvePenConn with HOGMAN_PEN=beta: (%+v, %v)", p, err)
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "using pen beta.pens.example.com (from HOGMAN_PEN)") {
+		t.Fatalf("expected HOGMAN_PEN notice, got %v", notices)
+	}
+
+	// Explicit --pen overrides HOGMAN_PEN and does not print the env notice.
+	notices = nil
+	if _, err := resolvePenConn(pens, "alpha"); err != nil {
+		t.Fatalf("explicit --pen alpha failed: %v", err)
+	}
+	if len(notices) != 0 {
+		t.Fatalf("explicit --pen should not print HOGMAN_PEN notice, got %v", notices)
+	}
+}
+
+func TestLinkStdinWithArgErrorsAndDefaults(t *testing.T) {
+	var errBuf bytes.Buffer
+	h := cliHandlers{
+		errOut: &errBuf,
+		join:   func(string, options) error { t.Fatal("join should not run"); return nil },
+	}
+	for _, argv := range [][]string{
+		{"join", "--link-stdin", "https://h.example/join#t=abc"},
+		{"--link-stdin", "https://h.example/join#t=abc"},
+	} {
+		errBuf.Reset()
+		if rc := runCLI(argv, h); rc != 2 || !strings.Contains(errBuf.String(), "--link-stdin") {
+			t.Fatalf("%v: rc=%d err=%q; want exit 2 mentioning --link-stdin", argv, rc, errBuf.String())
+		}
+	}
+
+	if cobra.MousetrapHelpText != "" {
+		t.Fatalf("cobra.MousetrapHelpText = %q, want empty string", cobra.MousetrapHelpText)
+	}
+
+	var out bytes.Buffer
+	if rc := runCLI([]string{"update", "--help"}, cliHandlers{out: &out, errOut: &errBuf}); rc != 0 {
+		t.Fatalf("update --help rc=%d", rc)
+	}
+	if strings.Contains(out.String(), "HOGMAN_RELEASE_BASE") {
+		t.Fatalf("update --help should not expose test-only HOGMAN_RELEASE_BASE:\n%s", out.String())
 	}
 }

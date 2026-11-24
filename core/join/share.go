@@ -113,7 +113,11 @@ func (c *shareConfig) save(dir string) error {
 func allShares(zone string) []string {
 	pattern := filepath.Join(sharesBase(), "*", "*", "share.json")
 	if zone != "" {
-		pattern = filepath.Join(sharesBase(), zone, "*", "share.json")
+		clean, err := validatePenQuery(zone)
+		if err != nil {
+			return nil
+		}
+		pattern = filepath.Join(sharesBase(), clean, "*", "share.json")
 	}
 	m, _ := filepath.Glob(pattern)
 	sort.Strings(m)

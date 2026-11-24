@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+
+	"golang.org/x/term"
 )
 
 func sha1Hex(b []byte) string {
@@ -24,8 +26,7 @@ func step(f string, a ...any) { fmt.Printf("\n• "+f+"\n", a...) }
 func note(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }
 
 func isTerminal() bool {
-	fi, err := os.Stdin.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 var (
