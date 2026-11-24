@@ -903,7 +903,24 @@ func writeUpdatingMarker(dir string, hadService bool) {
 	if hadService {
 		val = "service\n"
 	}
-	_ = os.WriteFile(filepath.Join(dir, updatingMarkerName), []byte(val), 0o600)
+	tmp, err := os.CreateTemp(dir, ".updating-*")
+	if err != nil {
+		return
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.WriteString(val); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return
+	}
+	_ = tmp.Chmod(0o600)
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := os.Rename(tmpPath, filepath.Join(dir, updatingMarkerName)); err != nil {
+		_ = os.Remove(tmpPath)
+	}
 }
 
 func clearUpdatingMarker(dir string) {

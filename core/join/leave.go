@@ -147,12 +147,14 @@ func leaveCmd(args []string, o options) error {
 }
 
 // cleanupOrphanCanonicalBinary removes the shared <configBase>/bin/hogman binary
-// once this computer has left its last pen and last share (keep-less-data).
+// and native-messaging registration once this computer has left its last pen and
+// last share (keep-less-data).
 func cleanupOrphanCanonicalBinary() {
 	if len(localLeaveTargets()) > 0 {
 		return
 	}
 	cfgBase := hogmanConfigBase()
+	removeNativeHost(cfgBase)
 	selfPath, _ := resolvedExePath()
 	canon := canonicalBinaryPath(cfgBase)
 	nh := nativeHostBinaryPath(cfgBase)
