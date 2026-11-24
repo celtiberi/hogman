@@ -95,9 +95,76 @@ jobs:
           docker build --progress=plain -t hogman-ops-check deploy/ops
           deploy/test-ops-snapshot.sh
 
+  prebuilt:
+    name: prebuild e2e binaries
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: core/join/go.mod
+          cache: true
+          cache-dependency-path: |
+            core/join/go.sum
+            core/registrar/go.sum
+            deploy/signup/go.sum
+            deploy/challenge-dns/go.sum
+      - name: Compile E2E binaries in parallel
+        run: |
+          set -euo pipefail
+          out="$PWD/prebuilt"
+          mkdir -p "$out/join" "$out/registrar" "$out/signup" "$out/challenge-dns" "$out/test-bins"
+          full="$(git rev-parse 'HEAD^{commit}')"
+          ver="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d "$full")-${full:0:7}"
+          # Build all 5 client platforms (matching deploy/build-bins.sh so the
+          # test pen serves the exact same 5-platform SHA256SUMS as a release)
+          # plus the Linux/amd64 server binaries, all in parallel with warm Go cache.
+          (
+            cd core/join
+            for t in Darwin-arm64:darwin/arm64 Darwin-x86_64:darwin/amd64 \
+                     Linux-x86_64:linux/amd64 Linux-aarch64:linux/arm64 \
+                     windows-amd64.exe:windows/amd64; do
+              name=${t%%:*}; plat=${t#*:}
+              CGO_ENABLED=0 GOOS=${plat%/*} GOARCH=${plat#*/} \
+                go build -trimpath -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-$name" .
+            done
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=2025.01.01-aaaaaaa" -o "$out/test-bins/hogman-old" .
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=2099.01.01-bbbbbbb" -o "$out/test-bins/hogman-new" .
+            cd "$out/join" && sha256sum hogman-* > SHA256SUMS
+          ) &
+          p1=$!
+          (
+            cd core/registrar
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$out/registrar/registrar-linux-amd64" .
+          ) &
+          p2=$!
+          (
+            cd deploy/signup
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$out/signup/hogman-signup-linux-amd64" .
+          ) &
+          p3=$!
+          (
+            cd deploy/challenge-dns
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$out/challenge-dns/challenge-dns-linux-amd64" .
+          ) &
+          p4=$!
+          wait "$p1" "$p2" "$p3" "$p4"
+          ls -lh "$out"/*/*
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-prebuilt
+          path: prebuilt/
+          retention-days: 1
+          if-no-files-found: error
+
   pen-core:
     name: pen core (core/test/run.sh)
-    needs: changes
+    needs: [changes, prebuilt]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -105,6 +172,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: e2e-prebuilt
+          path: core/prebuilt
+      - name: Restore execute bits on prebuilt binaries
+        run: find core/prebuilt -type f ! -name SHA256SUMS -exec chmod 0755 {} +
       - name: Tools
         run: |
           docker version --format 'docker {{.Server.Version}}'
@@ -163,7 +236,7 @@ jobs:
 
   host:
     name: shared host (deploy/test-host.sh)
-    needs: changes
+    needs: [changes, prebuilt]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -171,6 +244,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: e2e-prebuilt
+          path: core/prebuilt
+      - name: Restore execute bits on prebuilt binaries
+        run: find core/prebuilt -type f ! -name SHA256SUMS -exec chmod 0755 {} +
       - name: Fetch previous release tag for legacy upgrade test
         run: git fetch --no-tags --depth=1 origin refs/tags/v2026.11.24-76d2903:refs/tags/v2026.11.24-76d2903
       - name: Tools

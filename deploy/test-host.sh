@@ -75,6 +75,12 @@ ACME="$HOGMAN_HOME/acme"
 mkdir -p "$ACME/cdns" "$ACME/sock" "$ACME/certs"
 chgrp 65532 "$ACME/sock" && chmod 0750 "$ACME/sock"   # like /run/hogman-acme: the registrars' group may enter
 build_cdns() {
+  local arch=""
+  case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; esac
+  if [ -n "$arch" ] && [ -f "$HOGMAN_HOME/src/prebuilt/challenge-dns/challenge-dns-linux-$arch" ]; then
+    install -m 0755 "$HOGMAN_HOME/src/prebuilt/challenge-dns/challenge-dns-linux-$arch" "$ACME/cdns/challenge-dns"
+    return 0
+  fi
   docker run --rm -v "$REPO/deploy/challenge-dns:/src:ro" -v "$ACME/cdns:/out" -w /src \
     -e CGO_ENABLED=0 -e GOFLAGS=-buildvcs=false golang:1.27-alpine go build -o /out/challenge-dns .
 }

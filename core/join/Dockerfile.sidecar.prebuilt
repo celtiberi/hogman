@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+# Prebuilt variant of Dockerfile.sidecar for E2E runners that already compiled
+# hogman for the host architecture (see .github/workflows/e2e.yml).
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS prep
+RUN apk add --no-cache ca-certificates && \
+    mkdir -p /rootfs/var/lib/hogman /rootfs/run/hogman-in /rootfs/etc /rootfs/etc/ssl/certs && \
+    cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ca-certificates.crt && \
+    printf 'nonroot:x:65532:65532:nonroot:/nonexistent:/sbin/nologin\n' > /rootfs/etc/passwd && \
+    printf 'nonroot:x:65532:\n' > /rootfs/etc/group && \
+    chown 65532:65532 /rootfs/var/lib/hogman /rootfs/run/hogman-in && \
+    chmod 0700 /rootfs/var/lib/hogman /rootfs/run/hogman-in
+COPY hogman.bin /rootfs/hogman
+RUN chmod 0755 /rootfs/hogman
+
+FROM scratch
+COPY --from=prep /rootfs/ /
+ENV HOGMAN_DISABLE_NETNS=1
+USER 65532:65532
+ENTRYPOINT ["/hogman"]
