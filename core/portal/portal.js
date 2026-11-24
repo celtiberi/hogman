@@ -445,9 +445,54 @@
   const renderBillingBanner = (st) => {
     const el = $('billing-banner');
     if (!el) return;
-    if (!st || st.state !== 'grace') { el.hidden = true; return; }
+    if (!st || (st.state !== 'grace' && st.state !== 'renew_only')) { el.hidden = true; return; }
     const p = document.createElement('p');
     const strong = document.createElement('strong');
+    const appendRenewButton = () => {
+      if (!st.can_renew) return;
+      p.append(document.createTextNode(' '));
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'link';
+      btn.textContent = 'Renew now';
+      btn.onclick = async () => {
+        btn.disabled = true;
+        try {
+          const r = await api('POST', '/billing/renew-token', {});
+          if (typeof r.url === 'string' && r.url.startsWith('https://')) {
+            window.open(r.url, '_blank', 'noopener,noreferrer');
+          }
+        } catch (e) {
+          showError(e);
+        } finally {
+          btn.disabled = false;
+        }
+      };
+      p.append(btn);
+    };
+
+    if (st.state === 'renew_only') {
+      strong.textContent = 'Woken for renewal: ';
+      p.append(strong);
+      let until = 'shortly';
+      if (st.wake_until) {
+        const d = new Date(st.wake_until);
+        if (!Number.isNaN(d.getTime())) {
+          const mins = Math.max(0, Math.ceil((d.getTime() - Date.now()) / 60000));
+          until = `${d.toISOString().slice(11, 16)} UTC (${mins} min left)`;
+        }
+      }
+      p.append(document.createTextNode(
+        `this pen is temporarily awake for billing renewal until ${until}. ` +
+        'Shares, invites, devices, and access for other members are unavailable until the pen is renewed. ' +
+        'Once payment completes, normal access restores automatically.'
+      ));
+      appendRenewButton();
+      el.replaceChildren(p);
+      el.hidden = false;
+      return;
+    }
+
     strong.textContent = 'Renewal needed: ';
     p.append(strong);
     let until = 'soon';
@@ -463,27 +508,7 @@
         `this pen is in its 30-day grace period and will go to sleep on ${until}. ` +
         'Any owner or admin can renew from this page for a fresh year (an admin who pays becomes an owner).'
       ));
-      if (st.can_renew) {
-        p.append(document.createTextNode(' '));
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'link';
-        btn.textContent = 'Renew now';
-        btn.onclick = async () => {
-          btn.disabled = true;
-          try {
-            const r = await api('POST', '/billing/renew-token', {});
-            if (typeof r.url === 'string' && r.url.startsWith('https://')) {
-              window.open(r.url, '_blank', 'noopener,noreferrer');
-            }
-          } catch (e) {
-            showError(e);
-          } finally {
-            btn.disabled = false;
-          }
-        };
-        p.append(btn);
-      }
+      appendRenewButton();
     } else {
       p.append(document.createTextNode(
         `this pen is in its 30-day grace period and will go to sleep on ${until}. ` +
@@ -497,6 +522,10 @@
   const load = async () => {
     try { me = await api('GET', '/me'); render(); renderBillingBanner(me.billing); }
     catch (e) { $('whoami').textContent = 'Could not load your details: ' + e.message; return; }
+    if (me.billing && me.billing.state === 'renew_only') {
+      ['sites', 'mine', 'invite', 'herd', 'host'].forEach(id => { const s = $(id); if (s) s.hidden = true; });
+      return;
+    }
     loadDirectory().catch(errIn('sites-err'));
     if (!me.devices) return;   // a server
     if (me.can_invite) { $('invite').hidden = false; loadInvites().catch(errIn('invite-err')); }

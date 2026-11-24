@@ -139,13 +139,14 @@
 
   // Optional Cloudflare Turnstile widget (loaded only when server advertises a site key).
   let tsSiteKey = '';
-  let tsFormToken = '', tsWaitToken = '', tsRenewToken = '';
-  let tsFormWidget = null, tsWaitWidget = null, tsRenewWidget = null;
+  let tsFormToken = '', tsWaitToken = '', tsRenewToken = '', tsWakeToken = '';
+  let tsFormWidget = null, tsWaitWidget = null, tsRenewWidget = null, tsWakeWidget = null;
   const resetTurnstile = kind => {
     if (!window.turnstile) return;
     if (kind === 'form' && tsFormWidget !== null) { tsFormToken = ''; window.turnstile.reset(tsFormWidget); }
     if (kind === 'wait' && tsWaitWidget !== null) { tsWaitToken = ''; window.turnstile.reset(tsWaitWidget); }
     if (kind === 'renew' && tsRenewWidget !== null) { tsRenewToken = ''; window.turnstile.reset(tsRenewWidget); }
+    if (kind === 'wake' && tsWakeWidget !== null) { tsWakeToken = ''; window.turnstile.reset(tsWakeWidget); }
   };
   const mountTurnstile = siteKey => {
     if (!siteKey || tsSiteKey) return;
@@ -178,6 +179,15 @@
           callback: t => { tsRenewToken = t; },
           'expired-callback': () => { tsRenewToken = ''; },
           'error-callback': () => { tsRenewToken = ''; },
+        });
+      }
+      if ($('ts-wake') && tsWakeWidget === null) {
+        $('ts-wake').hidden = false;
+        tsWakeWidget = window.turnstile.render('#ts-wake', {
+          sitekey: tsSiteKey, theme: widgetTheme,
+          callback: t => { tsWakeToken = t; },
+          'expired-callback': () => { tsWakeToken = ''; },
+          'error-callback': () => { tsWakeToken = ''; },
         });
       }
     };
@@ -234,8 +244,46 @@
   for (const f of ['pen', 'handle']) $(f).addEventListener('change', setNames);   // autofill, paste, scripts
 
   let activeView = 'form';
-  const show = id => { activeView = id; for (const s of ['form', 'wait', 'waited', 'renew', 'renewed', 'working', 'done']) $(s).hidden = s !== id; };
+  const show = id => { activeView = id; for (const s of ['form', 'wait', 'waited', 'renew', 'renewed', 'wake', 'working', 'done']) $(s).hidden = s !== id; };
   const cleanURL = () => location.pathname + location.search;
+
+  // D-35 / I-7 Part 2: public sleeping-pen wake flow via /#wake=<pen>.
+  const wakeMatch = location.hash.match(/(?:^|[#&])wake=([a-z][a-z0-9-]{1,28}[a-z0-9])/i);
+  const wakePen = wakeMatch ? wakeMatch[1].toLowerCase() : '';
+  if (wakePen) {
+    history.replaceState(null, '', location.pathname);
+    if ($('wake-pen')) $('wake-pen').textContent = wakePen;
+  }
+  if ($('wake-go')) {
+    $('wake-go').addEventListener('click', async () => {
+      $('wake-err').hidden = true;
+      $('wake-done').hidden = true;
+      if (!wakePen) {
+        $('wake-err').textContent = 'Missing pen name in link.';
+        $('wake-err').hidden = false;
+        return;
+      }
+      if (tsSiteKey && !tsWakeToken) {
+        $('wake-err').textContent = 'Please complete the verification check first.';
+        $('wake-err').hidden = false;
+        return;
+      }
+      $('wake-go').disabled = true;
+      try {
+        const body = { pen: wakePen };
+        if (tsSiteKey) body.turnstile_token = tsWakeToken;
+        const r = await api('POST', '/wake', body);
+        $('wake-done').textContent = r.message || 'Wake request received. Open your pen\u2019s home page from a joined owner or admin device in 1\u20132 minutes to renew.';
+        $('wake-done').hidden = false;
+      } catch (e) {
+        $('wake-err').textContent = e.message;
+        $('wake-err').hidden = false;
+        $('wake-go').disabled = false;
+      } finally {
+        resetTurnstile('wake');
+      }
+    });
+  }
 
   // D-35: in-pen authenticated renewal flow via /#renew=<signed-token> and /?renewed=1.
   // The token lives only in the URL fragment and is stripped immediately from history.
@@ -400,6 +448,8 @@
     show('renewed');
   } else if (renewToken) {
     show('renew');
+  } else if (wakePen) {
+    show('wake');
   } else if (location.hash === '#wait') {
     show('wait');   // a link straight to the waiting list
   }
@@ -432,7 +482,7 @@
     if (!s.open) {
       $('closed').hidden = false;
       $('go').disabled = true;
-      if (activeView !== 'working' && activeView !== 'done' && activeView !== 'renew' && activeView !== 'renewed') show('wait');
+      if (activeView !== 'working' && activeView !== 'done' && activeView !== 'renew' && activeView !== 'renewed' && activeView !== 'wake') show('wait');
     }
   }).catch(() => { $('down').hidden = false; });
   if (vanityHint) {

@@ -266,8 +266,24 @@ operator acts on it by hand for now.
 hogman-host list
 hogman-host pen <name> <hogman args>
 hogman-host upgrade <name>
+hogman-host sleep <name>
+hogman-host wake [--renew-only] <name>
 hogman-host remove <name>
 ```
+
+**Sleeping pens and renew-only wakes (I-7):** when a paid pen finishes its 30-day grace period, the
+daily lifecycle sweep puts it to sleep (`hogman-host sleep <pen>`), freeing its host capacity slot
+while keeping its state for one year. Its front door serves a static sleeping notice linking to
+`https://<signup-host>/#wake=<pen>`, where an owner or admin can trigger a 10-minute `renew_only`
+wake (measured from when `home.<zone>`'s TLS certificate is ready, hard-capped at 20 minutes from
+the press). While `renew_only`, `hogman-host list` shows `renew_only`, `.sleeping` stays on disk,
+the pen's Headscale policy and registrar HTTP handlers allow only active owners/admins on personal
+devices to reach `GET /api/me` and `POST /api/billing/renew-token`, and `purge --due` refuses it.
+Wakes are capped at 3/day and 10/30d per pen, 2 concurrent wakes host-wide, and use the
+`RENEW_WAKE_RESERVE` (default `2`) reserve slots without blocking or evicting paying pens; hitting
+caps alerts the operator via `ntfy`. Payment restores normal policy live via `hogman-host wake <pen>`
+(`sync`) without restarting containers; otherwise the broker returns the pen to sleep at its
+persisted deadline while preserving the original `sleep_since` / `delete_after` timestamps.
 
 ## Publishing releases
 

@@ -23,36 +23,42 @@ import (
 // broker raises pens. One at a time: a small server should not build two
 // pens at once, and it makes a sign-up code impossible to use twice.
 type broker struct {
-	home             string // HOGMAN_HOME
-	tool             string // hogman-host
-	token            string
-	ntfy             string // optional: ntfy topic URL for the operator's pushes
-	mu               sync.Mutex
-	lifecycleMu      sync.Mutex // serializes lifecycle sweeps & renewals without blocking signup/provision
-	limitMu          sync.Mutex
-	waitJoins        *limiter
-	waitNotify       *limiter
-	raiseNotify      *limiter
-	healthNotify     *limiter
-	ntfySem          chan struct{}
-	runSem           chan struct{} // bounds concurrent non-provision hogman-host forks
-	capMu            sync.Mutex
-	capCache         *capacity
-	capCachedAt      time.Time
-	suffixFn         func() (string, error) // nil uses randomPenSuffix (tests override)
-	webhookSecret    string                 // Stripe's webhook signing secret; empty: payments off
-	minPersonalCents int64                  // optional minimum cents for personal Stripe checkout
-	minWorkCents     int64                  // optional minimum cents for work Stripe checkout
-	expectedCurrency string                 // optional lowercase ISO currency (e.g. "usd")
-	expectLivemode   *bool                  // optional Stripe ev.Livemode guard
-	publicURL        string                 // optional https://<signup-host> for renewal links
-	workSignupHost   string                 // optional Work signup hostname for Work renewal links
-	backdateRenewal  bool                   // D-35: default false (no backdating)
-	resendAPIKey     string                 // optional Resend key for opt-in billing alert emails
-	billingFrom      string                 // optional From address for billing alert emails
-	alertSendFn      func(ctx context.Context, to []string, subject, text string) error
-	memberRoleFn     func(ctx context.Context, pen, handle string) (role, status string, ok bool)
-	nowFn            func() time.Time
+	home                   string // HOGMAN_HOME
+	tool                   string // hogman-host
+	token                  string
+	ntfy                   string // optional: ntfy topic URL for the operator's pushes
+	mu                     sync.Mutex
+	lifecycleMu            sync.Mutex // serializes lifecycle sweeps & renewals without blocking signup/provision
+	limitMu                sync.Mutex
+	waitJoins              *limiter
+	waitNotify             *limiter
+	raiseNotify            *limiter
+	healthNotify           *limiter
+	ntfySem                chan struct{}
+	runSem                 chan struct{} // bounds concurrent non-provision hogman-host forks
+	capMu                  sync.Mutex
+	capCache               *capacity
+	capCachedAt            time.Time
+	suffixFn               func() (string, error) // nil uses randomPenSuffix (tests override)
+	webhookSecret          string                 // Stripe's webhook signing secret; empty: payments off
+	minPersonalCents       int64                  // optional minimum cents for personal Stripe checkout
+	minWorkCents           int64                  // optional minimum cents for work Stripe checkout
+	expectedCurrency       string                 // optional lowercase ISO currency (e.g. "usd")
+	expectLivemode         *bool                  // optional Stripe ev.Livemode guard
+	publicURL              string                 // optional https://<signup-host> for renewal links
+	workSignupHost         string                 // optional Work signup hostname for Work renewal links
+	backdateRenewal        bool                   // D-35: default false (no backdating)
+	resendAPIKey           string                 // optional Resend key for opt-in billing alert emails
+	billingFrom            string                 // optional From address for billing alert emails
+	alertSendFn            func(ctx context.Context, to []string, subject, text string) error
+	memberRoleFn           func(ctx context.Context, pen, handle string) (role, status string, ok bool)
+	nowFn                  func() time.Time
+	wakeHealthFn           func(ctx context.Context, pen string) error
+	wakeHealthInterval     time.Duration
+	renewWakeReserve       *int // nil defaults to renewWakeDefaultReserve (2); 0 disables reserve
+	renewWakeMaxConcurrent int  // <= 0 defaults to renewWakeDefaultMaxConcurrent (2)
+	globalCapFullSince     time.Time
+	globalCapAlertedAt     time.Time
 }
 
 func (b *broker) now() time.Time {
@@ -60,6 +66,23 @@ func (b *broker) now() time.Time {
 		return b.nowFn().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func (b *broker) effectiveRenewWakeReserve() int {
+	if b.renewWakeReserve != nil {
+		if *b.renewWakeReserve < 0 {
+			return 0
+		}
+		return *b.renewWakeReserve
+	}
+	return renewWakeDefaultReserve
+}
+
+func (b *broker) effectiveRenewWakeMaxConcurrent() int {
+	if b.renewWakeMaxConcurrent > 0 {
+		return b.renewWakeMaxConcurrent
+	}
+	return renewWakeDefaultMaxConcurrent
 }
 
 func (b *broker) nextSuffix() (string, error) {
@@ -89,6 +112,11 @@ func runBroker() {
 		}
 	}
 	b.billingFrom = strings.TrimSpace(os.Getenv("BILLING_FROM"))
+	if rawRes := strings.TrimSpace(os.Getenv("RENEW_WAKE_RESERVE")); rawRes != "" {
+		if n, err := strconv.Atoi(rawRes); err == nil && n >= 0 {
+			b.renewWakeReserve = &n
+		}
+	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("STRIPE_EXPECT_LIVEMODE"))) {
 	case "1", "true":
 		v := true
@@ -97,6 +125,7 @@ func runBroker() {
 		v := false
 		b.expectLivemode = &v
 	}
+	go b.runRenewWakeWatcher()
 	addr := env("BROKER_ADDR", ":9090")
 	log.Printf("broker on %s", addr)
 	srv := &http.Server{
@@ -165,6 +194,7 @@ func (b *broker) handler() http.Handler {
 	mux.HandleFunc("GET /lifecycle/pending-cancels", b.lifecyclePendingCancels)
 	mux.HandleFunc("POST /lifecycle/cancel-done", b.lifecycleCancelDone)
 	mux.HandleFunc("POST /lifecycle/cancel-alert", b.lifecycleCancelAlert)
+	mux.HandleFunc("POST /lifecycle/wake", b.lifecycleWakeHandler)
 	mux.HandleFunc("POST /renew-verify", b.renewVerify)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, hasBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -177,9 +207,11 @@ func (b *broker) handler() http.Handler {
 }
 
 type capacity struct {
-	Pens int  `json:"pens"`
-	Max  int  `json:"max"`
-	Open bool `json:"open"`
+	Pens         int  `json:"pens"`
+	Max          int  `json:"max"`
+	Open         bool `json:"open"`
+	RenewWakes   int  `json:"renew_wakes,omitempty"`
+	RenewReserve int  `json:"renew_reserve,omitempty"`
 }
 
 // run executes hogman-host gated by a small concurrency semaphore so bursts of
@@ -225,6 +257,7 @@ func (b *broker) readCapacityLocal() (*capacity, bool) {
 		return nil, false
 	}
 	maxPens := 8
+	reserve := b.effectiveRenewWakeReserve()
 	for _, line := range strings.Split(string(envBytes), "\n") {
 		line = strings.TrimSpace(line)
 		if val, ok := strings.CutPrefix(line, "MAX_PENS="); ok {
@@ -233,25 +266,41 @@ func (b *broker) readCapacityLocal() (*capacity, bool) {
 				maxPens = n
 			}
 		}
+		if b.renewWakeReserve == nil {
+			if val, ok := strings.CutPrefix(line, "RENEW_WAKE_RESERVE="); ok {
+				val = strings.Trim(strings.TrimSpace(val), `"'`)
+				if n, err := strconv.Atoi(val); err == nil && n >= 0 {
+					reserve = n
+				}
+			}
+		}
 	}
 	entries, err := os.ReadDir(filepath.Join(b.home, "pens"))
 	if err != nil && !os.IsNotExist(err) {
 		return nil, false
 	}
 	pens := 0
+	renewWakes := 0
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(b.home, "pens", e.Name(), ".removed")); err == nil {
+		penDir := filepath.Join(b.home, "pens", e.Name())
+		if _, err := os.Stat(filepath.Join(penDir, ".removed")); err == nil {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(b.home, "pens", e.Name(), ".sleeping")); err == nil {
+		if _, err := os.Stat(filepath.Join(penDir, ".retired")); err == nil {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(penDir, ".renew-wake")); err == nil {
+			renewWakes++
+		}
+		if _, err := os.Stat(filepath.Join(penDir, ".sleeping")); err == nil {
 			continue
 		}
 		pens++
 	}
-	return &capacity{Pens: pens, Max: maxPens, Open: pens < maxPens}, true
+	return &capacity{Pens: pens, Max: maxPens, Open: pens < maxPens, RenewWakes: renewWakes, RenewReserve: reserve}, true
 }
 
 func (b *broker) invalidateCapacityCache() {

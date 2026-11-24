@@ -404,6 +404,7 @@ type HomeConfig struct {
 	PropagationTimeout time.Duration
 	Backend            ACMEBackend
 	DNSProvider        certmagic.DNSProvider // overrides Backend if set (self-hosted libdns)
+	BillingStatusPath  string                // when in renew_only wake, reuse unexpired cert & cap to 1 issuance
 }
 
 // HomeCertManager obtains and renews home.<zone> via CertMagic and writes
@@ -423,11 +424,12 @@ type HomeCertManager struct {
 	fallbackCfg *certmagic.Config
 	fallbackIss *certmagic.ACMEIssuer
 
-	syncMu      sync.Mutex
-	renewMu     sync.Mutex
-	failoverCh  chan struct{}
-	lastCertPEM []byte
-	lastKeyPEM  []byte
+	syncMu          sync.Mutex
+	renewMu         sync.Mutex
+	failoverCh      chan struct{}
+	lastCertPEM     []byte
+	lastKeyPEM      []byte
+	renewWakeIssued bool
 }
 
 // NewHomeCertManager builds a certificate manager for home.<cfg.Zone>.
@@ -668,23 +670,59 @@ func (m *HomeCertManager) syncStoredCert(ctx context.Context, cfg *certmagic.Con
 	return cert.NeedsRenewal(cfg), nil
 }
 
+func (m *HomeCertManager) isRenewOnlyWake() bool {
+	return isRenewOnlyMode(m.cfg.BillingStatusPath)
+}
+
+// certValidForAtLeast reports whether <HomeTLSDir>/<FileBase>.crt/.key exists
+// and remains valid for at least minRemaining without needing CA issuance.
+func certValidForAtLeast(dir, base string, minRemaining time.Duration) bool {
+	pair, err := tls.LoadX509KeyPair(filepath.Join(dir, base+".crt"), filepath.Join(dir, base+".key"))
+	if err != nil || len(pair.Certificate) == 0 {
+		return false
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		return false
+	}
+	return leaf.NotAfter.After(time.Now().Add(minRemaining))
+}
+
 // EnsureOnce makes sure a valid certificate for home.<zone> is loaded or obtained,
 // exported atomically into HomeTLSDir, and handed to portal Caddy.
 func (m *HomeCertManager) EnsureOnce(ctx context.Context) error {
 	m.renewMu.Lock()
 	defer m.renewMu.Unlock()
 
+	renewOnly := m.isRenewOnlyWake()
+	if !renewOnly {
+		m.renewWakeIssued = false
+	} else {
+		// I-7 Part 2: during a short renew-only wake, reuse any still-valid
+		// certificate on disk (valid >= 1h) without burning a CA issuance.
+		if certValidForAtLeast(m.cfg.HomeTLSDir, m.cfg.FileBase, time.Hour) {
+			return nil
+		}
+		if m.renewWakeIssued {
+			return errors.New("acme: renewal wake certificate issuance cap (1 per wake) reached")
+		}
+	}
+
 	// Fast path: if either primary or fallback already holds a non-expiring cert in storage,
 	// ensure it is exported and cached before touching the CA.
 	primaryNeedsRenew, err := m.syncStoredCert(ctx, m.primaryCfg, m.primaryIss)
-	if err == nil && !primaryNeedsRenew {
+	if err == nil && (!primaryNeedsRenew || (renewOnly && certValidForAtLeast(m.cfg.HomeTLSDir, m.cfg.FileBase, time.Hour))) {
 		return nil
 	}
 	if errors.Is(err, fs.ErrNotExist) && m.fallbackCfg != nil {
 		fbNeedsRenew, fbErr := m.syncStoredCert(ctx, m.fallbackCfg, m.fallbackIss)
-		if fbErr == nil && !fbNeedsRenew {
+		if fbErr == nil && (!fbNeedsRenew || (renewOnly && certValidForAtLeast(m.cfg.HomeTLSDir, m.cfg.FileBase, time.Hour))) {
 			return nil
 		}
+	}
+
+	if renewOnly {
+		m.renewWakeIssued = true
 	}
 
 	err = m.newSyncConfig(m.primaryCfg, m.primaryIss).ManageSync(ctx, []string{m.host})

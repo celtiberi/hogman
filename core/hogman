@@ -406,7 +406,7 @@ main() {
                fi ;;
     status)    load_env; dc ps; echo; reg member list; echo; reg device list ;;
     logs)      load_env; dc logs -f "$@" ;;
-    member|invite|device|name|audit|sync)
+    member|invite|device|name|audit|sync|health)
                load_env; reg "$cmd" "$@" ;;
     help-registrar) load_env; reg help ;;
     headscale) load_env; hs "$@" ;;
