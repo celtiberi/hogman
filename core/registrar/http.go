@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -205,7 +206,10 @@ func meshMux(s *Service) http.Handler {
 					fail(w, forbidden("this pen is woken for renewal only; only active owners or admins on personal devices can access billing"))
 					return
 				}
-				if pattern != "GET /api/me" && pattern != "POST /api/billing/renew-token" {
+				// Active, grace, and renew_only pens can all be deleted from the portal
+				// by an active owner on a personal device (sleeping pens have no portal
+				// and must be woken first or left to the lifecycle).
+				if pattern != "GET /api/me" && pattern != "POST /api/billing/renew-token" && pattern != "POST /api/pen/delete-token" {
 					fail(w, forbidden("this pen is woken for renewal only; shares, devices, invites, and directory are unavailable until renewal"))
 					return
 				}
@@ -269,6 +273,11 @@ func meshMux(s *Service) http.Handler {
 				CanRenew: false,
 			}
 		}
+		if a.IsOwner() && c.member.Status == "active" {
+			if meta := readHostMeta(hostMetaPath(s.cfg.BillingStatusPath)); meta != nil && meta.Pen != "" && meta.DeleteURL != "" {
+				resp["pen_delete"] = buildPenDeleteView(s, c.member.Handle, meta)
+			}
+		}
 		writeJSON(w, 200, resp)
 	})
 
@@ -294,6 +303,44 @@ func meshMux(s *Service) http.Handler {
 		}
 		writeJSON(w, 200, map[string]any{
 			"url":        strings.TrimRight(billing.RenewURL, "/") + "/#renew=" + token,
+			"expires_at": exp.UTC().Format(time.RFC3339),
+		})
+	})
+
+	// I-24: In-pen authenticated self-service pen deletion (active owners on a
+	// personal device only; available in active, grace, and renew_only states).
+	// Mints a short-lived (15m), single-use, domain-separated HMAC token under
+	// hogman-delete-v1: returned in the URL fragment (#delete=<token>).
+	h("POST /api/pen/delete-token", true, false, func(w http.ResponseWriter, r *http.Request, c caller) {
+		if c.member.Status != "active" || !c.actor().IsOwner() {
+			fail(w, forbidden("only active owners can delete this pen"))
+			return
+		}
+		var in struct {
+			Confirm string `json:"confirm"`
+		}
+		if !readJSON(w, r, &in) {
+			return
+		}
+		meta := readHostMeta(hostMetaPath(s.cfg.BillingStatusPath))
+		if meta == nil || meta.Pen == "" || meta.DeleteURL == "" {
+			fail(w, &Problem{Status: http.StatusConflict, Msg: "self-service pen deletion is not configured for this pen"})
+			return
+		}
+		if !strings.EqualFold(strings.TrimSpace(in.Confirm), meta.Pen) {
+			fail(w, bad("type the exact pen name (%s) to confirm", meta.Pen))
+			return
+		}
+		keyPath := filepath.Join(filepath.Dir(s.cfg.BillingStatusPath), "renew.key")
+		token, exp, err := mintDeleteToken(keyPath, meta.Pen, c.member.Handle, time.Now().UTC())
+		if err != nil {
+			log.Printf("pen delete-token: %v", err)
+			fail(w, err)
+			return
+		}
+		s.st.Audit(c.member.Handle, "pen.delete.token", meta.Pen, "")
+		writeJSON(w, 200, map[string]any{
+			"url":        strings.TrimRight(meta.DeleteURL, "/") + "/#delete=" + token,
 			"expires_at": exp.UTC().Format(time.RFC3339),
 		})
 	})
@@ -921,9 +968,95 @@ type billingView struct {
 }
 
 const (
-	renewTokenPurpose = "hogman-renew-v1:"
-	renewTokenTTL     = 15 * time.Minute
+	renewTokenPurpose  = "hogman-renew-v1:"
+	deleteTokenPurpose = "hogman-delete-v1:"
+	renewTokenTTL      = 15 * time.Minute
 )
+
+// hostMeta is written by the shared host at /var/lib/registrar/host-meta.json
+// for hosted pens (free and paid) so active owners can initiate self-service
+// deletion from active, grace, and renew_only states without altering the
+// fail-closed semantics of billing-status.json.
+type hostMeta struct {
+	Pen             string `json:"pen,omitempty"`
+	DeleteURL       string `json:"delete_url,omitempty"`
+	HasSubscription bool   `json:"has_subscription,omitempty"`
+}
+
+// penDeleteView is the owner-only summary returned on GET /api/me for hosted pens.
+type penDeleteView struct {
+	Pen             string   `json:"pen"`
+	CanDelete       bool     `json:"can_delete"`
+	HasSubscription bool     `json:"has_subscription,omitempty"`
+	OtherOwners     []string `json:"other_owners,omitempty"`
+	MemberCount     int      `json:"member_count"`
+	DeviceCount     int      `json:"device_count"`
+}
+
+func hostMetaPath(billingStatusPath string) string {
+	if billingStatusPath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(billingStatusPath), "host-meta.json")
+}
+
+func readHostMeta(path string) *hostMeta {
+	if path == "" {
+		return nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) > 4096 {
+		return nil
+	}
+	var m hostMeta
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil
+	}
+	m.Pen = strings.ToLower(strings.TrimSpace(m.Pen))
+	if m.Pen == "" || strings.ContainsAny(m.Pen, "|/\\ \t\r\n") {
+		return nil
+	}
+	if m.DeleteURL != "" {
+		u, err := url.Parse(strings.TrimSpace(m.DeleteURL))
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+			m.DeleteURL = ""
+		} else {
+			m.DeleteURL = "https://" + u.Host
+		}
+	}
+	if m.DeleteURL == "" {
+		return nil
+	}
+	return &m
+}
+
+func buildPenDeleteView(s *Service, callerHandle string, meta *hostMeta) penDeleteView {
+	v := penDeleteView{
+		Pen:             meta.Pen,
+		CanDelete:       true,
+		HasSubscription: meta.HasSubscription,
+	}
+	if ms, err := s.st.Members(); err == nil {
+		var others []string
+		for _, m := range ms {
+			if m.Status == "removed" {
+				continue
+			}
+			v.MemberCount++
+			if m.Role == "owner" && m.Status == "active" && !strings.EqualFold(m.Handle, callerHandle) {
+				others = append(others, m.Handle)
+			}
+		}
+		if len(others) > 0 {
+			sort.Strings(others)
+			v.OtherOwners = others
+		}
+	}
+	if ds, err := s.st.LiveDevices(); err == nil {
+		v.DeviceCount = len(ds)
+	}
+	return v
+}
 
 func loadOrCreateRenewKey(path string) ([]byte, error) {
 	if raw, err := os.ReadFile(path); err == nil {
@@ -968,6 +1101,14 @@ func loadOrCreateRenewKey(path string) ([]byte, error) {
 }
 
 func mintRenewToken(keyPath, pen, handle, role string, now time.Time) (string, time.Time, error) {
+	return mintSignedToken(keyPath, renewTokenPurpose, pen, handle, role, now)
+}
+
+func mintDeleteToken(keyPath, pen, handle string, now time.Time) (string, time.Time, error) {
+	return mintSignedToken(keyPath, deleteTokenPurpose, pen, handle, "owner", now)
+}
+
+func mintSignedToken(keyPath, purpose, pen, handle, role string, now time.Time) (string, time.Time, error) {
 	key, err := loadOrCreateRenewKey(keyPath)
 	if err != nil {
 		return "", time.Time{}, err
@@ -980,7 +1121,7 @@ func mintRenewToken(keyPath, pen, handle, role string, now time.Time) (string, t
 	rawPayload := fmt.Sprintf("v1|%s|%s|%s|%d|%s", pen, handle, role, exp.Unix(), hex.EncodeToString(nonce))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(rawPayload))
 	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(renewTokenPurpose))
+	mac.Write([]byte(purpose))
 	mac.Write([]byte(payload))
 	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	return payload + "." + sig, exp, nil

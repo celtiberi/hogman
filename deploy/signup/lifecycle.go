@@ -66,8 +66,10 @@ var errNoLifecycle = errors.New("pen has no lifecycle.json")
 
 const (
 	renewTokenPurpose    = "hogman-renew-v1:"
+	deleteTokenPurpose   = "hogman-delete-v1:"
 	renewTokenMaxTTL     = 20 * time.Minute
 	renewNonceRetainTTL  = 24 * time.Hour // matches Stripe Checkout session max lifetime
+	deleteNonceRetainTTL = 24 * time.Hour
 	cancelAlertCooldown  = 24 * time.Hour
 	replacedSubRetainTTL = 90 * 24 * time.Hour
 )
@@ -102,34 +104,49 @@ type renewNonceRecord struct {
 	Consumed  bool   `json:"consumed,omitempty"`
 }
 
+type deleteNonceRecord struct {
+	Handle             string   `json:"handle"`
+	Exp                int64    `json:"exp"`
+	RetainExp          int64    `json:"retain_exp"`
+	RequiredCancelSubs []string `json:"required_cancel_subs,omitempty"`
+	Committed          bool     `json:"committed,omitempty"`
+}
+
 type penLifecycle struct {
-	Plan                string                      `json:"plan"` // "free" | "personal" | "work"
-	State               string                      `json:"state"`
-	PaidUntil           int64                       `json:"paid_until,omitempty"`
-	GraceUntil          int64                       `json:"grace_until,omitempty"`
-	SleepSince          int64                       `json:"sleep_since,omitempty"`
-	DeleteAfter         int64                       `json:"delete_after,omitempty"`
-	WakeStartedAt       int64                       `json:"wake_started_at,omitempty"`
-	WakeReadyAt         int64                       `json:"wake_ready_at,omitempty"`
-	WakeUntil           int64                       `json:"wake_until,omitempty"`
-	WakeCeiling         int64                       `json:"wake_ceiling,omitempty"`
-	WakeHistory         []int64                     `json:"wake_history,omitempty"`
-	SubscriptionID      string                      `json:"subscription_id,omitempty"`
-	CustomerID          string                      `json:"customer_id,omitempty"`
-	CancelledAt         int64                       `json:"cancelled_at,omitempty"`
-	BackdateRenewal     bool                        `json:"backdate_renewal"` // D-35 default: false
-	PendingWake         bool                        `json:"pending_wake,omitempty"`
-	PendingWakeAttempts int                         `json:"pending_wake_attempts,omitempty"`
-	PendingWakeNextAt   int64                       `json:"pending_wake_next_at,omitempty"`
-	PendingOwner        string                      `json:"pending_owner,omitempty"`
-	PendingCancelSubs   []pendingCancelSub          `json:"pending_cancel_subs,omitempty"` // I-6: replaced Stripe sub IDs awaiting cancel by web
-	ReplacedSubs        map[string]int64            `json:"replaced_subs,omitempty"`       // I-6: recently replaced sub IDs -> replaced_at unix (for double-charge invoice alerts)
-	AppliedEvents       []string                    `json:"applied_events,omitempty"`
-	RenewNonces         map[string]renewNonceRecord `json:"renew_nonces,omitempty"` // broker-verified nonces; pruned by RetainExp
-	AlertEmails         []string                    `json:"alert_emails,omitempty"`
-	AlertsSent          map[string]int64            `json:"alerts_sent,omitempty"`
-	RenewURL            string                      `json:"renew_url,omitempty"`
-	UpdatedAt           int64                       `json:"updated_at,omitempty"`
+	Plan                string                       `json:"plan"` // "free" | "personal" | "work"
+	State               string                       `json:"state"`
+	PaidUntil           int64                        `json:"paid_until,omitempty"`
+	GraceUntil          int64                        `json:"grace_until,omitempty"`
+	SleepSince          int64                        `json:"sleep_since,omitempty"`
+	DeleteAfter         int64                        `json:"delete_after,omitempty"`
+	WakeStartedAt       int64                        `json:"wake_started_at,omitempty"`
+	WakeReadyAt         int64                        `json:"wake_ready_at,omitempty"`
+	WakeUntil           int64                        `json:"wake_until,omitempty"`
+	WakeCeiling         int64                        `json:"wake_ceiling,omitempty"`
+	WakeHistory         []int64                      `json:"wake_history,omitempty"`
+	SubscriptionID      string                       `json:"subscription_id,omitempty"`
+	CustomerID          string                       `json:"customer_id,omitempty"`
+	CancelledAt         int64                        `json:"cancelled_at,omitempty"`
+	BackdateRenewal     bool                         `json:"backdate_renewal"` // D-35 default: false
+	PendingWake         bool                         `json:"pending_wake,omitempty"`
+	PendingWakeAttempts int                          `json:"pending_wake_attempts,omitempty"`
+	PendingWakeNextAt   int64                        `json:"pending_wake_next_at,omitempty"`
+	PendingOwner        string                       `json:"pending_owner,omitempty"`
+	PendingCancelSubs   []pendingCancelSub           `json:"pending_cancel_subs,omitempty"` // I-6: replaced Stripe sub IDs awaiting cancel by web
+	ReplacedSubs        map[string]int64             `json:"replaced_subs,omitempty"`       // I-6: recently replaced sub IDs -> replaced_at unix (for double-charge invoice alerts)
+	AppliedEvents       []string                     `json:"applied_events,omitempty"`
+	RenewNonces         map[string]renewNonceRecord  `json:"renew_nonces,omitempty"`  // broker-verified nonces; pruned by RetainExp
+	DeleteNonces        map[string]deleteNonceRecord `json:"delete_nonces,omitempty"` // I-24: broker-verified owner delete nonces; pruned by RetainExp
+	AlertEmails         []string                     `json:"alert_emails,omitempty"`
+	AlertsSent          map[string]int64             `json:"alerts_sent,omitempty"`
+	RenewURL            string                       `json:"renew_url,omitempty"`
+	UpdatedAt           int64                        `json:"updated_at,omitempty"`
+}
+
+type portalHostMeta struct {
+	Pen             string `json:"pen"`
+	DeleteURL       string `json:"delete_url"`
+	HasSubscription bool   `json:"has_subscription,omitempty"`
 }
 
 type portalBillingStatus struct {
@@ -159,6 +176,98 @@ func (b *broker) lifecyclePath(pen string) string {
 // /var/lib/registrar/billing-status.json and served to members via GET /api/me.
 func (b *broker) registrarBillingPath(pen string) string {
 	return filepath.Join(b.home, "pens", pen, "data", "registrar", "billing-status.json")
+}
+
+// registrarHostMetaPath is mounted inside the registrar container as
+// /var/lib/registrar/host-meta.json for hosted pens (free and paid) so owners
+// can initiate self-service pen deletion without altering billing-status.json.
+func (b *broker) registrarHostMetaPath(pen string) string {
+	return filepath.Join(b.home, "pens", pen, "data", "registrar", "host-meta.json")
+}
+
+func (b *broker) deleteOriginForPen(rec *penLifecycle) string {
+	if rec != nil {
+		if o := sanitizeHTTPSOrigin(rec.RenewURL); o != "" {
+			return o
+		}
+		if o := b.renewOriginForPen(rec.Plan); o != "" {
+			return o
+		}
+	}
+	return b.renewOriginForPen(planPersonal)
+}
+
+func (b *broker) syncRegistrarHostMeta(pen string, rec *penLifecycle) error {
+	penDir := filepath.Join(b.home, "pens", pen)
+	if _, err := os.Stat(filepath.Join(penDir, ".retired")); err == nil {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(penDir, ".removed")); err == nil {
+		return nil
+	}
+	metaPath := b.registrarHostMetaPath(pen)
+	dir := filepath.Dir(metaPath)
+	fi, err := os.Stat(dir)
+	if err != nil || !fi.IsDir() {
+		return nil
+	}
+	origin := b.deleteOriginForPen(rec)
+	if origin == "" {
+		return nil
+	}
+	meta := portalHostMeta{
+		Pen:             pen,
+		DeleteURL:       origin,
+		HasSubscription: rec != nil && rec.SubscriptionID != "" && rec.CancelledAt == 0,
+	}
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	tmp, err := os.CreateTemp(dir, ".host-meta-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	_ = tmp.Chmod(0o644)
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, metaPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+// syncAllRegistrarHostMeta backfills host-meta.json on broker startup for all
+// existing non-retired pens so active, grace, and renew_only pens immediately
+// expose self-service deletion after an upgrade.
+func (b *broker) syncAllRegistrarHostMeta() {
+	entries, err := os.ReadDir(filepath.Join(b.home, "pens"))
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pen := e.Name()
+		if _, ok := validPen(pen); !ok {
+			continue
+		}
+		rec, _ := loadPenLifecycle(b.lifecyclePath(pen))
+		if err := b.syncRegistrarHostMeta(pen, rec); err != nil {
+			log.Printf("host-meta %s: %v", pen, err)
+		}
+	}
 }
 
 // renewKeyPath is the per-pen 256-bit HMAC key written by registrar (0600) and
@@ -634,9 +743,15 @@ func (b *broker) initPenLifecycle(pen, plan, code string, paid bool, now time.Ti
 		}
 	}
 	path := b.lifecyclePath(pen)
-	return withPenLifecycleFileLock(path, func() error {
+	if err := withPenLifecycleFileLock(path, func() error {
 		return savePenLifecycle(path, rec)
-	})
+	}); err != nil {
+		return err
+	}
+	if err := b.syncRegistrarHostMeta(pen, rec); err != nil {
+		log.Printf("lifecycle %s: write host-meta.json: %v", pen, err)
+	}
+	return nil
 }
 
 // recordRenewal idempotently records a Stripe renewal event (invoice or checkout
@@ -732,6 +847,9 @@ func (b *broker) recordRenewal(pen, eventID, subID, custID, renewNonce string, n
 	if err := syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &updated, b.renewOriginForPen(updated.Plan)); err != nil {
 		log.Printf("lifecycle %s: clear grace banner: %v", pen, err)
 	}
+	if err := b.syncRegistrarHostMeta(pen, &updated); err != nil {
+		log.Printf("lifecycle %s: update host-meta.json: %v", pen, err)
+	}
 	b.ledger(fmt.Sprintf("%s renewed %s until %s (event=%s, backdate=%v, pending_wake=%v, pending_owner=%s)",
 		now.UTC().Format(time.RFC3339), pen, time.Unix(updated.PaidUntil, 0).UTC().Format("2006-01-02"), eventID, backdate, sleeping, updated.PendingOwner))
 	return &updated, false, sleeping, nil
@@ -779,6 +897,11 @@ func (b *broker) memberRole(ctx context.Context, pen, handle string) (role, stat
 func (b *broker) isPenAdminOrOwner(ctx context.Context, pen, handle string) bool {
 	role, status, ok, _ := b.memberRole(ctx, pen, handle)
 	return ok && (role == "admin" || role == "owner") && status == "active"
+}
+
+func (b *broker) isPenOwner(ctx context.Context, pen, handle string) bool {
+	role, status, ok, _ := b.memberRole(ctx, pen, handle)
+	return ok && role == "owner" && status == "active"
 }
 
 // applyPendingOwner promotes rec.PendingOwner to owner if they are currently an
@@ -1181,25 +1304,37 @@ type verifiedRenewToken struct {
 }
 
 func (b *broker) verifyRenewToken(raw string, now time.Time) (*verifiedRenewToken, error) {
+	return b.verifySignedToken(raw, renewTokenPurpose, false, now,
+		"invalid renewal token",
+		"renewal link expired; open your pen's home page and click Renew now again")
+}
+
+func (b *broker) verifyDeleteToken(raw string, now time.Time) (*verifiedRenewToken, error) {
+	return b.verifySignedToken(raw, deleteTokenPurpose, true, now,
+		"invalid delete token",
+		"delete link expired; open your pen's home page and start again")
+}
+
+func (b *broker) verifySignedToken(raw, purpose string, ownerOnly bool, now time.Time, invalidMsg, expiredMsg string) (*verifiedRenewToken, error) {
 	raw = strings.TrimSpace(raw)
 	if len(raw) < 20 || len(raw) > 512 {
-		return nil, errors.New("invalid renewal token")
+		return nil, errors.New(invalidMsg)
 	}
 	payloadB64, sigB64, ok := strings.Cut(raw, ".")
 	if !ok || payloadB64 == "" || sigB64 == "" || strings.Contains(sigB64, ".") {
-		return nil, errors.New("invalid renewal token")
+		return nil, errors.New(invalidMsg)
 	}
 	payloadBytes, err := base64.RawURLEncoding.DecodeString(payloadB64)
 	if err != nil {
-		return nil, errors.New("invalid renewal token")
+		return nil, errors.New(invalidMsg)
 	}
 	sigBytes, err := base64.RawURLEncoding.DecodeString(sigB64)
 	if err != nil || len(sigBytes) != sha256.Size {
-		return nil, errors.New("invalid renewal token")
+		return nil, errors.New(invalidMsg)
 	}
 	parts := strings.Split(string(payloadBytes), "|")
 	if len(parts) != 6 || parts[0] != "v1" {
-		return nil, errors.New("invalid renewal token")
+		return nil, errors.New(invalidMsg)
 	}
 	pen := strings.ToLower(strings.TrimSpace(parts[1]))
 	handle := strings.ToLower(strings.TrimSpace(parts[2]))
@@ -1207,41 +1342,367 @@ func (b *broker) verifyRenewToken(raw string, now time.Time) (*verifiedRenewToke
 	exp, err := strconv.ParseInt(parts[4], 10, 64)
 	nonce := strings.ToLower(strings.TrimSpace(parts[5]))
 	if _, ok := validPen(pen); !ok {
-		return nil, errors.New("invalid renewal token")
+		return nil, errors.New(invalidMsg)
 	}
 	if _, ok := validHandle(handle); !ok {
-		return nil, errors.New("invalid renewal token")
+		return nil, errors.New(invalidMsg)
 	}
-	if role != "owner" && role != "admin" {
-		return nil, errors.New("invalid renewal token")
+	if ownerOnly {
+		if role != "owner" {
+			return nil, errors.New(invalidMsg)
+		}
+	} else if role != "owner" && role != "admin" {
+		return nil, errors.New(invalidMsg)
 	}
 	if len(nonce) < 16 || len(nonce) > 64 {
-		return nil, errors.New("invalid renewal token")
+		return nil, errors.New(invalidMsg)
 	}
 	if _, err := hex.DecodeString(nonce); err != nil {
-		return nil, errors.New("invalid renewal token")
+		return nil, errors.New(invalidMsg)
 	}
 	nowUnix := now.UTC().Unix()
 	if err != nil || exp < nowUnix || exp > now.UTC().Add(renewTokenMaxTTL).Unix() {
-		return nil, errors.New("renewal link expired; open your pen's home page and click Renew now again")
+		return nil, errors.New(expiredMsg)
 	}
 
 	// Verify HMAC against this pen's own 0600 key with fixed purpose prefix.
 	rawKey, err := os.ReadFile(b.renewKeyPath(pen))
 	if err != nil {
-		return nil, errors.New("invalid renewal token")
+		return nil, errors.New(invalidMsg)
 	}
 	key, err := hex.DecodeString(strings.TrimSpace(string(rawKey)))
 	if err != nil || len(key) != 32 {
-		return nil, errors.New("invalid renewal token")
+		return nil, errors.New(invalidMsg)
 	}
 	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(renewTokenPurpose))
+	mac.Write([]byte(purpose))
 	mac.Write([]byte(payloadB64))
 	if !hmac.Equal(mac.Sum(nil), sigBytes) {
-		return nil, errors.New("invalid renewal token")
+		return nil, errors.New(invalidMsg)
 	}
 	return &verifiedRenewToken{Pen: pen, Handle: handle, Role: role, Exp: exp, Nonce: nonce}, nil
+}
+
+func pruneDeleteNonces(rec *penLifecycle, nowUnix int64) {
+	if len(rec.DeleteNonces) == 0 {
+		return
+	}
+	for n, nr := range rec.DeleteNonces {
+		exp := nr.RetainExp
+		if exp == 0 {
+			exp = nr.Exp
+		}
+		if exp < nowUnix {
+			delete(rec.DeleteNonces, n)
+		}
+	}
+	if len(rec.DeleteNonces) == 0 {
+		rec.DeleteNonces = nil
+	}
+}
+
+// penDeletePrepare verifies an owner-signed self-service delete token
+// (hogman-delete-v1:), checks live owner status and qualifying pen state
+// (active, grace, or renew_only — sleeping pens have no portal and must be
+// woken first or left to the lifecycle), consumes the single-use nonce, and
+// returns any Stripe subscription IDs that signup-web must cancel BEFORE
+// calling /pen-delete/commit (I-24).
+func (b *broker) penDeletePrepare(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Token string `json:"token"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		jsonOut(w, 400, map[string]string{"error": "bad request"})
+		return
+	}
+	now := b.now()
+	tok, err := b.verifyDeleteToken(in.Token, now)
+	if err != nil {
+		jsonOut(w, 403, map[string]string{"error": err.Error()})
+		return
+	}
+
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
+
+	penDir := filepath.Join(b.home, "pens", tok.Pen)
+	if fi, serr := os.Stat(penDir); serr != nil || !fi.IsDir() {
+		jsonOut(w, 404, map[string]string{"error": "pen not found"})
+		return
+	}
+	if _, serr := os.Stat(filepath.Join(penDir, ".retired")); serr == nil {
+		jsonOut(w, 409, map[string]string{"error": "this pen has already been deleted"})
+		return
+	}
+	if _, serr := os.Stat(filepath.Join(penDir, ".removed")); serr == nil {
+		jsonOut(w, 409, map[string]string{"error": "this pen has already been deleted"})
+		return
+	}
+	if _, serr := os.Stat(filepath.Join(penDir, ".sleeping")); serr == nil {
+		if _, werr := os.Stat(filepath.Join(penDir, ".renew-wake")); werr != nil {
+			jsonOut(w, 409, map[string]string{"error": "sleeping pens cannot be deleted from the portal; wake the pen first or let it follow the lifecycle"})
+			return
+		}
+	}
+
+	path := b.lifecyclePath(tok.Pen)
+	rec, err := loadPenLifecycle(path)
+	if os.IsNotExist(err) {
+		rec = &penLifecycle{Plan: planFree, State: stateActive, UpdatedAt: now.Unix()}
+	} else if err != nil {
+		log.Printf("pen delete %s: load lifecycle: %v", tok.Pen, err)
+		jsonOut(w, 500, map[string]string{"error": "could not process deletion right now"})
+		return
+	}
+	if rec.State == stateDeleted {
+		jsonOut(w, 409, map[string]string{"error": "this pen has already been deleted"})
+		return
+	}
+	if rec.State == stateSleeping {
+		jsonOut(w, 409, map[string]string{"error": "sleeping pens cannot be deleted from the portal; wake the pen first or let it follow the lifecycle"})
+		return
+	}
+	if rec.State != stateActive && rec.State != stateGrace && rec.State != stateRenewOnly {
+		jsonOut(w, 409, map[string]string{"error": "this pen cannot be deleted in its current state"})
+		return
+	}
+
+	if !b.isPenOwner(r.Context(), tok.Pen, tok.Handle) {
+		jsonOut(w, 403, map[string]string{"error": "only active owners can delete this pen"})
+		return
+	}
+
+	nowUnix := now.Unix()
+	var replayErr bool
+	var subIDs []string
+	if err := withPenLifecycleFileLock(path, func() error {
+		cur, lerr := loadPenLifecycle(path)
+		if os.IsNotExist(lerr) {
+			cur = &penLifecycle{Plan: planFree, State: stateActive}
+		} else if lerr != nil {
+			return lerr
+		}
+		pruneDeleteNonces(cur, nowUnix)
+		if cur.DeleteNonces == nil {
+			cur.DeleteNonces = map[string]deleteNonceRecord{}
+		}
+		if _, used := cur.DeleteNonces[tok.Nonce]; used {
+			replayErr = true
+			return nil
+		}
+		seen := map[string]bool{}
+		if cur.SubscriptionID != "" && cur.CancelledAt == 0 && strings.HasPrefix(cur.SubscriptionID, "sub_") {
+			seen[cur.SubscriptionID] = true
+			subIDs = append(subIDs, cur.SubscriptionID)
+		}
+		for _, p := range cur.PendingCancelSubs {
+			if strings.HasPrefix(p.SubscriptionID, "sub_") && !seen[p.SubscriptionID] {
+				seen[p.SubscriptionID] = true
+				subIDs = append(subIDs, p.SubscriptionID)
+			}
+		}
+		cur.DeleteNonces[tok.Nonce] = deleteNonceRecord{
+			Handle:             tok.Handle,
+			Exp:                tok.Exp,
+			RetainExp:          now.Add(deleteNonceRetainTTL).Unix(),
+			RequiredCancelSubs: append([]string(nil), subIDs...),
+		}
+		cur.UpdatedAt = nowUnix
+		return savePenLifecycle(path, cur)
+	}); err != nil {
+		log.Printf("pen delete %s: save delete nonce: %v", tok.Pen, err)
+		jsonOut(w, 500, map[string]string{"error": "could not process deletion right now"})
+		return
+	}
+	if replayErr {
+		jsonOut(w, 403, map[string]string{"error": "this delete link was already used; start again from your pen's home page"})
+		return
+	}
+	if subIDs == nil {
+		subIDs = []string{}
+	}
+	jsonOut(w, 200, map[string]any{
+		"ok":               true,
+		"pen":              tok.Pen,
+		"handle":           tok.Handle,
+		"delete_nonce":     tok.Nonce,
+		"subscription_ids": subIDs,
+	})
+}
+
+// penDeleteCommit executes `hogman-host purge --owner-delete <pen>` ONLY after
+// /pen-delete/prepare recorded a verified owner delete nonce and signup-web
+// cancelled any active Stripe subscriptions (I-24).
+//
+// Partial-failure invariant: any cancelled Stripe subscriptions are recorded
+// in lifecycle.json BEFORE invoking purge. If purge fails, the pen stays intact
+// (following the normal lifecycle with no active renewal), an operator ntfy is
+// sent, and the response clearly reports billing_cancelled=true, pen_removed=false.
+func (b *broker) penDeleteCommit(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Pen           string   `json:"pen"`
+		DeleteNonce   string   `json:"delete_nonce"`
+		CancelledSubs []string `json:"cancelled_subs,omitempty"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		jsonOut(w, 400, map[string]string{"error": "bad request"})
+		return
+	}
+	pen := strings.ToLower(strings.TrimSpace(in.Pen))
+	if _, ok := validPen(pen); !ok {
+		jsonOut(w, 400, map[string]string{"error": "invalid pen name"})
+		return
+	}
+	nonce := strings.ToLower(strings.TrimSpace(in.DeleteNonce))
+	if len(nonce) < 16 || len(nonce) > 64 {
+		jsonOut(w, 403, map[string]string{"error": "invalid delete nonce"})
+		return
+	}
+	if _, err := hex.DecodeString(nonce); err != nil {
+		jsonOut(w, 403, map[string]string{"error": "invalid delete nonce"})
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
+
+	now := b.now()
+	nowUnix := now.Unix()
+	path := b.lifecyclePath(pen)
+
+	var handle string
+	var authStatus int
+	var authErr string
+	if err := withPenLifecycleFileLock(path, func() error {
+		cur, lerr := loadPenLifecycle(path)
+		if lerr != nil {
+			authStatus = 403
+			authErr = "invalid delete request"
+			return nil
+		}
+		nr, ok := cur.DeleteNonces[nonce]
+		if !ok || nr.Committed || nowUnix > nr.Exp+300 {
+			authStatus = 403
+			authErr = "this delete request has expired or was already completed"
+			return nil
+		}
+
+		// Billing-first enforcement in the broker: refuse to purge unless every
+		// subscription ID recorded at /pen-delete/prepare is confirmed in
+		// cancelled_subs, so the guarantee never relies on signup-web alone.
+		cancelled := map[string]bool{}
+		for _, id := range in.CancelledSubs {
+			if strings.HasPrefix(id, "sub_") {
+				cancelled[id] = true
+			}
+		}
+		for _, reqSub := range nr.RequiredCancelSubs {
+			if !cancelled[reqSub] {
+				authStatus = 409
+				authErr = "billing cancellation was not confirmed for all active subscriptions; your pen was not deleted"
+				return nil
+			}
+		}
+
+		nr.Committed = true
+		cur.DeleteNonces[nonce] = nr
+		handle = nr.Handle
+
+		if len(cancelled) > 0 {
+			if cur.SubscriptionID != "" && cancelled[cur.SubscriptionID] && cur.CancelledAt == 0 {
+				cur.CancelledAt = nowUnix
+			}
+			if len(cur.PendingCancelSubs) > 0 {
+				kept := make([]pendingCancelSub, 0, len(cur.PendingCancelSubs))
+				for _, p := range cur.PendingCancelSubs {
+					if !cancelled[p.SubscriptionID] {
+						kept = append(kept, p)
+					}
+				}
+				cur.PendingCancelSubs = kept
+			}
+		}
+		cur.UpdatedAt = nowUnix
+		if serr := savePenLifecycle(path, cur); serr != nil {
+			return serr
+		}
+		_ = b.syncRegistrarHostMeta(pen, cur)
+		return nil
+	}); err != nil {
+		log.Printf("pen delete commit %s: save state: %v", pen, err)
+		jsonOut(w, 500, map[string]string{"error": "could not process deletion right now"})
+		return
+	}
+	if authErr != "" {
+		jsonOut(w, authStatus, map[string]string{"error": authErr})
+		return
+	}
+
+	hadSub := len(in.CancelledSubs) > 0
+	pctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	_, code, stderr := b.runUnbounded(pctx, "purge", "--owner-delete", pen)
+	b.invalidateCapacityCache()
+	if code != 0 {
+		detail := lastLine(stderr)
+		if hadSub {
+			msg := fmt.Sprintf("Pen %s self-delete partial failure: Stripe subscription cancelled (%s), but purge failed (exit %d): %s",
+				pen, strings.Join(in.CancelledSubs, ","), code, detail)
+			log.Print(msg)
+			b.ledger(fmt.Sprintf("%s %s", now.Format(time.RFC3339), msg))
+			b.notifyKind("health", msg)
+			jsonOut(w, 500, map[string]any{
+				"error":             fmt.Sprintf("Your subscription for %s was cancelled, but we could not finish removing the pen right now. Your pen is still intact for now and will follow the normal lifecycle; the operator has been notified.", pen),
+				"billing_cancelled": true,
+				"pen_removed":       false,
+			})
+			return
+		}
+		msg := fmt.Sprintf("Pen %s self-delete purge failed (exit %d): %s", pen, code, detail)
+		log.Print(msg)
+		b.ledger(fmt.Sprintf("%s %s", now.Format(time.RFC3339), msg))
+		b.notifyKind("health", msg)
+		jsonOut(w, 500, map[string]any{
+			"error":             fmt.Sprintf("We could not finish removing %s right now. Your pen is still intact and the operator has been notified.", pen),
+			"billing_cancelled": false,
+			"pen_removed":       false,
+		})
+		return
+	}
+
+	_ = withPenLifecycleFileLock(path, func() error {
+		cur, lerr := loadPenLifecycle(path)
+		if lerr != nil {
+			cur = &penLifecycle{Plan: planFree}
+		}
+		cur.State = stateDeleted
+		cur.WakeStartedAt = 0
+		cur.WakeReadyAt = 0
+		cur.WakeUntil = 0
+		cur.WakeCeiling = 0
+		cur.PendingWake = false
+		cur.PendingWakeAttempts = 0
+		cur.PendingWakeNextAt = 0
+		cur.UpdatedAt = nowUnix
+		return savePenLifecycle(path, cur)
+	})
+
+	b.ledger(fmt.Sprintf("%s pen %s self-deleted by owner %s (had_subscription=%v)",
+		now.Format(time.RFC3339), pen, handle, hadSub))
+	b.notifyKind("raised", fmt.Sprintf("Pen deleted by owner: %s (by %s)", pen, handle))
+	jsonOut(w, 200, map[string]any{
+		"ok":               true,
+		"pen":              pen,
+		"had_subscription": hadSub,
+	})
 }
 
 // renewVerify authenticates a short-lived, single-use signed renewal token

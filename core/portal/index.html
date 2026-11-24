@@ -204,6 +204,29 @@
     </p>
     <p class="muted hint" id="host-hint-ctlog">Site names appear in public certificate logs (contents stay private) — see the guide for <code>--private-name</code> if you want a random hostname.</p>
   </section>
+
+  <section id="pen-delete" class="panel danger-panel" hidden>
+    <div class="section-head">
+      <h2>Delete this pen</h2>
+    </div>
+    <p class="muted hint" id="pen-delete-intro">Permanently shut down <strong id="pen-delete-name"></strong> and cancel any active subscription.</p>
+    <div id="pen-delete-open-row" class="btn-row">
+      <button id="pen-delete-open" class="btn-danger-outline" type="button">Delete this pen&hellip;</button>
+    </div>
+    <div id="pen-delete-confirm-box" class="delete-confirm-box" hidden>
+      <p class="delete-lead">Deleting <strong id="pen-delete-lead-name"></strong> takes effect immediately:</p>
+      <ul class="delete-bullets" id="pen-delete-bullets"></ul>
+      <form id="pen-delete-form" class="delete-form" novalidate>
+        <label for="pen-delete-input" id="pen-delete-label">Type the pen name to confirm</label>
+        <div class="row">
+          <input id="pen-delete-input" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="63" required>
+          <button id="pen-delete-go" class="btn-danger" type="submit" disabled>Delete this pen permanently</button>
+          <button id="pen-delete-cancel" class="link" type="button">Cancel</button>
+        </div>
+      </form>
+      <p class="error" id="pen-delete-err" hidden></p>
+    </div>
+  </section>
 </main>
 
 <footer class="foot">

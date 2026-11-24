@@ -130,6 +130,7 @@ func runBroker() {
 		v := false
 		b.expectLivemode = &v
 	}
+	b.syncAllRegistrarHostMeta()
 	go b.runRenewWakeWatcher()
 	addr := env("BROKER_ADDR", ":9090")
 	log.Printf("broker on %s", addr)
@@ -221,6 +222,8 @@ func (b *broker) handler() http.Handler {
 	mux.HandleFunc("POST /lifecycle/cancel-alert", b.lifecycleCancelAlert)
 	mux.HandleFunc("POST /lifecycle/wake", b.lifecycleWakeHandler)
 	mux.HandleFunc("POST /renew-verify", b.renewVerify)
+	mux.HandleFunc("POST /pen-delete/prepare", b.penDeletePrepare)
+	mux.HandleFunc("POST /pen-delete/commit", b.penDeleteCommit)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, hasBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !hasBearer || subtle.ConstantTimeCompare([]byte(got), []byte(b.token)) != 1 {

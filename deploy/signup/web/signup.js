@@ -153,14 +153,15 @@
 
   // Optional Cloudflare Turnstile widget (loaded only when server advertises a site key).
   let tsSiteKey = '';
-  let tsFormToken = '', tsWaitToken = '', tsRenewToken = '', tsWakeToken = '';
-  let tsFormWidget = null, tsWaitWidget = null, tsRenewWidget = null, tsWakeWidget = null;
+  let tsFormToken = '', tsWaitToken = '', tsRenewToken = '', tsWakeToken = '', tsDeleteToken = '';
+  let tsFormWidget = null, tsWaitWidget = null, tsRenewWidget = null, tsWakeWidget = null, tsDeleteWidget = null;
   const resetTurnstile = kind => {
     if (!window.turnstile) return;
     if (kind === 'form' && tsFormWidget !== null) { tsFormToken = ''; window.turnstile.reset(tsFormWidget); }
     if (kind === 'wait' && tsWaitWidget !== null) { tsWaitToken = ''; window.turnstile.reset(tsWaitWidget); }
     if (kind === 'renew' && tsRenewWidget !== null) { tsRenewToken = ''; window.turnstile.reset(tsRenewWidget); }
     if (kind === 'wake' && tsWakeWidget !== null) { tsWakeToken = ''; window.turnstile.reset(tsWakeWidget); }
+    if (kind === 'delete' && tsDeleteWidget !== null) { tsDeleteToken = ''; window.turnstile.reset(tsDeleteWidget); }
   };
   const mountTurnstile = siteKey => {
     if (!siteKey || tsSiteKey) return;
@@ -202,6 +203,15 @@
           callback: t => { tsWakeToken = t; },
           'expired-callback': () => { tsWakeToken = ''; },
           'error-callback': () => { tsWakeToken = ''; },
+        });
+      }
+      if ($('ts-delete') && tsDeleteWidget === null) {
+        $('ts-delete').hidden = false;
+        tsDeleteWidget = window.turnstile.render('#ts-delete', {
+          sitekey: tsSiteKey, theme: widgetTheme,
+          callback: t => { tsDeleteToken = t; },
+          'expired-callback': () => { tsDeleteToken = ''; },
+          'error-callback': () => { tsDeleteToken = ''; },
         });
       }
     };
@@ -258,7 +268,7 @@
   for (const f of ['pen', 'handle']) $(f).addEventListener('change', setNames);   // autofill, paste, scripts
 
   let activeView = 'form';
-  const show = id => { activeView = id; for (const s of ['form', 'wait', 'waited', 'renew', 'renewed', 'wake', 'working', 'done']) $(s).hidden = s !== id; };
+  const show = id => { activeView = id; for (const s of ['form', 'wait', 'waited', 'renew', 'renewed', 'wake', 'delete', 'deleted', 'working', 'done']) $(s).hidden = s !== id; };
   const cleanURL = () => location.pathname + location.search;
 
   // D-35 / I-7 Part 2: public sleeping-pen wake flow via /#wake=<pen>.
@@ -334,6 +344,75 @@
         $('renew-err').hidden = false;
         $('renew-go').disabled = false;
       }
+    });
+  }
+
+  // I-24: in-pen owner-authenticated self-service deletion via /#delete=<signed-token>.
+  // The token lives only in the URL fragment and is stripped immediately from history.
+  const deleteMatch = location.hash.match(/(?:^|[#&])delete=([A-Za-z0-9._-]+)/);
+  let deleteToken = deleteMatch ? deleteMatch[1] : '';
+  let deletePenDisplay = '';
+  if (deleteToken) {
+    history.replaceState(null, '', location.pathname);
+    try {
+      const pB64 = deleteToken.split('.')[0].replace(/-/g, '+').replace(/_/g, '/');
+      const pad = pB64.length % 4 === 0 ? '' : '='.repeat(4 - (pB64.length % 4));
+      const parts = atob(pB64 + pad).split('|');
+      if (parts.length === 6 && parts[0] === 'v1' && /^[a-z0-9-]+$/i.test(parts[1])) {
+        deletePenDisplay = parts[1].toLowerCase();
+      }
+    } catch (_) { /* server verifies token authoritatively */ }
+    if (deletePenDisplay && $('delete-pen')) {
+      $('delete-pen').textContent = deletePenDisplay;
+    }
+  }
+  if ($('delete-go')) {
+    $('delete-go').addEventListener('click', async () => {
+      $('delete-err').hidden = true;
+      if (!deleteToken) {
+        $('delete-err').textContent = 'This delete link has already been used. Open your pen\u2019s home page to start again.';
+        $('delete-err').hidden = false;
+        return;
+      }
+      if (tsSiteKey && !tsDeleteToken) {
+        $('delete-err').textContent = 'Please complete the verification check first.';
+        $('delete-err').hidden = false;
+        return;
+      }
+      $('delete-go').disabled = true;
+      $('delete-go').textContent = 'Deleting pen\u2026';
+      try {
+        const body = { token: deleteToken };
+        if (tsSiteKey) body.turnstile_token = tsDeleteToken;
+        const r = await api('POST', '/delete', body);
+        deleteToken = '';
+        const pen = r.pen || deletePenDisplay || 'your pen';
+        $('deleted-text').textContent = `Your pen ${pen} has been deleted.`;
+        if (r.had_subscription) {
+          $('deleted-sub').textContent = 'Your subscription has been cancelled immediately (remaining paid time is forfeited \u2014 no refund).';
+          $('deleted-sub').hidden = false;
+        } else {
+          $('deleted-sub').hidden = true;
+        }
+        show('deleted');
+      } catch (e) {
+        resetTurnstile('delete');
+        $('delete-err').textContent = e.message;
+        $('delete-err').hidden = false;
+        $('delete-go').disabled = false;
+        $('delete-go').textContent = 'Delete this pen permanently';
+      }
+    });
+  }
+  if ($('copy-deleted-cmd')) {
+    $('copy-deleted-cmd').addEventListener('click', async () => {
+      const btn = $('copy-deleted-cmd');
+      const txt = $('deleted-cmd').textContent || '';
+      try {
+        await navigator.clipboard.writeText(txt);
+        btn.textContent = 'Copied';
+        setTimeout(() => { btn.textContent = 'Copy command'; }, 1600);
+      } catch (_) {}
     });
   }
 
@@ -496,6 +575,8 @@
     show('renewed');
   } else if (renewToken) {
     show('renew');
+  } else if (deleteToken) {
+    show('delete');
   } else if (wakePen) {
     show('wake');
   } else if (location.hash === '#wait') {
@@ -530,7 +611,7 @@
     if (!s.open) {
       $('closed').hidden = false;
       $('go').disabled = true;
-      if (activeView !== 'working' && activeView !== 'done' && activeView !== 'renew' && activeView !== 'renewed' && activeView !== 'wake') show('wait');
+      if (activeView !== 'working' && activeView !== 'done' && activeView !== 'renew' && activeView !== 'renewed' && activeView !== 'wake' && activeView !== 'delete' && activeView !== 'deleted') show('wait');
     }
   }).catch(() => { $('down').hidden = false; });
   if (vanityHint) {
