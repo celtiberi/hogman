@@ -13,7 +13,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -22,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"time"
 
@@ -37,41 +35,10 @@ func (e *userError) Error() string { return e.msg }
 
 func errorf(f string, a ...any) error { return &userError{fmt.Sprintf(f, a...)} }
 
-const usageText = `hogman-join: join this device to a Hogman private network
-
-usage:
-  hogman-join [options] '<link>'      join, using an invite or device link
-  hogman-join update ['<link|host>']  update hogman-join from GitHub Releases (or a pen's server)
-  hogman-join leave '<pen>'           take this computer out of one pen (its link, host or name)
-  hogman-join leave-all               take this computer out of every pen (asks first)
-  hogman-join uninstall               leave every pen and remove Hogman's settings (asks first)
-  hogman-join status                  show installed pens, browser extension host, and VPN proxy state
-  hogman-join browser-setup           register the browser extension native messaging host (no sudo)
-  hogman-join share <name> <target>   put a port, local URL, or folder on the pen over HTTPS
-                                      (hogman-join share --help for more)
-  hogman-join version                 print version and platform
-  hogman-join help [share|update]     show usage
-
-options:
-  --handle NAME     the name you want on the network (invite links only; asked if missing)
-  --hostname NAME   what this device is called on the network (default: this computer's name)
-  --no-service      don't register a login item, just run in the background
-  --no-system-proxy don't change this computer's automatic proxy setting
-  --dry-run         check the link and the network, then stop without changing anything
-  --no-open         don't open the portal in a browser at the end
-  --yes             answer prompts automatically where supported
-  --verbose         show the commands being run
-  --force           leave/share stop: override safety checks or clean up an unreachable pen
-  --version         print version and platform
-  --control-ca FILE extra certificate to trust for the public control server
-                    (test networks with a self-signed control host only)
-
-Quote the link: it contains '#' and '&'.
-`
-
 type options struct {
 	handle, hostname, controlCA string
 	yes, dryRun, noOpen         bool
+	linkStdin                   bool // join: read join link from stdin
 	force                       bool // leave/uninstall/share stop: override checks or clean up unreachable pen
 	alongside                   bool // accepted for old scripts; it's the only way now
 	noService, noSystemProxy    bool
@@ -81,187 +48,6 @@ type options struct {
 	noteSet                     bool
 	chromeID                    string // browser-setup: optional unpacked Chrome extension ID
 	firefoxID                   string // browser-setup: optional Firefox Gecko extension ID
-	seenFlags                   map[string]bool
-}
-
-func usageForSubcmd(subcmd string) string {
-	switch subcmd {
-	case "share":
-		return shareUsage
-	case "update":
-		return updateUsage
-	default:
-		return usageText
-	}
-}
-
-func isBoolFlag(fs *flag.FlagSet, name string) bool {
-	f := fs.Lookup(name)
-	if f == nil {
-		return false
-	}
-	type boolFlagger interface{ IsBoolFlag() bool }
-	bf, ok := f.Value.(boolFlagger)
-	return ok && bf.IsBoolFlag()
-}
-
-func validateSubcommandFlags(pos []string, o options) error {
-	if len(o.seenFlags) == 0 || len(pos) == 0 {
-		return nil
-	}
-	// Harmless global flags are accepted everywhere so scripts (like e2e
-	// harnesses prefixing --no-open) keep working. Only reject flags that
-	// would be unsafe or misleading if silently ignored (e.g. --dry-run on a
-	// destructive command, --force where it doesn't apply, or action flags on
-	// an unrelated subcommand).
-	sub := ""
-	var allowed map[string]bool
-	switch pos[0] {
-	case "leave":
-		sub = "leave"
-		allowed = map[string]bool{"force": true}
-	case "leave-all", "uninstall":
-		sub = pos[0]
-		allowed = map[string]bool{"force": true}
-	case "update":
-		sub = "update"
-		allowed = map[string]bool{"pen": true, "dry-run": true, "no-service": true}
-	case "share":
-		if len(pos) >= 2 && pos[1] == "list" {
-			sub = "share list"
-			allowed = map[string]bool{"pen": true}
-		} else if len(pos) >= 2 && pos[1] == "stop" {
-			sub = "share stop"
-			allowed = map[string]bool{"pen": true, "force": true}
-		} else {
-			sub = "share"
-			allowed = map[string]bool{"note": true, "background": true, "no-service": true, "pen": true}
-		}
-	case "status":
-		sub = "status"
-		allowed = map[string]bool{}
-	case "browser-setup":
-		sub = "browser-setup"
-		allowed = map[string]bool{"chrome-id": true, "firefox-id": true}
-	case "help", "version", "agent", "__agent-logout", "__share-run":
-		sub = pos[0]
-		allowed = map[string]bool{}
-	default:
-		if !strings.Contains(trimMatchingQuotes(pos[0]), "://") {
-			// Unknown command; reject unsafe flags like --dry-run instead of
-			// treating it as a join.
-			sub = pos[0]
-			allowed = map[string]bool{}
-		} else {
-			sub = "join"
-			allowed = map[string]bool{
-				"handle": true, "hostname": true, "dry-run": true,
-				"no-service": true, "no-system-proxy": true,
-			}
-		}
-	}
-	harmless := map[string]bool{
-		"no-open": true, "verbose": true, "yes": true,
-		"control-ca": true, "alongside": true,
-	}
-	var bad []string
-	for name := range o.seenFlags {
-		if !harmless[name] && !allowed[name] {
-			bad = append(bad, "--"+name)
-		}
-	}
-	if len(bad) == 0 {
-		return nil
-	}
-	// Deterministic order for error messages and tests.
-	for i := 0; i < len(bad); i++ {
-		for j := i + 1; j < len(bad); j++ {
-			if bad[j] < bad[i] {
-				bad[i], bad[j] = bad[j], bad[i]
-			}
-		}
-	}
-	return errorf("%s is not supported with %q", strings.Join(bad, ", "), sub)
-}
-
-func parseCLIArgs(raw []string) (pos []string, o options, showVersion bool, err error) {
-	fs := flag.NewFlagSet("hogman-join", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	fs.Usage = func() {} // printed explicitly by caller so --help goes to stdout with exit 0
-	fs.StringVar(&o.handle, "handle", "", "")
-	fs.StringVar(&o.hostname, "hostname", "", "")
-	fs.StringVar(&o.controlCA, "control-ca", "", "")
-	fs.BoolVar(&o.yes, "yes", false, "")
-	fs.BoolVar(&o.force, "force", false, "")
-	fs.BoolVar(&o.dryRun, "dry-run", false, "")
-	fs.BoolVar(&o.noOpen, "no-open", false, "")
-	fs.BoolVar(&verbose, "verbose", false, "")
-	fs.BoolVar(&o.alongside, "alongside", false, "")
-
-	fs.BoolVar(&o.noService, "no-service", false, "")
-	fs.BoolVar(&o.noSystemProxy, "no-system-proxy", false, "")
-	fs.StringVar(&o.pen, "pen", "", "")
-	gone := fs.Bool("tailscale", false, "") // removed (D-11); kept only to explain
-	fs.BoolVar(&o.background, "background", false, "")
-	fs.StringVar(&o.note, "note", "", "")
-	fs.StringVar(&o.chromeID, "chrome-id", "", "")
-	fs.StringVar(&o.firefoxID, "firefox-id", "", "")
-	ver := fs.Bool("version", false, "")
-
-	seen := map[string]bool{}
-	// Allow options before or after the link / share target, while honoring `--`
-	// as strict end-of-options and not confusing flag values (like `--note --`).
-	for i := 0; i < len(raw); {
-		arg := raw[i]
-		if arg == "--" {
-			pos = append(pos, raw[i+1:]...)
-			break
-		}
-		if len(arg) < 2 || arg[0] != '-' {
-			pos = append(pos, arg)
-			i++
-			continue
-		}
-		name := strings.TrimPrefix(arg, "-")
-		name = strings.TrimPrefix(name, "-")
-		hasEq := strings.Contains(name, "=")
-		if eq := strings.IndexByte(name, '='); eq >= 0 {
-			name = name[:eq]
-		}
-		step := 1
-		if !hasEq && fs.Lookup(name) != nil && !isBoolFlag(fs, name) && i+1 < len(raw) {
-			step = 2
-		}
-		if err := fs.Parse(raw[i : i+step]); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				sub := ""
-				if len(pos) > 0 {
-					sub = pos[0]
-				}
-				return []string{sub}, o, false, flag.ErrHelp
-			}
-			return nil, o, false, err
-		}
-		fs.Visit(func(f *flag.Flag) {
-			seen[f.Name] = true
-			if f.Name == "note" {
-				o.noteSet = true
-			}
-		})
-		i += step
-	}
-	o.seenFlags = seen
-	if *gone {
-		return nil, o, false, errorf("--tailscale no longer exists: every computer joins through Hogman's own connection,\n" +
-			"  which carries HTTPS to the pen and nothing else. Run the same command without it.\n" +
-			"  Why: https://hogman.network/docs/faq.html#not")
-	}
-	if !*ver {
-		if err := validateSubcommandFlags(pos, o); err != nil {
-			return nil, o, false, err
-		}
-	}
-	return pos, o, *ver, nil
 }
 
 func main() {
@@ -269,98 +55,7 @@ func main() {
 		runNativeHostMain()
 		return
 	}
-	pos, o, showVersion, err := parseCLIArgs(os.Args[1:])
-	if err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			sub := ""
-			if len(pos) > 0 {
-				sub = pos[0]
-			}
-			fmt.Print(usageForSubcmd(sub))
-			return
-		}
-		var u *userError
-		if errors.As(err, &u) {
-			fmt.Fprintf(os.Stderr, "\n✗ %s\n", u.msg)
-		} else {
-			fmt.Fprint(os.Stderr, usageText)
-		}
-		os.Exit(2)
-	}
-	if showVersion || (len(pos) == 1 && pos[0] == "version") {
-		fmt.Println("hogman-join", version, runtime.GOOS+"/"+runtime.GOARCH)
-		return
-	}
-	if len(pos) >= 1 && pos[0] == "help" {
-		sub := ""
-		if len(pos) >= 2 {
-			sub = pos[1]
-		}
-		fmt.Print(usageForSubcmd(sub))
-		return
-	}
-	switch {
-	case len(pos) == 2 && pos[0] == "__agent-logout":
-		agentLogout(pos[1])
-		return
-	case len(pos) == 2 && pos[0] == "agent":
-		// Internal: the long-running side-by-side connection.
-		if aerr := runAgent(pos[1]); aerr != nil {
-			fmt.Fprintln(os.Stderr, aerr.Error())
-			os.Exit(1)
-		}
-		return
-	case len(pos) == 2 && pos[0] == "__share-run":
-		// Internal: a share running in the background. Permanent failures exit 0
-		// after recording "error" in status.json so launchd (SuccessfulExit=false)
-		// and systemd (Restart=on-failure) do not restart them in a loop.
-		if serr := runShareProcess(pos[1]); serr != nil {
-			if isPermanentShareError(serr) {
-				fmt.Fprintf(os.Stderr, "%s (permanent failure; stopping automatic restarts)\n", serr.Error())
-			} else {
-				fmt.Fprintln(os.Stderr, serr.Error())
-			}
-			os.Exit(shareExitCode(serr))
-		}
-		return
-	case len(pos) >= 1 && pos[0] == "update":
-		err = updateCmd(pos[1:], o)
-	case len(pos) >= 1 && pos[0] == "share":
-		err = shareCmd(pos[1:], o)
-	case len(pos) >= 1 && pos[0] == "status":
-		if len(pos) != 1 {
-			err = errorf("usage: hogman-join status")
-		} else {
-			err = statusCmd()
-		}
-	case len(pos) >= 1 && pos[0] == "browser-setup":
-		err = browserSetupCmd(pos[1:], o)
-	case len(pos) >= 1 && pos[0] == "leave":
-		err = leaveCmd(pos[1:], o)
-	case len(pos) >= 1 && pos[0] == "leave-all":
-		err = leaveAllCmd(pos[1:], o)
-	case len(pos) >= 1 && pos[0] == "uninstall":
-		err = uninstallCmd(pos[1:], o)
-	case len(pos) == 1:
-		trimmed := trimMatchingQuotes(pos[0])
-		if !strings.Contains(trimmed, "://") {
-			fmt.Fprintf(os.Stderr, "\n✗ unknown command %q (run 'hogman-join --help' for usage)\n", pos[0])
-			os.Exit(2)
-		}
-		err = join(pos[0], o)
-	default:
-		fmt.Fprint(os.Stderr, usageText)
-		os.Exit(2)
-	}
-	if err != nil {
-		var u *userError
-		if errors.As(err, &u) {
-			fmt.Fprintf(os.Stderr, "\n✗ %s\n", u.msg)
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stderr, "\n✗ unexpected error: %v\n", err)
-		os.Exit(1)
-	}
+	os.Exit(runCLI(os.Args[1:], defaultCLIHandlers()))
 }
 
 // ---------------------------------------------------------------- network --

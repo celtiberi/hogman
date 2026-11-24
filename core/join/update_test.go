@@ -357,17 +357,26 @@ func TestGitHubReleaseFlowAndRedirects(t *testing.T) {
 }
 
 func TestParseCLIArgsUpdate(t *testing.T) {
-	pos, o, ver, err := parseCLIArgs([]string{"update", "--dry-run", "--pen", "bobo.hogman"})
-	if err != nil || ver {
-		t.Fatalf("parseCLIArgs: (%v, %v)", ver, err)
-	}
-	if len(pos) != 1 || pos[0] != "update" || !o.dryRun || o.pen != "bobo.hogman" {
-		t.Fatalf("unexpected parse: pos=%v o=%+v", pos, o)
+	var gotArgs []string
+	var gotO options
+	rc := runCLI([]string{"update", "--dry-run", "--pen", "bobo.hogman"}, cliHandlers{
+		update: func(args []string, o options) error {
+			gotArgs, gotO = args, o
+			return nil
+		},
+	})
+	if rc != 0 || len(gotArgs) != 0 || !gotO.dryRun || gotO.pen != "bobo.hogman" {
+		t.Fatalf("unexpected update parse: rc=%d args=%v o=%+v", rc, gotArgs, gotO)
 	}
 
-	pos, _, _, err = parseCLIArgs([]string{"update", "https://control.example"})
-	if err != nil || len(pos) != 2 || pos[0] != "update" || pos[1] != "https://control.example" {
-		t.Fatalf("unexpected positional parse: pos=%v err=%v", pos, err)
+	rc = runCLI([]string{"update", "https://control.example"}, cliHandlers{
+		update: func(args []string, o options) error {
+			gotArgs, gotO = args, o
+			return nil
+		},
+	})
+	if rc != 0 || len(gotArgs) != 1 || gotArgs[0] != "https://control.example" {
+		t.Fatalf("unexpected positional parse: rc=%d args=%v", rc, gotArgs)
 	}
 }
 
