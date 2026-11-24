@@ -834,37 +834,42 @@ func queryBinaryVersion(binPath string) string {
 }
 
 // compareReleaseVersions compares two dot-separated numeric release versions
-// (such as "2026.11.24" or "0.2.1"). Returns (-1/0/+1, true) when both strings
-// parse as numeric release versions, or (0, false) for "dev"/non-numeric builds.
+// (such as "2026.11.24-d17d2f9" or "0.2.1"). Returns (-1/0/+1, true) when both
+// strings parse as numeric release versions and can be ordered unambiguously,
+// or (0, false) for "dev"/non-numeric builds or two builds sharing the same
+// date/numeric prefix with different suffixes (e.g. different commit SHAs on
+// the same day, where order cannot be inferred from the string alone).
 func compareReleaseVersions(a, b string) (int, bool) {
-	parse := func(raw string) ([]int, bool) {
+	parse := func(raw string) ([]int, string, bool) {
 		s := strings.TrimPrefix(strings.TrimSpace(raw), "v")
 		if s == "" {
-			return nil, false
+			return nil, "", false
 		}
-		// Strip optional pre-release/build suffix after '-' or '+'.
+		// Split optional suffix after '-' or '+'.
+		suffix := ""
 		if i := strings.IndexAny(s, "-+"); i >= 0 {
+			suffix = s[i:]
 			s = s[:i]
 		}
 		parts := strings.Split(s, ".")
 		if len(parts) < 2 {
-			return nil, false
+			return nil, "", false
 		}
 		nums := make([]int, len(parts))
 		for i, p := range parts {
 			if p == "" {
-				return nil, false
+				return nil, "", false
 			}
 			n, err := strconv.Atoi(p)
 			if err != nil || n < 0 {
-				return nil, false
+				return nil, "", false
 			}
 			nums[i] = n
 		}
-		return nums, true
+		return nums, suffix, true
 	}
-	pa, okA := parse(a)
-	pb, okB := parse(b)
+	pa, sufA, okA := parse(a)
+	pb, sufB, okB := parse(b)
 	if !okA || !okB {
 		return 0, false
 	}
@@ -886,6 +891,9 @@ func compareReleaseVersions(a, b string) (int, bool) {
 		if va > vb {
 			return 1, true
 		}
+	}
+	if sufA != sufB {
+		return 0, false
 	}
 	return 0, true
 }
