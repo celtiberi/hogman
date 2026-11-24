@@ -10,6 +10,8 @@ x-mesh-node: &mesh-node
   cap_add: [NET_ADMIN, NET_RAW, CHOWN, DAC_OVERRIDE]
   security_opt: [no-new-privileges:true]
   devices: [/dev/net/tun:/dev/net/tun]
+  cpus: 0.25
+  cpu_shares: 256
   mem_limit: 128m
   pids_limit: 128
   environment:
@@ -29,6 +31,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    cpus: 0.5
+    cpu_shares: 256
     mem_limit: 256m
     pids_limit: 128
     environment:
@@ -59,6 +63,8 @@ services:
     # Allow unprivileged Caddy (cap_drop: ALL) to bind HTTP/HTTPS ports 80/443.
     sysctls:
       - net.ipv4.ip_unprivileged_port_start=80
+    cpus: 0.5
+    cpu_shares: 256
     mem_limit: 128m
     pids_limit: 128
     environment:
@@ -106,6 +112,8 @@ services:
     tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    cpus: 0.25
+    cpu_shares: 256
     mem_limit: 128m
     pids_limit: 128
     network_mode: service:core-mesh
@@ -141,6 +149,8 @@ services:
     tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    cpus: 0.25
+    cpu_shares: 256
     mem_limit: 128m
     pids_limit: 128
     network_mode: service:core-mesh

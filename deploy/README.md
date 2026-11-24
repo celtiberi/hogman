@@ -93,6 +93,10 @@ members who join or update a public pen have legacy Hogman root certificates cle
 | Host, ports 80/443, `challenge-dns`, `*.<GATE_DOMAIN>` wildcard, shared Caddy front door (`/join`, `/join/dl`, strict path allowlist) | `headscale`, `registrar` (ledger, ACLs, mesh DNS, `home.<zone>` ACME), `portal` (Caddy), `core-mesh` Tailscale node, keys, SQLite DBs, relay UDP port |
 
 Each pen lives in `/opt/hogman/pens/<name>` and shares no container network with other pens.
+Every pen container carries memory (`mem_limit`), PID (`pids_limit`), and CPU (`cpus: 0.5` on
+`headscale`, `0.25` on `core-mesh`, `registrar`, and `portal`, all with `cpu_shares: 256`) limits
+so a single busy or spinning pen cannot starve other pens; host-level services (`hogman-front`,
+`challenge-dns`, `hogman-signup`, and `sshd`) stay uncapped at default higher CPU weight (`1024`).
 `deploy/test-host.sh` exercises two pens on one host, combined multi-pen PAC routing, backup/restore,
 name burning, and public sign-ups against `challenge-dns` and Pebble.
 

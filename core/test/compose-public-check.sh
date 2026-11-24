@@ -28,6 +28,10 @@ for s in $svcs; do
   mounts "$s" | grep -qx /pki && fail "$s still mounts /pki"
 done
 mounts portal | grep -qx /run/hogman-acme && fail "the portal can reach the challenge DNS API"
+for s in $svcs; do
+  jq -e --arg s "$s" '(.services[$s].cpus // 0) > 0 and .services[$s].cpu_shares == 256' <<<"$cfg" >/dev/null \
+    || fail "$s must set cpus > 0 and cpu_shares: 256 (I-14)"
+done
 echo "public-certificate pen compose: ok"
 
 # Verify every shipped Dockerfile FROM and Compose image is explicitly pinned
