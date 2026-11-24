@@ -1147,9 +1147,14 @@ func tsnetPeerResolver(node *tsnet.Server) sharePeerResolver {
 	}
 }
 
+func isHogmanHeaderName(k string) bool {
+	norm := strings.ReplaceAll(strings.ToLower(k), "_", "-")
+	return strings.HasPrefix(norm, "x-hogman-")
+}
+
 func stripHogmanHeaders(h http.Header) {
 	for k := range h {
-		if strings.HasPrefix(strings.ToLower(k), "x-hogman-") {
+		if isHogmanHeaderName(k) {
 			delete(h, k)
 		}
 	}

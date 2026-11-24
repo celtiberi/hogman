@@ -249,7 +249,11 @@ func TestShareIdentityHeaders(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "https://fleet.ops.pens.example.com/api", nil)
 		req.RemoteAddr = remoteAddr
 		req.Header.Set("X-Hogman-Handle", "spoofed-owner")
+		// Underscore spellings collapse to HTTP_X_HOGMAN_HANDLE in CGI/PHP/WSGI/Rack.
+		req.Header["X_Hogman_Handle"] = []string{"spoofed-underscore"}
+		req.Header["X-Hogman_Handle"] = []string{"spoofed-mixed"}
 		req.Header.Set("X-Hogman-Role", "owner")
+		req.Header["X_Hogman_Role"] = []string{"owner"}
 		req.Header.Set("X-Hogman-IP", "100.64.0.1")
 		req.Header.Set("X-Hogman-Node", "spoofed-node")
 		req.Header.Set("X-Hogman-Tags", "tag:admin")
@@ -260,7 +264,7 @@ func TestShareIdentityHeaders(t *testing.T) {
 		}
 	}
 
-	// 1. Default OFF: inbound X-Hogman-* headers are ALWAYS stripped and resolver is not called.
+	// 1. Default OFF: inbound X-Hogman-* headers (including underscore variants) are ALWAYS stripped and resolver is not called.
 	resolverCalls := 0
 	hOff, closeOff, err := shareHandlerWithResolver(&shareConfig{
 		Name:   "fleet",
@@ -279,13 +283,13 @@ func TestShareIdentityHeaders(t *testing.T) {
 		t.Fatalf("resolver called %d times when IdentityHeaders=false, want 0", resolverCalls)
 	}
 	for k := range gotHeaders {
-		if strings.HasPrefix(strings.ToLower(k), "x-hogman-") {
+		if isHogmanHeaderName(k) {
 			t.Fatalf("client-supplied header %q leaked when IdentityHeaders=false: %v", k, gotHeaders)
 		}
 	}
 
 	// 2. Enabled ON with personal device (including Headscale trailing '@' on LoginName):
-	// spoofed headers are stripped and replaced with verified peer identity.
+	// spoofed hyphen/underscore/mixed headers are stripped and replaced with verified peer identity.
 	hOn, closeOn, err := shareHandlerWithResolver(&shareConfig{
 		Name:            "fleet",
 		Zone:            "ops.pens.example.com",
@@ -317,8 +321,10 @@ func TestShareIdentityHeaders(t *testing.T) {
 	if got := gotHeaders.Get("X-Hogman-Tags"); got != "" {
 		t.Fatalf("X-Hogman-Tags = %q, want empty for personal device", got)
 	}
-	if got := gotHeaders.Get("X-Hogman-Role"); got != "" {
-		t.Fatalf("spoofed X-Hogman-Role leaked: %q", got)
+	for k := range gotHeaders {
+		if isHogmanHeaderName(k) && k != "X-Hogman-Handle" && k != "X-Hogman-Node" && k != "X-Hogman-Ip" {
+			t.Fatalf("unexpected or spoofed X-Hogman header %q leaked: %v", k, gotHeaders[k])
+		}
 	}
 
 	// 3. Tagged server node: emits X-Hogman-Tags, never X-Hogman-Handle (even if LoginName is set).
@@ -367,7 +373,7 @@ func TestShareIdentityHeaders(t *testing.T) {
 	defer closeErr()
 	sendSpoofed(hErr, "100.64.0.11:51234")
 	for k := range gotHeaders {
-		if strings.HasPrefix(strings.ToLower(k), "x-hogman-") {
+		if isHogmanHeaderName(k) {
 			t.Fatalf("header %q leaked on WhoIs error: %v", k, gotHeaders)
 		}
 	}
