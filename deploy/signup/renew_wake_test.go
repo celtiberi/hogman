@@ -207,18 +207,32 @@ exit 0
 		t.Fatalf("expected operator alert when global wake cap stayed full >5m; alerts=%v", alerts)
 	}
 
-	// 3. Persisted deadline survives a FRESH broker instance (simulating broker restart!):
-	//    advance past alpha's WakeUntil (12:13) and sweep on a brand-new broker against same home.
+	// 3. Persisted deadline survives a FRESH broker instance (simulating broker restart!)
+	//    and targeted sweepExpiredRenewWakes ONLY sleeps expired renew_only pens without
+	//    touching overdue active or sleeping pens.
+	makeOverdueActive := func(name string) {
+		pdir := filepath.Join(home, "pens", name)
+		_ = os.MkdirAll(filepath.Join(pdir, "data", "registrar"), 0o700)
+		_ = savePenLifecycle(b.lifecyclePath(name), &penLifecycle{
+			Plan:      planPersonal,
+			State:     stateActive,
+			PaidUntil: origSleep - 30*86400,
+		})
+	}
+	makeOverdueActive("overdue-active")
 	freshBroker := &broker{home: home, tool: b.tool, token: testToken}
 	afterExpiry := time.Date(2028, 3, 1, 12, 14, 0, 0, time.UTC)
-	trs, err := freshBroker.sweepLifecycles(context.Background(), afterExpiry, false)
+	trs, err := freshBroker.sweepExpiredRenewWakes(context.Background(), afterExpiry)
 	if err != nil {
-		t.Fatalf("freshBroker sweep failed: %v", err)
+		t.Fatalf("freshBroker sweepExpiredRenewWakes failed: %v", err)
 	}
 	foundReturn := false
 	for _, tr := range trs {
 		if tr.Pen == "alpha" && tr.From == stateRenewOnly && tr.To == stateSleeping {
 			foundReturn = true
+		}
+		if tr.Pen == "overdue-active" {
+			t.Fatalf("sweepExpiredRenewWakes must not transition non-renew_only pens: %+v", trs)
 		}
 	}
 	if !foundReturn {
@@ -230,6 +244,37 @@ exit 0
 	}
 	if _, err := os.Stat(b.registrarBillingPath("alpha")); !os.IsNotExist(err) {
 		t.Fatal("billing-status.json should be removed after returning to sleep")
+	}
+	if _, err := os.Stat(registrarRenewOnlyMarkerPath(b.registrarBillingPath("alpha"))); !os.IsNotExist(err) {
+		t.Fatal(".renew-only marker should be removed after returning to sleep")
+	}
+	_ = os.RemoveAll(filepath.Join(home, "pens", "overdue-active"))
+
+	// B1 & B2: Missing data/registrar dir MUST abort and roll back cleanly without
+	// marking renew_only or starting containers.
+	brokenDir := filepath.Join(home, "pens", "broken")
+	_ = os.MkdirAll(brokenDir, 0o700)
+	_ = os.WriteFile(filepath.Join(brokenDir, ".sleeping"), nil, 0o600)
+	_ = savePenLifecycle(b.lifecyclePath("broken"), &penLifecycle{
+		Plan: planPersonal, State: stateSleeping, SleepSince: origSleep, DeleteAfter: origDelete,
+	})
+	if ok, _, _, reason := b.requestRenewWake(context.Background(), "broken", b.now()); ok || reason != "banner-error" {
+		t.Fatalf("missing data/registrar must fail closed with banner-error: ok=%v reason=%s", ok, reason)
+	}
+	brokenRec, _ := loadPenLifecycle(b.lifecyclePath("broken"))
+	if brokenRec.State != stateSleeping || brokenRec.WakeUntil != 0 || len(brokenRec.WakeHistory) != 0 {
+		t.Fatalf("failed banner write must not leave pen in renew_only: %+v", brokenRec)
+	}
+
+	// Should-fix: free plan pens cannot trigger renew-only wake.
+	freeDir := filepath.Join(home, "pens", "freepen")
+	_ = os.MkdirAll(filepath.Join(freeDir, "data", "registrar"), 0o700)
+	_ = os.WriteFile(filepath.Join(freeDir, ".sleeping"), nil, 0o600)
+	_ = savePenLifecycle(b.lifecyclePath("freepen"), &penLifecycle{
+		Plan: planFree, State: stateSleeping, SleepSince: origSleep, DeleteAfter: origDelete,
+	})
+	if ok, _, _, reason := b.requestRenewWake(context.Background(), "freepen", b.now()); ok || reason != "not-paid" {
+		t.Fatalf("free pen should be refused with not-paid: ok=%v reason=%s", ok, reason)
 	}
 
 	// Put beta back to sleep too so global cap is free for per-pen & host-full tests.
@@ -362,8 +407,11 @@ func TestHogmanHostRenewOnlyWakeListAndPurgeRefusalI7(t *testing.T) {
 		Plan: planPersonal, State: stateSleeping, SleepSince: origSleep, DeleteAfter: origDelete,
 	})
 
-	// 1. wake --renew-only keeps .sleeping, writes .renew-wake, routes pen on front door,
-	//    and shows renew_only in `hogman-host list`.
+	// 1. Hand-run wake --renew-only writes BOTH data/registrar/.renew-only and
+	//    data/registrar/billing-status.json, persists state=renew_only + deadline in
+	//    lifecycle.json (preserving sleep_since/delete_after so the watcher sleeps it
+	//    automatically), keeps .sleeping, writes .renew-wake, routes pen on front door,
+	//    and shows renew_only in `hogman-host list` (B3).
 	if out, err := runHost("wake", "--renew-only", "lab"); err != nil {
 		t.Fatalf("wake --renew-only failed: err=%v out=%s", err, out)
 	}
@@ -372,6 +420,16 @@ func TestHogmanHostRenewOnlyWakeListAndPurgeRefusalI7(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(penDir, ".renew-wake")); err != nil {
 		t.Fatal(".renew-wake must exist during renew_only")
+	}
+	if _, err := os.Stat(filepath.Join(penDir, "data", "registrar", ".renew-only")); err != nil {
+		t.Fatal("data/registrar/.renew-only marker must be written by wake --renew-only (B3)")
+	}
+	if bsRaw, err := os.ReadFile(filepath.Join(penDir, "data", "registrar", "billing-status.json")); err != nil || !strings.Contains(string(bsRaw), `"state": "renew_only"`) {
+		t.Fatalf("data/registrar/billing-status.json must be written by hand-run wake --renew-only (B3): err=%v content=%s", err, bsRaw)
+	}
+	handRec, err := loadPenLifecycle(filepath.Join(penDir, "lifecycle.json"))
+	if err != nil || handRec.State != stateRenewOnly || handRec.WakeUntil == 0 || handRec.WakeCeiling == 0 || handRec.SleepSince != origSleep || handRec.DeleteAfter != origDelete {
+		t.Fatalf("hand-run wake --renew-only must persist renew_only + deadline while preserving sleep dates (B3): %+v (%v)", handRec, err)
 	}
 	if caddyRaw, err := os.ReadFile(filepath.Join(home, "front", "Caddyfile")); err != nil || !strings.Contains(string(caddyRaw), "import pen lab") {
 		t.Fatalf("front Caddyfile should route pen during renew_only: err=%v content=%s", err, caddyRaw)
@@ -385,23 +443,37 @@ func TestHogmanHostRenewOnlyWakeListAndPurgeRefusalI7(t *testing.T) {
 		t.Fatalf("purge --due must refuse renew_only pen: err=%v out=%s", err, out)
 	}
 
-	// 3. sleep on a pen returning from renew_only removes .renew-wake, keeps .sleeping,
-	//    writes the static sleeping notice with the #wake=lab link, AND preserves origSleep/origDelete!
+	// 3. sleep on a pen returning from renew_only removes .renew-wake and .renew-only,
+	//    keeps .sleeping, writes the static sleeping notice with #wake=lab and NO unsafe-inline,
+	//    AND preserves origSleep/origDelete!
 	if out, err := runHost("sleep", "lab"); err != nil {
 		t.Fatalf("sleep lab failed: err=%v out=%s", err, out)
 	}
 	if _, err := os.Stat(filepath.Join(penDir, ".renew-wake")); !os.IsNotExist(err) {
 		t.Fatal(".renew-wake must be removed by sleep")
 	}
+	if _, err := os.Stat(filepath.Join(penDir, "data", "registrar", ".renew-only")); !os.IsNotExist(err) {
+		t.Fatal("data/registrar/.renew-only must be removed by sleep")
+	}
 	recAfterSleep, err := loadPenLifecycle(filepath.Join(penDir, "lifecycle.json"))
 	if err != nil || recAfterSleep.SleepSince != origSleep || recAfterSleep.DeleteAfter != origDelete {
 		t.Fatalf("sleep must preserve original sleep_since/delete_after: got %+v want (%d,%d)", recAfterSleep, origSleep, origDelete)
 	}
-	if caddyRaw, err := os.ReadFile(filepath.Join(home, "front", "Caddyfile")); err != nil || !strings.Contains(string(caddyRaw), "https://get.example.com/#wake=lab") {
-		t.Fatalf("sleeping front Caddyfile should link to #wake=lab: err=%v content=%s", err, caddyRaw)
+	if caddyRaw, err := os.ReadFile(filepath.Join(home, "front", "Caddyfile")); err != nil ||
+		!strings.Contains(string(caddyRaw), "https://get.example.com/#wake=lab") ||
+		strings.Contains(string(caddyRaw), "unsafe-inline") {
+		t.Fatalf("sleeping front Caddyfile should link to #wake=lab without unsafe-inline: err=%v content=%s", err, caddyRaw)
 	}
 
-	// 4. Full wake from renew_only promotes live via `./hogman sync` without restarting containers!
+	// B3: wake --renew-only refuses to start if data/registrar is missing (fail closed).
+	_ = os.RemoveAll(filepath.Join(penDir, "data", "registrar"))
+	if out, err := runHost("wake", "--renew-only", "lab"); err == nil || !strings.Contains(out, "missing registrar data dir") {
+		t.Fatalf("wake --renew-only without data/registrar must fail closed: err=%v out=%s", err, out)
+	}
+	_ = os.MkdirAll(filepath.Join(penDir, "data", "registrar"), 0o700)
+
+	// 4. Full wake from renew_only promotes live via `./hogman sync` without restarting containers
+	//    and removes .sleeping, .renew-wake, and data/registrar/.renew-only!
 	_ = os.Remove(filepath.Join(home, "pen-calls.log"))
 	if out, err := runHost("wake", "--renew-only", "lab"); err != nil {
 		t.Fatalf("second wake --renew-only failed: err=%v out=%s", err, out)
@@ -419,5 +491,8 @@ func TestHogmanHostRenewOnlyWakeListAndPurgeRefusalI7(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(penDir, ".renew-wake")); !os.IsNotExist(err) {
 		t.Fatal(".renew-wake must be removed after full wake")
+	}
+	if _, err := os.Stat(filepath.Join(penDir, "data", "registrar", ".renew-only")); !os.IsNotExist(err) {
+		t.Fatal("data/registrar/.renew-only must be removed after full wake")
 	}
 }

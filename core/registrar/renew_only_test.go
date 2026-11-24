@@ -145,6 +145,50 @@ func TestRenewOnlyPolicyAndHTTPEnforcementI7(t *testing.T) {
 	if restoredPol != normalPol {
 		t.Fatalf("policy did not restore cleanly after clearing billing-status.json:\ngot:\n%s\nwant:\n%s", restoredPol, normalPol)
 	}
+
+	// B4 (fail closed):
+	// 1) .renew-only marker ALONE (without billing-status.json) forces renew_only policy & 403s.
+	markerPath := filepath.Join(dir, ".renew-only")
+	if err := os.WriteFile(markerPath, []byte("renew_only\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !e.svc.isRenewOnly() {
+		t.Fatal("marker alone must force isRenewOnly() = true")
+	}
+	markerPol, err := e.svc.buildPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markerPol != renewPol {
+		t.Fatalf("marker-only policy must equal renew_only policy:\ngot:\n%s", markerPol)
+	}
+	if rec := doMeshReq(mesh, "GET", "/api/directory", "100.64.0.10", "", nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("marker-only /api/directory = %d, want 403", rec.Code)
+	}
+	if rec := doMeshReq(mesh, "GET", "/api/me", "100.64.0.10", "", nil); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"state":"renew_only"`) {
+		t.Fatalf("marker-only /api/me should still report renew_only: %d %s", rec.Code, rec.Body.String())
+	}
+	_ = os.Remove(markerPath)
+
+	// 2) Corrupt/unparseable billing-status.json fails closed into renew_only.
+	if err := os.WriteFile(billingPath, []byte(`{corrupt json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !e.svc.isRenewOnly() {
+		t.Fatal("corrupt billing-status.json must fail closed into renew_only")
+	}
+	if rec := doMeshReq(mesh, "GET", "/api/directory", "100.64.0.10", "", nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("corrupt billing-status.json /api/directory = %d, want 403", rec.Code)
+	}
+
+	// 3) Oversized (>4096B) billing-status.json fails closed into renew_only.
+	if err := os.WriteFile(billingPath, []byte(strings.Repeat(" ", 5000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !e.svc.isRenewOnly() {
+		t.Fatal("oversized billing-status.json must fail closed into renew_only")
+	}
+	_ = os.Remove(billingPath)
 }
 
 func TestHomeCertManagerRenewOnlyReuseAndCapI7(t *testing.T) {

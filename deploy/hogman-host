@@ -252,11 +252,11 @@ write_front() {
 		X-Content-Type-Options nosniff
 		Referrer-Policy no-referrer
 		Cache-Control no-store
-		Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'"
+		Content-Security-Policy "default-src 'none'"
 		Content-Type "text/html; charset=utf-8"
 		-Server
 	}
-	respond "<!doctype html><meta charset=utf-8><title>Pen asleep</title><body style='font-family:system-ui,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem'><h1>This pen is asleep</h1><p>Its state is kept for one year. An owner or admin can wake it briefly to renew.</p>{args[0]}<p style='color:#555;font-size:.9rem'>If the wake button cannot bring the pen up (for example if daily wake limits or host capacity are reached), contact your host operator.</p></body>" 503
+	respond "<!doctype html><meta charset=utf-8><title>Pen asleep</title><body><h1>This pen is asleep</h1><p>Its state is kept for one year. An owner or admin can wake it briefly to renew.</p>{args[0]}<p>If the wake button cannot bring the pen up (for example if daily wake limits or host capacity are reached), contact your host operator.</p></body>" 503
 }
 
 EOF
@@ -268,7 +268,7 @@ EOF
       if [ -f "$PENS/$n/.sleeping" ] && [ ! -f "$PENS/$n/.renew-wake" ]; then
         local wake_cta=""
         if [ -n "${SIGNUP_HOST:-}" ]; then
-          wake_cta="<p><a href='https://${SIGNUP_HOST}/#wake=${n}' style='display:inline-block;padding:.6rem 1rem;background:#111;color:#fff;text-decoration:none;border-radius:6px'>Wake pen for renewal</a></p>"
+          wake_cta="<p><a href='https://${SIGNUP_HOST}/#wake=${n}'>Wake pen for renewal</a></p>"
         fi
         cat <<EOF
 # pen (sleeping): $n
@@ -660,7 +660,7 @@ cmd_remove() {
   valid_name "$n" || die "invalid network name: $n"
   [ -d "$PENS/$n" ] || die "no pen $n"
   (cd "$PENS/$n" && ./hogman down) || true
-  rm -f "$PENS/$n/.renew-wake"
+  rm -f "$PENS/$n/.renew-wake" "$PENS/$n/data/registrar/.renew-only"
   touch "$PENS/$n/.removed"
   # Its challenge DNS credential goes; the server keeps only the fact that the
   # name was used (D-21), so it's never handed out again.
@@ -751,7 +751,7 @@ cmd_sleep() {
   [ ! -f "$PENS/$n/.retired" ] || die "pen $n has already been deleted"
   # SF-3: never mark .sleeping if containers failed to stop.
   (cd "$PENS/$n" && ./hogman down) || die "could not stop pen $n; refusing to mark sleeping"
-  rm -f "$PENS/$n/.renew-wake"
+  rm -f "$PENS/$n/.renew-wake" "$PENS/$n/data/registrar/.renew-only"
   touch "$PENS/$n/.sleeping"
   # SF-4: keep lifecycle.json aligned even for manual `hogman-host sleep <pen>`.
   lifecycle_mark_sleeping "$n"
@@ -795,6 +795,58 @@ lifecycle_mark_awake() {  # lifecycle_mark_awake <pen>
   chmod 0600 "$tmp" && mv "$tmp" "$f"
 }
 
+lifecycle_mark_renew_only() {  # lifecycle_mark_renew_only <pen> <now> <until> <ceiling>
+  local n="$1" now="$2" until="$3" ceil="$4" f="$PENS/$1/lifecycle.json" sleep_since del tmp
+  sleep_since="$now"
+  del=$((now + 365 * 86400))
+  if [ -f "$f" ]; then
+    local prev_sleep prev_del cur_state cur_ceil
+    cur_state="$(lifecycle_json_str "$f" state || true)"
+    cur_ceil="$(lifecycle_json_int "$f" wake_ceiling || true)"
+    # Already marked renew_only with a valid future ceiling by the broker: keep as-is.
+    if [ "$cur_state" = "renew_only" ] && [ -n "$cur_ceil" ] && [ "$cur_ceil" -gt "$now" ]; then
+      return 0
+    fi
+    prev_sleep="$(lifecycle_json_int "$f" sleep_since || true)"
+    prev_del="$(lifecycle_json_int "$f" delete_after || true)"
+    if [ -n "$prev_sleep" ] && [ "$prev_sleep" -gt 0 ] && [ -n "$prev_del" ] && [ "$prev_del" -gt 0 ]; then
+      sleep_since="$prev_sleep"
+      del="$prev_del"
+    fi
+  fi
+  tmp="$(mktemp "$PENS/$n/.lifecycle.XXXXXX")"
+  if [ ! -f "$f" ]; then
+    printf '{\n  "plan": "personal",\n  "state": "renew_only",\n  "sleep_since": %s,\n  "delete_after": %s,\n  "wake_started_at": %s,\n  "wake_until": %s,\n  "wake_ceiling": %s,\n  "backdate_renewal": false,\n  "updated_at": %s\n}\n' \
+      "$sleep_since" "$del" "$now" "$until" "$ceil" "$now" > "$tmp"
+  elif command -v jq >/dev/null 2>&1; then
+    jq --argjson now "$now" --argjson ss "$sleep_since" --argjson del "$del" \
+      --argjson until "$until" --argjson ceil "$ceil" \
+      '.state = "renew_only" | .sleep_since = $ss | .delete_after = $del | .wake_started_at = $now | .wake_until = $until | .wake_ceiling = $ceil | .updated_at = $now' "$f" > "$tmp"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["state"]="renew_only"; d["sleep_since"]=int(sys.argv[3]); d["delete_after"]=int(sys.argv[4]); d["wake_started_at"]=int(sys.argv[2]); d["wake_until"]=int(sys.argv[5]); d["wake_ceiling"]=int(sys.argv[6]); d["updated_at"]=int(sys.argv[2]); print(json.dumps(d, indent=2))' \
+      "$f" "$now" "$sleep_since" "$del" "$until" "$ceil" > "$tmp"
+  else
+    awk -v now="$now" -v ss="$sleep_since" -v del="$del" -v until="$until" -v ceil="$ceil" '
+      /^[[:space:]]*"(state|sleep_since|delete_after|wake_started_at|wake_ready_at|wake_until|wake_ceiling|updated_at)"[[:space:]]*:/ { next }
+      /^[[:space:]]*}[[:space:]]*$/ {
+        if (n > 0 && lines[n] !~ /[{,][[:space:]]*$/) {
+          lines[n] = lines[n] ","
+        }
+        for (i = 1; i <= n; i++) print lines[i]
+        printf "  \"state\": \"renew_only\",\n  \"sleep_since\": %s,\n  \"delete_after\": %s,\n  \"wake_started_at\": %s,\n  \"wake_until\": %s,\n  \"wake_ceiling\": %s,\n  \"updated_at\": %s\n}\n", ss, del, now, until, ceil, now
+        done = 1
+        next
+      }
+      { lines[++n] = $0 }
+      END {
+        if (!done) {
+          printf "{\n  \"plan\": \"personal\",\n  \"state\": \"renew_only\",\n  \"sleep_since\": %s,\n  \"delete_after\": %s,\n  \"wake_started_at\": %s,\n  \"wake_until\": %s,\n  \"wake_ceiling\": %s,\n  \"backdate_renewal\": false,\n  \"updated_at\": %s\n}\n", ss, del, now, until, ceil, now
+        }
+      }' "$f" > "$tmp"
+  fi
+  chmod 0600 "$tmp" && mv "$tmp" "$f"
+}
+
 cmd_wake() {
   load_host
   local renew_only=0 n=""
@@ -822,13 +874,53 @@ cmd_wake() {
 
   if [ "$renew_only" = 1 ]; then
     [ -f "$PENS/$n/.sleeping" ] || die "pen $n is not asleep"
+    if [ -f "$PENS/$n/lifecycle.json" ]; then
+      local plan
+      plan="$(lifecycle_json_str "$PENS/$n/lifecycle.json" plan || true)"
+      if [ -n "$plan" ] && [ "$plan" != "personal" ] && [ "$plan" != "work" ]; then
+        die "pen $n plan is '$plan'; renew-only wake is only for paid pens"
+      fi
+    fi
     if [ ! -f "$PENS/$n/.renew-wake" ]; then
       [ "$wakes" -lt "$max_wakes" ] || die "global renewal-wake cap reached ($wakes/$max_wakes)"
       [ "$((live + wakes))" -lt "$((max + reserve))" ] || die "host is at capacity ($live live + $wakes wake / $((max + reserve)) total); cannot wake $n"
     fi
+    # B3: Fail closed — require registrar's data volume, write BOTH .renew-only
+    # marker and billing-status.json, persist renew_only + deadline in
+    # lifecycle.json (so hand-run wakes still return to sleep automatically),
+    # and refuse ./hogman up unless both files exist and are non-empty.
+    local regdir="$PENS/$n/data/registrar"
+    [ -d "$regdir" ] || die "refusing renew-only wake for $n: missing registrar data dir $regdir"
+    local now until ceil until_iso renew_url=""
+    now="$(date -u +%s)"
+    until=$((now + 1200))
+    ceil=$((now + 1200))
+    until_iso="$(date -u -d "@$until" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$until" +%Y-%m-%dT%H:%M:%SZ)"
+    if [ -n "${SIGNUP_HOST:-}" ]; then
+      renew_url="https://${SIGNUP_HOST}"
+      if [ -f "$PENS/$n/lifecycle.json" ] && [ "$(lifecycle_json_str "$PENS/$n/lifecycle.json" plan || true)" = "work" ] && [ -n "${SIGNUP_WORK_HOST:-}" ]; then
+        renew_url="https://${SIGNUP_WORK_HOST}"
+      fi
+    fi
+    printf 'renew_only\n' > "$regdir/.renew-only" && chmod 0644 "$regdir/.renew-only" \
+      || die "failed to write $regdir/.renew-only; refusing renew-only wake"
+    if [ ! -s "$regdir/billing-status.json" ] || [ "$(lifecycle_json_str "$regdir/billing-status.json" state || true)" != "renew_only" ]; then
+      local btmp
+      btmp="$(mktemp "$regdir/.billing.XXXXXX")"
+      if [ -n "$renew_url" ]; then
+        printf '{\n  "pen": "%s",\n  "state": "renew_only",\n  "wake_until": "%s",\n  "renew_url": "%s"\n}\n' "$n" "$until_iso" "$renew_url" > "$btmp"
+      else
+        printf '{\n  "pen": "%s",\n  "state": "renew_only",\n  "wake_until": "%s"\n}\n' "$n" "$until_iso" > "$btmp"
+      fi
+      chmod 0644 "$btmp" && mv "$btmp" "$regdir/billing-status.json" \
+        || { rm -f "$btmp" "$regdir/.renew-only"; die "failed to write $regdir/billing-status.json; refusing renew-only wake"; }
+    fi
+    [ -s "$regdir/.renew-only" ] && [ -s "$regdir/billing-status.json" ] \
+      || die "renew-only guard files missing in $regdir; refusing to start containers"
+    lifecycle_mark_renew_only "$n" "$now" "$until" "$ceil"
     # Keep .sleeping on disk while woken in renew_only mode (I-7 Part 2) and
     # preserve lifecycle.json sleep_since/delete_after; registrar enforces
-    # renew-only Headscale policy from data/registrar/billing-status.json.
+    # renew-only Headscale policy from .renew-only and billing-status.json.
     touch "$PENS/$n/.renew-wake"
     docker network inspect "pen-$n-core" >/dev/null 2>&1 || docker network create "pen-$n-core" >/dev/null
     write_front
@@ -845,7 +937,7 @@ cmd_wake() {
   if [ -f "$PENS/$n/.sleeping" ] && [ "$was_renew_wake" != 1 ] && [ "$live" -ge "$max" ]; then
     die "host is at capacity ($live/$max live pens); cannot wake $n"
   fi
-  rm -f "$PENS/$n/.sleeping" "$PENS/$n/.renew-wake" "$PENS/$n/data/registrar/billing-status.json"
+  rm -f "$PENS/$n/.sleeping" "$PENS/$n/.renew-wake" "$PENS/$n/data/registrar/.renew-only" "$PENS/$n/data/registrar/billing-status.json"
   # B7: clear sleeping/delete_after/wake_* in lifecycle.json so a woken pen can
   # never be purged as expired sleep later.
   lifecycle_mark_awake "$n"

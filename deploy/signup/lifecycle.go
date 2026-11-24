@@ -257,16 +257,45 @@ func savePenLifecycle(path string, rec *penLifecycle) error {
 	return nil
 }
 
+func registrarRenewOnlyMarkerPath(billingPath string) string {
+	if billingPath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(billingPath), ".renew-only")
+}
+
 func syncRegistrarBillingBanner(pen, billingPath string, rec *penLifecycle, fallbackRenewOrigin string) error {
+	markerPath := registrarRenewOnlyMarkerPath(billingPath)
 	if rec.State != stateGrace && rec.State != stateRenewOnly {
+		if markerPath != "" {
+			if err := os.Remove(markerPath); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
 		err := os.Remove(billingPath)
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return err
 	}
-	if fi, err := os.Stat(filepath.Dir(billingPath)); err != nil || !fi.IsDir() {
+	dir := filepath.Dir(billingPath)
+	fi, err := os.Stat(dir)
+	if err != nil || !fi.IsDir() {
+		// B2: For renew_only, a missing registrar volume MUST fail closed rather
+		// than silently returning nil and letting the pen wake in normal mode.
+		if rec.State == stateRenewOnly {
+			return fmt.Errorf("registrar data dir %s unavailable: %v", dir, err)
+		}
 		return nil
+	}
+	if rec.State == stateRenewOnly {
+		if err := os.WriteFile(markerPath, []byte("renew_only\n"), 0o644); err != nil {
+			return fmt.Errorf("write .renew-only marker: %w", err)
+		}
+	} else if markerPath != "" {
+		if err := os.Remove(markerPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	renewOrigin := sanitizeHTTPSOrigin(rec.RenewURL)
 	if renewOrigin == "" {
@@ -1538,6 +1567,9 @@ func (b *broker) requestRenewWake(ctx context.Context, pen string, now time.Time
 	if rec.State != stateSleeping {
 		return false, 0, 0, "not-sleeping"
 	}
+	if rec.Plan != planPersonal && rec.Plan != planWork {
+		return false, 0, 0, "not-paid"
+	}
 	if _, err := os.Stat(filepath.Join(b.home, "pens", pen, ".removed")); err == nil {
 		return false, 0, 0, "removed"
 	}
@@ -1587,6 +1619,7 @@ func (b *broker) requestRenewWake(ctx context.Context, pen string, now time.Time
 		return false, 0, 0, "host-full"
 	}
 
+	prevRec := *rec
 	ceilUnix := now.Add(renewWakeCeiling).Unix()
 	rec.State = stateRenewOnly
 	rec.WakeStartedAt = nowUnix
@@ -1598,14 +1631,18 @@ func (b *broker) requestRenewWake(ctx context.Context, pen string, now time.Time
 		rec.RenewURL = b.renewOriginForPen(rec.Plan)
 	}
 	rec.UpdatedAt = nowUnix
+	// B1 & B2: Write BOTH .renew-only marker and billing-status.json BEFORE
+	// committing state=renew_only or starting containers. If writing fails,
+	// abort and roll back cleanly so a pen can never boot in normal mode.
+	if err := syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), rec, b.renewOriginForPen(rec.Plan)); err != nil {
+		log.Printf("lifecycle wake %s: write renew_only status/marker failed (aborting wake): %v", pen, err)
+		_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &prevRec, "")
+		return false, 0, 0, "banner-error"
+	}
 	if err := savePenLifecycle(path, rec); err != nil {
 		log.Printf("lifecycle wake %s: save renew_only: %v", pen, err)
+		_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &prevRec, "")
 		return false, 0, 0, "save-error"
-	}
-	// Write billing-status.json BEFORE starting containers so registrar's very
-	// first Headscale Sync boots directly into renew_only policy (zero race).
-	if err := syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), rec, b.renewOriginForPen(rec.Plan)); err != nil {
-		log.Printf("lifecycle wake %s: write billing-status.json: %v", pen, err)
 	}
 	b.ledger(fmt.Sprintf("%s renew-only wake requested for %s (ceiling %s, wakes_24h=%d, wakes_30d=%d)",
 		now.Format(time.RFC3339), pen, time.Unix(ceilUnix, 0).UTC().Format(time.RFC3339), dayCount+1, len(rec.WakeHistory)))
@@ -1745,6 +1782,62 @@ func (b *broker) lifecycleWakeHandler(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 202, map[string]any{"ok": true})
 }
 
+// sweepExpiredRenewWakes handles ONLY expired renew_only deadlines (never
+// running active->grace, alerts, or purges for unrelated pens) so the 1-minute
+// watcher stays narrowly scoped to ephemeral wakes.
+func (b *broker) sweepExpiredRenewWakes(ctx context.Context, now time.Time) ([]lifecycleTransition, error) {
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
+
+	pensDir := filepath.Join(b.home, "pens")
+	entries, err := os.ReadDir(pensDir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+
+	concurrent := 0
+	var out []lifecycleTransition
+	for _, pen := range names {
+		path := b.lifecyclePath(pen)
+		rec, err := loadPenLifecycle(path)
+		if err != nil || rec.State != stateRenewOnly {
+			continue
+		}
+		concurrent++
+		next, changed := evaluateLifecycle(*rec, now)
+		if !changed || next.State != stateSleeping {
+			continue
+		}
+		_, code, stderr := b.runUnbounded(ctx, "sleep", pen)
+		b.invalidateCapacityCache()
+		if code != 0 {
+			log.Printf("renew-wake watcher %s: sleep failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
+			continue
+		}
+		if err := savePenLifecycle(path, &next); err != nil {
+			log.Printf("renew-wake watcher %s: save sleeping: %v", pen, err)
+			continue
+		}
+		_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &next, "")
+		b.ledger(fmt.Sprintf("%s lifecycle %s: renew_only -> sleeping (delete after %s)",
+			now.UTC().Format(time.RFC3339), pen, time.Unix(next.DeleteAfter, 0).UTC().Format("2006-01-02")))
+		concurrent--
+		out = append(out, lifecycleTransition{Pen: pen, From: stateRenewOnly, To: stateSleeping})
+	}
+	b.checkGlobalWakeCapHealth(now, concurrent)
+	return out, nil
+}
+
 // runRenewWakeWatcher periodically enforces persisted renew_only deadlines
 // (even across broker restarts) and alerts if the global wake cap stays full.
 func (b *broker) runRenewWakeWatcher() {
@@ -1753,18 +1846,11 @@ func (b *broker) runRenewWakeWatcher() {
 	defer t.Stop()
 	for {
 		now := b.now()
-		b.lifecycleMu.Lock()
-		concurrent := b.countRenewOnlyPens()
-		b.checkGlobalWakeCapHealth(now, concurrent)
-		b.lifecycleMu.Unlock()
-
-		if concurrent > 0 {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-			if _, err := b.sweepLifecycles(ctx, now, false); err != nil {
-				log.Printf("renew-wake watcher sweep: %v", err)
-			}
-			cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		if _, err := b.sweepExpiredRenewWakes(ctx, now); err != nil {
+			log.Printf("renew-wake watcher: %v", err)
 		}
+		cancel()
 		<-t.C
 	}
 }

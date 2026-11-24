@@ -249,6 +249,11 @@ func MeshHandler(s *Service) http.Handler {
 				WakeUntil:  billing.WakeUntil,
 				CanRenew:   a.IsAdmin() && billing.Pen != "" && billing.RenewURL != "",
 			}
+		} else if s.isRenewOnly() {
+			resp["billing"] = billingView{
+				State:    "renew_only",
+				CanRenew: false,
+			}
 		}
 		writeJSON(w, 200, resp)
 	})
@@ -784,6 +789,45 @@ func mintRenewToken(keyPath, pen, handle, role string, now time.Time) (string, t
 	mac.Write([]byte(payload))
 	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	return payload + "." + sig, exp, nil
+}
+
+func renewOnlyMarkerPath(billingStatusPath string) string {
+	if billingStatusPath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(billingStatusPath), ".renew-only")
+}
+
+// isRenewOnlyMode reports whether the pen must run in restricted renew_only
+// mode. Fails closed (B4):
+//   - if the .renew-only marker exists (or cannot be stat'd for a reason other
+//     than ENOENT), returns true even if billing-status.json is absent;
+//   - if billing-status.json exists but is unreadable, oversized (>4096B),
+//     unparseable JSON, or has state "renew_only", returns true.
+func isRenewOnlyMode(billingStatusPath string) bool {
+	if billingStatusPath == "" {
+		return false
+	}
+	marker := renewOnlyMarkerPath(billingStatusPath)
+	if _, err := os.Stat(marker); err == nil || !os.IsNotExist(err) {
+		return true
+	}
+	fi, err := os.Stat(billingStatusPath)
+	if os.IsNotExist(err) {
+		return false
+	}
+	if err != nil || fi.Size() > 4096 {
+		return true
+	}
+	b, err := os.ReadFile(billingStatusPath)
+	if err != nil || len(b) > 4096 {
+		return true
+	}
+	var st billingStatus
+	if err := json.Unmarshal(b, &st); err != nil {
+		return true
+	}
+	return st.State != "grace"
 }
 
 func readBillingStatus(path string) *billingStatus {

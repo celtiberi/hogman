@@ -1504,8 +1504,7 @@ func splitIPs(ips []string) (v4, v6 string) {
 }
 
 func (s *Service) isRenewOnly() bool {
-	st := readBillingStatus(s.cfg.BillingStatusPath)
-	return st != nil && st.State == "renew_only"
+	return isRenewOnlyMode(s.cfg.BillingStatusPath)
 }
 
 // buildPolicy is the default-deny policy of DESIGN.md section 8, expressed
