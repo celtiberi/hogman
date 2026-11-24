@@ -26,13 +26,16 @@ const (
 	maxLivePer                 = 2                // live values per name (ACME may ask for two at once)
 	hourlyWindow               = time.Hour
 	capWindow                  = 7 * 24 * time.Hour
-	defaultHourlyCap           = 5  // distinct new names per personal pen per rolling hour (CDNS_HOURLY_CAP)
-	defaultCapNames            = 20 // distinct new names per personal pen per 7 days (CDNS_WEEKLY_CAP)
-	defaultWorkHourlyCap       = 10 // distinct new names per work pen per rolling hour (CDNS_WORK_HOURLY_CAP)
-	defaultWorkWeeklyCap       = 60 // distinct new names per work pen per 7 days (CDNS_WORK_WEEKLY_CAP)
-	defaultGlobalHourlyCap     = 40 // soft global hourly cap across all pens (CDNS_GLOBAL_HOURLY_CAP)
-	defaultGlobalHardHourlyCap = 60 // hard global hourly ceiling with reserved quiet-pen floor (CDNS_GLOBAL_HARD_HOURLY_CAP)
-	quietPenHourlyFloor        = 2  // pens with <2 new names in the last hour may use soft..hard headroom
+	defaultHourlyCap           = 5   // distinct new names per personal pen per rolling hour (CDNS_HOURLY_CAP)
+	defaultCapNames            = 20  // distinct new names per personal pen per 7 days (CDNS_WEEKLY_CAP)
+	defaultWorkHourlyCap       = 40  // distinct new names per work pen per rolling hour (CDNS_WORK_HOURLY_CAP, D-38)
+	defaultWorkWeeklyCap       = 120 // distinct new names per work pen per 7 days (CDNS_WORK_WEEKLY_CAP, D-38)
+	defaultGlobalHourlyCap     = 80  // soft global hourly cap across all pens (CDNS_GLOBAL_HOURLY_CAP, D-38)
+	defaultGlobalHardHourlyCap = 120 // hard global hourly ceiling with reserved quiet-pen floor (CDNS_GLOBAL_HARD_HOURLY_CAP, D-38)
+	defaultLEWeeklyAllowance   = 300 // Let's Encrypt 7-day registered-domain allowance for alerting (CDNS_LE_WEEKLY_ALLOWANCE, D-38)
+	weeklyAlertPct             = 80  // alert threshold percentage of LE weekly allowance (240 of 300)
+	weeklyAlertCooldown        = 24 * time.Hour
+	quietPenHourlyFloor        = 2 // pens with <2 new names in the last hour may use soft..hard headroom
 	planPersonal               = "personal"
 	planWork                   = "work"
 	acmePrefix                 = "_acme-challenge."
@@ -109,10 +112,11 @@ type Cred struct {
 //
 // Challenge values are never written to disk.
 type state struct {
-	Creds []Cred                          `json:"creds"`
-	Seen  map[string]map[string]time.Time `json:"seen"` // cred ID -> fqdn -> first write in window
-	EAB   map[string][]time.Time          `json:"eab"`  // cred ID -> recent EAB mints
-	Used  []string                        `json:"used"` // pen names ever credentialed, kept after removal
+	Creds           []Cred                          `json:"creds"`
+	Seen            map[string]map[string]time.Time `json:"seen"`                        // cred ID -> fqdn -> first write in window
+	EAB             map[string][]time.Time          `json:"eab"`                         // cred ID -> recent EAB mints
+	Used            []string                        `json:"used"`                        // pen names ever credentialed, kept after removal
+	LastWeeklyAlert time.Time                       `json:"last_weekly_alert,omitempty"` // last 80% global 7-day LE-budget alert
 }
 
 type txtValue struct {
@@ -128,12 +132,14 @@ type Store struct {
 	st                       state
 	txt                      map[string][]txtValue // fqdn -> live values
 	now                      func() time.Time
-	hourlyCapNames           int // 0 uses defaultHourlyCap (clamped to weeklyCap)
-	capNames                 int // 0 uses defaultCapNames
-	workHourlyCapNames       int // 0 uses defaultWorkHourlyCap (clamped to workWeeklyCap)
-	workCapNames             int // 0 uses defaultWorkWeeklyCap
-	globalHourlyCapNames     int // 0 uses defaultGlobalHourlyCap (soft global cap)
-	globalHardHourlyCapNames int // 0 uses defaultGlobalHardHourlyCap (or globalHourlyCapNames if set directly)
+	hourlyCapNames           int                                  // 0 uses defaultHourlyCap (clamped to weeklyCap)
+	capNames                 int                                  // 0 uses defaultCapNames
+	workHourlyCapNames       int                                  // 0 uses defaultWorkHourlyCap (clamped to workWeeklyCap)
+	workCapNames             int                                  // 0 uses defaultWorkWeeklyCap
+	globalHourlyCapNames     int                                  // 0 uses defaultGlobalHourlyCap (soft global cap)
+	globalHardHourlyCapNames int                                  // 0 uses defaultGlobalHardHourlyCap (or globalHourlyCapNames if set directly)
+	leWeeklyAllowance        int                                  // 0 uses defaultLEWeeklyAllowance
+	onWeeklyAlert            func(used, allowance, threshold int) // invoked outside s.mu when 7-day global usage >= 80% of LE allowance
 }
 
 func (s *Store) weeklyCap() int {
@@ -205,6 +211,22 @@ func (s *Store) globalHardHourlyCap() int {
 		return soft
 	}
 	return h
+}
+
+func (s *Store) leWeeklyAllowanceVal() int {
+	if s.leWeeklyAllowance > 0 {
+		return s.leWeeklyAllowance
+	}
+	return defaultLEWeeklyAllowance
+}
+
+func (s *Store) weeklyAlertThreshold() int {
+	allowance := s.leWeeklyAllowanceVal()
+	t := (allowance*weeklyAlertPct + 99) / 100
+	if t < 1 {
+		return 1
+	}
+	return t
 }
 
 // Zones are the names this server answers for.
@@ -533,9 +555,9 @@ func (s *Store) PutTXT(c Cred, fqdn, value string) error {
 		return errValue
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	liveCred, ok := s.credLocked(c.ID)
 	if !ok {
+		s.mu.Unlock()
 		return errRevoked
 	}
 	c = liveCred
@@ -545,26 +567,45 @@ func (s *Store) PutTXT(c Cred, fqdn, value string) error {
 		if live[i].value == value {
 			live[i].expires = now.Add(txtTTL)
 			s.txt[fqdn] = live
+			s.mu.Unlock()
 			return nil
 		}
 	}
 	if len(live) >= maxLivePer {
+		s.mu.Unlock()
 		return errFull
 	}
+	var alertNeeded bool
+	var alertUsed, alertAllowance, alertThreshold int
+	var alertFn func(used, allowance, threshold int)
 	if c.Kind == "pen" {
-		if err := s.countLocked(c, fqdn, now); err != nil {
+		var err error
+		alertNeeded, alertUsed, err = s.countLocked(c, fqdn, now)
+		if err != nil {
+			s.mu.Unlock()
 			return err
+		}
+		if alertNeeded {
+			alertAllowance = s.leWeeklyAllowanceVal()
+			alertThreshold = s.weeklyAlertThreshold()
+			alertFn = s.onWeeklyAlert
 		}
 	}
 	s.txt[fqdn] = append(live, txtValue{value: value, expires: now.Add(txtTTL)})
+	s.mu.Unlock()
+	if alertNeeded && alertFn != nil {
+		alertFn(alertUsed, alertAllowance, alertThreshold)
+	}
 	return nil
 }
 
 // countLocked applies the per-pen weekly cap, per-pen hourly burst cap, and
-// global hourly cap across all pens. A name already counted in this pen's
-// 7-day window (retries and renewals) is free; a new name counts on first TXT
-// write (attempts count, not issued certs).
-func (s *Store) countLocked(c Cred, fqdn string, now time.Time) error {
+// global hourly cap across all pens, and checks whether total 7-day usage
+// across all pens crossed the 80% Let's Encrypt allowance alert threshold
+// (D-38). A name already counted in this pen's 7-day window (retries and
+// renewals) is free; a new name counts on first TXT write (attempts count,
+// not issued certs).
+func (s *Store) countLocked(c Cred, fqdn string, now time.Time) (alertNeeded bool, globalWeekly int, err error) {
 	// Prune expired 7-day entries across all credentials so global counts stay accurate.
 	globalHourly := 0
 	var oldestGlobalHourly time.Time
@@ -574,6 +615,7 @@ func (s *Store) countLocked(c Cred, fqdn string, now time.Time) error {
 				delete(m, n)
 				continue
 			}
+			globalWeekly++
 			if now.Sub(t) < hourlyWindow {
 				globalHourly++
 				if oldestGlobalHourly.IsZero() || t.Before(oldestGlobalHourly) {
@@ -607,24 +649,30 @@ func (s *Store) countLocked(c Cred, fqdn string, now time.Time) error {
 		}
 		if len(seen) >= s.weeklyCapFor(c) {
 			s.st.Seen[c.ID] = seen
-			return &rateLimitError{cause: errCap, retryAfter: retryAfterFromOldest(oldestWeekly, now, capWindow)}
+			return false, globalWeekly, &rateLimitError{cause: errCap, retryAfter: retryAfterFromOldest(oldestWeekly, now, capWindow)}
 		}
 		if penHourly >= s.hourlyCapFor(c) {
 			s.st.Seen[c.ID] = seen
-			return &rateLimitError{cause: errHourlyCap, retryAfter: retryAfterFromOldest(oldestHourly, now, hourlyWindow)}
+			return false, globalWeekly, &rateLimitError{cause: errHourlyCap, retryAfter: retryAfterFromOldest(oldestHourly, now, hourlyWindow)}
 		}
 		if globalHourly >= s.globalHardHourlyCap() {
 			s.st.Seen[c.ID] = seen
-			return &rateLimitError{cause: errGlobalHourlyCap, retryAfter: retryAfterFromOldest(oldestGlobalHourly, now, hourlyWindow)}
+			return false, globalWeekly, &rateLimitError{cause: errGlobalHourlyCap, retryAfter: retryAfterFromOldest(oldestGlobalHourly, now, hourlyWindow)}
 		}
 		if globalHourly >= s.globalHourlyCap() && penHourly >= quietPenHourlyFloor {
 			s.st.Seen[c.ID] = seen
-			return &rateLimitError{cause: errGlobalHourlyCap, retryAfter: retryAfterFromOldest(oldestGlobalHourly, now, hourlyWindow)}
+			return false, globalWeekly, &rateLimitError{cause: errGlobalHourlyCap, retryAfter: retryAfterFromOldest(oldestGlobalHourly, now, hourlyWindow)}
 		}
 		seen[fqdn] = now
+		globalWeekly++
 	}
-	if alreadySeen && c.EverChallenged {
-		return nil
+	prevAlert := s.st.LastWeeklyAlert
+	if globalWeekly >= s.weeklyAlertThreshold() && (s.st.LastWeeklyAlert.IsZero() || now.Sub(s.st.LastWeeklyAlert) >= weeklyAlertCooldown) {
+		s.st.LastWeeklyAlert = now
+		alertNeeded = true
+	}
+	if alreadySeen && c.EverChallenged && !alertNeeded {
+		return false, globalWeekly, nil
 	}
 	prevChallenged := c.EverChallenged
 	s.st.Seen[c.ID] = seen
@@ -633,6 +681,7 @@ func (s *Store) countLocked(c Cred, fqdn string, now time.Time) error {
 		if !alreadySeen {
 			delete(seen, fqdn)
 		}
+		s.st.LastWeeklyAlert = prevAlert
 		if !prevChallenged {
 			for i := range s.st.Creds {
 				if s.st.Creds[i].ID == c.ID {
@@ -641,9 +690,9 @@ func (s *Store) countLocked(c Cred, fqdn string, now time.Time) error {
 				}
 			}
 		}
-		return err
+		return false, globalWeekly, err
 	}
-	return nil
+	return alertNeeded, globalWeekly, nil
 }
 
 // DeleteTXT removes a value if present. Absent or expired is still success.

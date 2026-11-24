@@ -2254,8 +2254,10 @@ cmd_signup_notify() {
     [[ "$u" =~ ^https://[A-Za-z0-9.-]+/[A-Za-z0-9_-]{8,64}$ ]] || die "usage: hogman-host signup-notify https://ntfy.sh/<topic> | off"
   fi
   set_host_var SIGNUP_NTFY "$u"
+  SIGNUP_NTFY="$u"
+  sync_cdns_ntfy_dropin restart
   cmd_signup_setup
-  info "Sign-up pushes ${u:+go to $u}${u:-are off}"
+  info "Sign-up and certificate-budget pushes ${u:+go to $u}${u:-are off}"
 }
 
 # signup-stripe <price-id> [--work <work-price-id>] [tax] < keys: sell pens on
@@ -2443,6 +2445,36 @@ PEN_GID=65532   # the group the pens' registrars run as (H3); it may use the API
 # accounts, which Google requires. Kept in a systemd drop-in, so re-running
 # challenge-dns-setup keeps it. Let's Encrypt accounts stay without one.
 CDNS_CONTACT_DROPIN=/etc/systemd/system/hogman-challenge-dns.service.d/contact.conf
+CDNS_NTFY_DROPIN=/etc/systemd/system/hogman-challenge-dns.service.d/notify.conf
+
+# Keep challenge-dns's 80% global 7-day Let's Encrypt budget alert (D-38) in
+# sync with SIGNUP_NTFY via a 0600 systemd drop-in.
+sync_cdns_ntfy_dropin() {
+  local mode="${1:-}" changed=0
+  [ -f "$CDNS_UNIT" ] && command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] || return 0
+  local u="${SIGNUP_NTFY:-}"
+  if [ -n "$u" ]; then
+    [[ "$u" =~ ^https://[A-Za-z0-9.-]+/[A-Za-z0-9_-]{8,64}$ ]] || return 0
+    local want
+    want="$(printf '[Service]\nEnvironment=CDNS_NTFY_URL=%s\n' "$u")"
+    if [ ! -f "$CDNS_NTFY_DROPIN" ] || [ "$(cat "$CDNS_NTFY_DROPIN" 2>/dev/null || true)" != "$want" ]; then
+      install -d -m 0755 "$(dirname "$CDNS_NTFY_DROPIN")"
+      ( umask 077; printf '%s\n' "$want" > "$CDNS_NTFY_DROPIN" )
+      chmod 600 "$CDNS_NTFY_DROPIN"
+      changed=1
+    fi
+  elif [ -f "$CDNS_NTFY_DROPIN" ]; then
+    rm -f "$CDNS_NTFY_DROPIN"
+    changed=1
+  fi
+  if [ "$changed" = 1 ]; then
+    systemctl daemon-reload
+    if [ "$mode" = restart ] && systemctl is-active --quiet hogman-challenge-dns.service; then
+      systemctl restart hogman-challenge-dns.service
+      restart_signup_broker
+    fi
+  fi
+}
 cmd_fallback_contact() {
   local addr="${1:-}"   # no %: systemd would read it as a specifier
   [[ "$addr" =~ ^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] \
@@ -2548,6 +2580,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 UNIT
+  sync_cdns_ntfy_dropin
   systemctl daemon-reload
   systemctl enable hogman-challenge-dns.service >/dev/null
   systemctl restart hogman-challenge-dns.service
@@ -2594,6 +2627,7 @@ restart_signup_broker() {
 # ones this host already runs and only when the binary changed. install.sh
 # calls it, so a release reaches them like it reaches the pens.
 cmd_refresh_services() {
+  load_host
   local arch
   case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) die "unsupported CPU $(uname -m)" ;; esac
   refresh_one() {  # refresh_one <installed path> <prebuilt path> <service>
@@ -2610,6 +2644,7 @@ cmd_refresh_services() {
     fi
   }
   refresh_one "$CDNS_BIN" "$SRC/prebuilt/challenge-dns/challenge-dns-linux-$arch" hogman-challenge-dns
+  sync_cdns_ntfy_dropin restart
   refresh_one /usr/local/bin/hogman-registrar "$SRC/prebuilt/registrar/registrar-linux-$arch" hogman-gate-cert
 }
 

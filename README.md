@@ -204,7 +204,7 @@ Read the full breakdown in [Architecture & security](https://work.hogman.network
   isolated.
 - **Current limits & platforms:** macOS and Linux work today; Windows is built but untested; a
   mobile app is in the works. Each pen may get certificates for a limited number of distinct new
-  names: 5 per rolling hour and 20 per rolling 7 days on Free and Personal pens, 10 and 60 on Work
+  names: 5 per rolling hour and 20 per rolling 7 days on Free and Personal pens, 40 and 120 on Work
   pens, under a shared limit across all pens (`home.<pen>` uses one; attempts count, not issued
   certificates; a name already counted in the last 7 days doesn't count again). Pen names, member
   handles, and kicked site names are permanently retired.
