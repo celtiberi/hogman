@@ -607,8 +607,36 @@ check "bob can't load it any more" retry 15 not fetch notes.$ZONE "notes from da
 # Server links only put something in the pen with share (D-11): joining a
 # whole computer with one is refused before the link is used, and the same
 # link then works with share.
-dc up -d dave-server
+dc up -d dave-server dave-server-tools
 retry 20 run dave-server test -s /etc/ssl/certs/ca-certificates.crt
+
+# Second-device link minted from an existing member's portal (I-21): verifies
+# device-link enrollment survives the transient ACL sync window, actually
+# reaches https://home.$ZONE/api/me through its own local proxy, and loses
+# access cleanly when removed via DELETE /api/devices/:id.
+DAVE_DEV_LINK="$(run dave-laptop curl -sf -m10 --cacert "$ROOT" --proxy "http://$PROXY" \
+  -H "Origin: https://home.$ZONE" -H 'Content-Type: application/json' \
+  -d '{"kind":"personal"}' "https://home.$ZONE/api/devices" | jq -r '.join_link')"
+check "dave mints a second-device link from his portal" bash -c '[[ "$1" == https://*/join#k=* ]]' _ "$DAVE_DEV_LINK"
+out="$(join_tool dave-server --hostname dave-second "$DAVE_DEV_LINK" 2>&1)"; rc=$?
+[ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
+check "second device joins via portal device link (exit $rc)" grep -q "You're in. You are dave on $ZONE" <<<"$out"
+DAVE2_PROXY="$(run dave-server sh -c 'cat "${XDG_CONFIG_HOME:-$HOME/.config}/hogman/'"$ZONE"'/config.json"' | jq -r '.proxy_addr' | tr -d '\r')"
+dave2_me() {
+  run dave-server-tools curl -sf -m10 --cacert "$ROOT" --proxy "http://$DAVE2_PROXY" "https://home.$ZONE/api/me" \
+    | jq -e '.member.handle == "dave"' >/dev/null
+}
+check "... second device reaches /api/me through its proxy" retry 10 dave2_me
+DAVE2_ID="$(run dave-server-tools curl -sf -m10 --cacert "$ROOT" --proxy "http://$DAVE2_PROXY" "https://home.$ZONE/api/me" | jq -r '.this_device.id')"
+check "... dave removes his second device via DELETE /api/devices/$DAVE2_ID" run dave-laptop curl -sf -m10 --cacert "$ROOT" --proxy "http://$PROXY" \
+  -X DELETE -H "Origin: https://home.$ZONE" "https://home.$ZONE/api/devices/$DAVE2_ID"
+dave2_blocked() {
+  ! run dave-server-tools curl -sf -m5 --cacert "$ROOT" --proxy "http://$DAVE2_PROXY" "https://home.$ZONE/api/me"
+}
+check "... removed second device loses access to home.$ZONE" retry 15 dave2_blocked
+check "... while dave's first laptop still reaches home.$ZONE" run dave-laptop curl -sf -m10 --cacert "$ROOT" --proxy "http://$PROXY" "https://home.$ZONE/api/me"
+join_tool dave-server leave --force "$ZONE" >/dev/null 2>&1 || true
+
 SHARE_LINK="$($H device key dave server | awk '/^link:/ {print $2}')"
 check "a server link is marked for share" grep -q 'for=share' <<<"$SHARE_LINK"
 check "the server link carries no fingerprint" bash -c '! grep -q "fp=" <<<"$1"' _ "$SHARE_LINK"

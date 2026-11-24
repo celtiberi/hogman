@@ -579,6 +579,7 @@ func orderIPs(ips []string) []string {
 type agentStatus struct {
 	Zone       string   `json:"zone"`
 	Up         bool     `json:"up"`
+	Enrolled   bool     `json:"enrolled,omitempty"` // true once upNode succeeded on the control plane
 	NeedsLogin bool     `json:"needs_login,omitempty"`
 	Error      string   `json:"error,omitempty"`
 	IPs        []string `json:"ips,omitempty"`
@@ -720,7 +721,7 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.mu.Lock()
-		st := agentStatus{Zone: a.cfg.Zone, Up: a.up, Error: a.err, IPs: a.ips, Server: a.server, BinSHA256: a.binSHA256}
+		st := agentStatus{Zone: a.cfg.Zone, Up: a.up, Enrolled: a.up, Error: a.err, IPs: a.ips, Server: a.server, BinSHA256: a.binSHA256}
 		a.mu.Unlock()
 		if st.Up && a.liveStatus != nil {
 			ctx, cancel := context.WithTimeout(r.Context(), 200*time.Millisecond)
