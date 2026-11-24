@@ -41,6 +41,13 @@ usage: hogman-host <command>
   upgrade <network>              update a pen's code from src/ and restart it
   routes                         rewrite the front door's routes and reload it
   remove <network>               stop a pen (its folder is kept; delete it yourself to destroy it)
+  sleep <network>                put a pen to sleep (stops containers, frees slot, keeps state for 1 yr)
+  wake <network>                 wake a sleeping pen back up
+  purge --force <network>        permanently destroy a pen's state (interactive TTY confirmation; --due for expired sleep)
+  lifecycle [--dry-run]          run the daily pen lifecycle sweep (D-35: grace -> sleep -> delete)
+  lifecycle-setup                install and enable the daily systemd timer for lifecycle sweeps
+  lifecycle-alert <pen> list|add|remove [email]
+                                 manage opt-in billing alert email addresses for a pen
 
   backup-setup <age-public-key>  nightly encrypted backups of every pen (age, https://age-encryption.org)
   backup-allow '<ssh-public-key>'  let another machine download the encrypted backups, and nothing else
@@ -238,12 +245,40 @@ write_front() {
 	}
 }
 
+(sleeping) {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Frame-Options DENY
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Cache-Control no-store
+		Content-Security-Policy "default-src 'none'"
+		Content-Type "text/html; charset=utf-8"
+		-Server
+	}
+	respond "<!doctype html><meta charset=utf-8><title>Pen asleep</title><body style='font-family:system-ui,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem'><h1>This pen is asleep</h1><p>Its state is kept for one year. Contact your host operator if an owner or admin needs to wake it for renewal.</p></body>" 503
+}
+
 EOF
     for n in $(pen_names); do
       [ -f "$PENS/$n/.removed" ] && continue
       host="$(pen_env "$n" PUBLIC_HOST)"
       [ -n "$host" ] || continue
       valid_host "$host" || die "invalid PUBLIC_HOST in pen $n: $host"
+      if [ -f "$PENS/$n/.sleeping" ]; then
+        cat <<EOF
+# pen (sleeping): $n
+http://$host {
+	redir https://{host}{uri} permanent
+}
+$host {
+$(gate_tls_line "$host")
+	import sleeping
+}
+
+EOF
+        continue
+      fi
       cat <<EOF
 # pen: $n
 http://$host {
@@ -337,7 +372,7 @@ front_join() {
   local c=hogman-front-front-1 n host attached
   attached="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$c" 2>/dev/null)" || return 1
   for n in $(pen_names); do
-    [ -f "$PENS/$n/.removed" ] && continue
+    [ -f "$PENS/$n/.removed" ] || [ -f "$PENS/$n/.sleeping" ] && continue
     host="$(pen_env "$n" PUBLIC_HOST)"
     [ -n "$host" ] || continue
     grep -qw "pen-$n-core" <<<"$attached" && continue
@@ -346,7 +381,7 @@ front_join() {
   for net in $attached; do
     case "$net" in pen-*-core) ;; *) continue ;; esac
     n="${net#pen-}"; n="${n%-core}"
-    if [ ! -d "$PENS/$n" ] || [ -f "$PENS/$n/.removed" ]; then
+    if [ ! -d "$PENS/$n" ] || [ -f "$PENS/$n/.removed" ] || [ -f "$PENS/$n/.sleeping" ]; then
       docker network disconnect "$net" "$c" >/dev/null 2>&1 || true
     fi
   done
@@ -520,7 +555,10 @@ cmd_list() {
   printf "%-16s %-28s %-6s %s\n" NETWORK PUBLIC-HOST RELAY STATE
   for n in $(pen_names); do
     local state="running"
-    [ -f "$PENS/$n/.removed" ] && state="stopped"
+    if [ -f "$PENS/$n/.retired" ]; then state="deleted"
+    elif [ -f "$PENS/$n/.sleeping" ]; then state="sleeping"
+    elif [ -f "$PENS/$n/.removed" ]; then state="stopped"
+    fi
     if [ "$state" = running ] && ! grep -qx "pen-$n-headscale-1" <<<"$running"; then state="down"; fi
     printf "%-16s %-28s %-6s %s\n" "$n" "$(pen_env "$n" PUBLIC_HOST)" "$(pen_env "$n" STUN_PORT)" "$state"
   done
@@ -622,6 +660,253 @@ cmd_remove() {
   info "pen $n stopped and unrouted. Its folder is kept at $PENS/$n"
 }
 
+lifecycle_json_str() {  # lifecycle_json_str <file> <key>
+  awk -v k="\"$2\"" '
+    match($0, k "[[:space:]]*:[[:space:]]*\"[^\"]*\"") {
+      s = substr($0, RSTART, RLENGTH)
+      sub(/^[^:]*:[[:space:]]*"/, "", s)
+      sub(/"$/, "", s)
+      print s
+      exit
+    }' "$1"
+}
+
+lifecycle_json_int() {  # lifecycle_json_int <file> <key>
+  awk -v k="\"$2\"" '
+    match($0, k "[[:space:]]*:[[:space:]]*[0-9]+") {
+      s = substr($0, RSTART, RLENGTH)
+      sub(/^[^:]*:[[:space:]]*/, "", s)
+      print s
+      exit
+    }' "$1"
+}
+
+lifecycle_mark_sleeping() {  # lifecycle_mark_sleeping <pen>
+  local n="$1" f="$PENS/$1/lifecycle.json" now del tmp
+  now="$(date -u +%s)"
+  del=$((now + 365 * 86400))
+  tmp="$(mktemp "$PENS/$n/.lifecycle.XXXXXX")"
+  if [ ! -f "$f" ]; then
+    printf '{\n  "plan": "free",\n  "state": "sleeping",\n  "sleep_since": %s,\n  "delete_after": %s,\n  "backdate_renewal": false,\n  "updated_at": %s\n}\n' \
+      "$now" "$del" "$now" > "$tmp"
+  elif command -v jq >/dev/null 2>&1; then
+    jq --argjson now "$now" --argjson del "$del" \
+      '.state = "sleeping" | .sleep_since = $now | .delete_after = $del | .updated_at = $now' "$f" > "$tmp"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); now=int(sys.argv[2]); d["state"]="sleeping"; d["sleep_since"]=now; d["delete_after"]=now+365*86400; d["updated_at"]=now; print(json.dumps(d, indent=2))' \
+      "$f" "$now" > "$tmp"
+  else
+    awk -v now="$now" -v del="$del" '
+      /^[[:space:]]*"(state|sleep_since|delete_after|updated_at)"[[:space:]]*:/ { next }
+      /^[[:space:]]*}[[:space:]]*$/ {
+        if (n > 0 && lines[n] !~ /[{,][[:space:]]*$/) {
+          lines[n] = lines[n] ","
+        }
+        for (i = 1; i <= n; i++) print lines[i]
+        printf "  \"state\": \"sleeping\",\n  \"sleep_since\": %s,\n  \"delete_after\": %s,\n  \"updated_at\": %s\n}\n", now, del, now
+        done = 1
+        next
+      }
+      { lines[++n] = $0 }
+      END {
+        if (!done) {
+          printf "{\n  \"plan\": \"free\",\n  \"state\": \"sleeping\",\n  \"sleep_since\": %s,\n  \"delete_after\": %s,\n  \"backdate_renewal\": false,\n  \"updated_at\": %s\n}\n", now, del, now
+        }
+      }' "$f" > "$tmp"
+  fi
+  chmod 0600 "$tmp" && mv "$tmp" "$f"
+}
+
+cmd_sleep() {
+  load_host
+  local n="${1:-}"
+  valid_name "$n" || die "invalid network name: $n"
+  [ -d "$PENS/$n" ] || die "no pen $n"
+  [ ! -f "$PENS/$n/.retired" ] || die "pen $n has already been deleted"
+  # SF-3: never mark .sleeping if containers failed to stop.
+  (cd "$PENS/$n" && ./hogman down) || die "could not stop pen $n; refusing to mark sleeping"
+  touch "$PENS/$n/.sleeping"
+  # SF-4: keep lifecycle.json aligned even for manual `hogman-host sleep <pen>`.
+  lifecycle_mark_sleeping "$n"
+  rm -f "$PENS/$n/data/registrar/billing-status.json"
+  write_front
+  reload_front
+  docker network rm "pen-$n-core" >/dev/null 2>&1 || true
+  info "pen $n put to sleep (slot freed; state kept at $PENS/$n)"
+}
+
+lifecycle_mark_awake() {  # lifecycle_mark_awake <pen>
+  local n="$1" f="$PENS/$1/lifecycle.json" now tmp
+  [ -f "$f" ] || return 0
+  now="$(date -u +%s)"
+  tmp="$(mktemp "$PENS/$n/.lifecycle.XXXXXX")"
+  if command -v jq >/dev/null 2>&1; then
+    jq --argjson now "$now" \
+      'del(.sleep_since, .delete_after, .pending_wake) | .state = "active" | .updated_at = $now' "$f" > "$tmp"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["state"]="active"; d.pop("sleep_since",None); d.pop("delete_after",None); d.pop("pending_wake",None); d["updated_at"]=int(sys.argv[2]); print(json.dumps(d, indent=2))' \
+      "$f" "$now" > "$tmp"
+  else
+    awk -v now="$now" '
+      /^[[:space:]]*"(state|sleep_since|delete_after|pending_wake|updated_at)"[[:space:]]*:/ { next }
+      /^[[:space:]]*}[[:space:]]*$/ {
+        if (n > 0 && lines[n] !~ /[{,][[:space:]]*$/) {
+          lines[n] = lines[n] ","
+        }
+        for (i = 1; i <= n; i++) print lines[i]
+        printf "  \"state\": \"active\",\n  \"updated_at\": %s\n}\n", now
+        done = 1
+        next
+      }
+      { lines[++n] = $0 }
+      END {
+        if (!done) {
+          printf "{\n  \"state\": \"active\",\n  \"updated_at\": %s\n}\n", now
+        }
+      }' "$f" > "$tmp"
+  fi
+  chmod 0600 "$tmp" && mv "$tmp" "$f"
+}
+
+cmd_wake() {
+  load_host
+  local n="${1:-}"
+  valid_name "$n" || die "invalid network name: $n"
+  [ -d "$PENS/$n" ] || die "no pen $n"
+  [ ! -f "$PENS/$n/.retired" ] || die "pen $n has already been deleted"
+  # SF-2: wake only wakes sleeping pens, never operator-removed pens.
+  [ ! -f "$PENS/$n/.removed" ] || die "pen $n was removed (use upgrade/restore, not wake)"
+  [ -f "$PENS/$n/.env" ] || die "pen $n has no .env"
+  local live max
+  live="$(live_pens)"
+  max="${MAX_PENS:-8}"
+  if [ -f "$PENS/$n/.sleeping" ] && [ "$live" -ge "$max" ]; then
+    die "host is at capacity ($live/$max live pens); cannot wake $n"
+  fi
+  rm -f "$PENS/$n/.sleeping"
+  # B7: clear sleeping/delete_after in lifecycle.json so a manually woken pen
+  # can never be purged as expired sleep later.
+  lifecycle_mark_awake "$n"
+  docker network inspect "pen-$n-core" >/dev/null 2>&1 || docker network create "pen-$n-core" >/dev/null
+  write_front
+  reload_front
+  local front_ca=""
+  [ -n "${FRONT_TLS_MODE:-}" ] && front_ca="$FRONT/data/caddy/pki/authorities/local/root.crt"
+  (cd "$PENS/$n" && FRONT_CA="$front_ca" FRONT_JOIN_DL="$FRONT/join-dl" ./hogman up)
+  info "pen $n woken and routed"
+}
+
+cmd_purge() {
+  load_host
+  local due=0 force=0 n=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --due)   due=1; shift ;;
+      --force) force=1; shift ;;
+      --yes|-y) die "purge is irreversible and cannot be bypassed with --yes" ;;
+      -*)      die "usage: hogman-host purge --force <pen>   |   hogman-host purge --due <pen>" ;;
+      *)
+        [ -z "$n" ] || die "usage: hogman-host purge --force <pen>   |   hogman-host purge --due <pen>"
+        n="$1"; shift ;;
+    esac
+  done
+  valid_name "$n" || die "invalid network name: $n"
+  [ -d "$PENS/$n" ] || die "no pen $n"
+
+  if [ "$due" = 1 ]; then
+    # B5 & B7: non-interactive sweep mode ONLY deletes pens that have .sleeping,
+    # no running containers, and lifecycle.json showing sleeping + past delete_after.
+    [ -f "$PENS/$n/.sleeping" ] || die "purge --due refused: pen $n does not have a .sleeping marker"
+    local running=""
+    if [ -f "$PENS/$n/compose.yaml" ]; then
+      running="$(cd "$PENS/$n" && docker compose ps -q --status running 2>/dev/null || true)"
+    else
+      running="$(docker ps -q --filter "label=com.docker.compose.project=pen-$n" 2>/dev/null || true)"
+    fi
+    [ -z "$running" ] || die "purge --due refused: pen $n still has running containers"
+    local lf="$PENS/$n/lifecycle.json"
+    [ -f "$lf" ] || die "purge --due refused: $n has no lifecycle.json"
+    local st del now
+    st="$(lifecycle_json_str "$lf" state)"
+    del="$(lifecycle_json_int "$lf" delete_after)"
+    now="$(date -u +%s)"
+    [ "$st" = "sleeping" ] || die "purge --due refused: pen $n state is '${st:-unknown}', not 'sleeping'"
+    [ -n "$del" ] && [ "$del" -gt 0 ] || die "purge --due refused: pen $n has no valid delete_after"
+    [ "$now" -ge "$del" ] || die "purge --due refused: pen $n is not due for deletion yet (delete_after=$del, now=$now)"
+  else
+    # B5: manual operator purge requires --force AND an interactive TTY typing
+    # the exact pen name (never bypassed by flags or piped stdin).
+    [ "$force" = 1 ] || die "purge permanently destroys all data for $n (pass --force on an interactive terminal)"
+    [ -t 0 ] || die "manual purge requires an interactive terminal (use 'purge --due <pen>' only for expired sleeping pens)"
+    printf 'WARNING: This will permanently destroy all state for pen %s (its name stays retired).\n' "$n" >&2
+    printf 'Type the pen name (%s) to confirm: ' "$n" >&2
+    local confirm=""
+    IFS= read -r confirm || true
+    [ "$confirm" = "$n" ] || die "confirmation did not match '$n'; aborted"
+  fi
+
+  # Take one final encrypted backup before destruction when backups are configured.
+  if [ -s "$RECIPIENT" ] && [ -f "$PENS/$n/.env" ] && [ -d "$PENS/$n/data" ]; then
+    backup_pen "$n" || die "final backup of $n failed; refusing to destroy state"
+  fi
+
+  (cd "$PENS/$n" && ./hogman down -v --remove-orphans) || true
+  if [ -s "$PENS/$n/.challenge-dns-id" ] && [ -x "$CDNS_BIN" ]; then
+    cdns cred rm "$(cat "$PENS/$n/.challenge-dns-id")" >/dev/null 2>&1 \
+      && rm -f "$PENS/$n/.challenge-dns-id" || info "could not remove $n's challenge DNS credential"
+  fi
+  rm -rf "$PENS/$n/data" "$PENS/$n/.env" "$PENS/$n/.sleeping"
+  touch "$PENS/$n/.removed" "$PENS/$n/.retired"
+  write_front
+  reload_front
+  docker network rm "pen-$n-core" >/dev/null 2>&1 || true
+  info "pen $n deleted (name stays retired per D-21)"
+}
+
+cmd_lifecycle() {
+  load_host
+  [ -f "$SIGNUP/compose.yaml" ] || die "sign-ups are not set up: hogman-host signup-setup"
+  (cd "$SIGNUP" && docker compose exec -T broker hogman-signup lifecycle-sweep "$@")
+}
+
+cmd_lifecycle_alert() {
+  load_host
+  [ -f "$SIGNUP/compose.yaml" ] || die "sign-ups are not set up: hogman-host signup-setup"
+  [ $# -ge 2 ] && [ $# -le 3 ] || die "usage: hogman-host lifecycle-alert <pen> <list|add|remove> [email]"
+  (cd "$SIGNUP" && docker compose exec -T broker hogman-signup lifecycle-alert "$@")
+}
+
+cmd_lifecycle_setup() {
+  load_host
+  command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] || die "systemd is required for lifecycle-setup"
+  cat > /etc/systemd/system/hogman-lifecycle.service <<UNIT
+[Unit]
+Description=Hogman: daily pen lifecycle sweep (D-35 grace, sleep, delete)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Environment=HOGMAN_HOME=$HOGMAN_HOME
+ExecStart=/usr/local/bin/hogman-host lifecycle
+UNIT
+  cat > /etc/systemd/system/hogman-lifecycle.timer <<'UNIT'
+[Unit]
+Description=Hogman: daily pen lifecycle sweep
+
+[Timer]
+OnCalendar=*-*-* 04:15:00 UTC
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now hogman-lifecycle.timer >/dev/null
+  info "Daily lifecycle sweep on (04:15 UTC)"
+}
+
 
 # ---------------------------------------------------------------- backup ----
 #
@@ -720,7 +1005,11 @@ backup_pen() {  # backup_pen <name>
   out="$BACKUPS/$n-$ts.tar.gz.age"
   tar -C "$stage" -czf - . | age -r "$(cat "$RECIPIENT")" > "$out.part"
   rm -rf "$stage"
-  chown root:hogman-backup "$out.part"; chmod 0640 "$out.part"; mv "$out.part" "$out"
+  local bgrp=hogman-backup
+  if ! getent group "$bgrp" >/dev/null 2>&1; then
+    bgrp="$(stat -c '%g' "$BACKUPS" 2>/dev/null || stat -f '%g' "$BACKUPS" 2>/dev/null || echo 0)"
+  fi
+  chown "0:$bgrp" "$out.part" 2>/dev/null || true; chmod 0640 "$out.part"; mv "$out.part" "$out"
   # Keep the newest few here; anchor to the exact timestamp suffix so pen "foo"
   # never matches and prunes backups of "foo-bar".
   ls -1t "$BACKUPS/$n"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.tar.gz.age 2>/dev/null \
@@ -766,7 +1055,7 @@ name_free() {
   esac
 }
 
-live_pens() { local n c=0; for n in $(pen_names); do [ -f "$PENS/$n/.removed" ] || c=$((c + 1)); done; echo "$c"; }
+live_pens() { local n c=0; for n in $(pen_names); do [ -f "$PENS/$n/.removed" ] || [ -f "$PENS/$n/.sleeping" ] || c=$((c + 1)); done; echo "$c"; }
 
 set_host_var() {  # set_host_var KEY value: in host.env, replacing any old value
   # host.env is sourced, so quote the value (a sender like "Hogman <x@y>"
@@ -917,8 +1206,18 @@ cmd_signup_setup() {
   # The broker is as powerful as root, so it gets no internet unless the
   # operator turned on push notifications (the only thing it sends out).
   # Docker itself pulls images and builds; the broker only asks it to.
-  local broker_nets="[signup]" out_net=""
-  if [ -n "${SIGNUP_NTFY:-}" ]; then broker_nets="[signup, out]"; out_net="  out: {}"; fi
+  local broker_nets="[signup]" out_net="" broker_mail="" broker_backups_vol=""
+  if [ -s "$SIGNUP/resend_key" ] && [ -n "${SIGNUP_FROM:-}" ]; then
+    broker_mail="      RESEND_API_KEY_FILE: $SIGNUP/resend_key
+      BILLING_FROM: \"$SIGNUP_FROM\""
+  fi
+  if [ -n "${SIGNUP_NTFY:-}" ] || [ -n "$broker_mail" ]; then
+    broker_nets="[signup, out]"; out_net="  out: {}"
+  fi
+  if [ -d "$BACKUPS" ]; then
+    broker_backups_vol="      - $BACKUPS:$BACKUPS
+"
+  fi
   # Selling pens (signup-stripe): the page gets the Stripe key, the broker the
   # webhook secret it checks Stripe's events with.
   local web_extra_vols="" web_stripe="" broker_stripe=""
@@ -999,7 +1298,10 @@ $web_extra_vols
       HOGMAN_HOME: $HOGMAN_HOME
       HOGMAN_HOST_TOOL: /usr/local/bin/hogman-host
       BROKER_TOKEN_FILE: $SIGNUP/token
+      PUBLIC_URL: https://$SIGNUP_HOST
+      WORK_SIGNUP_HOST: "${SIGNUP_WORK_HOST:-}"
       NTFY_URL: ${SIGNUP_NTFY:-}
+$broker_mail
 $broker_stripe
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -1011,6 +1313,7 @@ $broker_stripe
       # pen, and a route uses the *.<gate> wildcard only if these files exist.
       # Without them every gate route lost its certificate line.
       - $GATE_TLS:$GATE_TLS:ro
+$broker_backups_vol
     # signup: the page reaches it here (internal: no internet). out, only with
     # push notifications on: nothing else is on it, so nothing reaches it there.
     networks: $broker_nets
@@ -1029,6 +1332,9 @@ EOF
   (cd "$SIGNUP" && docker compose up -d --build --remove-orphans >&2) || die "the sign-up page did not start: cd $SIGNUP && docker compose logs"
   write_front
   reload_front
+  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    cmd_lifecycle_setup
+  fi
   info "Sign-ups on: https://$SIGNUP_HOST, front doors at <name>.$PENS_DOMAIN, at most $MAX_PENS here."
   info "DNS: point $SIGNUP_HOST and *.$PENS_DOMAIN at this server. Then: hogman-host signup-code"
 }
@@ -1837,6 +2143,12 @@ case "${1:-}" in
   upgrade) shift; cmd_upgrade "$@" ;;
   routes)  load_host; write_front; reload_front; info "routes rewritten" ;;
   remove)  shift; cmd_remove "$@" ;;
+  sleep)   shift; cmd_sleep "$@" ;;
+  wake)    shift; cmd_wake "$@" ;;
+  purge)   shift; cmd_purge "$@" ;;
+  lifecycle) shift; cmd_lifecycle "$@" ;;
+  lifecycle-alert) shift; cmd_lifecycle_alert "$@" ;;
+  lifecycle-setup) shift; cmd_lifecycle_setup "$@" ;;
   backup-setup) shift; cmd_backup_setup "$@" ;;
   backup-allow) shift; cmd_backup_allow "$@" ;;
   backup)  cmd_backup ;;

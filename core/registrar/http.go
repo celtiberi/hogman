@@ -2,15 +2,23 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"mime"
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -208,7 +216,7 @@ func MeshHandler(s *Service) http.Handler {
 		}
 		invs, _ := s.st.Invites(&c.member.ID)
 		a := c.actor()
-		writeJSON(w, 200, map[string]any{
+		resp := map[string]any{
 			"member": c.member, "this_device": c.device, "devices": devs, "names": mine,
 			"invites": inviteViews(invs), "zone": s.cfg.Zone,
 			// What the page should offer. The API checks again on every call.
@@ -218,6 +226,41 @@ func MeshHandler(s *Service) http.Handler {
 			"owners": ownerCount(s, a),
 			// What `hogman share` needs to start a server of its own.
 			"network": s.NetworkInfo(),
+		}
+		if billing := readBillingStatus(s.cfg.BillingStatusPath); billing != nil {
+			resp["billing"] = billingView{
+				State:      billing.State,
+				PaidUntil:  billing.PaidUntil,
+				GraceUntil: billing.GraceUntil,
+				CanRenew:   a.IsAdmin() && billing.Pen != "" && billing.RenewURL != "",
+			}
+		}
+		writeJSON(w, 200, resp)
+	})
+
+	// D-35: In-pen authenticated renewal (owners & admins on a personal device).
+	// Mints a short-lived (15m), single-use, purpose- and pen-bound HMAC token
+	// returned in the URL fragment (#renew=<token>) so it never hits logs or referers.
+	h("POST /api/billing/renew-token", true, false, func(w http.ResponseWriter, r *http.Request, c caller) {
+		billing := readBillingStatus(s.cfg.BillingStatusPath)
+		if billing == nil || billing.State != "grace" || billing.Pen == "" || billing.RenewURL == "" {
+			fail(w, &Problem{Status: http.StatusConflict, Msg: "this pen is not currently in a renewable grace period"})
+			return
+		}
+		if c.member.Status != "active" || (c.member.Role != "owner" && c.member.Role != "admin") {
+			fail(w, forbidden("only active owners or admins can renew"))
+			return
+		}
+		keyPath := filepath.Join(filepath.Dir(s.cfg.BillingStatusPath), "renew.key")
+		token, exp, err := mintRenewToken(keyPath, billing.Pen, c.member.Handle, c.member.Role, time.Now().UTC())
+		if err != nil {
+			log.Printf("billing renew-token: %v", err)
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{
+			"url":        strings.TrimRight(billing.RenewURL, "/") + "/#renew=" + token,
+			"expires_at": exp.UTC().Format(time.RFC3339),
 		})
 	})
 
@@ -639,6 +682,115 @@ func fail(w http.ResponseWriter, err error) {
 	}
 	log.Printf("internal error: %v", err)
 	writeJSON(w, 500, map[string]string{"error": "internal error"})
+}
+
+// billingStatus is the host-written grace-period notice at
+// /var/lib/registrar/billing-status.json.
+type billingStatus struct {
+	Pen        string `json:"pen,omitempty"`
+	State      string `json:"state"`
+	PaidUntil  string `json:"paid_until,omitempty"`
+	GraceUntil string `json:"grace_until,omitempty"`
+	RenewURL   string `json:"renew_url,omitempty"`
+}
+
+// billingView is the sanitized projection returned on GET /api/me (never exposes
+// signing material or unauthenticated renewal URLs).
+type billingView struct {
+	State      string `json:"state"`
+	PaidUntil  string `json:"paid_until,omitempty"`
+	GraceUntil string `json:"grace_until,omitempty"`
+	CanRenew   bool   `json:"can_renew,omitempty"`
+}
+
+const (
+	renewTokenPurpose = "hogman-renew-v1:"
+	renewTokenTTL     = 15 * time.Minute
+)
+
+func loadOrCreateRenewKey(path string) ([]byte, error) {
+	if raw, err := os.ReadFile(path); err == nil {
+		if k, derr := hex.DecodeString(strings.TrimSpace(string(raw))); derr == nil && len(k) == 32 {
+			return k, nil
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
+	}
+	encoded := []byte(hex.EncodeToString(key) + "\n")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			raw, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return nil, rerr
+			}
+			k, derr := hex.DecodeString(strings.TrimSpace(string(raw)))
+			if derr != nil || len(k) != 32 {
+				return nil, errors.New("corrupt renew.key")
+			}
+			return k, nil
+		}
+		return nil, err
+	}
+	_, werr := f.Write(encoded)
+	cerr := f.Close()
+	if werr != nil {
+		_ = os.Remove(path)
+		return nil, werr
+	}
+	if cerr != nil {
+		_ = os.Remove(path)
+		return nil, cerr
+	}
+	return key, nil
+}
+
+func mintRenewToken(keyPath, pen, handle, role string, now time.Time) (string, time.Time, error) {
+	key, err := loadOrCreateRenewKey(keyPath)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", time.Time{}, err
+	}
+	exp := now.UTC().Add(renewTokenTTL)
+	rawPayload := fmt.Sprintf("v1|%s|%s|%s|%d|%s", pen, handle, role, exp.Unix(), hex.EncodeToString(nonce))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(rawPayload))
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(renewTokenPurpose))
+	mac.Write([]byte(payload))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return payload + "." + sig, exp, nil
+}
+
+func readBillingStatus(path string) *billingStatus {
+	if path == "" {
+		return nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) > 4096 {
+		return nil
+	}
+	var st billingStatus
+	if err := json.Unmarshal(b, &st); err != nil || st.State != "grace" {
+		return nil
+	}
+	st.Pen = strings.ToLower(strings.TrimSpace(st.Pen))
+	if st.RenewURL != "" {
+		u, err := url.Parse(strings.TrimSpace(st.RenewURL))
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+			st.RenewURL = ""
+		} else {
+			st.RenewURL = "https://" + u.Host
+		}
+	}
+	return &st
 }
 
 // ownerCount tells an owner how many owners the pen has; others get 0.

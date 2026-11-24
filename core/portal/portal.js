@@ -442,8 +442,60 @@
   $('herd-form').onsubmit = ev => ev.preventDefault();
   $('herd-more').onclick = () => loadHerd(true).catch(errIn('herd-err'));
 
+  const renderBillingBanner = (st) => {
+    const el = $('billing-banner');
+    if (!el) return;
+    if (!st || st.state !== 'grace') { el.hidden = true; return; }
+    const p = document.createElement('p');
+    const strong = document.createElement('strong');
+    strong.textContent = 'Renewal needed: ';
+    p.append(strong);
+    let until = 'soon';
+    if (st.grace_until) {
+      const d = new Date(st.grace_until);
+      if (!Number.isNaN(d.getTime())) {
+        const days = Math.max(0, Math.ceil((d.getTime() - Date.now()) / 86400000));
+        until = `${d.toISOString().slice(0, 10)} (${days} day${days === 1 ? '' : 's'} left)`;
+      }
+    }
+    if (me && me.is_admin) {
+      p.append(document.createTextNode(
+        `this pen is in its 30-day grace period and will go to sleep on ${until}. ` +
+        'Any owner or admin can renew from this page for a fresh year (an admin who pays becomes an owner).'
+      ));
+      if (st.can_renew) {
+        p.append(document.createTextNode(' '));
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'link';
+        btn.textContent = 'Renew now';
+        btn.onclick = async () => {
+          btn.disabled = true;
+          try {
+            const r = await api('POST', '/billing/renew-token', {});
+            if (typeof r.url === 'string' && r.url.startsWith('https://')) {
+              window.open(r.url, '_blank', 'noopener,noreferrer');
+            }
+          } catch (e) {
+            showError(e);
+          } finally {
+            btn.disabled = false;
+          }
+        };
+        p.append(btn);
+      }
+    } else {
+      p.append(document.createTextNode(
+        `this pen is in its 30-day grace period and will go to sleep on ${until}. ` +
+        'Ask an owner or admin to renew it from this page.'
+      ));
+    }
+    el.replaceChildren(p);
+    el.hidden = false;
+  };
+
   const load = async () => {
-    try { me = await api('GET', '/me'); render(); }
+    try { me = await api('GET', '/me'); render(); renderBillingBanner(me.billing); }
     catch (e) { $('whoami').textContent = 'Could not load your details: ' + e.message; return; }
     loadDirectory().catch(errIn('sites-err'));
     if (!me.devices) return;   // a server

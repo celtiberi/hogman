@@ -257,6 +257,37 @@ check "the portal knows alice from her mesh address (alice, admin)" \
 me="$(api bob-tools GET /api/me)"
 check "... and bob from his (bob, member)" test "$(jq -r '.member.handle + "/" + .member.role' <<<"$me")" = bob/member
 
+# D-35 grace-period banner + in-pen signed renewal token (owners/admins only).
+printf '{"pen":"bobo","state":"grace","grace_until":"2027-12-24T00:00:00Z","renew_url":"https://get.example.com"}\n' \
+  > "$WORK/data/registrar/billing-status.json"
+chmod 0644 "$WORK/data/registrar/billing-status.json"
+me_grace_alice="$(api alice-laptop-tools GET /api/me)"
+me_grace_bob="$(api bob-tools GET /api/me)"
+check "alice (admin) sees grace status with can_renew=true in /api/me" \
+  jq -e '.billing.state == "grace" and .billing.can_renew == true' <<<"$me_grace_alice"
+check "bob (non-admin member) sees grace status without can_renew in /api/me" \
+  jq -e '.billing.state == "grace" and (.billing.can_renew // false) == false' <<<"$me_grace_bob"
+check "bob (non-admin) cannot mint a renewal token (403)" \
+  expect 403 bob-tools POST /api/billing/renew-token '{}'
+renew_tok="$(api alice-laptop-tools POST /api/billing/renew-token '{}')"
+check "alice (admin) mints a signed fragment renewal URL" \
+  jq -e '.url | startswith("https://get.example.com/#renew=")' <<<"$renew_tok"
+# Verify registrar created a 0600 renew.key and that the minted token's HMAC matches it (host/broker compatibility).
+renew_verify_hmac() {
+  local tok payload sig key_hex expected
+  [ "$(stat -c '%a' "$WORK/data/registrar/renew.key")" = "600" ] || return 1
+  tok="$(jq -r '.url | split("#renew=")[1]' <<<"$renew_tok")"
+  payload="${tok%%.*}"; sig="${tok#*.}"
+  key_hex="$(tr -d ' \r\n' < "$WORK/data/registrar/renew.key")"
+  expected="$(printf 'hogman-renew-v1:%s' "$payload" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$key_hex" -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')"
+  [ -n "$expected" ] && [ "$sig" = "$expected" ]
+}
+check "registrar wrote 0600 renew.key and minted token HMAC verifies against it" renew_verify_hmac
+rm -f "$WORK/data/registrar/billing-status.json" "$WORK/data/registrar/renew.key"
+me_clear="$(api bob-tools GET /api/me)"
+check "removing billing-status.json clears /api/me billing field" \
+  jq -e '.billing == null' <<<"$me_clear"
+
 step "Alice adds a server and shares a site"
 srv="$(api alice-laptop-tools POST /api/devices '{"kind":"server"}')"
 ALICE_SERVER_KEY="$(jq -r .auth_key <<<"$srv")"

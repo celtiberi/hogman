@@ -27,6 +27,7 @@ type Config struct {
 	InviteTTL               time.Duration
 	DeviceKeyTTL            time.Duration
 	MembersCanInvite        bool
+	BillingStatusPath       string
 	MaxOpenDeviceKeys       int
 	MaxNamesPerMember       int
 	MaxOpenInvites          int

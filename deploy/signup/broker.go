@@ -28,6 +28,7 @@ type broker struct {
 	token            string
 	ntfy             string // optional: ntfy topic URL for the operator's pushes
 	mu               sync.Mutex
+	lifecycleMu      sync.Mutex // serializes lifecycle sweeps & renewals without blocking signup/provision
 	limitMu          sync.Mutex
 	waitJoins        *limiter
 	waitNotify       *limiter
@@ -42,7 +43,15 @@ type broker struct {
 	webhookSecret    string                 // Stripe's webhook signing secret; empty: payments off
 	minPersonalCents int64                  // optional minimum cents for personal Stripe checkout
 	minWorkCents     int64                  // optional minimum cents for work Stripe checkout
+	expectedCurrency string                 // optional lowercase ISO currency (e.g. "usd")
 	expectLivemode   *bool                  // optional Stripe ev.Livemode guard
+	publicURL        string                 // optional https://<signup-host> for renewal links
+	workSignupHost   string                 // optional Work signup hostname for Work renewal links
+	backdateRenewal  bool                   // D-35: default false (no backdating)
+	resendAPIKey     string                 // optional Resend key for opt-in billing alert emails
+	billingFrom      string                 // optional From address for billing alert emails
+	alertSendFn      func(ctx context.Context, to []string, subject, text string) error
+	memberRoleFn     func(ctx context.Context, pen, handle string) (role, status string, ok bool)
 }
 
 func (b *broker) nextSuffix() (string, error) {
@@ -62,6 +71,16 @@ func runBroker() {
 	b.webhookSecret = readWebhookSecret("STRIPE_WEBHOOK_SECRET_FILE")
 	b.minPersonalCents, _ = strconv.ParseInt(strings.TrimSpace(os.Getenv("STRIPE_MIN_PERSONAL_CENTS")), 10, 64)
 	b.minWorkCents, _ = strconv.ParseInt(strings.TrimSpace(os.Getenv("STRIPE_MIN_WORK_CENTS")), 10, 64)
+	b.expectedCurrency = strings.ToLower(strings.TrimSpace(os.Getenv("STRIPE_CURRENCY")))
+	b.publicURL = strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_URL")), "/")
+	b.workSignupHost = stripHostPort(os.Getenv("WORK_SIGNUP_HOST"))
+	b.backdateRenewal = env("LIFECYCLE_BACKDATE_RENEWAL", "") == "1" // D-35: off by default
+	if keyFile := strings.TrimSpace(os.Getenv("RESEND_API_KEY_FILE")); keyFile != "" {
+		if raw, err := os.ReadFile(keyFile); err == nil {
+			b.resendAPIKey = strings.TrimSpace(string(raw))
+		}
+	}
+	b.billingFrom = strings.TrimSpace(os.Getenv("BILLING_FROM"))
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("STRIPE_EXPECT_LIVEMODE"))) {
 	case "1", "true":
 		v := true
@@ -133,6 +152,9 @@ func (b *broker) handler() http.Handler {
 	mux.HandleFunc("POST /waitlist/leave", b.leaveWaitlist)
 	mux.HandleFunc("POST /stripe/event", b.stripeEvent)
 	mux.HandleFunc("GET /paid-code", b.paidCode)
+	mux.HandleFunc("POST /lifecycle/sweep", b.lifecycleSweepHandler)
+	mux.HandleFunc("POST /lifecycle/alerts", b.lifecycleAlertsHandler)
+	mux.HandleFunc("POST /renew-verify", b.renewVerify)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, hasBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !hasBearer || subtle.ConstantTimeCompare([]byte(got), []byte(b.token)) != 1 {
@@ -211,6 +233,9 @@ func (b *broker) readCapacityLocal() (*capacity, bool) {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(b.home, "pens", e.Name(), ".removed")); err == nil {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(b.home, "pens", e.Name(), ".sleeping")); err == nil {
 			continue
 		}
 		pens++
@@ -563,6 +588,10 @@ func (b *broker) provision(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := b.dropInvited(in.Code); err != nil {
 		log.Printf("could not clear the waiting list entry: %v", err)
+	}
+	isPaid := hasCodeWord(rawNote, paidTag)
+	if err := b.initPenLifecycle(targetPen, plan, in.Code, isPaid, time.Now().UTC()); err != nil {
+		log.Printf("could not write lifecycle.json for %s: %v", targetPen, err)
 	}
 	tag := ""
 	if vanity {

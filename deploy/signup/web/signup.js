@@ -139,12 +139,13 @@
 
   // Optional Cloudflare Turnstile widget (loaded only when server advertises a site key).
   let tsSiteKey = '';
-  let tsFormToken = '', tsWaitToken = '';
-  let tsFormWidget = null, tsWaitWidget = null;
+  let tsFormToken = '', tsWaitToken = '', tsRenewToken = '';
+  let tsFormWidget = null, tsWaitWidget = null, tsRenewWidget = null;
   const resetTurnstile = kind => {
     if (!window.turnstile) return;
     if (kind === 'form' && tsFormWidget !== null) { tsFormToken = ''; window.turnstile.reset(tsFormWidget); }
     if (kind === 'wait' && tsWaitWidget !== null) { tsWaitToken = ''; window.turnstile.reset(tsWaitWidget); }
+    if (kind === 'renew' && tsRenewWidget !== null) { tsRenewToken = ''; window.turnstile.reset(tsRenewWidget); }
   };
   const mountTurnstile = siteKey => {
     if (!siteKey || tsSiteKey) return;
@@ -168,6 +169,15 @@
           callback: t => { tsWaitToken = t; },
           'expired-callback': () => { tsWaitToken = ''; },
           'error-callback': () => { tsWaitToken = ''; },
+        });
+      }
+      if ($('ts-renew') && tsRenewWidget === null) {
+        $('ts-renew').hidden = false;
+        tsRenewWidget = window.turnstile.render('#ts-renew', {
+          sitekey: tsSiteKey, theme: widgetTheme,
+          callback: t => { tsRenewToken = t; },
+          'expired-callback': () => { tsRenewToken = ''; },
+          'error-callback': () => { tsRenewToken = ''; },
         });
       }
     };
@@ -224,8 +234,46 @@
   for (const f of ['pen', 'handle']) $(f).addEventListener('change', setNames);   // autofill, paste, scripts
 
   let activeView = 'form';
-  const show = id => { activeView = id; for (const s of ['form', 'wait', 'waited', 'working', 'done']) $(s).hidden = s !== id; };
+  const show = id => { activeView = id; for (const s of ['form', 'wait', 'waited', 'renew', 'renewed', 'working', 'done']) $(s).hidden = s !== id; };
   const cleanURL = () => location.pathname + location.search;
+
+  // D-35: in-pen authenticated renewal flow via /#renew=<signed-token> and /?renewed=1.
+  // The token lives only in the URL fragment and is stripped immediately from history.
+  const urlParams = new URLSearchParams(location.search);
+  const renewMatch = location.hash.match(/(?:^|[#&])renew=([A-Za-z0-9._-]+)/);
+  let renewToken = renewMatch ? renewMatch[1] : '';
+  if (renewToken) {
+    history.replaceState(null, '', location.pathname);
+  }
+  const renewedParam = urlParams.get('renewed') === '1';
+  if ($('renew-go')) {
+    $('renew-go').addEventListener('click', async () => {
+      $('renew-err').hidden = true;
+      if (!renewToken) {
+        $('renew-err').textContent = 'This renewal link has already been used. Open your pen\u2019s home page and click Renew now to start a fresh one.';
+        $('renew-err').hidden = false;
+        return;
+      }
+      if (tsSiteKey && !tsRenewToken) {
+        $('renew-err').textContent = 'Please complete the verification check first.';
+        $('renew-err').hidden = false;
+        return;
+      }
+      $('renew-go').disabled = true;
+      try {
+        const body = { token: renewToken };
+        if (tsSiteKey) body.turnstile_token = tsRenewToken;
+        const r = await api('POST', '/renew', body);
+        renewToken = '';
+        location.href = r.url;
+      } catch (e) {
+        resetTurnstile('renew');
+        $('renew-err').textContent = e.message;
+        $('renew-err').hidden = false;
+        $('renew-go').disabled = false;
+      }
+    });
+  }
 
   // The waiting list: for when capacity is full, or there's no code.
   $('to-wait').addEventListener('click', ev => { ev.preventDefault(); show('wait'); $('w-email').focus(); });
@@ -348,6 +396,10 @@
   const pending = sessionStorage.getItem(JOB);
   if (pending) {
     follow(pending);
+  } else if (renewedParam) {
+    show('renewed');
+  } else if (renewToken) {
+    show('renew');
   } else if (location.hash === '#wait') {
     show('wait');   // a link straight to the waiting list
   }
@@ -380,7 +432,7 @@
     if (!s.open) {
       $('closed').hidden = false;
       $('go').disabled = true;
-      if (activeView !== 'working' && activeView !== 'done') show('wait');
+      if (activeView !== 'working' && activeView !== 'done' && activeView !== 'renew' && activeView !== 'renewed') show('wait');
     }
   }).catch(() => { $('down').hidden = false; });
   if (vanityHint) {

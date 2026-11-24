@@ -24,6 +24,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -63,12 +64,13 @@ var sessionRE = regexp.MustCompile(`^cs_(test|live)_[A-Za-z0-9]{10,200}$`)
 
 // stripeCheckout is what the page needs to sell a pen. nil: selling is off.
 type stripeCheckout struct {
-	client         *stripe.Client
-	price          string            // personal price_...
-	workPrice      string            // optional Work price_... (falls back to price when empty)
-	publicURL      string            // default https://get.example.com, for Stripe's redirects
-	allowedOrigins map[string]string // lowercased bare host -> allowlisted https://<host>
-	automatTax     bool              // Stripe Tax computes tax (needs Stripe Tax set up)
+	client          *stripe.Client
+	price           string            // personal price_...
+	workPrice       string            // optional Work price_... (falls back to price when empty)
+	publicURL       string            // default https://get.example.com, for Stripe's redirects
+	allowedOrigins  map[string]string // lowercased bare host -> allowlisted https://<host>
+	automatTax      bool              // Stripe Tax computes tax (needs Stripe Tax set up)
+	createSessionFn func(ctx context.Context, p *stripe.CheckoutSessionCreateParams) (string, error)
 }
 
 func (sc *stripeCheckout) priceForPlan(plan string) string {
@@ -183,6 +185,118 @@ func (sc *stripeCheckout) paramsFor(origin, plan string) *stripe.CheckoutSession
 		p.BillingAddressCollection = stripe.String(string(stripe.CheckoutSessionBillingAddressCollectionRequired))
 	}
 	return p
+}
+
+func (sc *stripeCheckout) renewParamsFor(origin, pen, plan, renewNonce string) *stripe.CheckoutSessionCreateParams {
+	if origin == "" {
+		origin = sc.publicURL
+	}
+	if plan != planWork {
+		plan = planPersonal
+	}
+	meta := map[string]string{
+		penMetaKey:    penMetaValue,
+		planMetaKey:   plan,
+		"action":      "renew",
+		"pen":         pen,
+		"renew_nonce": renewNonce,
+	}
+	subMeta := map[string]string{penMetaKey: penMetaValue, planMetaKey: plan, "pen": pen}
+	p := &stripe.CheckoutSessionCreateParams{
+		Mode:       stripe.String(string(stripe.CheckoutSessionModeSubscription)),
+		LineItems:  []*stripe.CheckoutSessionCreateLineItemParams{{Price: stripe.String(sc.priceForPlan(plan)), Quantity: stripe.Int64(1)}},
+		SuccessURL: stripe.String(origin + "/?renewed=1"),
+		CancelURL:  stripe.String(origin + "/"),
+		Metadata:   meta,
+		SubscriptionData: &stripe.CheckoutSessionCreateSubscriptionDataParams{
+			Metadata: subMeta,
+		},
+		TaxIDCollection: &stripe.CheckoutSessionCreateTaxIDCollectionParams{Enabled: stripe.Bool(true)},
+	}
+	if sc.automatTax {
+		p.AutomaticTax = &stripe.CheckoutSessionCreateAutomaticTaxParams{Enabled: stripe.Bool(true)}
+		p.BillingAddressCollection = stripe.String(string(stripe.CheckoutSessionBillingAddressCollectionRequired))
+	}
+	return p
+}
+
+func (sc *stripeCheckout) createCheckoutURL(ctx context.Context, p *stripe.CheckoutSessionCreateParams) (string, error) {
+	if sc.createSessionFn != nil {
+		return sc.createSessionFn(ctx, p)
+	}
+	s, err := sc.client.V1CheckoutSessions.Create(ctx, p)
+	if err != nil || s == nil {
+		return "", err
+	}
+	return s.URL, nil
+}
+
+// renew starts a Stripe Checkout Session ONLY for a valid, short-lived,
+// single-use signed renewal token minted inside the pen by an active owner or
+// admin (D-35). Pen, plan, and payer_handle all come from the verified token
+// via the broker — never from the browser.
+func (wb *web) renew(w http.ResponseWriter, r *http.Request) {
+	if wb.stripe == nil {
+		jsonOut(w, 404, map[string]string{"error": "pens aren't for sale here"})
+		return
+	}
+	if !wb.requireSameOriginJSON(w, r) {
+		return
+	}
+	var in struct {
+		Token          string `json:"token"`
+		TurnstileToken string `json:"turnstile_token"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		jsonOut(w, 400, map[string]string{"error": "bad request"})
+		return
+	}
+	tok := strings.TrimSpace(in.Token)
+	if len(tok) < 20 || len(tok) > 512 {
+		jsonOut(w, 400, map[string]string{"error": "invalid renewal token"})
+		return
+	}
+	clientIP := wb.clientIP(r)
+	now := time.Now()
+	if !wb.checkouts.allow(rateLimitKey(clientIP), now) {
+		jsonOut(w, 429, map[string]string{"error": "too many tries from here; wait an hour"})
+		return
+	}
+	if !wb.verifyTurnstile(w, r, in.TurnstileToken, clientIP) {
+		return
+	}
+	if wb.globalCheckouts != nil && !wb.globalCheckouts.allow("*", now) {
+		log.Printf("renew: global hourly cap reached")
+		jsonOut(w, 429, map[string]string{"error": "checkout is temporarily busy; try again in a few minutes"})
+		return
+	}
+	code, out := wb.ask(r.Context(), "POST", "/renew-verify", map[string]string{"token": tok})
+	if code != 200 {
+		jsonOut(w, code, out)
+		return
+	}
+	pen, _ := out["pen"].(string)
+	plan, _ := out["plan"].(string)
+	renewNonce, _ := out["renew_nonce"].(string)
+	if plan != planWork {
+		plan = planPersonal
+	}
+	if wb.stripe.priceForPlan(plan) == "" {
+		jsonOut(w, 404, map[string]string{"error": "renewals for this plan aren't enabled here"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	checkoutURL, err := wb.stripe.createCheckoutURL(ctx, wb.stripe.renewParamsFor(wb.stripe.originForHost(r.Host), pen, plan, renewNonce))
+	if err != nil || !strings.HasPrefix(checkoutURL, "https://") {
+		log.Printf("stripe renew checkout (%s): %v", pen, err)
+		jsonOut(w, 502, map[string]string{"error": "the payment page didn't open; try again in a minute"})
+		return
+	}
+	jsonOut(w, 200, map[string]string{"url": checkoutURL})
 }
 
 // checkout starts a Checkout Session. Not when the server is full: nobody
@@ -323,6 +437,39 @@ type subscriptionObject struct {
 	Metadata map[string]string `json:"metadata"`
 }
 
+type invoiceObject struct {
+	ID            string `json:"id"`
+	Status        string `json:"status"`
+	BillingReason string `json:"billing_reason"`
+	Currency      string `json:"currency"`
+	Customer      string `json:"customer"`
+	Subscription  string `json:"subscription"`
+	AmountPaid    int64  `json:"amount_paid"`
+}
+
+func (b *broker) checkPaidAmount(id, plan, currency string, paidCents int64) (ok bool, reason string) {
+	if b.expectedCurrency != "" && strings.ToLower(strings.TrimSpace(currency)) != b.expectedCurrency {
+		return false, fmt.Sprintf("currency %q != expected %q", currency, b.expectedCurrency)
+	}
+	minCents := b.minPersonalCents
+	if plan == planWork {
+		minCents = b.minWorkCents
+	}
+	if minCents > 0 && paidCents < minCents {
+		return false, fmt.Sprintf("plan=%s paid=%d %q < min=%d", plan, paidCents, currency, minCents)
+	}
+	return true, ""
+}
+
+func hasCodeWord(note, word string) bool {
+	for _, f := range strings.Fields(note) {
+		if f == word {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 	if b.webhookSecret == "" {
 		jsonOut(w, 404, map[string]string{"error": "payments are off"})
@@ -356,26 +503,71 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 			jsonOut(w, 400, map[string]string{"error": "unreadable checkout session"})
 			return
 		}
-		if s.Metadata[penMetaKey] != penMetaValue || s.Mode != "subscription" || s.PaymentStatus != "paid" {
+		if s.Metadata[penMetaKey] != penMetaValue || s.PaymentStatus != "paid" {
 			jsonOut(w, 200, map[string]string{"ok": "ignored"}) // not ours, or not paid yet
 			return
 		}
-		plan := planFromMeta(s.Metadata)
-		minCents := b.minPersonalCents
-		if plan == planWork {
-			minCents = b.minWorkCents
+		if s.Mode != "subscription" {
+			jsonOut(w, 200, map[string]string{"ok": "ignored"})
+			return
 		}
-		if minCents > 0 {
-			paid := s.AmountSubtotal
-			if paid <= 0 {
-				paid = s.AmountTotal
+		// D-35: Owner/Admin renewal checkout for an existing pen in grace or sleep.
+		if s.Metadata["action"] == "renew" {
+			pen := strings.ToLower(strings.TrimSpace(s.Metadata["pen"]))
+			if _, ok := validPen(pen); !ok {
+				jsonOut(w, 400, map[string]string{"error": "invalid renewal pen"})
+				return
 			}
-			if paid < minCents {
-				log.Printf("stripe %s alert: plan=%s paid=%d %q < min=%d (returning 500 so Stripe retries)", s.ID, plan, paid, s.Currency, minCents)
-				b.notifyKind("health", fmt.Sprintf("Stripe paid session %s (%s) below configured minimum (%d < %d)", s.ID, plan, paid, minCents))
+			// Authoritative plan comes from lifecycle.json (not client/session metadata)
+			// so a Work pen cannot be renewed at a Personal price.
+			rec, rerr := loadPenLifecycle(b.lifecyclePath(pen))
+			if os.IsNotExist(rerr) {
+				log.Printf("stripe renew %s (%s): no lifecycle.json; ignoring", s.ID, pen)
+				jsonOut(w, 200, map[string]string{"ok": "ignored"})
+				return
+			}
+			if rerr != nil {
+				log.Printf("stripe renew %s (%s): %v", s.ID, pen, rerr)
+				jsonOut(w, 500, map[string]string{"error": "renewal failed"})
+				return
+			}
+			if ok, reason := b.checkPaidAmount(s.ID, rec.Plan, s.Currency, s.AmountTotal); !ok {
+				log.Printf("stripe renew %s (%s) refused: %s", s.ID, pen, reason)
+				b.notifyKind("health", fmt.Sprintf("Stripe renewal session %s (%s) rejected: %s", s.ID, pen, reason))
 				jsonOut(w, 500, map[string]string{"error": "payment below configured minimum"})
 				return
 			}
+			updatedRec, alreadyApplied, wasSleeping, err := b.recordRenewal(pen, s.ID, s.Subscription, s.Customer, s.Metadata["renew_nonce"], time.Now().UTC())
+			if errors.Is(err, errNoLifecycle) {
+				jsonOut(w, 200, map[string]string{"ok": "ignored"})
+				return
+			}
+			if err != nil {
+				log.Printf("stripe renew %s (%s): %v", s.ID, pen, err)
+				jsonOut(w, 500, map[string]string{"error": "renewal failed"})
+				return
+			}
+			if !alreadyApplied {
+				if wasSleeping || (updatedRec != nil && updatedRec.PendingOwner != "") {
+					go func(pen string, wake bool) {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+						defer cancel()
+						if err := b.finishRenewalWork(ctx, pen, wake); err != nil {
+							log.Printf("stripe renew %s (%s) post-work: %v", s.ID, pen, err)
+						}
+					}(pen, wasSleeping)
+				}
+				b.notifyKind("raise", "Pen renewed ("+pen+")")
+			}
+			jsonOut(w, 200, map[string]string{"ok": "renewed"})
+			return
+		}
+		plan := planFromMeta(s.Metadata)
+		if ok, reason := b.checkPaidAmount(s.ID, plan, s.Currency, s.AmountTotal); !ok {
+			log.Printf("stripe %s alert: %s (returning 500 so Stripe retries)", s.ID, reason)
+			b.notifyKind("health", fmt.Sprintf("Stripe paid session %s (%s) rejected: %s", s.ID, plan, reason))
+			jsonOut(w, 500, map[string]string{"error": "payment below configured minimum"})
+			return
 		}
 		code, fresh, err := b.codeForPayment(s)
 		if err != nil {
@@ -390,14 +582,60 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 			b.notifyKind("raise", "A pen was paid for ("+plan+")")
 		}
 		jsonOut(w, 200, map[string]string{"ok": "code ready"})
+	case "invoice.paid":
+		var inv invoiceObject
+		if err := json.Unmarshal(ev.Data.Raw, &inv); err == nil && inv.Status == "paid" && inv.Subscription != "" && inv.BillingReason == "subscription_cycle" {
+			b.lifecycleMu.Lock()
+			pen, ok := b.findPenBySubscription(inv.Subscription)
+			var penPlan string
+			if ok {
+				if rec, rerr := loadPenLifecycle(b.lifecyclePath(pen)); rerr == nil {
+					penPlan = rec.Plan
+				}
+			}
+			b.lifecycleMu.Unlock()
+			if ok {
+				if okAmt, reason := b.checkPaidAmount(inv.ID, penPlan, inv.Currency, inv.AmountPaid); !okAmt {
+					log.Printf("stripe invoice %s (%s) refused: %s", inv.ID, pen, reason)
+					b.notifyKind("health", fmt.Sprintf("Stripe invoice %s (%s) rejected: %s", inv.ID, pen, reason))
+					jsonOut(w, 500, map[string]string{"error": "payment below configured minimum"})
+					return
+				}
+				_, alreadyApplied, wasSleeping, err := b.recordRenewal(pen, inv.ID, inv.Subscription, inv.Customer, "", time.Now().UTC())
+				if err != nil && !errors.Is(err, errNoLifecycle) {
+					log.Printf("stripe invoice %s renew %s: %v", inv.ID, pen, err)
+					jsonOut(w, 500, map[string]string{"error": "renewal failed"})
+					return
+				}
+				if err == nil && !alreadyApplied && wasSleeping {
+					go func(pen string) {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+						defer cancel()
+						if err := b.finishRenewalWork(ctx, pen, true); err != nil {
+							log.Printf("stripe invoice %s (%s) wake: %v", inv.ID, pen, err)
+						}
+					}(pen)
+				}
+			}
+		}
+		jsonOut(w, 200, map[string]string{"ok": "noted"})
 	case "customer.subscription.deleted":
 		var sub subscriptionObject
 		if err := json.Unmarshal(ev.Data.Raw, &sub); err == nil && sub.Metadata[penMetaKey] == penMetaValue {
-			// What a cancelled pen should do (warn, suspend, remove) is a later
-			// decision; for now the operator hears about it and acts by hand.
+			// D-35: cancelling mid-year changes nothing; the pen runs to its paid_until date.
 			plan := planFromMeta(sub.Metadata)
-			b.ledger(fmt.Sprintf("%s subscription %s ended (plan %s, customer %s): see payments for its code",
-				time.Now().UTC().Format(time.RFC3339), sub.ID, plan, sub.Customer))
+			now := time.Now().UTC()
+			b.lifecycleMu.Lock()
+			if pen, ok := b.findPenBySubscription(sub.ID); ok {
+				if rec, err := loadPenLifecycle(b.lifecyclePath(pen)); err == nil && rec.CancelledAt == 0 {
+					rec.CancelledAt = now.Unix()
+					rec.UpdatedAt = now.Unix()
+					_ = savePenLifecycle(b.lifecyclePath(pen), rec)
+				}
+			}
+			b.lifecycleMu.Unlock()
+			b.ledger(fmt.Sprintf("%s subscription %s ended (plan %s, customer %s): pen runs until paid_until",
+				now.Format(time.RFC3339), sub.ID, plan, sub.Customer))
 			b.notifyKind("raise", "A pen's subscription ended ("+plan+")")
 		}
 		jsonOut(w, 200, map[string]string{"ok": "noted"})
@@ -442,6 +680,34 @@ func (b *broker) paidCode(w http.ResponseWriter, r *http.Request) {
 type payment struct{ session, code, customer, subscription, plan string }
 
 func (b *broker) paymentsPath() string { return filepath.Join(b.home, "signup", "payments") }
+
+func (b *broker) findPaymentByCode(code string) (payment, bool, error) {
+	unlock, err := b.lock(b.paymentsPath() + ".lock")
+	if err != nil {
+		return payment{}, false, err
+	}
+	defer unlock()
+	f, err := os.Open(b.paymentsPath())
+	if os.IsNotExist(err) {
+		return payment{}, false, nil
+	}
+	if err != nil {
+		return payment{}, false, err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		p := strings.Fields(sc.Text())
+		if len(p) >= 4 && subtle.ConstantTimeCompare([]byte(p[1]), []byte(code)) == 1 {
+			plan := planPersonal
+			if len(p) >= 6 && p[5] == planWork {
+				plan = planWork
+			}
+			return payment{session: p[0], code: p[1], customer: p[2], subscription: p[3], plan: plan}, true, nil
+		}
+	}
+	return payment{}, false, sc.Err()
+}
 
 func (b *broker) findPayment(session string) (payment, bool, error) {
 	unlock, err := b.lock(b.paymentsPath() + ".lock")
