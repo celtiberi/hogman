@@ -2017,11 +2017,13 @@ $web_extra_vols
     restart: unless-stopped
     security_opt: [no-new-privileges:true]
     # Runs hogman-signup plus docker-cli/compose/buildx during pen provisioning;
-    # 128m could OOM-kill the broker mid-provision (I-5).
-    mem_limit: 384m
+    # 384m could still OOM-kill docker-compose/buildx when streaming prebuilt
+    # registrar binaries, so give it 512m and keep Go heaps compact with GOGC=50.
+    mem_limit: 512m
     pids_limit: 256
     environment:
       ROLE: broker
+      GOGC: "50"
       HOGMAN_HOME: $HOGMAN_HOME
       HOGMAN_HOST_TOOL: /usr/local/bin/hogman-host
       BROKER_TOKEN_FILE: $SIGNUP/token

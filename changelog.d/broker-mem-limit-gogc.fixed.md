@@ -1,0 +1,1 @@
+- Signup broker container (`deploy/hogman-host`): raised `mem_limit` from `384m` to `512m` and set `GOGC=50` so `docker compose` / `buildx` does not OOM-kill during pen provisioning when streaming prebuilt registrar binaries.
