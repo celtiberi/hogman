@@ -541,11 +541,11 @@ check "members load https://app.$ZONE" retry 30 fetch app.$ZONE "app from a serv
 out="$(join_tool dave-server share stop app 2>&1)"; rc=$?
 check "and it stops cleanly (exit $rc)" grep -q "app.$ZONE is down" <<<"$out"
 
-out="$(join_tool dave-laptop update --dry-run 2>&1)"; rc=$?
+out="$(join_tool dave-laptop update --pen "$ZONE" --dry-run 2>&1)"; rc=$?
 check "hogman-join update --dry-run checks SHA256SUMS cleanly (exit $rc)" bash -c 'test "$1" = 0 && grep -q "already up to date" <<<"$2"' _ "$rc" "$out"
 BEFORE_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>/dev/null | tr -d '\r')"
 run dave-laptop sh -c 'printf "#!/bin/sh\nexit 1\n" > "/root/.config/hogman/'"$ZONE"'/.stale-join" && chmod 755 "/root/.config/hogman/'"$ZONE"'/.stale-join" && mv "/root/.config/hogman/'"$ZONE"'/.stale-join" "/root/.config/hogman/'"$ZONE"'/hogman-join"'
-out="$(join_tool dave-laptop update 2>&1)"; rc=$?
+out="$(join_tool dave-laptop update --pen "$ZONE" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
 check "hogman-join update repairs stale pen copy and restarts agent (exit $rc)" bash -c 'test "$1" = 0 && grep -q "Updated " <<<"$2"' _ "$rc" "$out"
 AFTER_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>/dev/null | tr -d '\r')"

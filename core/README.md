@@ -50,9 +50,11 @@ The join tool ([join/](join/)) runs side by side as your own user (no root, no `
 
 More devices: each member adds their own from the home page (`POST /api/devices`), which prints a
 device link (`https://<PUBLIC_HOST>/join#k=…`, or with `&for=share` for `hogman-join share`). Nobody can
-make one for someone else: there is no account recovery. `hogman-join update` verifies downloads
-against `SHA256SUMS` over HTTPS, cleans up any leftover legacy private-CA root certificates, and
-restarts background agents and service-managed shares. `hogman-join leave <pen>` (a join link
+make one for someone else: there is no account recovery. `hogman-join update` defaults to
+immutable GitHub Releases on `celtiberi/hogman` (working with 0, 1, or many pens; pass `--pen <zone>`
+or a pen host URL to update from a pen's server instead), verifies downloads against SHA-256 over
+HTTPS, cleans up any leftover legacy private-CA root certificates, and restarts background agents and
+service-managed shares. `hogman-join leave <pen>` (a join link
 with or without its key, the control host, the pen zone, or its short name) stops shares on that pen, cleans up any
 legacy root cert, logs the device out, and removes its local settings. It works from saved settings,
 so a pen whose server is gone can still be left. `leave` with no pen does nothing and points to
