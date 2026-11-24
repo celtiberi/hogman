@@ -61,14 +61,15 @@ options:
 `
 
 type shareConfig struct {
-	Name        string `json:"name"`
-	Zone        string `json:"zone"`
-	LoginServer string `json:"login_server"`
-	DNSServer   string `json:"dns_server"`
-	Target      string `json:"target"` // http://host:port, or an absolute folder path
-	Folder      bool   `json:"folder,omitempty"`
-	Note        string `json:"note,omitempty"`
-	ControlCA   string `json:"control_ca,omitempty"`
+	Name         string `json:"name"`
+	Zone         string `json:"zone"`
+	LoginServer  string `json:"login_server"`
+	DNSServer    string `json:"dns_server"`
+	Target       string `json:"target"` // http://host:port, unix:///path/to.sock, or an absolute folder path
+	Folder       bool   `json:"folder,omitempty"`
+	Note         string `json:"note,omitempty"`
+	ControlCA    string `json:"control_ca,omitempty"`
+	UpstreamHost string `json:"upstream_host,omitempty"`
 }
 
 func (c *shareConfig) fqdn() string { return c.Name + "." + c.Zone }
@@ -258,6 +259,14 @@ func shareTarget(what string) (target string, folder bool, err error) {
 		}
 		return "http://127.0.0.1:" + what, false, nil
 	}
+	if strings.HasPrefix(what, "unix://") {
+		rawPath := strings.TrimPrefix(what, "unix://")
+		clean, err := validateUnixSocketPath(rawPath)
+		if err != nil {
+			return "", false, err
+		}
+		return "unix://" + clean, false, nil
+	}
 	if strings.HasPrefix(what, "http://") || strings.HasPrefix(what, "https://") {
 		u, err := url.Parse(what)
 		if err != nil || u.Host == "" || u.Hostname() == "" {
@@ -315,24 +324,62 @@ func shareStart(name, what, rawLink string, o options) error {
 		return err
 	}
 
+	if o.enrollOnly && o.background {
+		return errorf("--enroll-only cannot be combined with --background")
+	}
+
 	var cfg *shareConfig
 	key := ""
-	if rawLink != "" {
-		cfg, key, err = shareFromLink(name, rawLink, o)
-	} else {
-		cfg, key, err = shareFromMembership(name, o)
+	explicitDir := strings.TrimSpace(o.stateDir)
+	if explicitDir != "" {
+		absDir, err := filepath.Abs(explicitDir)
+		if err != nil {
+			return err
+		}
+		explicitDir = absDir
 	}
-	if err != nil {
-		return err
+
+	if explicitDir != "" && rawLink == "" {
+		if old, err := loadShare(explicitDir); err == nil {
+			if old.Name != "" && old.Name != name {
+				return errorf("state directory %s is enrolled for share %q, not %q", explicitDir, old.Name, name)
+			}
+			cfgCopy := *old
+			cfg = &cfgCopy
+			cfg.Name = name
+		}
+	}
+	if cfg == nil {
+		if rawLink != "" {
+			cfg, key, err = shareFromLink(name, rawLink, o)
+		} else if explicitDir != "" {
+			return errorf("state directory %s is not enrolled yet. Enroll once with a share link:\n  hogman share %s %s --state-dir %s --enroll-only --link-stdin", explicitDir, name, what, explicitDir)
+		} else {
+			cfg, key, err = shareFromMembership(name, o)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	cfg.Target, cfg.Folder = target, folder
+	if uh := strings.TrimSpace(o.upstreamHost); uh != "" {
+		if strings.ContainsAny(uh, " \t\r\n/\\@") || strings.Contains(uh, "://") {
+			return errorf("invalid --upstream-host %q (expected a bare hostname or host:port)", uh)
+		}
+		cfg.UpstreamHost = uh
+	}
 
 	dir := shareDir(cfg.Zone, name)
+	if explicitDir != "" {
+		dir = explicitDir
+	}
 	var prev *shareConfig
 	fresh := true
 	if old, err := loadShare(dir); err == nil {
-		if pid := sharePID(dir); pid != 0 {
-			return errorf("%s is already being shared from this computer (process %d). Stop it first: hogman share stop %s", old.url(), pid, name)
+		if explicitDir == "" {
+			if pid := sharePID(dir); pid != 0 && pid != os.Getpid() {
+				return errorf("%s is already being shared from this computer (process %d). Stop it first: hogman share stop %s", old.url(), pid, name)
+			}
 		}
 		_, hasUnspentKey := os.Stat(filepath.Join(dir, "authkey"))
 		st := readShareStatus(dir)
@@ -349,6 +396,9 @@ func shareStart(name, what, rawLink string, o options) error {
 		} else {
 			key = "" // this share already has its device; reuse it
 			cfg.ControlCA = old.ControlCA
+			if cfg.UpstreamHost == "" {
+				cfg.UpstreamHost = old.UpstreamHost
+			}
 			prev = old
 			fresh = false
 		}
@@ -368,7 +418,21 @@ func shareStart(name, what, rawLink string, o options) error {
 		}
 	}
 
+	if o.enrollOnly {
+		step("Enrolling %s into %s", cfg.url(), dir)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		ctx, cancelReady := context.WithCancel(ctx)
+		defer cancelReady()
+		return serveShare(ctx, dir, func(c *shareConfig) {
+			say("\n✓ Enrolled %s in %s.", c.url(), dir)
+			cancelReady()
+		})
+	}
 	if o.background {
+		if explicitDir != "" {
+			return errorf("--background is not supported with --state-dir; run the container in the foreground")
+		}
 		err := shareBackground(dir, cfg, o)
 		if err != nil && fresh {
 			// If undoFreshShare already removed share.json, also clean up leftover
@@ -379,7 +443,9 @@ func shareStart(name, what, rawLink string, o options) error {
 		}
 		return err
 	}
-	stopShareService(cfg)
+	if explicitDir == "" {
+		stopShareService(cfg)
+	}
 	step("Sharing %s as %s", cfg.showing(), cfg.url())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -695,6 +761,11 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 		writeShareStatus(dir, "error", err.Error())
 		return permanentShare(err)
 	}
+	unlock, err := acquireShareLock(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	// Foreground or background, the pid file says a share is running, so
 	// list, stop and a second start all see it. Refuse to clobber a live process
 	// whose status indicates it is actively starting or up (ignoring stale PIDs
@@ -794,7 +865,14 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 		return fail(out)
 	}
 	go cm.RunFailoverLoop(ctx)
-	tlsSrv := &http.Server{Handler: h, TLSConfig: cm.TLSConfig(), ReadHeaderTimeout: 20 * time.Second, IdleTimeout: 60 * time.Second, ErrorLog: quiet}
+	tlsSrv := &http.Server{
+		Handler:           h,
+		TLSConfig:         cm.TLSConfig(),
+		ReadHeaderTimeout: 20 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 << 10,
+		ErrorLog:          quiet,
+	}
 	go func() { _ = tlsSrv.ServeTLS(ln443, "", "") }()
 	defer tlsSrv.Close()
 	writeShareStatus(dir, "up", "")
@@ -931,28 +1009,63 @@ func shareHandler(c *shareConfig) (http.Handler, func(), error) {
 		}
 		return http.FileServerFS(noDotfilesFS{inner: root.FS()}), func() { _ = root.Close() }, nil
 	}
-	u, err := url.Parse(c.Target)
-	if err != nil {
-		return nil, nil, permanentShare(err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, nil, permanentShare(errorf("share target %q must use http:// or https://", c.Target))
-	}
-	if isBlockedMetadataHost(u.Hostname()) {
-		return nil, nil, permanentShare(errorf("share target %q is a cloud metadata address and cannot be shared", c.Target))
-	}
-	if ip, err := netip.ParseAddr(u.Hostname()); err == nil && !isAllowedShareIP(ip) {
-		return nil, nil, permanentShare(errorf("share target %q is not a local or private LAN address", c.Target))
-	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.Proxy = nil // always connect directly to the local/LAN share target
-	tr.DialContext = localOrLANDialContext(nil, nil)
+	tr.Proxy = nil // always connect directly to the local/LAN or Unix socket share target
+	tr.MaxResponseHeaderBytes = 64 << 10
+	tr.MaxConnsPerHost = 128
+	tr.MaxIdleConnsPerHost = 32
+
+	var targetURL *url.URL
+	var rewriteHost string
+	if strings.HasPrefix(c.Target, "unix://") {
+		sockPath, err := validateUnixSocketPath(strings.TrimPrefix(c.Target, "unix://"))
+		if err != nil {
+			return nil, nil, permanentShare(err)
+		}
+		tr.ResponseHeaderTimeout = 60 * time.Second
+		tr.DialContext = unixSocketDialContext(sockPath)
+		rewriteHost = strings.TrimSpace(c.UpstreamHost)
+		if rewriteHost == "" {
+			rewriteHost = c.fqdn()
+		}
+		targetURL = &url.URL{Scheme: "http", Host: rewriteHost}
+	} else {
+		u, err := url.Parse(c.Target)
+		if err != nil {
+			return nil, nil, permanentShare(err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return nil, nil, permanentShare(errorf("share target %q must use http://, https://, or unix://", c.Target))
+		}
+		if isBlockedMetadataHost(u.Hostname()) {
+			return nil, nil, permanentShare(errorf("share target %q is a cloud metadata address and cannot be shared", c.Target))
+		}
+		if ip, err := netip.ParseAddr(u.Hostname()); err == nil && !isAllowedShareIP(ip) {
+			return nil, nil, permanentShare(errorf("share target %q is not a local or private LAN address", c.Target))
+		}
+		tr.DialContext = localOrLANDialContext(nil, nil)
+		targetURL = u
+	}
+
 	rp := &httputil.ReverseProxy{
 		Transport: tr,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Opaque = ""
-			pr.SetURL(u) // Host becomes the target's: dev servers expect their own
-			pr.SetXForwarded()
+			pr.SetURL(targetURL)
+			if rewriteHost != "" {
+				pr.Out.Host = rewriteHost
+			}
+			// Never trust client-supplied forwarding headers: strip them before
+			// setting fresh values from the authenticated mesh connection.
+			pr.Out.Header.Del("Forwarded")
+			pr.Out.Header.Del("X-Forwarded-For")
+			pr.Out.Header.Del("X-Forwarded-Host")
+			pr.Out.Header.Del("X-Forwarded-Proto")
+			if clientIP, _, err := net.SplitHostPort(pr.In.RemoteAddr); err == nil && clientIP != "" {
+				pr.Out.Header.Set("X-Forwarded-For", clientIP)
+			}
+			pr.Out.Header.Set("X-Forwarded-Host", c.fqdn())
+			pr.Out.Header.Set("X-Forwarded-Proto", "https")
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -961,7 +1074,7 @@ func shareHandler(c *shareConfig) (http.Handler, func(), error) {
 		},
 		ErrorLog: log.New(io.Discard, "", 0),
 	}
-	subpath := u.Path != "" && u.Path != "/"
+	subpath := targetURL.Path != "" && targetURL.Path != "/"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Opaque != "" || (subpath && hasPathTraversal(r.URL)) {
 			http.Error(w, "invalid path", http.StatusBadRequest)

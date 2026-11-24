@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1
+# Builds the minimal scratch hogman-sidecar image (UID 65532:65532, no shell).
+# Serves both the pen-facing `hogman share` sidecar and the `network_mode: none`
+# `hogman bridge` Unix-socket <-> loopback-TCP forwarder.
+#
+#   docker build -f core/join/Dockerfile.sidecar -t hogman-sidecar core/join
+FROM golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY *.go ./
+ARG VERSION=dev
+ARG TARGETOS
+ARG TARGETARCH
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} CGO_ENABLED=0 \
+    go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /rootfs/hogman . && \
+    mkdir -p /rootfs/var/lib/hogman /rootfs/run/hogman-in /rootfs/etc /rootfs/etc/ssl/certs && \
+    cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ca-certificates.crt && \
+    printf 'nonroot:x:65532:65532:nonroot:/nonexistent:/sbin/nologin\n' > /rootfs/etc/passwd && \
+    printf 'nonroot:x:65532:\n' > /rootfs/etc/group && \
+    chown 65532:65532 /rootfs/var/lib/hogman /rootfs/run/hogman-in && \
+    chmod 0700 /rootfs/var/lib/hogman /rootfs/run/hogman-in
+
+FROM scratch
+COPY --from=build /rootfs/ /
+# Pure userspace tsnet container with no kernel TUN / host VPN: disable Tailscale's
+# netns SO_BINDTODEVICE fallback (matching tailscaled's !onlyNetstack) so multi-network
+# and --internal Docker bridges work cleanly under --cap-drop ALL on Linux 5.7+.
+ENV HOGMAN_DISABLE_NETNS=1
+USER 65532:65532
+ENTRYPOINT ["/hogman"]
