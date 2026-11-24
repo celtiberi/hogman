@@ -148,6 +148,7 @@ func parseUpdateSourceURL(raw string) (baseURL, host string, err error) {
 
 func parseSHA256SUMS(data []byte, wantFile string) (string, error) {
 	var found string
+	sawLegacyName := false
 	lines := strings.Split(string(data), "\n")
 	for _, rawLine := range lines {
 		line := strings.TrimRight(rawLine, "\r")
@@ -170,6 +171,9 @@ func parseSHA256SUMS(data []byte, wantFile string) (string, error) {
 		if err != nil || len(b) != sha256.Size {
 			continue
 		}
+		if strings.HasPrefix(name, "hogman-join-") {
+			sawLegacyName = true
+		}
 		if name == wantFile {
 			if found != "" {
 				return "", errorf("SHA256SUMS lists %s more than once", wantFile)
@@ -178,6 +182,10 @@ func parseSHA256SUMS(data []byte, wantFile string) (string, error) {
 		}
 	}
 	if found == "" {
+		if sawLegacyName && strings.HasPrefix(wantFile, "hogman-") {
+			return "", errorf("this pen's server is on an older release (SHA256SUMS lists hogman-join-* instead of %s).\n"+
+				"  Run 'hogman update' (without --pen) to update from GitHub Releases.", wantFile)
+		}
 		return "", errorf("SHA256SUMS has no checksum entry for %s", wantFile)
 	}
 	return found, nil
@@ -638,6 +646,7 @@ func agentRunning(dir string, c *agentConfig) bool {
 type penUpdateOps struct {
 	isRunning      func(dir string, c *agentConfig) bool
 	hasService     func(zone string) bool
+	probeReachable func(p *penTarget, o options) error
 	stop           func(dir string, c *agentConfig)
 	stage          func(srcPath, dstPath, wantHex string) error
 	restartNew     func(p *penTarget, binPath string, hadService bool, o options) error
@@ -649,12 +658,43 @@ func defaultPenUpdateOps() penUpdateOps {
 	return penUpdateOps{
 		isRunning:      agentRunning,
 		hasService:     serviceConfigured,
+		probeReachable: probePenLoginServer,
 		stop:           stopAgent,
 		stage:          stageAndVerify,
 		restartNew:     restartPenAgent,
 		restartOld:     restartOldPenAgent,
 		rewriteService: rewriteAgentService,
 	}
+}
+
+// probePenLoginServer does a quick (4s) pre-flight check against the pen's
+// public control host so `hogman update` doesn't stall for 60s waiting on
+// tsnet.Up for a pen that has been deleted, stopped, or put to sleep (I-10).
+func probePenLoginServer(p *penTarget, o options) error {
+	if p == nil || p.cfg == nil || strings.TrimSpace(p.cfg.LoginServer) == "" {
+		return errors.New("missing server address")
+	}
+	baseURL, host, err := parseUpdateSourceURL(p.cfg.LoginServer)
+	if err != nil {
+		return err
+	}
+	c, err := updateHTTPClient(o.controlCA, p.cfg.ControlCA, host, 4*time.Second)
+	if err != nil {
+		return err
+	}
+	resp, err := c.Get(baseURL + "/join/network.json")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return fmt.Errorf("pen server returned HTTP 503 (sleeping or stopped)")
+	}
+	return fmt.Errorf("pen server returned HTTP %d", resp.StatusCode)
 }
 
 func restartPenAgent(p *penTarget, binPath string, hadService bool, o options) error {
@@ -938,6 +978,9 @@ func clearUpdatingMarker(dir string) {
 // migrateAndRestartPen atomically transitions a pen's agent service to
 // canonicalBin (rewriting its LaunchAgent/systemd unit and waiting for it to
 // come online) and removes any legacy per-pen duplicate copy only after success.
+// If the pen's server is unreachable (deleted/stopped/sleeping), it moves the
+// login item to canonicalBin without waiting a minute for tsnet.Up and returns
+// an actionable error telling the user how to remove a dead pen (I-10).
 func migrateAndRestartPen(p *penTarget, canonicalBin, legacyBin, selfPath string, o options, ops penUpdateOps) error {
 	running := ops.isRunning(p.dir, p.cfg)
 	hadService := ops.hasService(p.cfg.Zone)
@@ -948,7 +991,32 @@ func migrateAndRestartPen(p *penTarget, canonicalBin, legacyBin, selfPath string
 			hadService = true
 		}
 	}
+	removeLegacy := func() {
+		if legacyBin != "" && !sameFilePath(legacyBin, selfPath) && !sameFilePath(legacyBin, canonicalBin) {
+			if _, err := os.Stat(legacyBin); err == nil {
+				if err := os.Remove(legacyBin); err == nil {
+					note("consolidated %s -> %s", legacyBin, canonicalBin)
+				}
+			}
+		}
+	}
 	if running {
+		if ops.probeReachable != nil {
+			if perr := ops.probeReachable(p, o); perr != nil {
+				ops.stop(p.dir, p.cfg)
+				clearUpdatingMarker(p.dir)
+				if hadService && ops.rewriteService != nil {
+					if rerr := ops.rewriteService(canonicalBin, p.dir, p.cfg); rerr != nil {
+						return errorf("%s is unreachable (%v), and updating its login item failed: %v.\n"+
+							"  If this pen no longer exists, remove it with: hogman leave %s", p.zone, perr, rerr, p.zone)
+					}
+					note("updated login item for %s to %s (server unreachable; skipped online wait)", p.zone, canonicalBin)
+				}
+				removeLegacy()
+				return errorf("%s is unreachable (%v); moved its config to %s without waiting.\n"+
+					"  If this pen no longer exists, remove it with: hogman leave %s", p.zone, perr, canonicalBin, p.zone)
+			}
+		}
 		step("Restarting %s agent", p.zone)
 		writeUpdatingMarker(p.dir, hadService)
 		ops.stop(p.dir, p.cfg)
@@ -964,7 +1032,7 @@ func migrateAndRestartPen(p *penTarget, canonicalBin, legacyBin, selfPath string
 					}
 				}
 			}
-			return err
+			return errorf("%v\n  If this pen no longer exists, remove it with: hogman leave %s", err, p.zone)
 		}
 		clearUpdatingMarker(p.dir)
 	} else if hadService && ops.rewriteService != nil {
@@ -972,14 +1040,39 @@ func migrateAndRestartPen(p *penTarget, canonicalBin, legacyBin, selfPath string
 			return errorf("could not update login item for %s: %v", p.zone, err)
 		}
 	}
-	if legacyBin != "" && !sameFilePath(legacyBin, selfPath) && !sameFilePath(legacyBin, canonicalBin) {
-		if _, err := os.Stat(legacyBin); err == nil {
-			if err := os.Remove(legacyBin); err == nil {
-				note("consolidated %s -> %s", legacyBin, canonicalBin)
-			}
-		}
-	}
+	removeLegacy()
 	return nil
+}
+
+type penMigrationResult struct {
+	Zone string
+	Err  error
+}
+
+// migratePensForUpdate migrates every pen in the plan, never stopping on the
+// first pen that fails to come up so healthy pens still move to the new binary
+// (I-10).
+func migratePensForUpdate(pens []penTarget, serviceBin, selfPath string, legacyCopyIn func(string) string, forceAll bool, o options, ops penUpdateOps) []penMigrationResult {
+	results := make([]penMigrationResult, 0, len(pens))
+	for i := range pens {
+		p := &pens[i]
+		legacy := ""
+		if legacyCopyIn != nil {
+			legacy = legacyCopyIn(p.dir)
+		}
+		interrupted, _ := readUpdatingMarker(p.dir)
+		if !forceAll && legacy == "" && !interrupted {
+			continue
+		}
+		err := migrateAndRestartPen(p, serviceBin, legacy, selfPath, o, ops)
+		if err != nil {
+			note("✗ %s: %v", p.zone, err)
+		} else {
+			note("✓ %s migrated to %s", p.zone, serviceBin)
+		}
+		results = append(results, penMigrationResult{Zone: p.zone, Err: err})
+	}
+	return results
 }
 
 // migrateAndRestartShare atomically transitions a managed share to canonicalBin
@@ -1286,29 +1379,30 @@ func updateCmd(args []string, o options) error {
 	}
 	ops := defaultPenUpdateOps()
 	shareOps := defaultShareUpdateOps()
-	for i := range plan.pens {
-		p := &plan.pens[i]
-		legacy := legacyCopyIn(p.dir)
-		interrupted, _ := readUpdatingMarker(p.dir)
-		if !selfNeedsUpdate && !canonicalNeedsUpdate && legacy == "" && !hasOldBinCanonical && !interrupted {
-			continue
-		}
-		if err := migrateAndRestartPen(p, serviceBin, legacy, selfPath, o, ops); err != nil {
-			return err
+	forceAll := selfNeedsUpdate || canonicalNeedsUpdate || hasOldBinCanonical
+	penResults := migratePensForUpdate(plan.pens, serviceBin, selfPath, legacyCopyIn, forceAll, o, ops)
+	var failedZones []string
+	var failedShares []string
+	for _, res := range penResults {
+		if res.Err != nil {
+			failedZones = append(failedZones, res.Zone)
 		}
 	}
 	for i := range plan.shares {
 		s := &plan.shares[i]
 		legacy := legacyCopyIn(s.dir)
 		interrupted, _ := readUpdatingMarker(s.dir)
-		if !selfNeedsUpdate && !canonicalNeedsUpdate && legacy == "" && !hasOldBinCanonical && !interrupted {
+		if !forceAll && legacy == "" && !interrupted {
 			continue
 		}
 		if err := migrateAndRestartShare(s, serviceBin, legacy, selfPath, o, shareOps); err != nil {
-			return err
+			note("✗ share %s: %v", s.cfg.fqdn(), err)
+			failedShares = append(failedShares, s.cfg.fqdn())
+		} else {
+			note("✓ share %s migrated to %s", s.cfg.fqdn(), serviceBin)
 		}
 	}
-	if hasOldBinCanonical {
+	if hasOldBinCanonical && len(failedZones) == 0 && len(failedShares) == 0 {
 		if err := os.Remove(oldBinCanonical); err == nil {
 			note("consolidated %s -> %s", oldBinCanonical, canonicalBin)
 		}
@@ -1331,6 +1425,17 @@ func updateCmd(args []string, o options) error {
 	if len(skipped) > 0 {
 		note("shared binary %s updated from %s; other pens (%s) will use it on next restart (run 'hogman update' to update and restart all pens from GitHub Releases)",
 			canonicalBin, plan.host, strings.Join(skipped, ", "))
+	}
+
+	if len(failedZones) > 0 || len(failedShares) > 0 {
+		var parts []string
+		if len(failedZones) > 0 {
+			parts = append(parts, fmt.Sprintf("pen(s): %s (if gone, run 'hogman leave <pen>')", strings.Join(failedZones, ", ")))
+		}
+		if len(failedShares) > 0 {
+			parts = append(parts, fmt.Sprintf("share(s): %s", strings.Join(failedShares, ", ")))
+		}
+		return errorf("updated binary (%s), but %s did not come back online", wantHex[:12], strings.Join(parts, "; "))
 	}
 
 	verLine := ""

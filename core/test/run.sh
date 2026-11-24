@@ -681,6 +681,68 @@ check "... and removed legacy per-pen hogman-join copy" run dave-laptop sh -c 't
 check "... and converted hogman-native-host into a symlink to hogman" run dave-laptop sh -c 'test -L "/root/.config/hogman/bin/hogman-native-host"'
 check "... and restarted agent still loads alice.$ZONE" retry 20 alice_via
 
+# I-10 E2E (1): a running legacy hogman-join agent holding the proxy port must
+# be stopped cleanly when the new hogman client runs on the same pen (e.g. via /start).
+run dave-laptop sh -c '
+  pid="$(cat "/root/.config/hogman/'"$ZONE"'/agent.pid" 2>/dev/null || true)"
+  [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  sleep 1
+  cp "/dl/hogman-$(uname -s)-$(uname -m)" "/root/.config/hogman/'"$ZONE"'/hogman-join"
+  rm -f "/root/.config/hogman/'"$ZONE"'/status.token"
+  nohup "/root/.config/hogman/'"$ZONE"'/hogman-join" agent "/root/.config/hogman/'"$ZONE"'" >/root/.config/hogman/'"$ZONE"'/agent.log 2>&1 </dev/null &
+'
+retry 20 run dave-laptop sh -c 'test -s "/root/.config/hogman/'"$ZONE"'/agent.pid" && kill -0 "$(cat "/root/.config/hogman/'"$ZONE"'/agent.pid")" 2>/dev/null'
+LEGACY_AGENT_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>/dev/null | tr -d '\r')"
+out="$(join_tool dave-laptop --no-system-proxy "$DAVE_LINK" 2>&1)"; rc=$?
+[ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
+check "re-running hogman replaces a running legacy hogman-join agent on the same port (exit $rc)" bash -c 'test "$1" = 0 && grep -q "You'\''re in." <<<"$2"' _ "$rc" "$out"
+NEW_AGENT_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>/dev/null | tr -d '\r')"
+check "... replaced legacy agent PID ($LEGACY_AGENT_PID -> $NEW_AGENT_PID)" test -n "$LEGACY_AGENT_PID" -a -n "$NEW_AGENT_PID" -a "$LEGACY_AGENT_PID" != "$NEW_AGENT_PID"
+check "... cleaned up legacy hogman-join copy after restart" run dave-laptop sh -c 'test ! -e "/root/.config/hogman/'"$ZONE"'/hogman-join"'
+check "... and new agent loads alice.$ZONE" retry 20 alice_via
+
+# I-10 E2E (2): two legacy pens where the first pen's server is unreachable and
+# the second pen is healthy: `hogman update` must not stop at the dead pen, must
+# skip the 60s online wait for it, and must still migrate the healthy pen.
+docker exec -d "$(dc ps -q dave-server)" sh -c '
+  set -e
+  mkdir -p /tmp/rel/latest/download /tmp/rel/download/v2026.11.24
+  printf "2026.11.24\n" > /tmp/rel/latest/download/latest
+  cp /dl/SHA256SUMS /tmp/rel/download/v2026.11.24/hogman-SHA256SUMS
+  cp /dl/hogman-* /tmp/rel/download/v2026.11.24/
+  cat > /tmp/rel/Caddyfile <<EOF
+{
+  auto_https disable_redirects
+}
+dave-server:8443 {
+  tls internal
+  root * /tmp/rel
+  file_server
+}
+EOF
+  caddy run --config /tmp/rel/Caddyfile >/tmp/rel/caddy.log 2>&1
+'
+retry 20 run dave-server test -s /data/caddy/pki/authorities/local/root.crt
+run dave-server cat /data/caddy/pki/authorities/local/root.crt | docker exec -i "$(dc ps -q dave-laptop)" sh -c 'cat > /usr/local/share/ca-certificates/rel-ca.crt && update-ca-certificates >/dev/null 2>&1'
+BEFORE_MULTI_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>/dev/null | tr -d '\r')"
+run dave-laptop sh -c '
+  mkdir -p /root/.config/hogman/aaa-dead.example.test
+  printf "{\"zone\":\"aaa-dead.example.test\",\"login_server\":\"https://127.0.0.1:1\",\"dns_server\":\"100.64.0.1\",\"hostname\":\"dead\",\"proxy_addr\":\"127.0.0.1:19999\"}\n" > /root/.config/hogman/aaa-dead.example.test/config.json
+  cp "/dl/hogman-$(uname -s)-$(uname -m)" /root/.config/hogman/aaa-dead.example.test/hogman-join
+  nohup sleep 300 >/dev/null 2>&1 </dev/null & echo $! > /root/.config/hogman/aaa-dead.example.test/agent.pid
+  cp "/dl/hogman-$(uname -s)-$(uname -m)" "/root/.config/hogman/'"$ZONE"'/hogman-join"
+'
+t0="$(date +%s)"
+out="$(run dave-laptop sh -c 'HOGMAN_RELEASE_BASE="https://dave-server:8443" "/dl/hogman-$(uname -s)-$(uname -m)" --no-open update' 2>&1)"; rc=$?
+t_multi=$(( $(date +%s) - t0 ))
+check "hogman update with one dead pen + one live pen reports failure (exit $rc, ${t_multi}s)" bash -c 'test "$1" != 0 && grep -q "hogman leave aaa-dead.example.test" <<<"$2"' _ "$rc" "$out"
+check "... skipped the 60s wait on the unreachable pen (${t_multi}s < 45s)" test "$t_multi" -lt 45
+AFTER_MULTI_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>/dev/null | tr -d '\r')"
+check "... still migrated and restarted the healthy pen ($BEFORE_MULTI_PID -> $AFTER_MULTI_PID)" test -n "$BEFORE_MULTI_PID" -a -n "$AFTER_MULTI_PID" -a "$BEFORE_MULTI_PID" != "$AFTER_MULTI_PID"
+check "... removed legacy hogman-join copy on BOTH pens" run dave-laptop sh -c 'test ! -e /root/.config/hogman/aaa-dead.example.test/hogman-join && test ! -e "/root/.config/hogman/'"$ZONE"'/hogman-join"'
+check "... and healthy pen still loads alice.$ZONE" retry 20 alice_via
+run dave-laptop sh -c 'rm -rf /root/.config/hogman/aaa-dead.example.test /usr/local/share/ca-certificates/rel-ca.crt && update-ca-certificates --fresh >/dev/null 2>&1'
+
 out="$(join_tool dave-laptop leave "$DAVE_LINK" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
 check "leave works (exit $rc)" grep -q "Left $ZONE" <<<"$out"

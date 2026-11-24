@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
 
 func launchPlist(zone string) string {
@@ -14,12 +16,15 @@ func launchPlist(zone string) string {
 }
 
 // startAgent runs the agent as a per-user LaunchAgent, so it starts at login
-// and restarts if it stops. No administrator rights needed.
+// and restarts if it stops. No administrator rights needed. Always stops any
+// previous agent (including a legacy hogman-join process holding the proxy
+// port) first.
 func startAgent(dir string, c *agentConfig, o options) error {
 	bin, err := installedBinary(dir)
 	if err != nil {
 		return err
 	}
+	stopAgent(dir, c)
 	if o.noService {
 		return startDetached(bin, dir)
 	}
@@ -51,6 +56,68 @@ func stopAgent(dir string, c *agentConfig) {
 	_, _ = run(false, "/bin/launchctl", "bootout", domain+"/"+launchLabel(c.Zone))
 	_ = os.Remove(launchPlist(c.Zone))
 	stopDetached(dir)
+}
+
+// stopOrphanAgentForDir finds and stops any hogman or legacy hogman-join agent
+// process owned by our UID running `agent <dir>` even if agent.pid is missing
+// or stale (I-10).
+func stopOrphanAgentForDir(dir string) {
+	cleanDir := filepath.Clean(dir)
+	if cleanDir == "" || cleanDir == "." || cleanDir == "/" {
+		return
+	}
+	out, err := run(false, "/bin/ps", "-u", strconv.Itoa(os.Getuid()), "-o", "pid=,args=")
+	if err != nil {
+		return
+	}
+	myPID := os.Getpid()
+	needle := " agent " + cleanDir
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		sp := strings.IndexAny(line, " \t")
+		if sp <= 0 {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(line[:sp]))
+		if err != nil || pid <= 1 || pid == myPID {
+			continue
+		}
+		args := strings.TrimSpace(line[sp:])
+		idx := strings.Index(args, needle)
+		if idx <= 0 {
+			continue
+		}
+		// Match exact trailing argument (or followed by whitespace) and a hogman* executable.
+		tail := args[idx+len(needle):]
+		if tail != "" && tail[0] != ' ' && tail[0] != '\t' {
+			continue
+		}
+		exeBase := filepath.Base(strings.TrimSpace(args[:idx]))
+		if !strings.HasPrefix(exeBase, "hogman") {
+			continue
+		}
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Signal(syscall.SIGTERM)
+			for i := 0; i < 20; i++ {
+				if !processAlive(pid) {
+					break
+				}
+				time.Sleep(150 * time.Millisecond)
+			}
+			if processAlive(pid) {
+				_ = p.Kill()
+				for i := 0; i < 10; i++ {
+					if !processAlive(pid) {
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+			}
+		}
+	}
 }
 
 func sharePlist(c *shareConfig) string {

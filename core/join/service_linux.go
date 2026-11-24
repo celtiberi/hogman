@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
 
 func unitPath(zone string) string {
@@ -30,12 +33,14 @@ func haveUserSystemd() bool {
 }
 
 // startAgent runs the agent as a systemd user service where there is one,
-// otherwise as a plain background process.
+// otherwise as a plain background process. Always stops any previous agent
+// (including a legacy hogman-join process holding the proxy port) first.
 func startAgent(dir string, c *agentConfig, o options) error {
 	bin, err := installedBinary(dir)
 	if err != nil {
 		return err
 	}
+	stopAgent(dir, c)
 	if o.noService || !haveUserSystemd() {
 		if !o.noService {
 			note("no user service manager here; running in the background until restart")
@@ -67,6 +72,71 @@ func stopAgent(dir string, c *agentConfig) {
 		_, _ = run(false, sc, "--user", "daemon-reload")
 	}
 	stopDetached(dir)
+}
+
+// stopOrphanAgentForDir finds and stops any hogman or legacy hogman-join agent
+// process owned by our UID running `agent <dir>` even if agent.pid is missing
+// or stale (I-10).
+func stopOrphanAgentForDir(dir string) {
+	cleanDir := filepath.Clean(dir)
+	if cleanDir == "" || cleanDir == "." || cleanDir == "/" {
+		return
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return
+	}
+	myPID := os.Getpid()
+	myUID := uint32(os.Getuid())
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid <= 1 || pid == myPID {
+			continue
+		}
+		fi, err := os.Stat(filepath.Join("/proc", e.Name()))
+		if err != nil {
+			continue
+		}
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid != myUID {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		parts := bytes.Split(bytes.TrimRight(raw, "\x00"), []byte{0})
+		if len(parts) < 3 {
+			continue
+		}
+		exeBase := filepath.Base(string(parts[0]))
+		if !strings.HasPrefix(exeBase, "hogman") {
+			continue
+		}
+		if string(parts[1]) != "agent" || filepath.Clean(string(parts[2])) != cleanDir {
+			continue
+		}
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Signal(syscall.SIGTERM)
+			for i := 0; i < 20; i++ {
+				if !processAlive(pid) {
+					break
+				}
+				time.Sleep(150 * time.Millisecond)
+			}
+			if processAlive(pid) {
+				_ = p.Kill()
+				for i := 0; i < 10; i++ {
+					if !processAlive(pid) {
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+			}
+		}
+	}
 }
 
 func shareUnitPath(c *shareConfig) string {
