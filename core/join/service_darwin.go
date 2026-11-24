@@ -202,88 +202,80 @@ func autoProxyState(svc string) (string, bool) {
 	return parseAutoProxyOutput(out)
 }
 
-// setSystemProxy points the Mac's automatic proxy setting at the agent's
-// rules file, which sends only pen names through their pens. It never replaces
-// an enabled non-Hogman setting someone else put there.
-func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, error) {
+// setSystemProxy checks (read-only, no password) whether macOS already points
+// at a Hogman automatic proxy URL. If not, it returns step-by-step macOS
+// System Settings instructions using the stable local PAC URL so Hogman never
+// asks for the user's Mac password or administrator privileges (D-41).
+func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, bool, error) {
 	known := normalizePenConfigs(pens, c)
-	want := pacURLWithVersion(c, known)
-	manual := "set System Settings → Network → (your network) → Proxies → Automatic proxy configuration to " + c.pacURL()
-	var done, left []string
-	var ops []darwinProxyOp
+	stableURL := c.pacURL()
+	if host := pickPACHost(known); host != nil {
+		stableURL = host.pacURL()
+	}
+
+	var configured, left []string
+	configuredURL := ""
 	for _, svc := range networkServices() {
 		cur, enabled := autoProxyState(svc)
-		switch planAutoProxyAction(cur, enabled, known, want) {
-		case "leave":
-			// Someone else's setting (a company PAC, another tool): leave this
-			// connection alone, but still set the others.
+		if !enabled || cur == "" {
+			continue
+		}
+		if isHogmanPACURL(cur, known) {
+			configured = append(configured, svc)
+			if configuredURL == "" {
+				configuredURL = cur
+			}
+		} else {
 			left = append(left, svc+" ("+cur+")")
-		case "noop":
-			done = append(done, svc)
-		case "set":
-			ops = append(ops, darwinProxyOp{Action: "set", Service: svc, URL: want})
 		}
 	}
-	if len(ops) > 0 {
-		err := applyDarwinProxyOps(darwinProxyCopyFor("set"), ops, defaultDarwinProxyRunner())
-		if err != nil {
-			return "", fmt.Errorf("%v Re-run to try again, or set it by hand: %s", err, manual)
+
+	if len(configured) > 0 {
+		if len(known) > 1 {
+			return fmt.Sprintf("already configured on %s (%s), which covers all %d pens (%s). If your browser doesn't see %s right away, toggle Auto proxy configuration off and back on in System Settings (or restart your browser).",
+				strings.Join(configured, ", "), configuredURL, len(known), strings.Join(penZoneNames(known), ", "), c.Zone), true, nil
 		}
-		for _, op := range ops {
-			done = append(done, op.Service)
-		}
-	}
-	if len(done) == 0 {
-		if len(left) > 0 {
-			return "this Mac already uses another automatic proxy (" + strings.Join(left, ", ") + "), so it was left alone. To use the pen in browsers, " + manual, nil
-		}
-		return manual, nil
+		return fmt.Sprintf("already configured on %s (%s) — Safari, Chrome and others find the pen automatically.",
+			strings.Join(configured, ", "), configuredURL), true, nil
 	}
 	if len(left) > 0 {
-		note("left alone (another automatic proxy is set): %s", strings.Join(left, ", "))
+		note("another automatic proxy is already set on %s (left untouched)", strings.Join(left, ", "))
 	}
-	if len(known) > 1 {
-		return fmt.Sprintf("Safari, Chrome and others now find all %d pens (%s) by themselves (set on: %s)",
-			len(known), strings.Join(penZoneNames(known), ", "), strings.Join(done, ", ")), nil
-	}
-	return "Safari, Chrome and others now find the pen by themselves (set on: " + strings.Join(done, ", ") + ")", nil
+	return formatBrowserProxyInstructions("darwin", stableURL, c.Zone, penZoneNames(known)), false, nil
 }
 
+// clearSystemProxy checks (read-only, no password) whether macOS still points
+// at a leaving or orphaned Hogman automatic proxy URL and returns clear steps
+// to update or turn it off in System Settings (D-41).
 func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {
 	known := normalizePenConfigs(remaining, leaving)
 	nextURL := ""
 	if host := pickPACHost(remaining); host != nil {
-		nextURL = pacURLWithVersion(host, remaining)
+		nextURL = host.pacURL()
 	}
-	var ops []darwinProxyOp
-	hasOff, hasSet := false, false
+	var matching []string
 	for _, svc := range networkServices() {
 		cur, enabled := autoProxyState(svc)
-		switch planClearAutoProxyAction(cur, enabled, known, nextURL) {
-		case "off":
-			ops = append(ops, darwinProxyOp{Action: "off", Service: svc})
-			hasOff = true
-		case "set":
-			ops = append(ops, darwinProxyOp{Action: "set", Service: svc, URL: nextURL})
-			hasSet = true
+		if !enabled || cur == "" {
+			continue
+		}
+		if leaving != nil {
+			if isHogmanPACURL(cur, []*agentConfig{leaving}) {
+				matching = append(matching, svc)
+			}
+		} else if isOurPAC(cur, known) {
+			if nextURL == "" || !isHogmanPACURL(cur, remaining) {
+				matching = append(matching, svc)
+			}
 		}
 	}
-	if len(ops) == 0 {
+	if len(matching) == 0 {
 		return ""
 	}
-	mode := "remove"
-	if hasSet {
-		mode = "update"
+	if nextURL != "" {
+		return fmt.Sprintf("in System Settings → Network → %s → Details… → Proxies, update \"Auto proxy configuration\" to %s for your remaining pen(s): %s",
+			strings.Join(matching, " / "), nextURL, strings.Join(penZoneNames(remaining), ", "))
 	}
-	if err := applyDarwinProxyOps(darwinProxyCopyFor(mode), ops, defaultDarwinProxyRunner()); err != nil {
-		note("%v", err)
-		return ""
-	}
-	if hasSet {
-		return "updated the automatic proxy setting for your remaining pen(s): " + strings.Join(penZoneNames(remaining), ", ")
-	}
-	if hasOff {
-		return "removed the pen's automatic proxy setting"
-	}
-	return ""
+	return fmt.Sprintf("turn off \"Auto proxy configuration\" in System Settings → Network → %s → Details… → Proxies (the local proxy.pac server is now stopped)",
+		strings.Join(matching, " / "))
 }

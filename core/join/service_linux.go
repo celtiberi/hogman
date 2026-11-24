@@ -237,14 +237,13 @@ func startDetached(bin, dir string) error {
 
 // Linux desktops each keep proxy settings in their own place, so the member
 // sets it in the browser. The message says how.
-func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, error) {
+func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, bool, error) {
 	pens = normalizePenConfigs(pens, c)
-	if len(pens) <= 1 {
-		return "set your browser's (or desktop's) automatic proxy configuration URL to " + c.pacURL(), nil
+	stableURL := c.pacURL()
+	if host := pickPACHost(pens); host != nil {
+		stableURL = host.pacURL()
 	}
-	return "set your browser's (or desktop's) automatic proxy configuration URL to " + c.pacURL() +
-		" (covers all " + strconv.Itoa(len(pens)) + " pens: " + strings.Join(penZoneNames(pens), ", ") +
-		"; if your browser already uses another pen's proxy.pac, reload proxy settings)", nil
+	return formatBrowserProxyInstructions("linux", stableURL, c.Zone, penZoneNames(pens)), false, nil
 }
 
 func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {

@@ -191,9 +191,15 @@
         <div class="done-actions">
           <button class="btn small" id="copy-cmd" type="button">Copy command</button>
         </div>
-        <p class="hint">It downloads <code>hogman</code>, verifies its SHA-256 checksum, connects this computer to your pen, and wires up your browser.</p>
+        <p class="hint">It downloads <code>hogman</code>, verifies its SHA-256 checksum, and connects this computer to your pen — Hogman never asks for your Mac or computer password.</p>
       </li>
-      <li id="done-step-3">Once that finishes, <code id="done-home-step"></code> will start working and open automatically — <span id="done-step-3-rest">that's where you add other devices, invite people, and run the herd.</span></li>
+      <li id="done-proxy-step">
+        <p>Set your browser's automatic proxy URL once using the <code>http://127.0.0.1:&lt;port&gt;/proxy.pac</code> address printed by <code>hogman</code> (only pen sites use it; normal browsing goes direct):</p>
+        <p class="hint"><strong>macOS:</strong> <em>System Settings &rarr; Network &rarr; Wi-Fi (or Ethernet) &rarr; Details&hellip; &rarr; Proxies &rarr; Auto proxy configuration</em> &rarr; paste &rarr; OK.<br>
+          <strong>Linux / Firefox:</strong> Firefox <em>Settings &rarr; Network Settings &rarr; Automatic proxy configuration URL</em> (or GNOME <em>Network Proxy &rarr; Automatic</em>).<br>
+          We're working on a signed Mac app and Chrome/Firefox extensions so this step will be automatic soon.</p>
+      </li>
+      <li id="done-step-3">Once that's set, open <code id="done-home-step"></code> — <span id="done-step-3-rest">that's where you add other devices, invite people, and run the herd.</span></li>
     </ol>
     <details class="alt-link" id="done-alt-link">
       <summary>Setting up a different computer? Copy or open the setup link instead</summary>
