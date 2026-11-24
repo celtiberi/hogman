@@ -234,6 +234,10 @@ front_blocked_routes_ok() {
 check "front door blocks Headscale root, register, auth, apple, windows, version (404)" front_blocked_routes_ok
 check "front door allows Headscale /health" match '"pass"' in_client bobo curl -sf https://bobo.gate.hogman.test/health
 check "front door allows Tailscale /key" match '"publicKey"' in_client bobo curl -sf 'https://bobo.gate.hogman.test/key?v=138'
+front_ip="$(docker inspect -f '{{(index .NetworkSettings.Networks "hogman-front").IPAddress}}' hogman-front-front-1)"
+check "front door answers a pen that doesn't exist with 404" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' --resolve "nopen.gate.hogman.test:443:$front_ip" https://nopen.gate.hogman.test/start)" = 404
+check "the start command fails loudly for a pen that doesn't exist" fails in_client bobo curl -fsSL --resolve "nopen.gate.hogman.test:443:$front_ip" https://nopen.gate.hogman.test/start
+check "front door still serves a real pen's /start" match 'Join a Hogman pen' in_client bobo curl -fsS https://bobo.gate.hogman.test/start
 check "front door allows /generate_204" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://bobo.gate.hogman.test/generate_204)" = 204
 join_hdrs="$(in_client bobo curl -sI https://bobo.gate.hogman.test/join | tr -d '\r')"
 check "front door sets anti-framing headers and Origin-Agent-Cluster on /join" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\" && grep -iq '^origin-agent-cluster: ?1' <<<\"\$1\"" _ "$join_hdrs"

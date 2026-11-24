@@ -35,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Added an all-member grace-period banner in `core/portal` served via `registrar` `GET /api/me` (`data/registrar/billing-status.json`), offering **Renew now** only to owners and admins.
 
 ### Fixed
+- `deploy/hogman-host` & `deploy/test-host.sh`: the front door now answers any name under its `*.gate` wildcard that isn't a pen with a 404 and a short message. Before, Caddy answered an unknown name with an empty 200, so `curl -fsSL https://<wrong-name>/start | sh` (for example the docs' sample pen name) printed nothing and did nothing.
 - `deploy/signup` & `deploy/hogman-host`: made the signup broker the single owner of `pens/<pen>/lifecycle.json` (I-12):
   - Added `--no-lifecycle` to `hogman-host sleep` and `hogman-host wake [--renew-only]` and passed it on every broker invocation so broker-run host commands never rewrite `lifecycle.json` from the shell.
   - Added `POST /lifecycle/transition` and `hogman-signup lifecycle-transition <sleep|wake|renew_only> <pen>`, and routed hand-run `hogman-host sleep`/`wake` through the running broker when configured.

@@ -300,6 +300,30 @@ $(gate_tls_line "$host")
 
 EOF
     done
+    # Any other name under the front door's wildcard: no pen lives there.
+    # Without this block Caddy answers an unmatched host with an empty 200, so
+    # `curl -fsSL https://<wrong-name>/start | sh` printed nothing and did
+    # nothing. A 404 makes curl -f fail with an error instead.
+    if [ -n "${GATE_DOMAIN:-}" ] && [ -s "$GATE_TLS/gate.crt" ] && [ -s "$GATE_TLS/gate.key" ]; then
+      cat <<EOF
+# no pen at this address
+http://*.$GATE_DOMAIN {
+	redir https://{host}{uri} permanent
+}
+*.$GATE_DOMAIN {
+	tls /gate-tls/gate.crt /gate-tls/gate.key
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Cache-Control no-store
+		Content-Type "text/plain; charset=utf-8"
+		-Server
+	}
+	respond "There is no pen at this address. Check the address in your invite link, or ask whoever invited you for a new one." 404
+}
+
+EOF
+    fi
     local shost
     for shost in "${SIGNUP_HOST:-}" "${SIGNUP_WORK_HOST:-}"; do
       [ -n "$shost" ] || continue
