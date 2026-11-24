@@ -524,7 +524,7 @@ func TestUpdateContinuesPastUnreachablePenAndLegacySHA256MessageI10(t *testing.T
 		{zone: "aaa-dead.example.test", dir: deadDir, cfg: &agentConfig{Zone: "aaa-dead.example.test", LoginServer: "https://dead.example.test"}},
 		{zone: "zzz-good.example.test", dir: goodDir, cfg: &agentConfig{Zone: "zzz-good.example.test", LoginServer: "https://good.example.test"}},
 	}
-	var stopped, rewritten, restarted []string
+	var stopped, startedNoWait, restarted []string
 	ops := penUpdateOps{
 		isRunning:  func(string, *agentConfig) bool { return true },
 		hasService: func(string) bool { return true },
@@ -535,8 +535,8 @@ func TestUpdateContinuesPastUnreachablePenAndLegacySHA256MessageI10(t *testing.T
 			return nil
 		},
 		stop: func(_ string, c *agentConfig) { stopped = append(stopped, c.Zone) },
-		rewriteService: func(bin, _ string, c *agentConfig) error {
-			rewritten = append(rewritten, c.Zone+":"+bin)
+		startNoWait: func(p *penTarget, bin string, _ bool, _ options) error {
+			startedNoWait = append(startedNoWait, p.zone+":"+bin)
 			return nil
 		},
 		restartNew: func(p *penTarget, _ string, _ bool, _ options) error {
@@ -565,8 +565,8 @@ func TestUpdateContinuesPastUnreachablePenAndLegacySHA256MessageI10(t *testing.T
 	if len(restarted) != 1 || restarted[0] != "zzz-good.example.test" {
 		t.Fatalf("restarted = %v, want only [zzz-good.example.test]", restarted)
 	}
-	if len(rewritten) != 1 || rewritten[0] != "aaa-dead.example.test:/tmp/canon/hogman" {
-		t.Fatalf("rewritten = %v, want dead pen login item updated to canonical bin", rewritten)
+	if len(startedNoWait) != 1 || startedNoWait[0] != "aaa-dead.example.test:/tmp/canon/hogman" {
+		t.Fatalf("startedNoWait = %v, want unreachable pen started on canonical bin without waiting", startedNoWait)
 	}
 	if _, err := os.Stat(deadLegacy); !os.IsNotExist(err) {
 		t.Fatalf("dead pen legacy copy should be removed after moving login item (err=%v)", err)

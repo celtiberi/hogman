@@ -40,6 +40,9 @@ func startAgent(dir string, c *agentConfig, o options) error {
 	if err != nil {
 		return err
 	}
+	if currentAgentHealthy(dir, c) {
+		return nil
+	}
 	stopAgent(dir, c)
 	if o.noService || !haveUserSystemd() {
 		if !o.noService {

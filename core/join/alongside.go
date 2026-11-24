@@ -638,6 +638,17 @@ func hasLegacyPenBinary(dir string) bool {
 	return err == nil
 }
 
+// currentAgentHealthy reports whether the pen's agent is already up, passes
+// HMAC status verification, and is NOT accompanied by a legacy per-pen
+// hogman-join copy that still needs replacing.
+func currentAgentHealthy(dir string, c *agentConfig) bool {
+	if c == nil || hasLegacyPenBinary(dir) {
+		return false
+	}
+	st, err := agentStateInDir(dir, c)
+	return err == nil && st.Up
+}
+
 func cleanupLegacyPenBinary(dir string) {
 	p := filepath.Join(dir, legacyBinaryName(runtime.GOOS))
 	self, _ := resolvedExePath()

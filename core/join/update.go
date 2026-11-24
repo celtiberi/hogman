@@ -649,6 +649,7 @@ type penUpdateOps struct {
 	probeReachable func(p *penTarget, o options) error
 	stop           func(dir string, c *agentConfig)
 	stage          func(srcPath, dstPath, wantHex string) error
+	startNoWait    func(p *penTarget, binPath string, hadService bool, o options) error
 	restartNew     func(p *penTarget, binPath string, hadService bool, o options) error
 	restartOld     func(p *penTarget, binPath string, hadService bool, o options) error
 	rewriteService func(binPath, dir string, c *agentConfig) error
@@ -661,6 +662,9 @@ func defaultPenUpdateOps() penUpdateOps {
 		probeReachable: probePenLoginServer,
 		stop:           stopAgent,
 		stage:          stageAndVerify,
+		startNoWait: func(p *penTarget, binPath string, hadService bool, o options) error {
+			return startExistingBinary(binPath, p.dir, p.cfg, o.noService || !hadService)
+		},
 		restartNew:     restartPenAgent,
 		restartOld:     restartOldPenAgent,
 		rewriteService: rewriteAgentService,
@@ -1003,17 +1007,25 @@ func migrateAndRestartPen(p *penTarget, canonicalBin, legacyBin, selfPath string
 	if running {
 		if ops.probeReachable != nil {
 			if perr := ops.probeReachable(p, o); perr != nil {
+				// B1: "unreachable for 4s" may be a restarting server, sleeping pen,
+				// or flaky Wi-Fi — start the new canonical agent normally so it
+				// reconnects on its own, and skip only the 60s online wait.
 				ops.stop(p.dir, p.cfg)
 				clearUpdatingMarker(p.dir)
-				if hadService && ops.rewriteService != nil {
+				if ops.startNoWait != nil {
+					if serr := ops.startNoWait(p, canonicalBin, hadService, o); serr != nil {
+						return errorf("%s is unreachable (%v), and starting its new agent failed: %v.\n"+
+							"  If this pen no longer exists, remove it with: hogman leave %s", p.zone, perr, serr, p.zone)
+					}
+					note("started %s on %s without waiting for it to come online (server unreachable)", p.zone, canonicalBin)
+				} else if hadService && ops.rewriteService != nil {
 					if rerr := ops.rewriteService(canonicalBin, p.dir, p.cfg); rerr != nil {
 						return errorf("%s is unreachable (%v), and updating its login item failed: %v.\n"+
 							"  If this pen no longer exists, remove it with: hogman leave %s", p.zone, perr, rerr, p.zone)
 					}
-					note("updated login item for %s to %s (server unreachable; skipped online wait)", p.zone, canonicalBin)
 				}
 				removeLegacy()
-				return errorf("%s is unreachable (%v); moved its config to %s without waiting.\n"+
+				return errorf("%s is unreachable (%v); started %s without waiting for it to come online.\n"+
 					"  If this pen no longer exists, remove it with: hogman leave %s", p.zone, perr, canonicalBin, p.zone)
 			}
 		}
