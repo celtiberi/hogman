@@ -724,7 +724,7 @@ func TestPendingWakeInFlightSkipsOverlappingWatcherAndSweepI7(t *testing.T) {
 		t.Fatalf("finishRenewalWork should have cleared PendingWake: %+v", rec)
 	}
 	rawCalls, _ := os.ReadFile(callsFile)
-	if got := strings.Count(string(rawCalls), "wake racepen"); got != 1 {
+	if got := strings.Count(string(rawCalls), "wake --no-lifecycle racepen"); got != 1 {
 		t.Fatalf("expected exactly 1 wake invocation (no overlap), got %d:\n%s", got, string(rawCalls))
 	}
 }
@@ -834,5 +834,305 @@ func TestExpiredRenewWakeSleepSerializedWithConcurrentRenewalI7(t *testing.T) {
 	finalRec, _ = loadPenLifecycle(lcPath)
 	if finalRec.State != stateActive || finalRec.PendingWake {
 		t.Fatalf("expected active pen with PendingWake=false after wake: %+v", finalRec)
+	}
+}
+
+func TestHogmanHostNoLifecycleAndBrokerDelegationI12(t *testing.T) {
+	hostScript, err := filepath.Abs("../hogman-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(hostScript); err != nil {
+		t.Skip("deploy/hogman-host not found")
+	}
+
+	home := t.TempDir()
+	binDir := filepath.Join(home, "bin")
+	_ = os.MkdirAll(binDir, 0o700)
+	_ = os.WriteFile(filepath.Join(binDir, "docker"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	_ = os.WriteFile(filepath.Join(home, "host.env"), []byte("MAX_PENS=4\nRENEW_WAKE_RESERVE=2\nSIGNUP_HOST=get.example.com\n"), 0o600)
+	_ = os.MkdirAll(filepath.Join(home, "front"), 0o700)
+	penDir := filepath.Join(home, "pens", "lab")
+	_ = os.MkdirAll(filepath.Join(penDir, "data", "registrar"), 0o700)
+	_ = os.WriteFile(filepath.Join(penDir, ".env"), []byte("PUBLIC_HOST=lab.gate.example.com\nSTUN_PORT=3478\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(penDir, "hogman"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+
+	lcPath := filepath.Join(penDir, "lifecycle.json")
+	origLC := &penLifecycle{
+		Plan:              planPersonal,
+		State:             stateActive,
+		PaidUntil:         1900000000,
+		AppliedEvents:     []string{"evt_keep_1"},
+		PendingCancelSubs: []pendingCancelSub{{SubscriptionID: "sub_old_keep"}},
+		UpdatedAt:         1800000000,
+	}
+	if err := savePenLifecycle(lcPath, origLC); err != nil {
+		t.Fatal(err)
+	}
+	origBytes, err := os.ReadFile(lcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runHost := func(args ...string) (string, error) {
+		cmd := exec.Command("bash", append([]string{hostScript}, args...)...)
+		cmd.Env = append(os.Environ(), "HOGMAN_HOME="+home, "PATH="+binDir+":"+os.Getenv("PATH"))
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	// 1. --no-lifecycle on sleep, wake --renew-only, and wake NEVER modifies lifecycle.json.
+	if out, err := runHost("sleep", "--no-lifecycle", "lab"); err != nil {
+		t.Fatalf("sleep --no-lifecycle failed: err=%v out=%s", err, out)
+	}
+	if got, _ := os.ReadFile(lcPath); string(got) != string(origBytes) {
+		t.Fatalf("sleep --no-lifecycle modified lifecycle.json:\ngot:  %s\nwant: %s", got, origBytes)
+	}
+	if out, err := runHost("wake", "--renew-only", "--no-lifecycle", "lab"); err != nil {
+		t.Fatalf("wake --renew-only --no-lifecycle failed: err=%v out=%s", err, out)
+	}
+	if got, _ := os.ReadFile(lcPath); string(got) != string(origBytes) {
+		t.Fatalf("wake --renew-only --no-lifecycle modified lifecycle.json:\ngot:  %s\nwant: %s", got, origBytes)
+	}
+	if out, err := runHost("wake", "--no-lifecycle", "lab"); err != nil {
+		t.Fatalf("wake --no-lifecycle failed: err=%v out=%s", err, out)
+	}
+	if got, _ := os.ReadFile(lcPath); string(got) != string(origBytes) {
+		t.Fatalf("wake --no-lifecycle modified lifecycle.json:\ngot:  %s\nwant: %s", got, origBytes)
+	}
+
+	// 2. When signup broker is configured and running, hand-run sleep/wake/wake --renew-only
+	//    delegate to `docker compose exec -T broker hogman-signup lifecycle-transition <action> <pen>`.
+	_ = os.MkdirAll(filepath.Join(home, "signup"), 0o700)
+	_ = os.WriteFile(filepath.Join(home, "signup", "compose.yaml"), []byte("services:\n  broker: {}\n"), 0o600)
+	dockerLog := filepath.Join(home, "docker.log")
+	dockerStub := "#!/bin/sh\n" +
+		"echo \"$*\" >> \"" + dockerLog + "\"\n" +
+		"if [ \"$1\" = compose ] && [ \"$2\" = ps ]; then echo broker-cid-123; exit 0; fi\n" +
+		"exit 0\n"
+	_ = os.WriteFile(filepath.Join(binDir, "docker"), []byte(dockerStub), 0o755)
+
+	for _, args := range [][]string{
+		{"sleep", "lab"},
+		{"wake", "--renew-only", "lab"},
+		{"wake", "lab"},
+	} {
+		if out, err := runHost(args...); err != nil {
+			t.Fatalf("delegated %v failed: err=%v out=%s", args, err, out)
+		}
+	}
+	dlog, _ := os.ReadFile(dockerLog)
+	for _, want := range []string{
+		"compose exec -T broker hogman-signup lifecycle-transition sleep lab",
+		"compose exec -T broker hogman-signup lifecycle-transition renew_only lab",
+		"compose exec -T broker hogman-signup lifecycle-transition wake lab",
+	} {
+		if !strings.Contains(string(dlog), want) {
+			t.Fatalf("expected delegated broker call %q in docker log:\n%s", want, string(dlog))
+		}
+	}
+	if got, _ := os.ReadFile(lcPath); string(got) != string(origBytes) {
+		t.Fatalf("delegated host commands must not touch lifecycle.json directly:\ngot: %s", got)
+	}
+}
+
+func TestBrokerLifecycleTransitionEndpointI12(t *testing.T) {
+	b, home := newTestBroker(t, "")
+	now := time.Date(2026, 12, 1, 12, 0, 0, 0, time.UTC)
+	b.nowFn = func() time.Time { return now }
+	b.publicURL = "https://get.example.com"
+	b.wakeHealthInterval = 5 * time.Millisecond
+	b.wakeHealthFn = func(context.Context, string) error { return nil }
+
+	penDir := filepath.Join(home, "pens", "lab")
+	_ = os.MkdirAll(filepath.Join(penDir, "data", "registrar"), 0o700)
+	lcPath := filepath.Join(penDir, "lifecycle.json")
+	_ = savePenLifecycle(lcPath, &penLifecycle{
+		Plan:              planPersonal,
+		State:             stateActive,
+		PaidUntil:         now.Add(30 * 24 * time.Hour).Unix(),
+		AppliedEvents:     []string{"evt_preserve_1"},
+		PendingCancelSubs: []pendingCancelSub{{SubscriptionID: "sub_old_preserve"}},
+	})
+
+	callsLog := filepath.Join(home, "host-calls.log")
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> \"" + callsLog + "\"\n" +
+		"if [ \"$1\" = capacity ]; then echo '{\"pens\":1,\"max\":8,\"open\":true,\"renew_wakes\":0,\"renew_reserve\":2}'; exit 0; fi\n" +
+		"if [ \"$1\" = sleep ]; then touch \"" + penDir + "/.sleeping\"; rm -f \"" + penDir + "/.renew-wake\"; exit 0; fi\n" +
+		"if [ \"$1\" = wake ] && [ \"$2\" = --renew-only ]; then touch \"" + penDir + "/.renew-wake\"; exit 0; fi\n" +
+		"if [ \"$1\" = wake ]; then rm -f \"" + penDir + "/.sleeping\" \"" + penDir + "/.renew-wake\"; exit 0; fi\n" +
+		"exit 0\n"
+	b.tool = filepath.Join(t.TempDir(), "hogman-host")
+	_ = os.WriteFile(b.tool, []byte(script), 0o755)
+
+	callTransition := func(action string) *httptest.ResponseRecorder {
+		body := fmt.Sprintf(`{"pen":"lab","action":%q}`, action)
+		req := httptest.NewRequest("POST", "/lifecycle/transition", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+b.token)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		b.handler().ServeHTTP(rr, req)
+		return rr
+	}
+
+	// 1. Sleep via broker endpoint.
+	if rr := callTransition("sleep"); rr.Code != 200 {
+		t.Fatalf("transition sleep = %d: %s", rr.Code, rr.Body.String())
+	}
+	rec, _ := loadPenLifecycle(lcPath)
+	if rec.State != stateSleeping || rec.SleepSince == 0 || rec.DeleteAfter == 0 ||
+		!hasAppliedEvent(*rec, "evt_preserve_1") || len(rec.PendingCancelSubs) != 1 {
+		t.Fatalf("sleep transition lost fields or state wrong: %+v", rec)
+	}
+	origSleep, origDelete := rec.SleepSince, rec.DeleteAfter
+
+	// 2. Renew-only wake via broker endpoint preserves sleep_since/delete_after and writes marker+status.
+	if rr := callTransition("renew_only"); rr.Code != 200 {
+		t.Fatalf("transition renew_only = %d: %s", rr.Code, rr.Body.String())
+	}
+	rec, _ = loadPenLifecycle(lcPath)
+	if rec.State != stateRenewOnly || rec.SleepSince != origSleep || rec.DeleteAfter != origDelete || rec.WakeCeiling == 0 {
+		t.Fatalf("renew_only transition wrong: %+v", rec)
+	}
+	if _, err := os.Stat(filepath.Join(penDir, "data", "registrar", ".renew-only")); err != nil {
+		t.Fatalf("renew_only transition must write .renew-only marker: %v", err)
+	}
+
+	// 3. In-flight guard returns 409 Conflict if another wake/sleep is running.
+	if !b.tryBeginWake("lab") {
+		t.Fatal("tryBeginWake failed")
+	}
+	if rr := callTransition("wake"); rr.Code != 409 {
+		b.endWake("lab")
+		t.Fatalf("expected 409 when wake in flight, got %d: %s", rr.Code, rr.Body.String())
+	}
+	b.endWake("lab")
+
+	// 4. Full wake via broker endpoint restores active while preserving applied_events & pending_cancel_subs.
+	if rr := callTransition("wake"); rr.Code != 200 {
+		t.Fatalf("transition wake = %d: %s", rr.Code, rr.Body.String())
+	}
+	rec, _ = loadPenLifecycle(lcPath)
+	if rec.State != stateActive || rec.SleepSince != 0 || rec.DeleteAfter != 0 ||
+		!hasAppliedEvent(*rec, "evt_preserve_1") || len(rec.PendingCancelSubs) != 1 {
+		t.Fatalf("wake transition lost fields or failed to clear sleep dates: %+v", rec)
+	}
+
+	calls, _ := os.ReadFile(callsLog)
+	for _, want := range []string{
+		"sleep --no-lifecycle lab",
+		"wake --renew-only --no-lifecycle lab",
+		"wake --no-lifecycle lab",
+	} {
+		if !strings.Contains(string(calls), want) {
+			t.Fatalf("expected broker to pass --no-lifecycle (%q) in calls:\n%s", want, string(calls))
+		}
+	}
+}
+
+func TestConcurrentBrokerSaveAndHostRewriteKeepBothChangesI12(t *testing.T) {
+	hostScript, err := filepath.Abs("../hogman-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(hostScript); err != nil {
+		t.Skip("deploy/hogman-host not found")
+	}
+
+	home := t.TempDir()
+	binDir := filepath.Join(home, "bin")
+	_ = os.MkdirAll(binDir, 0o700)
+	_ = os.WriteFile(filepath.Join(binDir, "docker"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	_ = os.WriteFile(filepath.Join(home, "host.env"), []byte("MAX_PENS=4\nRENEW_WAKE_RESERVE=2\n"), 0o600)
+	_ = os.MkdirAll(filepath.Join(home, "front"), 0o700)
+	penDir := filepath.Join(home, "pens", "lab")
+	_ = os.MkdirAll(filepath.Join(penDir, "data", "registrar"), 0o700)
+	_ = os.WriteFile(filepath.Join(penDir, ".env"), []byte("PUBLIC_HOST=lab.gate.example.com\nSTUN_PORT=3478\n"), 0o600)
+
+	downDone := filepath.Join(home, "down-done")
+	_ = os.WriteFile(filepath.Join(penDir, "hogman"), []byte("#!/bin/sh\ntouch \""+downDone+"\"\nexit 0\n"), 0o755)
+
+	lcPath := filepath.Join(penDir, "lifecycle.json")
+	if err := savePenLifecycle(lcPath, &penLifecycle{
+		Plan:      planPersonal,
+		State:     stateGrace,
+		PaidUntil: 1800000000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold the shared per-pen advisory flock from the broker while starting a
+	// standalone/fallback `hogman-host sleep lab` concurrently.
+	lockHeld := make(chan struct{})
+	releaseLock := make(chan struct{})
+	brokerDone := make(chan error, 1)
+	go func() {
+		brokerDone <- withPenLifecycleFileLock(lcPath, func() error {
+			close(lockHeld)
+			<-releaseLock
+			rec, err := loadPenLifecycle(lcPath)
+			if err != nil {
+				return err
+			}
+			recordAppliedEvent(rec, "evt_concurrent_broker_1")
+			rec.PendingCancelSubs = append(rec.PendingCancelSubs, pendingCancelSub{SubscriptionID: "sub_concurrent_1"})
+			rec.UpdatedAt = 1850000000
+			return savePenLifecycle(lcPath, rec)
+		})
+	}()
+	<-lockHeld
+
+	hostDone := make(chan error, 1)
+	var hostOut string
+	go func() {
+		cmd := exec.Command("bash", hostScript, "sleep", "lab")
+		cmd.Env = append(os.Environ(), "HOGMAN_HOME="+home, "PATH="+binDir+":"+os.Getenv("PATH"))
+		out, err := cmd.CombinedOutput()
+		hostOut = string(out)
+		hostDone <- err
+	}()
+
+	// Wait until `hogman-host sleep` has finished `./hogman down` and reached
+	// `lifecycle_mark_sleeping` (now blocked on .lifecycle.lock).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(downDone); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Stat(downDone); err != nil {
+		close(releaseLock)
+		t.Fatal("hogman-host sleep never reached ./hogman down")
+	}
+	// Confirm hogman-host sleep is blocked waiting for our flock and has NOT exited early.
+	select {
+	case err := <-hostDone:
+		close(releaseLock)
+		t.Fatalf("hogman-host sleep bypassed .lifecycle.lock while broker held it (err=%v, out=%s)", err, hostOut)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Broker writes its update and releases the lock; hogman-host sleep then
+	// acquires the lock, reads the broker's saved JSON, and applies sleeping on top.
+	close(releaseLock)
+	if err := <-brokerDone; err != nil {
+		t.Fatalf("broker locked update failed: %v", err)
+	}
+	if err := <-hostDone; err != nil {
+		t.Fatalf("hogman-host sleep failed: err=%v out=%s", err, hostOut)
+	}
+
+	finalRec, err := loadPenLifecycle(lcPath)
+	if err != nil {
+		t.Fatalf("load final lifecycle.json: %v", err)
+	}
+	if finalRec.State != stateSleeping || finalRec.SleepSince == 0 || finalRec.DeleteAfter == 0 {
+		t.Fatalf("expected host sleep state in final record, got %+v", finalRec)
+	}
+	if !hasAppliedEvent(*finalRec, "evt_concurrent_broker_1") ||
+		len(finalRec.PendingCancelSubs) != 1 || finalRec.PendingCancelSubs[0].SubscriptionID != "sub_concurrent_1" {
+		t.Fatalf("concurrent host rewrite clobbered broker updates! final=%+v", finalRec)
 	}
 }

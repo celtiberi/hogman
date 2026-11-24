@@ -300,6 +300,37 @@ func runBrokerLifecycleAlerts(args []string) {
 	_, _ = os.Stdout.Write(body)
 }
 
+func runBrokerLifecycleTransition(args []string) {
+	if len(args) != 2 {
+		fmt.Fprintf(os.Stderr, "usage: hogman-signup lifecycle-transition <sleep|wake|renew_only> <pen>\n")
+		os.Exit(2)
+	}
+	payload := map[string]string{"action": args[0], "pen": args[1]}
+	raw, _ := json.Marshal(payload)
+	u := strings.TrimSuffix(brokerHealthURL(env("BROKER_ADDR", ":9090")), "/health") + "/lifecycle/transition"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", u, bytes.NewReader(raw))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	req.Header.Set("Authorization", "Bearer "+readToken())
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 10 * time.Minute}).Do(req)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "lifecycle-transition HTTP %d: %s\n", resp.StatusCode, strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
+	_, _ = os.Stdout.Write(body)
+}
+
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) > 1 {
@@ -312,6 +343,9 @@ func main() {
 			return
 		case "lifecycle-alert":
 			runBrokerLifecycleAlerts(os.Args[2:])
+			return
+		case "lifecycle-transition":
+			runBrokerLifecycleTransition(os.Args[2:])
 			return
 		}
 	}

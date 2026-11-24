@@ -729,11 +729,16 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 			now := b.now()
 			b.lifecycleMu.Lock()
 			if pen, ok := b.findPenBySubscription(sub.ID); ok {
-				if rec, err := loadPenLifecycle(b.lifecyclePath(pen)); err == nil && rec.CancelledAt == 0 {
+				p := b.lifecyclePath(pen)
+				_ = withPenLifecycleFileLock(p, func() error {
+					rec, err := loadPenLifecycle(p)
+					if err != nil || rec.CancelledAt != 0 {
+						return nil
+					}
 					rec.CancelledAt = now.Unix()
 					rec.UpdatedAt = now.Unix()
-					_ = savePenLifecycle(b.lifecyclePath(pen), rec)
-				}
+					return savePenLifecycle(p, rec)
+				})
 			}
 			b.clearPendingCancelSub(sub.ID, now)
 			b.lifecycleMu.Unlock()
