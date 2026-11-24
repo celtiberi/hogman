@@ -153,27 +153,43 @@ func isReservedShareName(name string) bool {
 	return reservedShareTop[labels[len(labels)-1]]
 }
 
-// isLoopbackHost reports whether host is localhost or a loopback IP literal
-// (127.0.0.0/8 or ::1, without an IPv6 zone ID).
-func isLoopbackHost(host string) bool {
-	h := strings.TrimSpace(host)
-	if h == "" {
-		return false
-	}
-	if strings.EqualFold(h, "localhost") {
-		return true
-	}
-	addr, err := netip.ParseAddr(h)
-	if err != nil {
-		return false
-	}
-	return addr.Zone() == "" && addr.IsLoopback()
+var blockedShareMetadataIPs = map[netip.Addr]bool{
+	netip.MustParseAddr("169.254.169.254"): true, // AWS/GCP/Azure/DO/Oracle IMDS
+	netip.MustParseAddr("169.254.170.2"):   true, // AWS ECS task metadata
+	netip.MustParseAddr("169.254.169.253"): true, // AWS VPC DNS
+	netip.MustParseAddr("169.254.169.123"): true, // AWS Time Sync
+	netip.MustParseAddr("100.100.100.200"): true, // Alibaba Cloud IMDS
+	netip.MustParseAddr("fd00:ec2::254"):   true, // AWS IPv6 IMDS
 }
 
-// loopbackDialContext enforces at dial time that share reverse-proxy requests
-// only ever connect to loopback IPs, preventing /etc/hosts or DNS overrides
-// from redirecting localhost to a LAN, metadata, or internet host.
-func loopbackDialContext(lookup func(context.Context, string) ([]net.IPAddr, error), dial func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
+func isBlockedMetadataHost(host string) bool {
+	h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	return h == "metadata.google.internal" || h == "metadata.goog" || h == "instance-data"
+}
+
+// isAllowedShareIP reports whether addr is a local or private LAN address
+// suitable as a share target: loopback (127.0.0.0/8, ::1), RFC 1918
+// (10/8, 172.16/12, 192.168/16), IPv6 ULA (fc00::/7), or link-local LAN
+// (169.254/16, fe80::/10) — always denying cloud metadata endpoints,
+// unspecified/multicast addresses, and public internet IPs.
+func isAllowedShareIP(addr netip.Addr) bool {
+	if !addr.IsValid() {
+		return false
+	}
+	ip := addr.Unmap()
+	if addr.Zone() != "" && !ip.IsLinkLocalUnicast() {
+		return false
+	}
+	if blockedShareMetadataIPs[ip] || ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
+// localOrLANDialContext enforces at dial time (after resolving DNS) that share
+// reverse-proxy requests only ever connect to loopback or private LAN IPs,
+// denying cloud metadata endpoints and public internet addresses.
+func localOrLANDialContext(lookup func(context.Context, string) ([]net.IPAddr, error), dial func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
 	if lookup == nil {
 		lookup = net.DefaultResolver.LookupIPAddr
 	}
@@ -186,22 +202,26 @@ func loopbackDialContext(lookup func(context.Context, string) ([]net.IPAddr, err
 		if err != nil {
 			return nil, err
 		}
-		if !isLoopbackHost(host) {
-			return nil, errorf("refusing to proxy to non-loopback host %q", host)
+		if isBlockedMetadataHost(host) {
+			return nil, errorf("refusing to proxy to cloud metadata host %q", host)
 		}
-		var ips []netip.Addr
+		var targets []string
 		if ip, err := netip.ParseAddr(host); err == nil {
-			if ip.Zone() != "" || !ip.IsLoopback() {
-				return nil, errorf("refusing to proxy to non-loopback address %q", host)
+			if !isAllowedShareIP(ip) {
+				return nil, errorf("refusing to proxy to disallowed address %q (only local and private LAN targets are allowed)", host)
 			}
-			ips = []netip.Addr{ip}
+			if ip.Zone() != "" {
+				targets = []string{ip.String()}
+			} else {
+				targets = []string{ip.Unmap().String()}
+			}
 		} else {
 			resolved, err := lookup(ctx, host)
 			if err != nil {
 				return nil, err
 			}
 			if len(resolved) == 0 {
-				return nil, errorf("host %q did not resolve to a loopback address", host)
+				return nil, errorf("host %q did not resolve to any address", host)
 			}
 			for _, r := range resolved {
 				ip, ok := netip.AddrFromSlice(r.IP)
@@ -209,15 +229,18 @@ func loopbackDialContext(lookup func(context.Context, string) ([]net.IPAddr, err
 					return nil, errorf("refusing to proxy to invalid resolved address for %q", host)
 				}
 				ip = ip.Unmap()
-				if r.Zone != "" || !ip.IsLoopback() {
-					return nil, errorf("refusing to proxy to non-loopback address %s resolved for %q", ip, host)
+				if r.Zone != "" {
+					ip = ip.WithZone(r.Zone)
 				}
-				ips = append(ips, ip)
+				if !isAllowedShareIP(ip) {
+					return nil, errorf("refusing to proxy to disallowed address %s resolved for %q (only local and private LAN targets are allowed)", ip, host)
+				}
+				targets = append(targets, ip.String())
 			}
 		}
 		var lastErr error
-		for _, ip := range ips {
-			conn, err := dial(ctx, network, net.JoinHostPort(ip.String(), port))
+		for _, ipStr := range targets {
+			conn, err := dial(ctx, network, net.JoinHostPort(ipStr, port))
 			if err == nil {
 				return conn, nil
 			}
@@ -227,7 +250,7 @@ func loopbackDialContext(lookup func(context.Context, string) ([]net.IPAddr, err
 	}
 }
 
-// shareTarget reads WHAT: a port, a local web address or a folder.
+// shareTarget reads WHAT: a port, a local/LAN web address or a folder.
 func shareTarget(what string) (target string, folder bool, err error) {
 	if n, err := strconv.Atoi(what); err == nil {
 		if n < 1 || n > 65535 {
@@ -243,8 +266,12 @@ func shareTarget(what string) (target string, folder bool, err error) {
 		if u.User != nil {
 			return "", false, errorf("the share target must not contain credentials")
 		}
-		if !isLoopbackHost(u.Hostname()) {
-			return "", false, errorf("%q is not a local address on this computer (use a port like 3000, localhost, 127.0.0.1, or [::1]). To share something running on another machine, run 'hogman share' on that machine with a server link", what)
+		host := u.Hostname()
+		if isBlockedMetadataHost(host) {
+			return "", false, errorf("%q is a cloud metadata address and cannot be shared", what)
+		}
+		if ip, err := netip.ParseAddr(host); err == nil && !isAllowedShareIP(ip) {
+			return "", false, errorf("%q is not a local or private LAN address (public internet and cloud metadata addresses cannot be shared)", what)
 		}
 		if p := u.Port(); p != "" {
 			n, perr := strconv.Atoi(p)
@@ -908,12 +935,18 @@ func shareHandler(c *shareConfig) (http.Handler, func(), error) {
 	if err != nil {
 		return nil, nil, permanentShare(err)
 	}
-	if (u.Scheme != "http" && u.Scheme != "https") || !isLoopbackHost(u.Hostname()) {
-		return nil, nil, permanentShare(errorf("share target %q is not a local loopback address (localhost, 127.0.0.1, or [::1])", c.Target))
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, nil, permanentShare(errorf("share target %q must use http:// or https://", c.Target))
+	}
+	if isBlockedMetadataHost(u.Hostname()) {
+		return nil, nil, permanentShare(errorf("share target %q is a cloud metadata address and cannot be shared", c.Target))
+	}
+	if ip, err := netip.ParseAddr(u.Hostname()); err == nil && !isAllowedShareIP(ip) {
+		return nil, nil, permanentShare(errorf("share target %q is not a local or private LAN address", c.Target))
 	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.Proxy = nil // always connect directly to the local loopback share target
-	tr.DialContext = loopbackDialContext(nil, nil)
+	tr.Proxy = nil // always connect directly to the local/LAN share target
+	tr.DialContext = localOrLANDialContext(nil, nil)
 	rp := &httputil.ReverseProxy{
 		Transport: tr,
 		Rewrite: func(pr *httputil.ProxyRequest) {

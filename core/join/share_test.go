@@ -350,15 +350,19 @@ func TestFormatFreshShareCertErrorRateLimit(t *testing.T) {
 	}
 }
 
-func TestShareTargetLoopbackOnly(t *testing.T) {
+func TestShareTargetLocalAndLANPolicy(t *testing.T) {
 	allowed := []string{
 		"3000",
 		"http://localhost:8080/",
 		"https://localhost:8443/app",
-		"http://LOCALHOST:3000",
 		"http://127.0.0.1:8080",
-		"http://127.0.0.2:8080",
 		"http://[::1]:8080/",
+		"http://192.168.1.40",
+		"http://10.0.0.5:8080",
+		"http://172.16.4.10:9000",
+		"http://[fd12:3456:789a::1]:8080",
+		"http://169.254.10.20:8080",
+		"http://cooler-1.local:8080",
 	}
 	for _, in := range allowed {
 		if _, folder, err := shareTarget(in); err != nil || folder {
@@ -367,37 +371,42 @@ func TestShareTargetLoopbackOnly(t *testing.T) {
 	}
 
 	rejected := []string{
-		"https://example.com",
-		"https://example.com/",
-		"http://box.example.ts.net:8091/",
-		"http://192.168.1.1/",
-		"http://10.0.0.5:8080",
 		"http://169.254.169.254/latest/meta-data/",
+		"http://169.254.170.2/v2/credentials",
+		"http://[fd00:ec2::254]/latest/meta-data/",
+		"http://100.100.100.200/latest/meta-data/",
+		"http://metadata.google.internal/computeMetadata/v1/",
+		"http://93.184.216.34/",
+		"https://1.1.1.1/",
+		"http://[2606:2800:220:1:248:1893:25c8:1946]/",
 		"http://0.0.0.0:8080",
 		"http://[::]:8080",
 		"http://[::1%25en0]:8080",
-		"http://sub.localhost:8080",
 	}
 	for _, in := range rejected {
 		if got, _, err := shareTarget(in); err == nil {
-			t.Errorf("shareTarget(%q) succeeded (%q); want loopback rejection", in, got)
+			t.Errorf("shareTarget(%q) succeeded (%q); want rejection", in, got)
 		}
 	}
 
-	// shareHandler must also reject non-loopback targets already persisted in share.json.
-	for _, bad := range []string{"https://example.com", "http://192.168.1.1:8080", "http://169.254.169.254"} {
+	// LAN target must also be accepted by shareHandler (D-27 Work LAN bridging).
+	if _, _, err := shareHandler(&shareConfig{Name: "cooler-1", Zone: "z.hogman", Target: "http://192.168.1.40"}); err != nil {
+		t.Errorf("shareHandler rejected valid LAN target: %v", err)
+	}
+	// Public and metadata IPs persisted in share.json must be rejected by shareHandler.
+	for _, bad := range []string{"http://93.184.216.34:80", "http://169.254.169.254", "http://metadata.google.internal"} {
 		if _, _, err := shareHandler(&shareConfig{Name: "x", Zone: "z.hogman", Target: bad}); err == nil {
 			t.Errorf("shareHandler(Target=%q) succeeded; want error", bad)
 		}
 	}
 }
 
-func TestLoopbackDialContext(t *testing.T) {
-	// Rejects non-loopback hostname directly without calling lookup or dial.
+func TestLocalOrLANDialContext(t *testing.T) {
+	// 1. Metadata IP literal is denied without dialing.
 	dialed := ""
-	dialFn := loopbackDialContext(
+	dialFn := localOrLANDialContext(
 		func(context.Context, string) ([]net.IPAddr, error) {
-			t.Fatal("lookup should not run for non-loopback host")
+			t.Fatal("lookup should not run for IP literal")
 			return nil, nil
 		},
 		func(_ context.Context, _, addr string) (net.Conn, error) {
@@ -405,12 +414,32 @@ func TestLoopbackDialContext(t *testing.T) {
 			return nil, errors.New("unexpected dial")
 		},
 	)
-	if _, err := dialFn(context.Background(), "tcp", "example.com:443"); err == nil {
-		t.Fatal("expected non-loopback host dial to fail")
+	if _, err := dialFn(context.Background(), "tcp", "169.254.169.254:80"); err == nil {
+		t.Fatal("expected metadata IP dial to fail")
+	}
+	if _, err := dialFn(context.Background(), "tcp", "93.184.216.34:443"); err == nil {
+		t.Fatal("expected public IP dial to fail")
+	}
+	if dialed != "" {
+		t.Fatalf("dial should not have been called for blocked IPs, got %q", dialed)
 	}
 
-	// Rejects localhost when /etc/hosts or DNS resolves it to a non-loopback IP.
-	dialFn = loopbackDialContext(
+	// 2. Hostname that resolves to a public IP (e.g. facebook.com / example.com) is denied.
+	dialFn = localOrLANDialContext(
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+		},
+		func(_ context.Context, _, addr string) (net.Conn, error) {
+			dialed = addr
+			return nil, errors.New("unexpected dial")
+		},
+	)
+	if _, err := dialFn(context.Background(), "tcp", "example.com:443"); err == nil {
+		t.Fatal("expected hostname resolving to public IP to fail")
+	}
+
+	// 3. Hostname that resolves to a cloud metadata IP is denied.
+	dialFn = localOrLANDialContext(
 		func(context.Context, string) ([]net.IPAddr, error) {
 			return []net.IPAddr{{IP: net.ParseIP("169.254.169.254")}}, nil
 		},
@@ -419,31 +448,47 @@ func TestLoopbackDialContext(t *testing.T) {
 			return nil, errors.New("unexpected dial")
 		},
 	)
-	if _, err := dialFn(context.Background(), "tcp", "localhost:8080"); err == nil {
-		t.Fatal("expected spoofed localhost resolution to fail")
+	if _, err := dialFn(context.Background(), "tcp", "cooler.local:80"); err == nil {
+		t.Fatal("expected hostname resolving to metadata IP to fail")
 	}
 	if dialed != "" {
-		t.Fatalf("dial should not have been called for spoofed localhost, got %q", dialed)
+		t.Fatalf("dial should not have been called for blocked resolutions, got %q", dialed)
 	}
 
-	// Accepts localhost when it resolves strictly to loopback IPs, dialing the literal IP.
+	// 4. LAN IP literal (RFC 1918) is allowed and dialed directly.
 	c1, c2 := net.Pipe()
 	defer c1.Close()
 	defer c2.Close()
-	dialFn = loopbackDialContext(
+	dialFn = localOrLANDialContext(
 		func(context.Context, string) ([]net.IPAddr, error) {
-			return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+			t.Fatal("lookup should not run for IP literal")
+			return nil, nil
 		},
 		func(_ context.Context, _, addr string) (net.Conn, error) {
 			dialed = addr
 			return c1, nil
 		},
 	)
-	conn, err := dialFn(context.Background(), "tcp", "localhost:8080")
+	conn, err := dialFn(context.Background(), "tcp", "192.168.1.40:80")
 	if err != nil {
-		t.Fatalf("expected loopback dial to succeed, got %v", err)
+		t.Fatalf("expected RFC 1918 LAN dial to succeed, got %v", err)
 	}
-	if conn != c1 || dialed != "127.0.0.1:8080" {
-		t.Fatalf("dialed=%q want 127.0.0.1:8080", dialed)
+	if conn != c1 || dialed != "192.168.1.40:80" {
+		t.Fatalf("dialed=%q want 192.168.1.40:80", dialed)
+	}
+
+	// 5. Hostname resolving to loopback or LAN IP is allowed and dialed by literal IP.
+	dialed = ""
+	dialFn = localOrLANDialContext(
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("10.0.1.25")}}, nil
+		},
+		func(_ context.Context, _, addr string) (net.Conn, error) {
+			dialed = addr
+			return c1, nil
+		},
+	)
+	if _, err := dialFn(context.Background(), "tcp", "cooler-1.local:8080"); err != nil || dialed != "10.0.1.25:8080" {
+		t.Fatalf("LAN hostname dial = (%q, %v), want 10.0.1.25:8080", dialed, err)
 	}
 }
