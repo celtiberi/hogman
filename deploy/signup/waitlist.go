@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -133,6 +134,7 @@ func (b *broker) waitlist(w http.ResponseWriter, r *http.Request) {
 		Email string `json:"email"`
 		Pen   string `json:"pen"`
 		Note  string `json:"note"`
+		Theme string `json:"theme,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	dec := json.NewDecoder(r.Body)
@@ -153,6 +155,11 @@ func (b *broker) waitlist(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	theme := strings.ToLower(strings.TrimSpace(in.Theme))
+	if theme != "" && theme != "work" {
+		jsonOut(w, 400, map[string]string{"error": "invalid theme"})
+		return
+	}
 	place, already, err := b.joinWaitlist(email, pen, cleanField(in.Note, 280))
 	switch {
 	case err == errFull:
@@ -169,8 +176,64 @@ func (b *broker) waitlist(w http.ResponseWriter, r *http.Request) {
 	if !already {
 		log.Printf("waitlist: someone joined (%d waiting)", place)
 		b.notifyKind("waitlist", fmt.Sprintf("Someone joined the waiting list. %d waiting. See: hogman-host waitlist", place))
+		b.sendWaitlistAckAsync(email, pen, place, theme == "work")
 	}
 	jsonOut(w, 200, map[string]any{"place": place, "already": already})
+}
+
+// waitlistAckEmail builds the plain-text confirmation email for a brand-new
+// waiting-list entry. It intentionally never reflects the caller's free-form
+// note so Hogman's mail domain cannot be abused to relay arbitrary text.
+func waitlistAckEmail(pen string, place int, isWork bool, origin string) (subject, body string) {
+	product := "Hogman"
+	if isWork {
+		product = "Hogman Work"
+	}
+	subject = fmt.Sprintf("You're on the %s waiting list", product)
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "You're on the %s waiting list (spot #%d).\n\n", product, place)
+	sb.WriteString("We'll email you a sign-up code as soon as there's room.\n")
+	if pen != "" {
+		fmt.Fprintf(&sb, "Requested pen name: %s (not reserved until you sign up).\n", pen)
+	}
+	if origin != "" {
+		fmt.Fprintf(&sb, "\nTo take yourself off the waiting list at any time, visit:\n%s/#wait\n", strings.TrimRight(origin, "/"))
+	}
+	return subject, sb.String()
+}
+
+// sendWaitlistAckAsync sends a one-time confirmation email via Resend for a
+// newly added waiting-list entry without blocking /waitlist (preserving
+// uniform response timing and preventing mail failures from failing sign-ups).
+func (b *broker) sendWaitlistAckAsync(email, pen string, place int, isWork bool) {
+	if b.alertSendFn == nil && (b.resendAPIKey == "" || b.billingFrom == "") {
+		return
+	}
+	b.ensureLimits()
+	if !b.allowWaitlistAckMail(b.now()) {
+		log.Printf("waitlist ack mail: rate cap hit; skipping confirmation email")
+		return
+	}
+	select {
+	case b.mailSem <- struct{}{}:
+	default:
+		log.Printf("waitlist ack mail: too many emails in flight; skipping confirmation email")
+		return
+	}
+	plan := planPersonal
+	if isWork {
+		plan = planWork
+	}
+	origin := b.renewOriginForPen(plan)
+	subject, body := waitlistAckEmail(pen, place, isWork, origin)
+	go func() {
+		defer func() { <-b.mailSem }()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if _, err := b.sendBillingAlert(ctx, []string{email}, subject, body); err != nil {
+			log.Printf("waitlist ack mail: send failed: %v", err)
+		}
+	}()
 }
 
 // notifyKind pushes a capped note to the operator's ntfy topic without growing

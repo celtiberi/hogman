@@ -31,10 +31,12 @@ type broker struct {
 	lifecycleMu            sync.Mutex // serializes lifecycle sweeps & renewals without blocking signup/provision
 	limitMu                sync.Mutex
 	waitJoins              *limiter
+	waitAckMail            *limiter
 	waitNotify             *limiter
 	raiseNotify            *limiter
 	healthNotify           *limiter
 	ntfySem                chan struct{}
+	mailSem                chan struct{}
 	runSem                 chan struct{} // bounds concurrent non-provision hogman-host forks
 	capMu                  sync.Mutex
 	capCache               *capacity
@@ -146,6 +148,9 @@ func (b *broker) ensureLimits() {
 	if b.waitJoins == nil {
 		b.waitJoins = newLimiterWithCap(30, time.Hour, 4)
 	}
+	if b.waitAckMail == nil {
+		b.waitAckMail = newLimiterWithCap(30, time.Hour, 4)
+	}
 	if b.waitNotify == nil {
 		b.waitNotify = newLimiterWithCap(10, time.Hour, 4)
 	}
@@ -158,6 +163,9 @@ func (b *broker) ensureLimits() {
 	if b.ntfySem == nil {
 		b.ntfySem = make(chan struct{}, 4)
 	}
+	if b.mailSem == nil {
+		b.mailSem = make(chan struct{}, 4)
+	}
 	if b.runSem == nil {
 		b.runSem = make(chan struct{}, 6)
 	}
@@ -166,6 +174,11 @@ func (b *broker) ensureLimits() {
 func (b *broker) allowWaitlistJoin(now time.Time) bool {
 	b.ensureLimits()
 	return b.waitJoins.allow("*", now)
+}
+
+func (b *broker) allowWaitlistAckMail(now time.Time) bool {
+	b.ensureLimits()
+	return b.waitAckMail.allow("*", now)
 }
 
 func (b *broker) notifyLimiter(kind string) *limiter {

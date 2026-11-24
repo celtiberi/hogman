@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -1088,5 +1089,105 @@ func TestBrokerHealthAndChallengeDNSOutage(t *testing.T) {
 	}
 	if code, out := call(wh, "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"fresh","handle":"alice"}`, map[string]string{"Content-Type": "application/json"}); code != 503 || out["error"] != nameCheckUnavailableMsg {
 		t.Fatalf("web down /api/create: %d %v, want 503 %q", code, out, nameCheckUnavailableMsg)
+	}
+}
+
+func TestWaitlistAckEmailPersonalWorkDedupAndNoNoteReflection(t *testing.T) {
+	b, _ := newTestBroker(t, "")
+	b.publicURL = "https://get.example.com"
+	b.workSignupHost = "get.work.example.com"
+	b.waitAckMail = newLimiterWithCap(2, time.Hour, 4)
+
+	type sentMail struct {
+		to      []string
+		subject string
+		text    string
+	}
+	sentCh := make(chan sentMail, 8)
+	b.alertSendFn = func(_ context.Context, to []string, subject, text string) error {
+		sentCh <- sentMail{to: append([]string(nil), to...), subject: subject, text: text}
+		return nil
+	}
+
+	brokerSrv := httptest.NewServer(b.handler())
+	defer brokerSrv.Close()
+
+	wb := newWeb(brokerSrv.URL, testToken, "pens.test")
+	wb.workHost = "get.work.example.com"
+	wb.waits = newLimiter(20, time.Hour)
+	wb.globalWaits = newLimiter(20, time.Hour)
+	wh := wb.handler()
+
+	postWait := func(host, body string) (int, map[string]any) {
+		req := httptest.NewRequest("POST", "/api/waitlist", strings.NewReader(body))
+		req.Host = host
+		req.Header.Set("Origin", "https://"+host)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		wh.ServeHTTP(rec, req)
+		out := map[string]any{}
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return rec.Code, out
+	}
+
+	// 1. Personal host join sends a Hogman ack email without echoing the free-form note.
+	if code, out := postWait("get.example.com", `{"email":"alice@example.com","pen":"lab","note":"CLICK PHISH LINK https://evil.example"}`); code != 200 || out["place"] != float64(1) {
+		t.Fatalf("personal waitlist join = %d %v", code, out)
+	}
+	select {
+	case m := <-sentCh:
+		if len(m.to) != 1 || m.to[0] != "alice@example.com" {
+			t.Fatalf("personal ack to = %v", m.to)
+		}
+		if m.subject != "You're on the Hogman waiting list" {
+			t.Fatalf("personal ack subject = %q", m.subject)
+		}
+		if !strings.Contains(m.text, "spot #1") || !strings.Contains(m.text, "Requested pen name: lab") || !strings.Contains(m.text, "https://get.example.com/#wait") {
+			t.Fatalf("personal ack body missing expected details:\n%s", m.text)
+		}
+		if strings.Contains(m.text, "PHISH") || strings.Contains(m.text, "evil.example") {
+			t.Fatalf("ack email MUST NOT reflect untrusted note text:\n%s", m.text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for personal waitlist ack email")
+	}
+
+	// 2. Duplicate submit for alice@example.com MUST NOT send another email.
+	if code, out := postWait("get.example.com", `{"email":"ALICE@example.com"}`); code != 200 || out["place"] != float64(1) {
+		t.Fatalf("duplicate waitlist join = %d %v", code, out)
+	}
+	select {
+	case m := <-sentCh:
+		t.Fatalf("duplicate waitlist submit should not re-send ack email: %+v", m)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// 3. Work host join sends a Hogman Work ack email linking to get.work.example.com/#wait.
+	if code, out := postWait("get.work.example.com", `{"email":"bob@example.com","pen":"acme"}`); code != 200 || out["place"] != float64(2) {
+		t.Fatalf("work waitlist join = %d %v", code, out)
+	}
+	select {
+	case m := <-sentCh:
+		if len(m.to) != 1 || m.to[0] != "bob@example.com" {
+			t.Fatalf("work ack to = %v", m.to)
+		}
+		if m.subject != "You're on the Hogman Work waiting list" {
+			t.Fatalf("work ack subject = %q", m.subject)
+		}
+		if !strings.Contains(m.text, "Hogman Work waiting list (spot #2)") || !strings.Contains(m.text, "https://get.work.example.com/#wait") {
+			t.Fatalf("work ack body missing Work branding/URL:\n%s", m.text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for work waitlist ack email")
+	}
+
+	// 4. Rate cap hit (limit was 2): 3rd new email still joins the waitlist (200) without sending extra mail.
+	if code, out := postWait("get.work.example.com", `{"email":"carol@example.com"}`); code != 200 || out["place"] != float64(3) {
+		t.Fatalf("rate-capped waitlist join = %d %v", code, out)
+	}
+	select {
+	case m := <-sentCh:
+		t.Fatalf("waitAckMail rate cap should suppress 3rd email: %+v", m)
+	case <-time.After(150 * time.Millisecond):
 	}
 }
