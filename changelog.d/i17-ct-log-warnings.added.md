@@ -1,1 +1,0 @@
-- `core/join`, `core/portal`, & `deploy/signup`: warn at the point of naming (`hogman share`, pen home page in both Personal and Work themes, and the sign-up page) that site and pen names are publicly visible in certificate logs while contents stay private (I-17 Part 1).
