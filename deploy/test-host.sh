@@ -223,6 +223,16 @@ front_dns_ok() {  # the front door resolves each pen's unique container names on
 }
 check "front door reaches only bobo's core and headscale"  front_dns_ok bobo
 check "front door reaches only zebra's core and headscale" front_dns_ok zebra
+pen_cpu_caps_ok() {
+  local c nc cs
+  for c in pen-bobo-headscale-1 pen-bobo-core-mesh-1 pen-bobo-registrar-1 pen-bobo-portal-1; do
+    read -r nc cs <<<"$(docker inspect -f '{{.HostConfig.NanoCpus}} {{.HostConfig.CpuShares}}' "$c")"
+    [ "${nc:-0}" -gt 0 ] && [ "${cs:-0}" -eq 256 ] || return 1
+  done
+  # Shared front door stays uncapped so busy pens cannot starve host ingress.
+  [ "$(docker inspect -f '{{.HostConfig.NanoCpus}}' hogman-front-front-1)" = "0" ]
+}
+check "pen containers enforce CPU caps and lower CPU shares while front door stays uncapped (I-14)" pen_cpu_caps_ok
 check "front door hides Headscale admin API (404)" test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://bobo.gate.hogman.test/api/v1/node)" = 404
 check "front door hides Headscale Swagger (404)"   test "$(in_client bobo curl -s -o /dev/null -w '%{http_code}' https://bobo.gate.hogman.test/swagger)" = 404
 front_blocked_routes_ok() {
