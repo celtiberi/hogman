@@ -76,6 +76,14 @@ jobs:
           docker build --progress=plain --target broker -t hogman-signup-broker-check deploy/signup
       - name: Test join client in isolated Docker context
         run: docker build --progress=plain --target test -t hogman-join-test core/join
+      - name: Commands shown to users run under zsh
+        # macOS Terminal uses zsh, where an unquoted word starting with "="
+        # (like --proto =https) is replaced by a program path and fails with
+        # "zsh: https not found". Run the join page's commands under zsh with
+        # the network and install steps replaced by no-ops.
+        run: |
+          sudo apt-get install -y -qq zsh >/dev/null
+          core/test/zsh-commands.sh
       - name: Validate changelog fragments
         run: |
           if [ -x deploy/changelog-fold.sh ]; then

@@ -48,7 +48,7 @@ SLSA-attested release binaries.
 Invited to a pen? Open the invite link and run the single command it shows:
 
 ```text
-$ curl -fsSL --proto =https --proto-redir =https https://<your-pen>.gate.hogman.network/start | HOGMAN_EXPECTED_HOST='<your-pen>.gate.hogman.network' sh -s -- 'https://<your-pen>.gate.hogman.network/join#t=...'
+$ curl -fsSL --proto '=https' --proto-redir '=https' https://<your-pen>.gate.hogman.network/start | HOGMAN_EXPECTED_HOST='<your-pen>.gate.hogman.network' sh -s -- 'https://<your-pen>.gate.hogman.network/join#t=...'
 
 • Downloading hogman for Darwin arm64 from <your-pen>.gate.hogman.network
   checked: SHA-256 matches

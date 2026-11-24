@@ -106,8 +106,8 @@
   }
   const cleanLink = `https://${host}/join#${t ? 't=' + t : 'k=' + k}${forShare ? '&for=share' : ''}`;
   const quoted = `'${cleanLink}'`;
-  const makeLongCmd = verb => `curl -fsSL --proto =https --proto-redir =https -o hogman "https://${host}/join/dl/hogman-$(uname -s)-$(uname -m)" && chmod +x hogman && ./hogman ${verb}${quoted}`;
-  const makeStartCmd = args => `curl -fsSL --proto =https --proto-redir =https https://${host}/start | HOGMAN_EXPECTED_HOST='${host}' sh -s -- ${quoted}${args ? ' ' + args : ''}`;
+  const makeLongCmd = verb => `curl -fsSL --proto '=https' --proto-redir '=https' -o hogman "https://${host}/join/dl/hogman-$(uname -s)-$(uname -m)" && chmod +x hogman && ./hogman ${verb}${quoted}`;
+  const makeStartCmd = args => `curl -fsSL --proto '=https' --proto-redir '=https' https://${host}/start | HOGMAN_EXPECTED_HOST='${host}' sh -s -- ${quoted}${args ? ' ' + args : ''}`;
   const verb = forShare ? 'share blog 8080 ' : '';
   let longCmd = makeLongCmd(verb);
   // Single copy-paste command through /start so the download goes through a
