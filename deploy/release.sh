@@ -19,8 +19,10 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 REF="${1:-origin/main}"
 cd "$REPO"
 git fetch -q origin 2>/dev/null || true
-sha="$(git rev-parse --short=7 "$REF")"
-ver="$(date -u +%Y.%m.%d)-$sha"
+full="$(git rev-parse "$REF^{commit}")"   # a tag resolves to its commit
+sha="${full:0:7}"
+commit_date="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d "$full")"
+ver="$commit_date-$sha"
 tag="v$ver"
 
 git cat-file -e "$REF:deploy/install.sh" 2>/dev/null || {
@@ -40,7 +42,6 @@ trap 'rm -rf "$work"' EXIT
 out="${OUT_DIR:-$work/out}"
 mkdir -p "$out"
 
-full="$(git rev-parse "$REF^{commit}")"   # a tag resolves to its commit
 echo "using GitHub's build of $sha..."
 # Only push or manual runs: a pull-request run builds a merge commit, and its
 # artifact is named after that, not $full (and isn't attested).
@@ -75,6 +76,19 @@ while IFS= read -r -d '' f; do
 done < <(find "$work/prebuilt" -type f -print0)
 [ "$checked" -gt 0 ] || { echo "GitHub's build of $sha has no files: not releasing" >&2; exit 1; }
 echo "provenance checked: $checked files, each built by build.yml from $sha on GitHub's runners"
+
+# Refuse to publish a client whose embedded --version doesn't match this release
+# (I-8: prevents releasing binaries stamped "dev" or built for another commit).
+host_cli="$work/prebuilt/join/hogman-$(uname -s)-$(uname -m)"
+[ -x "$host_cli" ] || { echo "missing runnable host client binary $(basename "$host_cli"): not releasing" >&2; exit 1; }
+got_ver_out="$("$host_cli" --version)"
+got_ver="$(printf '%s\n' "$got_ver_out" | awk '{print $2}')"
+got_ver="${got_ver#v}"
+if [ -z "$got_ver" ] || [ "$got_ver" = "dev" ] || [ "$got_ver" != "$ver" ]; then
+  echo "$(basename "$host_cli") reported version '${got_ver:-<empty>}' ('$got_ver_out'), expected '$ver': not releasing" >&2
+  exit 1
+fi
+echo "client version checked: $got_ver_out"
 
 # Only now that the compiled parts check out, package release assets from $REF.
 git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md deploy/signup deploy/challenge-dns LICENSE README.md \

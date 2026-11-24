@@ -18,8 +18,16 @@ out="$(cd "$out" && pwd)"
 
 GO_IMAGE="golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280"
 
-echo "building the join tool (5 platforms), the registrar and the sign-up page (linux amd64, arm64)..."
-docker build -q --output "type=local,dest=$out/join" "$src/core/join" >/dev/null
+version="${VERSION:-}"
+if [ -z "$version" ] && git -C "$src" rev-parse --verify HEAD >/dev/null 2>&1; then
+  full="$(git -C "$src" rev-parse 'HEAD^{commit}')"
+  commit_date="$(TZ=UTC git -C "$src" show -s --format=%cd --date=format-local:%Y.%m.%d "$full")"
+  version="$commit_date-${full:0:7}"
+fi
+version="${version:-dev}"
+
+echo "building the join tool (5 platforms, version $version), the registrar and the sign-up page (linux amd64, arm64)..."
+docker build -q --build-arg "VERSION=$version" --output "type=local,dest=$out/join" "$src/core/join" >/dev/null
 docker run --rm -v "$src/core/registrar:/src:ro" -v "$out/registrar:/out" -w /src \
   -v hogman-gomod:/go/pkg/mod -v hogman-gocache:/root/.cache/go-build "$GO_IMAGE" sh -c '
     set -e

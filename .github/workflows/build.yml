@@ -8,7 +8,7 @@ on:
   push:
     branches: [main]
   pull_request:   # only to check changes to the build itself
-    paths: [".github/workflows/build.yml", "deploy/build-bins.sh"]
+    paths: [".github/workflows/build.yml", "deploy/build-bins.sh", "core/join/Dockerfile"]
   workflow_dispatch:
 
 permissions:
@@ -27,7 +27,23 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Compile
-        run: deploy/build-bins.sh . prebuilt
+        run: |
+          full="$(git rev-parse 'HEAD^{commit}')"
+          ver="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d "$full")-${full:0:7}"
+          VERSION="$ver" deploy/build-bins.sh . prebuilt
+      - name: Verify client version
+        run: |
+          full="$(git rev-parse 'HEAD^{commit}')"
+          want="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d "$full")-${full:0:7}"
+          chmod +x prebuilt/join/hogman-Linux-x86_64
+          out="$(prebuilt/join/hogman-Linux-x86_64 --version)"
+          echo "$out"
+          got="$(printf '%s\n' "$out" | awk '{print $2}')"
+          got="${got#v}"
+          if [ -z "$got" ] || [ "$got" = "dev" ] || [ "$got" != "$want" ]; then
+            echo "built client reported version '${got:-<empty>}', expected '$want'" >&2
+            exit 1
+          fi
       - name: List
         run: find prebuilt -type f | sort
 
@@ -43,7 +59,23 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Compile
-        run: deploy/build-bins.sh . prebuilt
+        run: |
+          full="$(git rev-parse 'HEAD^{commit}')"
+          ver="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d "$full")-${full:0:7}"
+          VERSION="$ver" deploy/build-bins.sh . prebuilt
+      - name: Verify client version
+        run: |
+          full="$(git rev-parse 'HEAD^{commit}')"
+          want="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d "$full")-${full:0:7}"
+          chmod +x prebuilt/join/hogman-Linux-x86_64
+          out="$(prebuilt/join/hogman-Linux-x86_64 --version)"
+          echo "$out"
+          got="$(printf '%s\n' "$out" | awk '{print $2}')"
+          got="${got#v}"
+          if [ -z "$got" ] || [ "$got" = "dev" ] || [ "$got" != "$want" ]; then
+            echo "built client reported version '${got:-<empty>}', expected '$want'" >&2
+            exit 1
+          fi
       - name: List
         run: find prebuilt -type f | sort
       # SLSA build provenance: which workflow, commit and runner made each file.
