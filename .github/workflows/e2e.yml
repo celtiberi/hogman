@@ -96,7 +96,7 @@ jobs:
           deploy/test-ops-snapshot.sh
 
   prebuilt:
-    name: prebuild linux/amd64 binaries
+    name: prebuild e2e binaries
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
@@ -114,17 +114,28 @@ jobs:
             core/registrar/go.sum
             deploy/signup/go.sum
             deploy/challenge-dns/go.sum
-      - name: Compile linux/amd64 binaries in parallel
+      - name: Compile E2E binaries in parallel
         run: |
           set -euo pipefail
           out="$PWD/prebuilt"
           mkdir -p "$out/join" "$out/registrar" "$out/signup" "$out/challenge-dns" "$out/test-bins"
+          full="$(git rev-parse 'HEAD^{commit}')"
+          ver="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d "$full")-${full:0:7}"
+          # Build all 5 client platforms (matching deploy/build-bins.sh so the
+          # test pen serves the exact same 5-platform SHA256SUMS as a release)
+          # plus the Linux/amd64 server binaries, all in parallel with warm Go cache.
           (
             cd core/join
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$out/join/hogman-Linux-x86_64" .
+            for t in Darwin-arm64:darwin/arm64 Darwin-x86_64:darwin/amd64 \
+                     Linux-x86_64:linux/amd64 Linux-aarch64:linux/arm64 \
+                     windows-amd64.exe:windows/amd64; do
+              name=${t%%:*}; plat=${t#*:}
+              CGO_ENABLED=0 GOOS=${plat%/*} GOARCH=${plat#*/} \
+                go build -trimpath -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-$name" .
+            done
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=2025.01.01-aaaaaaa" -o "$out/test-bins/hogman-old" .
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=2099.01.01-bbbbbbb" -o "$out/test-bins/hogman-new" .
-            cd "$out/join" && sha256sum hogman-Linux-x86_64 > SHA256SUMS
+            cd "$out/join" && sha256sum hogman-* > SHA256SUMS
           ) &
           p1=$!
           (
