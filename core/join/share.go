@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"tailscale.com/client/tailscale/apitype"
@@ -59,8 +60,8 @@ don't put anything sensitive in it.
 options:
   --private-name      use a random hostname so the friendly name stays inside the pen (pair with --note "Label" for the portal directory). Does not hide the pen name, site count, or issuance/renewal timing in certificate logs, and does not change certificate caps.
   --note TEXT         short one-line description shown on the pen's home page (--note "" clears it)
-  --background        keep running in the background and start automatically after a restart
-  --no-service        with --background, don't register a login item, just run in the background
+  --foreground        stay attached to this terminal (Ctrl-C to stop) instead of running in the background
+  --no-service        don't register a login item, just run in the background
   --pen ZONE          which pen, if this computer is on more than one
   --identity-headers  pass verified X-Hogman-* caller identity headers to a local upstream target
   --force             with stop, remove local files even if the pen cannot be reached
@@ -395,6 +396,9 @@ func shareStart(name, what, rawLink string, o options) error {
 		return err
 	}
 
+	if o.background && o.foreground {
+		return errorf("cannot combine --background and --foreground")
+	}
 	if o.enrollOnly && o.background {
 		return errorf("--enroll-only cannot be combined with --background")
 	}
@@ -590,10 +594,10 @@ func shareStart(name, what, rawLink string, o options) error {
 			cancelReady()
 		})
 	}
-	if o.background {
-		if explicitDir != "" {
-			return errorf("--background is not supported with --state-dir; run the container in the foreground")
-		}
+	if explicitDir != "" && o.background {
+		return errorf("--background is not supported with --state-dir; run the container in the foreground")
+	}
+	if !o.foreground && explicitDir == "" {
 		err := shareBackground(dir, cfg, o)
 		if err != nil && fresh {
 			// If undoFreshShare already removed share.json, also clean up leftover
@@ -617,7 +621,7 @@ func shareStart(name, what, rawLink string, o options) error {
 	return serveShare(ctx, dir, func(c *shareConfig) {
 		shareReady(c, false, false)
 		if c.PrivateName && explicitDir == "" {
-			say("  Stop: Ctrl-C. The name stays yours: run 'hogman share %s %s' to bring it back.", c.Name, what)
+			say("  Stop: Ctrl-C. The name stays yours: run 'hogman share %s %s --foreground' to bring it back.", c.Name, what)
 		} else {
 			say("  Stop: Ctrl-C. The name stays yours: run the same command to bring it back.")
 		}
@@ -1662,6 +1666,43 @@ func collectShareListItems(dirs []string) []shareListItemJSON {
 	return items
 }
 
+func shortPenLabel(zone string) string {
+	z := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(zone)), ".")
+	if first, _, ok := strings.Cut(z, "."); ok && first != "" {
+		return first
+	}
+	return z
+}
+
+func formatShareListTable(w io.Writer, items []shareListItemJSON) {
+	hasNote := false
+	for _, item := range items {
+		if item.Note != "" {
+			hasNote = true
+			break
+		}
+	}
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	if hasNote {
+		fmt.Fprintln(tw, "NAME\tPEN\tURL\tTARGET\tNOTE\tSTATUS")
+	} else {
+		fmt.Fprintln(tw, "NAME\tPEN\tURL\tTARGET\tSTATUS")
+	}
+	for _, item := range items {
+		pen := shortPenLabel(item.Zone)
+		if hasNote {
+			noteCol := item.Note
+			if noteCol == "" {
+				noteCol = "-"
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", item.Name, pen, item.URL, item.Target, noteCol, item.State)
+		} else {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", item.Name, pen, item.URL, item.Target, item.State)
+		}
+	}
+	_ = tw.Flush()
+}
+
 func shareList(zone string, asJSON bool) error {
 	all := allShares("")
 	resolvedZone, err := resolveShareZoneFilter(all, zone)
@@ -1680,41 +1721,86 @@ func shareList(zone string, asJSON bool) error {
 		}
 		return nil
 	}
-	for _, item := range collectShareListItems(dirs) {
-		showing := item.Target
-		if item.Folder {
-			showing = "the folder " + item.Target
-		}
-		if item.Note != "" {
-			say("%-40s %s  %q  (%s)", item.URL, showing, item.Note, item.State)
-		} else {
-			say("%-40s %s  (%s)", item.URL, showing, item.State)
-		}
-	}
+	formatShareListTable(os.Stdout, collectShareListItems(dirs))
 	return nil
 }
 
+func normalizeShareLookup(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSuffix(s, ".")
+}
+
+func shareMatchesLookup(shareName, shareZone, query string) bool {
+	if query == "" {
+		return false
+	}
+	sn := strings.ToLower(shareName)
+	sz := strings.ToLower(shareZone)
+	if query == sn || query == sn+"."+sz {
+		return true
+	}
+	if pen := shortPenLabel(sz); pen != "" && query == sn+"."+pen {
+		return true
+	}
+	return false
+}
+
+func formatActiveSharesHint(dirs []string) string {
+	if len(dirs) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n  Active shares on this computer:")
+	for _, d := range dirs {
+		name := filepath.Base(d)
+		zone := filepath.Base(filepath.Dir(d))
+		fmt.Fprintf(&sb, "\n    hogman share stop %s   (%s)", name, shortPenLabel(zone))
+	}
+	return sb.String()
+}
+
+func shareStopUsageError(zone string) error {
+	all := allShares("")
+	dirs := all
+	if resolvedZone, err := resolveShareZoneFilter(all, zone); err == nil {
+		dirs = allShares(resolvedZone)
+	}
+	if len(dirs) == 0 {
+		return usageErrorf("usage: hogman share stop <name>\n  This computer currently shares nothing.")
+	}
+	return usageErrorf("usage: hogman share stop <name>%s", formatActiveSharesHint(dirs))
+}
+
 func findShare(name, zone string) (string, error) {
-	name = strings.ToLower(strings.TrimSpace(name))
+	query := normalizeShareLookup(name)
 	all := allShares("")
 	resolvedZone, err := resolveShareZoneFilter(all, zone)
 	if err != nil {
 		return "", err
 	}
+	dirs := allShares(resolvedZone)
 	var hits []string
-	for _, d := range allShares(resolvedZone) {
-		if filepath.Base(d) == name {
+	for _, d := range dirs {
+		if shareMatchesLookup(filepath.Base(d), filepath.Base(filepath.Dir(d)), query) {
 			hits = append(hits, d)
 		}
 	}
 	switch len(hits) {
 	case 0:
-		return "", errorf("this computer doesn't share anything called %s (see: hogman share list)", name)
+		if len(dirs) > 0 {
+			return "", errorf("this computer doesn't share anything called %s%s", strings.TrimSpace(name), formatActiveSharesHint(dirs))
+		}
+		return "", errorf("this computer doesn't share anything called %s (see: hogman share list)", strings.TrimSpace(name))
 	case 1:
 		return hits[0], nil
 	}
 	if isTerminalFn() {
-		say("%s is shared on more than one pen:", name)
+		say("%s is shared on more than one pen:", query)
 		for i, d := range hits {
 			say("  %d) %s", i+1, filepath.Base(filepath.Dir(d)))
 		}
@@ -1725,7 +1811,7 @@ func findShare(name, zone string) (string, error) {
 		}
 		return hits[idx-1], nil
 	}
-	return "", errorf("%s is shared on more than one pen here; pick one with --pen <zone> or set HOGMAN_PEN", name)
+	return "", errorf("%s is shared on more than one pen here; pick one with --pen <zone> or set HOGMAN_PEN", query)
 }
 
 func shareStop(name string, o options) error {

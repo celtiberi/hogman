@@ -44,7 +44,8 @@ type options struct {
 	alongside                   bool // accepted for old scripts; it's the only way now
 	noService, noSystemProxy    bool
 	pen                         string // share/update: which pen
-	background                  bool   // share: keep running after the window closes
+	background                  bool   // share: explicit --background (now the default; kept for scripts)
+	foreground                  bool   // share: stay attached to the terminal (Ctrl-C to stop)
 	note                        string // share: one-line note for the pen directory
 	noteSet                     bool
 	privateName                 bool   // share: allocate a random private hostname on the registrar

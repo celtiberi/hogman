@@ -405,8 +405,9 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 	}
 	shareC.Flags().BoolVar(&o.privateName, "private-name", false, "use a random hostname so the friendly name stays inside the pen (pair with --note \"Label\" for the portal directory). Does not hide the pen name, site count, or issuance/renewal timing in certificate logs, and does not change certificate caps.")
 	shareC.Flags().StringVar(&o.note, "note", "", "short one-line description shown on the pen's home page (--note \"\" clears it)")
-	shareC.Flags().BoolVar(&o.background, "background", false, "keep running in the background and start automatically after a restart")
-	shareC.Flags().BoolVar(&o.noService, "no-service", false, "with --background, don't register a login item, just run in the background")
+	shareC.Flags().BoolVar(&o.foreground, "foreground", false, "stay attached to this terminal (Ctrl-C to stop) instead of running in the background")
+	shareC.Flags().BoolVar(&o.background, "background", false, "run in the background and start at login (default; kept for older scripts)")
+	shareC.Flags().BoolVar(&o.noService, "no-service", false, "don't register a login item, just run in the background")
 	shareC.Flags().StringVar(&o.pen, "pen", "", "which pen, if this computer is on more than one (short name or full zone; or set HOGMAN_PEN)")
 	shareC.Flags().StringVar(&o.stateDir, "state-dir", "", "store share state in this directory instead of the default config folder (for containers)")
 	shareC.Flags().BoolVar(&o.enrollOnly, "enroll-only", false, "enroll the share, claim its name and certificate, then exit 0 (for one-shot container setup)")
@@ -428,8 +429,14 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 	shareStopC := &cobra.Command{
 		Use:   "stop <name>",
 		Short: "Take a share down and give its name back",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return shareStopUsageError(o.pen)
+			}
+			if len(args) > 1 {
+				return usageErrorf("usage: hogman share stop <name> [--pen ZONE] [--force]")
+			}
 			return h.shareStop(args[0], o)
 		},
 	}

@@ -809,7 +809,7 @@ func updateShareBinary(s *shareTargetDir, binPath, verifiedSrc, wantHex string, 
 		if err := ops.stage(verifiedSrc, binPath, wantHex); err != nil {
 			if rerr := ops.restartOld(s, binPath, o); rerr != nil {
 				return errorf("could not update %s share binary (%v), and restarting the previous share also failed (%v).\n"+
-					"  To bring it back up: hogman share %s %s --background",
+					"  To bring it back up: hogman share %s %s",
 					s.cfg.fqdn(), err, rerr, s.cfg.Name, s.cfg.Target)
 			}
 			return errorf("could not update %s share binary: %v", s.cfg.fqdn(), err)
@@ -817,7 +817,7 @@ func updateShareBinary(s *shareTargetDir, binPath, verifiedSrc, wantHex string, 
 		note("updated %s", binPath)
 		if err := ops.restartNew(s, binPath, o); err != nil {
 			return errorf("updated %s share binary, but restarting it failed (%v).\n"+
-				"  To bring it back up: hogman share %s %s --background",
+				"  To bring it back up: hogman share %s %s",
 				s.cfg.fqdn(), err, s.cfg.Name, s.cfg.Target)
 		}
 		return nil
@@ -1111,7 +1111,7 @@ func migrateAndRestartShare(s *shareTargetDir, canonicalBin, legacyBin, selfPath
 				}
 			}
 			return errorf("updated share binary, but restarting %s failed (%v).\n"+
-				"  To bring it back up: hogman share %s %s --background",
+				"  To bring it back up: hogman share %s %s",
 				s.cfg.fqdn(), err, s.cfg.Name, s.cfg.Target)
 		}
 		clearUpdatingMarker(s.dir)
