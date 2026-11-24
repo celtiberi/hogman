@@ -943,3 +943,144 @@ func TestBillingStatusInMeAndRenewToken(t *testing.T) {
 		t.Fatalf("renew-token with invalid renew_url = %d, want 409", rec.Code)
 	}
 }
+
+func TestPortalPresenceDirectoryAndAdminDevices(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+	if _, err := e.svc.AddMember(ctx, cli, "alice", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	bobMember, err := e.svc.AddMember(ctx, cli, "bob", "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, aliceLaptop := e.addDevice(t, "alice", "personal", "alice-laptop", "100.64.0.10", "")
+	_, bobLaptop := e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.11", "")
+	_, aliceSrv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.20", "")
+	_, bobSrv := e.addDevice(t, "bob", "server", "bob-srv", "100.64.0.21", "")
+	_, bobGhost := e.addDevice(t, "bob", "server", "bob-ghost", "100.64.0.22", "")
+
+	e.hs.mu.Lock()
+	kept := e.hs.nodes[:0]
+	for _, n := range e.hs.nodes {
+		switch n.ID {
+		case aliceLaptop.HSNodeID:
+			n.Online = true
+			n.LastSeen = "2026-11-24T06:15:30.123456-06:00"
+		case bobLaptop.HSNodeID:
+			n.Online = false
+			n.LastSeen = "2026-11-23T22:00:00Z"
+		case aliceSrv.HSNodeID:
+			n.Online = true
+			n.LastSeen = "2026-11-24T12:10:05.987654Z"
+		case bobSrv.HSNodeID:
+			n.Online = false
+			n.LastSeen = "0001-01-01T00:00:00Z"
+		case bobGhost.HSNodeID:
+			// Drop bob-ghost from Headscale so it stays in SQLite but is absent from Headscale.
+			continue
+		}
+		kept = append(kept, n)
+	}
+	e.hs.nodes = kept
+	e.hs.mu.Unlock()
+
+	if _, err := e.svc.Claim(cli, "alice", "photos", aliceSrv.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Claim(cli, "bob", "blog", bobSrv.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Claim(cli, "bob", "ghost", bobGhost.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Defense-in-depth: force a name row pointing at bob's personal laptop directly in SQLite
+	// to verify /api/directory never leaks personal device presence.
+	if err := e.st.UpsertName("laptop-leak", bobMember.ID, &bobLaptop.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	h := MeshHandler(e.svc)
+
+	// Regular member reads GET /api/directory: server sites include live online/last_seen,
+	// offline server serializes explicit online:false with zero timestamp omitted, missing node
+	// omits both, and personal device row omits both.
+	rec := doMeshReq(h, "GET", "/api/directory", "100.64.0.11", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/directory = %d %s", rec.Code, rec.Body.String())
+	}
+	var dir []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &dir); err != nil {
+		t.Fatalf("unmarshal /api/directory: %v (%s)", err, rec.Body.String())
+	}
+	dirByName := map[string]map[string]any{}
+	for _, entry := range dir {
+		dirByName[entry["name"].(string)] = entry
+	}
+	photos := dirByName["photos.bobo.hogman"]
+	if photos["online"] != true || photos["last_seen"] != "2026-11-24T12:10:05Z" {
+		t.Fatalf("photos presence = %#v, want online=true last_seen=2026-11-24T12:10:05Z", photos)
+	}
+	blog := dirByName["blog.bobo.hogman"]
+	if v, ok := blog["online"]; !ok || v != false {
+		t.Fatalf("blog online = (%v, %v), want explicit false", v, ok)
+	}
+	if _, ok := blog["last_seen"]; ok {
+		t.Fatalf("blog zero last_seen should be omitted: %#v", blog)
+	}
+	ghost := dirByName["ghost.bobo.hogman"]
+	if _, ok := ghost["online"]; ok {
+		t.Fatalf("ghost missing node should omit online: %#v", ghost)
+	}
+	if _, ok := ghost["last_seen"]; ok {
+		t.Fatalf("ghost missing node should omit last_seen: %#v", ghost)
+	}
+	leak := dirByName["laptop-leak.bobo.hogman"]
+	if _, ok := leak["online"]; ok {
+		t.Fatalf("personal device in directory must omit online: %#v", leak)
+	}
+	if _, ok := leak["last_seen"]; ok {
+		t.Fatalf("personal device in directory must omit last_seen: %#v", leak)
+	}
+
+	// Regular member and server device cannot access GET /api/admin/devices.
+	if rec := doMeshReq(h, "GET", "/api/admin/devices", "100.64.0.11", "", nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("member GET /api/admin/devices = %d, want 403", rec.Code)
+	}
+	if rec := doMeshReq(h, "GET", "/api/admin/devices", "100.64.0.20", "", nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("server GET /api/admin/devices = %d, want 403", rec.Code)
+	}
+
+	// Owner reads GET /api/admin/devices: both personal and server devices carry live Headscale presence.
+	rec = doMeshReq(h, "GET", "/api/admin/devices", "100.64.0.10", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner GET /api/admin/devices = %d %s", rec.Code, rec.Body.String())
+	}
+	var devs []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &devs); err != nil {
+		t.Fatalf("unmarshal /api/admin/devices: %v (%s)", err, rec.Body.String())
+	}
+	gotDev := map[string]map[string]any{}
+	for _, d := range devs {
+		gotDev[d["name"].(string)] = d
+	}
+	if gotDev["alice-laptop"]["online"] != true || gotDev["alice-laptop"]["last_seen"] != "2026-11-24T12:15:30Z" {
+		t.Fatalf("alice-laptop presence = %#v, want online=true last_seen=2026-11-24T12:15:30Z", gotDev["alice-laptop"])
+	}
+	if v, ok := gotDev["bob-laptop"]["online"]; !ok || v != false || gotDev["bob-laptop"]["last_seen"] != "2026-11-23T22:00:00Z" {
+		t.Fatalf("bob-laptop presence = %#v, want online=false last_seen=2026-11-23T22:00:00Z", gotDev["bob-laptop"])
+	}
+	if gotDev["alice-srv"]["online"] != true || gotDev["alice-srv"]["last_seen"] != "2026-11-24T12:10:05Z" {
+		t.Fatalf("alice-srv presence = %#v", gotDev["alice-srv"])
+	}
+	if v, ok := gotDev["bob-srv"]["online"]; !ok || v != false {
+		t.Fatalf("bob-srv online = (%v, %v), want explicit false", v, ok)
+	}
+	if _, ok := gotDev["bob-srv"]["last_seen"]; ok {
+		t.Fatalf("bob-srv zero last_seen should be omitted: %#v", gotDev["bob-srv"])
+	}
+	if _, ok := gotDev["bob-ghost"]["online"]; ok {
+		t.Fatalf("bob-ghost absent from Headscale should omit online: %#v", gotDev["bob-ghost"])
+	}
+}

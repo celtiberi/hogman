@@ -644,20 +644,22 @@ func (s *Store) MarkDeviceRemoved(id int64) error {
 // ------------------------------------------------------------------ names --
 
 type Name struct {
-	Name     string `json:"name"`
-	MemberID int64  `json:"member_id"`
-	Member   string `json:"member"`
-	DeviceID *int64 `json:"device_id,omitempty"`
-	Note     string `json:"note,omitempty"`
-	IPv4     string `json:"ipv4,omitempty"`
-	IPv6     string `json:"ipv6,omitempty"`
+	Name       string `json:"name"`
+	MemberID   int64  `json:"member_id"`
+	Member     string `json:"member"`
+	DeviceID   *int64 `json:"device_id,omitempty"`
+	DeviceKind string `json:"-"`
+	HSNodeID   string `json:"-"`
+	Note       string `json:"note,omitempty"`
+	IPv4       string `json:"ipv4,omitempty"`
+	IPv6       string `json:"ipv6,omitempty"`
 	// RetiredAt is stored in names.held_until for backward compatibility with existing DBs;
 	// any non-NULL value means the name is permanently retired and may never be reused.
 	RetiredAt *int64 `json:"retired_at,omitempty"`
 }
 
 func (s *Store) queryNames(where string, args ...any) ([]*Name, error) {
-	rows, err := s.db.Query(`SELECT n.name, n.member_id, m.handle, n.device_id, n.note, COALESCE(d.ipv4, ''), COALESCE(d.ipv6, ''), n.held_until
+	rows, err := s.db.Query(`SELECT n.name, n.member_id, m.handle, n.device_id, COALESCE(d.kind, ''), COALESCE(d.hs_node_id, ''), n.note, COALESCE(d.ipv4, ''), COALESCE(d.ipv6, ''), n.held_until
 		FROM names n JOIN members m ON m.id = n.member_id
 		LEFT JOIN devices d ON d.id = n.device_id AND d.removed_at IS NULL `+where+` ORDER BY n.name`, args...)
 	if err != nil {
@@ -667,7 +669,7 @@ func (s *Store) queryNames(where string, args ...any) ([]*Name, error) {
 	var out []*Name
 	for rows.Next() {
 		var n Name
-		if err := rows.Scan(&n.Name, &n.MemberID, &n.Member, &n.DeviceID, &n.Note, &n.IPv4, &n.IPv6, &n.RetiredAt); err != nil {
+		if err := rows.Scan(&n.Name, &n.MemberID, &n.Member, &n.DeviceID, &n.DeviceKind, &n.HSNodeID, &n.Note, &n.IPv4, &n.IPv6, &n.RetiredAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &n)

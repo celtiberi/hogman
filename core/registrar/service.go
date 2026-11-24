@@ -912,37 +912,42 @@ func nodeMatchesDevice(nodes []HSNode, nodeID string, addr netip.Addr) bool {
 // node left and Headscale reassigned its IP before the periodic Sync tick,
 // VerifyLiveCaller refreshes the ledger once and re-checks.
 func (s *Service) VerifyLiveCaller(ctx context.Context, src string) (*Member, *Device, error) {
+	m, d, _, err := s.verifyLiveCallerWithNodes(ctx, src)
+	return m, d, err
+}
+
+func (s *Service) verifyLiveCallerWithNodes(ctx context.Context, src string) (*Member, *Device, []HSNode, error) {
 	addr, err := netip.ParseAddr(src)
 	if err != nil {
-		return nil, nil, ErrNotFound
+		return nil, nil, nil, ErrNotFound
 	}
 	canon := addr.String()
 	m, d, err := s.WhoIs(canon)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	nodes, err := s.hs.Nodes(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("verify caller: %w", err)
+		return nil, nil, nil, fmt.Errorf("verify caller: %w", err)
 	}
 	if nodeMatchesDevice(nodes, d.HSNodeID, addr) {
-		return m, d, nil
+		return m, d, nodes, nil
 	}
 	if err := s.Sync(ctx); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	m, d, err = s.WhoIs(canon)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	nodes, err = s.hs.Nodes(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("verify caller: %w", err)
+		return nil, nil, nil, fmt.Errorf("verify caller: %w", err)
 	}
 	if !nodeMatchesDevice(nodes, d.HSNodeID, addr) {
-		return nil, nil, ErrNotFound
+		return nil, nil, nil, ErrNotFound
 	}
-	return m, d, nil
+	return m, d, nodes, nil
 }
 
 // ----------------------------------------------------------------- names --
