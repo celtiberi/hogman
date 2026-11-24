@@ -95,6 +95,7 @@ docker run -d --name hogman-run-cdns --network hogman-test-acme \
   -v "$ACME/cdns:/cdns" -v "$ACME/sock:/run/hogman-acme" \
   -e CDNS_LISTEN=0.0.0.0:53 -e CDNS_PENS_ZONE=pens.hogman.test -e CDNS_GATE_NAME=_acme-challenge.gate.hogman.test \
   -e CDNS_STATE=/cdns/state.json -e CDNS_API_SOCK=/run/hogman-acme/api.sock -e CDNS_ADMIN_SOCK=/cdns/admin.sock \
+  -e CDNS_HOURLY_CAP=10 \
   alpine:3.22 /cdns/challenge-dns serve >/dev/null
 retry 20 env CDNS_ADMIN_SOCK="$ACME/cdns/admin.sock" "$ACME/cdns/challenge-dns" cred list || exit 1
 
@@ -574,6 +575,42 @@ check "a server link plus one command shares a port (exit $rc)" grep -q "https:/
 check "members load https://app.$ZONE" retry 30 fetch app.$ZONE "app from a server link"
 out="$(join_tool dave-server share stop app 2>&1)"; rc=$?
 check "and it stops cleanly (exit $rc)" grep -q "app.$ZONE is down" <<<"$out"
+
+# Opt-in private site name (I-17 Part 2): random 12-char hostname in DNS/cert,
+# friendly --note stays inside the pen, discoverable via /api/directory both
+# through a local hogman proxy (no browser) and from a tag:server device, and
+# permanently retired on stop (D-21).
+step "Private site names (--private-name) and headless /api/directory discovery"
+PRIV_LINK="$($H device key dave server | awk '/^link:/ {print $2}')"
+out="$(join_tool dave-server share --private-name 8080 "$PRIV_LINK" --note "Cooler 3 - North Bay" --background 2>&1)"; rc=$?
+echo "$out" | sed 's/^/        | /'
+PRIV_FQDN="$(grep -oE "https://[a-z][a-z0-9]{11}\.${ZONE}" <<<"$out" | head -n 1 | sed 's|^https://||')"
+PRIV_LABEL="${PRIV_FQDN%.$ZONE}"
+check "share --private-name brings up a random 12-char hostname (exit $rc, label=$PRIV_LABEL)" \
+  bash -c 'test "$1" = 0 && [[ "$2" =~ ^[a-z][a-z0-9]{11}$ ]]' _ "$rc" "$PRIV_LABEL"
+check "private-name output prints honest certificate-log notice" grep -q "only this random name appears in certificate logs" <<<"$out"
+DAVE_STATUS_PORT="$(join_tool dave-laptop status --json | jq -r --arg z "$ZONE" '.pens[] | select(.zone == $z) | .port')"
+check "hogman status --json reports the local proxy port ($DAVE_STATUS_PORT)" test "127.0.0.1:$DAVE_STATUS_PORT" = "$PROXY"
+priv_dir_via_proxy() {
+  run dave-laptop curl -sf -m10 --cacert $ROOT --proxy "http://127.0.0.1:$DAVE_STATUS_PORT" "https://home.$ZONE/api/directory" \
+    | jq -e --arg n "$PRIV_FQDN" 'any(.[]; .name == $n and .member == "dave" and .note == "Cooler 3 - North Bay" and .private == true and .online == true)'
+}
+check "headless client discovers private site via /api/directory through local proxy" retry 20 priv_dir_via_proxy
+priv_dir_via_server() {
+  api alice-tools GET /api/directory \
+    | jq -e --arg n "$PRIV_FQDN" 'any(.[]; .name == $n and .member == "dave" and .note == "Cooler 3 - North Bay" and .private == true)'
+}
+check "tag:server device discovers private site via /api/directory without a browser" retry 20 priv_dir_via_server
+priv_via_proxy() { match "app from a server link" via_pen "https://$PRIV_FQDN"; }
+check "members load the private-name site over HTTPS" retry 30 priv_via_proxy
+priv_listed() {
+  join_tool dave-server share list --json \
+    | jq -e --arg n "$PRIV_LABEL" 'any(.[]; .name == $n and .private == true and .note == "Cooler 3 - North Bay" and .running == true)'
+}
+check "share list --json shows private=true and note" priv_listed
+out="$(join_tool dave-server share stop "$PRIV_LABEL" 2>&1)"; rc=$?
+check "share stop retires the private name (exit $rc)" grep -q "private name is retired" <<<"$out"
+check "retired private label stays retired in registrar (D-21)" match "${PRIV_LABEL}.*retired" $H name list
 
 # Sealed sidecar E2E: real scratch hogman-sidecar container -> --enroll-only --link-stdin
 # -> serve over mesh via :ro UDS -> network_mode: none bridge -> app -> docker kill PID 1

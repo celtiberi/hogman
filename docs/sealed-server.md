@@ -133,6 +133,68 @@ Apps behind `hogman share` (or `hogman-sidecar`) can identify who in the pen is 
   - `X-Hogman-Tags` — comma-separated ACL tags (e.g. `tag:server`), omitted for personal devices.
 - **Fail closed in your app:** only accept traffic on the local socket or loopback interface reachable by the sidecar, read caller identity **only** from `X-Hogman-Handle`, and return `403 Forbidden` whenever `X-Hogman-Handle` is missing or not on your allowlist (and reject requests with `X-Hogman-Tags` if only personal devices should have access).
 
+## Private Site Names (`--private-name`) & Headless Discovery
+
+Every shared site gets its own publicly trusted TLS certificate, so its hostname (`<site>.<pen>.pens.hogman.network`) appears in public certificate logs. If you don't want descriptive names (`cameras`, `cooler-3`, `payroll`) in certificate logs, pass `--private-name` with `--note "Label"`:
+
+- The registrar assigns a 12-character random hostname (e.g. `k7p3m9x2q4v8.<pen>.pens.hogman.network`), which is the only name in DNS and the TLS certificate. Once stopped, a private name is permanently retired and never recycled.
+- Your friendly `--note` label stays inside the pen (shown as the primary link text on the pen's home page, with the random hostname in muted monospace below and the owner's handle alongside it).
+- **What `--private-name` does not hide:** the random hostname itself, the pen name, the number of sites in the pen, and when each certificate is issued or renewed remain visible in public certificate logs. It does not change certificate limits (large fleets still need the Work plan's limits).
+
+### Enrolling a sealed container with `--private-name`
+
+```sh
+docker compose run --rm -i hogman-sidecar \
+  share --private-name unix:///run/hogman-in/app.sock \
+  --note "Cooler 3 - North Bay" \
+  --state-dir=/var/lib/hogman --enroll-only --link-stdin
+```
+
+Then set the service command in `docker-compose.yml` to:
+
+```yaml
+command:
+  - share
+  - --private-name
+  - unix:///run/hogman-in/app.sock
+  - --state-dir=/var/lib/hogman
+```
+
+On restart, `hogman-sidecar` reuses the random hostname saved in `/var/lib/hogman/share.json` without minting a new name.
+
+### Discovering private sites from a headless managing server (no browser)
+
+A headless managing server on the pen can query `GET /api/directory` without a browser or extra credentials, map each `note` to its random `https://<name>` address, and call each controller over HTTPS:
+
+- **With `hogman` (no Tailscale, local proxy):** join the managing host with a member invite or personal device link (`hogman '<join link>' --no-open --no-system-proxy` — personal devices accept zero inbound connections while reaching every site on `:443`; server share links are only for `hogman share`):
+
+```sh
+# 1. Read the local proxy port for the pen from `hogman status --json`
+PORT="$(hogman status --json | jq -r '.pens[] | select(.zone == "acme.pens.hogman.network") | .port')"
+
+# 2. Fetch the pen's site directory through the local proxy
+curl -fsS --proxy "http://127.0.0.1:${PORT}" https://home.acme.pens.hogman.network/api/directory
+```
+
+- **From a `tag:server` node directly on the pen:** `GET /api/directory` is also open to `tag:server` devices (no browser, authenticated by WireGuard IP), so a managing server joined as `tag:server` can fetch `https://home.acme.pens.hogman.network/api/directory` directly over the pen mesh.
+
+Example response:
+
+```json
+[
+  {
+    "name": "k7p3m9x2q4v8.acme.pens.hogman.network",
+    "member": "ops",
+    "note": "Cooler 3 - North Bay",
+    "private": true,
+    "online": true,
+    "last_seen": "2026-11-24T16:30:00Z"
+  }
+]
+```
+
+The managing server can then call each controller directly over HTTPS through the same local proxy (`curl --proxy "http://127.0.0.1:${PORT}" https://k7p3m9x2q4v8.acme.pens.hogman.network/...`) or directly over the mesh from a `tag:server` node. Note that a sealed container using `network_mode: none` intentionally has no outbound network access; run the managing client on a normal pen-joined host or service.
+
 ## Operational Notes
 
 - **Firewalled networks blocking `1.1.1.1:53` / `8.8.8.8:53`:** If your lab firewall blocks direct public DNS from containers, set `HOGMAN_ACME_RESOLVERS` on `hogman-sidecar` to your local recursive resolver (e.g., `10.0.0.53:53`) so DNS-01 propagation checks succeed on first enrollment.

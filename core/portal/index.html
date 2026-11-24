@@ -207,7 +207,7 @@
     <p class="muted hint" id="host-hint-1">Everyone in the pen can then open <code>https://blog.<span class="zone">&lt;network&gt;.pens.hogman.network</span></code>.
       Add <code>--background</code> to keep it running after the window closes;
       <code>~/hogman share stop blog</code> takes it down and frees the name.</p>
-    <p class="muted hint" id="host-hint-ctlog">Note: site names are publicly visible in certificate logs (contents stay private). Don't put anything sensitive in a site name.</p>
+    <p class="muted hint" id="host-hint-ctlog">Note: site names are publicly visible in certificate logs (contents stay private). Don't put anything sensitive in a site name — or pass <code>--private-name</code> with <code>--note "Label"</code> for a random hostname.</p>
     <p class="muted hint" id="host-hint-2">Running from a spare computer that isn't in the pen? Click <em>Get a share link</em>
       above and pass the link at the end: <code>~/hogman share blog 3000 '&lt;share link&gt;'</code>.
       Already run Caddy or nginx? Share its port.</p>

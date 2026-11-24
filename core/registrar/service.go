@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/big"
 	"net/netip"
 	"regexp"
 	"sort"
@@ -102,11 +103,12 @@ type Service struct {
 	lastPolicy string
 	orphans    map[string]bool
 
-	acmeMu        sync.Mutex
-	serverEABHits map[int64][]time.Time
-	memberEABHits map[int64][]time.Time
-	memberTXTHits map[int64][]time.Time
-	nowFn         func() time.Time
+	acmeMu         sync.Mutex
+	serverEABHits  map[int64][]time.Time
+	memberEABHits  map[int64][]time.Time
+	memberTXTHits  map[int64][]time.Time
+	nowFn          func() time.Time
+	privateLabelFn func() (string, error)
 }
 
 func (s *Service) clock() time.Time {
@@ -977,10 +979,79 @@ func cleanNameNote(raw string) string {
 	return collapsed
 }
 
+const (
+	privateLabelLen         = 12
+	maxPrivateLabelAttempts = 8
+	privateLabelFirstChars  = "abcdefghijklmnopqrstuvwxyz"
+	privateLabelRestChars   = "abcdefghijklmnopqrstuvwxyz0123456789"
+)
+
+// generatePrivateLabel returns a 12-character random DNS label starting with a
+// lowercase letter followed by 11 lowercase letters or digits (~61.6 bits).
+func generatePrivateLabel() (string, error) {
+	var b strings.Builder
+	b.Grow(privateLabelLen)
+	firstMax := big.NewInt(int64(len(privateLabelFirstChars)))
+	restMax := big.NewInt(int64(len(privateLabelRestChars)))
+	n, err := rand.Int(rand.Reader, firstMax)
+	if err != nil {
+		return "", fmt.Errorf("generate private label: %w", err)
+	}
+	b.WriteByte(privateLabelFirstChars[n.Int64()])
+	for i := 1; i < privateLabelLen; i++ {
+		n, err := rand.Int(rand.Reader, restMax)
+		if err != nil {
+			return "", fmt.Errorf("generate private label: %w", err)
+		}
+		b.WriteByte(privateLabelRestChars[n.Int64()])
+	}
+	return b.String(), nil
+}
+
+// allocatePrivateLabelLocked (s.mu held) picks a random label not present in
+// names (active or retired) and not reserved. Fails cleanly after 8 collisions.
+func (s *Service) allocatePrivateLabelLocked() (string, error) {
+	gen := s.privateLabelFn
+	if gen == nil {
+		gen = generatePrivateLabel
+	}
+	all, err := s.st.Names()
+	if err != nil {
+		return "", err
+	}
+	used := make(map[string]struct{}, len(all))
+	for _, x := range all {
+		used[x.Name] = struct{}{}
+		used[topLabel(x.Name)] = struct{}{}
+	}
+	for attempt := 0; attempt < maxPrivateLabelAttempts; attempt++ {
+		cand, err := gen()
+		if err != nil {
+			return "", err
+		}
+		name, err := s.normaliseName(cand)
+		if err != nil || topLabel(name) != name {
+			continue
+		}
+		if _, exists := used[name]; exists {
+			continue
+		}
+		return name, nil
+	}
+	return "", &Problem{Status: 503, Msg: fmt.Sprintf("could not allocate a unique private name after %d attempts", maxPrivateLabelAttempts)}
+}
+
 func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64, note *string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.claimLocked(a, handle, rawName, deviceID, note, nil)
+	return s.claimLocked(a, handle, rawName, deviceID, note, nil, false)
+}
+
+// ClaimPrivate allocates a random private label for a server device owned by handle.
+func (s *Service) ClaimPrivate(a Actor, handle string, deviceID int64, note *string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.claimLocked(a, handle, "", deviceID, note, nil, true)
 }
 
 // ServerClaim is a server naming itself (what `hogman share` does). The
@@ -991,11 +1062,47 @@ func (s *Service) ServerClaim(a Actor, d *Device, rawName string, note *string) 
 	if err := s.serverMayUse(d, rawName); err != nil {
 		return "", err
 	}
-	return s.claimLocked(a, a.Member.Handle, rawName, d.ID, note, d)
+	return s.claimLocked(a, a.Member.Handle, rawName, d.ID, note, d, false)
+}
+
+// ServerClaimPrivate allocates a random private label for the calling server
+// device. If this exact server device already owns a single active private name
+// (e.g. crash right after claiming before writing share.json), returns that
+// existing private name and updates its note if provided. Refuses if the server
+// already owns a non-private name or multiple names.
+func (s *Service) ServerClaimPrivate(a Actor, d *Device, note *string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var err error
+	if a, err = s.refreshActorLocked(a); err != nil {
+		return "", err
+	}
+	if d == nil || d.Kind != "server" {
+		return "", forbidden("server devices only")
+	}
+	all, err := s.st.Names()
+	if err != nil {
+		return "", err
+	}
+	var owned []*Name
+	for _, n := range all {
+		if n.RetiredAt == nil && n.MemberID == d.MemberID && n.DeviceID != nil && *n.DeviceID == d.ID {
+			owned = append(owned, n)
+		}
+	}
+	if len(owned) == 1 && owned[0].Private {
+		return s.claimLocked(a, a.Member.Handle, owned[0].Name, d.ID, note, d, false)
+	}
+	if len(owned) > 0 {
+		return "", conflict("this server already has a claimed name; pass its existing name")
+	}
+	return s.claimLocked(a, a.Member.Handle, "", d.ID, note, d, true)
 }
 
 // claimLocked: s.mu held. server is the calling server device, or nil.
-func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, rawNote *string, server *Device) (string, error) {
+// When allocatePrivate is true, rawName must be empty and a fresh 12-char
+// random label is allocated under s.mu and stored with private=1.
+func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, rawNote *string, server *Device, allocatePrivate bool) (string, error) {
 	var err error
 	if a, err = s.refreshActorLocked(a); err != nil {
 		return "", err
@@ -1015,78 +1122,109 @@ func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, r
 	if m.Status != "active" {
 		return "", conflict("%s is %s", handle, m.Status)
 	}
-	name, err := s.normaliseName(rawName)
-	if err != nil {
-		return "", err
+	if allocatePrivate && strings.TrimSpace(rawName) != "" {
+		return "", bad("cannot pass both a name and private: true")
 	}
-	existing, err := s.st.NameByName(name)
-	if err == nil {
-		if existing.RetiredAt != nil {
-			return "", conflict("%s is retired and cannot be reused", name)
+
+	var name string
+	var existing *Name
+	var d *Device
+	if allocatePrivate {
+		// Validate device and cap before allocating a random label.
+		d, err = s.st.DeviceByID(deviceID)
+		if err != nil || d.RemovedAt != nil || d.MemberID != m.ID {
+			return "", bad("device %d is not one of %s's devices", deviceID, handle)
 		}
-		if existing.MemberID != m.ID && !a.IsOwner() {
-			return "", conflict("%s belongs to %s", name, existing.Member)
+		if d.Kind != "server" {
+			return "", bad("device %d is a personal device; names point at servers (personal devices accept no connections)", deviceID)
 		}
-	} else if !errors.Is(err, ErrNotFound) {
-		return "", err
+		if !a.IsOwner() || server != nil {
+			count, err := s.st.CountMemberNames(m.ID)
+			if err != nil {
+				return "", err
+			}
+			if count >= s.cfg.MaxNamesPerMember {
+				return "", conflict("too many names claimed")
+			}
+		}
+		name, err = s.allocatePrivateLabelLocked()
+		if err != nil {
+			return "", err
+		}
 	} else {
-		existing = nil
-	}
-	// If claiming an unclaimed top-level name, refuse if another member (or a
-	// retired record) already owns a subdomain under it.
-	if existing == nil && topLabel(name) == name {
-		all, err := s.st.Names()
+		name, err = s.normaliseName(rawName)
 		if err != nil {
 			return "", err
 		}
-		for _, x := range all {
-			if !strings.HasSuffix(x.Name, "."+name) {
-				continue
+		existing, err = s.st.NameByName(name)
+		if err == nil {
+			if existing.RetiredAt != nil {
+				return "", conflict("%s is retired and cannot be reused", name)
 			}
-			if x.RetiredAt != nil {
-				return "", conflict("%s has retired subdomains and cannot be reused", name)
+			if existing.MemberID != m.ID && !a.IsOwner() {
+				return "", conflict("%s belongs to %s", name, existing.Member)
 			}
-			if x.MemberID != m.ID && !a.IsOwner() {
-				return "", conflict("%s has subdomains belonging to %s", name, x.Member)
-			}
-		}
-	}
-	// A server always counts against the cap, even the owner's: a leaked server
-	// link must not be able to claim names without limit.
-	if (!a.IsOwner() || server != nil) && (existing == nil || existing.MemberID != m.ID) {
-		count, err := s.st.CountMemberNames(m.ID)
-		if err != nil {
+		} else if !errors.Is(err, ErrNotFound) {
 			return "", err
+		} else {
+			existing = nil
 		}
-		if count >= s.cfg.MaxNamesPerMember {
-			return "", conflict("too many names claimed")
+		// If claiming an unclaimed top-level name, refuse if another member (or a
+		// retired record) already owns a subdomain under it.
+		if existing == nil && topLabel(name) == name {
+			all, err := s.st.Names()
+			if err != nil {
+				return "", err
+			}
+			for _, x := range all {
+				if !strings.HasSuffix(x.Name, "."+name) {
+					continue
+				}
+				if x.RetiredAt != nil {
+					return "", conflict("%s has retired subdomains and cannot be reused", name)
+				}
+				if x.MemberID != m.ID && !a.IsOwner() {
+					return "", conflict("%s has subdomains belonging to %s", name, x.Member)
+				}
+			}
 		}
-	}
-	if top := topLabel(name); top != name {
-		parent, err := s.st.NameByName(top)
-		if err == nil && parent.RetiredAt != nil {
-			return "", conflict("%s is retired and cannot be reused", top)
+		// A server always counts against the cap, even the owner's: a leaked server
+		// link must not be able to claim names without limit.
+		if (!a.IsOwner() || server != nil) && (existing == nil || existing.MemberID != m.ID) {
+			count, err := s.st.CountMemberNames(m.ID)
+			if err != nil {
+				return "", err
+			}
+			if count >= s.cfg.MaxNamesPerMember {
+				return "", conflict("too many names claimed")
+			}
 		}
-		if err != nil || parent.MemberID != m.ID {
-			return "", forbidden("claim %s first; names under it belong to whoever owns it", top)
+		if top := topLabel(name); top != name {
+			parent, err := s.st.NameByName(top)
+			if err == nil && parent.RetiredAt != nil {
+				return "", conflict("%s is retired and cannot be reused", top)
+			}
+			if err != nil || parent.MemberID != m.ID {
+				return "", forbidden("claim %s first; names under it belong to whoever owns it", top)
+			}
 		}
-	}
-	d, err := s.st.DeviceByID(deviceID)
-	if err != nil || d.RemovedAt != nil || d.MemberID != m.ID {
-		return "", bad("device %d is not one of %s's devices", deviceID, handle)
-	}
-	if d.Kind != "server" {
-		return "", bad("device %d is a personal device; names point at servers (personal devices accept no connections)", deviceID)
-	}
-	if existing != nil && existing.MemberID != m.ID && topLabel(name) == name {
-		all, err := s.st.Names()
-		if err != nil {
-			return "", err
+		d, err = s.st.DeviceByID(deviceID)
+		if err != nil || d.RemovedAt != nil || d.MemberID != m.ID {
+			return "", bad("device %d is not one of %s's devices", deviceID, handle)
 		}
-		for _, x := range all {
-			if strings.HasSuffix(x.Name, "."+name) && x.MemberID != m.ID && x.RetiredAt == nil {
-				if err := s.st.DeleteName(x.Name); err != nil {
-					return "", err
+		if d.Kind != "server" {
+			return "", bad("device %d is a personal device; names point at servers (personal devices accept no connections)", deviceID)
+		}
+		if existing != nil && existing.MemberID != m.ID && topLabel(name) == name {
+			all, err := s.st.Names()
+			if err != nil {
+				return "", err
+			}
+			for _, x := range all {
+				if strings.HasSuffix(x.Name, "."+name) && x.MemberID != m.ID && x.RetiredAt == nil {
+					if err := s.st.DeleteName(x.Name); err != nil {
+						return "", err
+					}
 				}
 			}
 		}
@@ -1097,10 +1235,15 @@ func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, r
 	} else if existing != nil && existing.RetiredAt == nil && existing.MemberID == m.ID {
 		note = existing.Note
 	}
-	if err := s.st.UpsertName(name, m.ID, &d.ID, note); err != nil {
+	isPrivate := allocatePrivate || (existing != nil && existing.Private)
+	if err := s.st.UpsertNameWithPrivate(name, m.ID, &d.ID, note, isPrivate); err != nil {
 		return "", err
 	}
-	s.st.Audit(a.String(), "name.claim", name+"."+s.cfg.Zone, fmt.Sprintf("member=%s device=%d", handle, d.ID))
+	detail := fmt.Sprintf("member=%s device=%d", handle, d.ID)
+	if isPrivate {
+		detail += " private=true"
+	}
+	s.st.Audit(a.String(), "name.claim", name+"."+s.cfg.Zone, detail)
 	return name + "." + s.cfg.Zone, nil
 }
 
@@ -1360,7 +1503,7 @@ func (s *Service) releaseLocked(a Actor, rawName string) error {
 	if err != nil {
 		return err
 	}
-	var toDelete []string
+	var toRelease []*Name
 	for _, x := range all {
 		if x.RetiredAt != nil {
 			continue
@@ -1369,11 +1512,16 @@ func (s *Service) releaseLocked(a Actor, rawName string) error {
 			if err := canReleaseRow(x); err != nil {
 				return err
 			}
-			toDelete = append(toDelete, x.Name)
+			toRelease = append(toRelease, x)
 		}
 	}
-	for _, dn := range toDelete {
-		_ = s.st.DeleteName(dn)
+	for _, x := range toRelease {
+		if x.Private {
+			// D-21: private random labels are permanently retired on release, never recycled.
+			_ = s.st.RetireName(x.Name)
+		} else {
+			_ = s.st.DeleteName(x.Name)
+		}
 	}
 	s.st.Audit(a.String(), "name.release", name+"."+s.cfg.Zone, "")
 	return nil

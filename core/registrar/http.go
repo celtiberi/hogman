@@ -331,8 +331,13 @@ func MeshHandler(s *Service) http.Handler {
 			Name     string  `json:"name"`
 			DeviceID int64   `json:"device_id"`
 			Note     *string `json:"note"`
+			Private  bool    `json:"private"`
 		}
 		if !readJSON(w, r, &in) {
+			return
+		}
+		if in.Private && strings.TrimSpace(in.Name) != "" {
+			fail(w, bad("cannot pass both name and private"))
 			return
 		}
 		var fqdn string
@@ -342,12 +347,24 @@ func MeshHandler(s *Service) http.Handler {
 				fail(w, forbidden("a server can only name itself"))
 				return
 			}
-			fqdn, err = s.ServerClaim(c.actor(), c.device, in.Name, in.Note)
+			if in.Private {
+				fqdn, err = s.ServerClaimPrivate(c.actor(), c.device, in.Note)
+			} else {
+				fqdn, err = s.ServerClaim(c.actor(), c.device, in.Name, in.Note)
+			}
 		} else {
-			fqdn, err = s.Claim(c.actor(), c.member.Handle, in.Name, in.DeviceID, in.Note)
+			if in.Private {
+				fqdn, err = s.ClaimPrivate(c.actor(), c.member.Handle, in.DeviceID, in.Note)
+			} else {
+				fqdn, err = s.Claim(c.actor(), c.member.Handle, in.Name, in.DeviceID, in.Note)
+			}
 		}
 		if err != nil {
 			fail(w, err)
+			return
+		}
+		if in.Private {
+			writeJSON(w, 201, map[string]any{"name": fqdn, "private": true})
 			return
 		}
 		writeJSON(w, 201, map[string]string{"name": fqdn})
@@ -423,9 +440,10 @@ func MeshHandler(s *Service) http.Handler {
 		out := make([]directoryEntry, 0, len(names))
 		for _, n := range names {
 			entry := directoryEntry{
-				Name:   n.Name + "." + s.cfg.Zone,
-				Member: n.Member,
-				Note:   n.Note,
+				Name:    n.Name + "." + s.cfg.Zone,
+				Member:  n.Member,
+				Note:    n.Note,
+				Private: n.Private,
 			}
 			// Only expose live presence for sites/servers on /api/directory;
 			// personal device presence stays admin-only on /api/admin/devices.
@@ -654,6 +672,7 @@ type directoryEntry struct {
 	Name     string `json:"name"`
 	Member   string `json:"member"`
 	Note     string `json:"note"`
+	Private  bool   `json:"private,omitempty"`
 	Online   *bool  `json:"online,omitempty"`
 	LastSeen string `json:"last_seen,omitempty"`
 }

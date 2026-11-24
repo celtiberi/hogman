@@ -47,6 +47,7 @@ type options struct {
 	background                  bool   // share: keep running after the window closes
 	note                        string // share: one-line note for the pen directory
 	noteSet                     bool
+	privateName                 bool   // share: allocate a random private hostname on the registrar
 	stateDir                    string // share: explicit state directory (container/sidecar deployments)
 	enrollOnly                  bool   // share: enroll state into --state-dir and exit 0
 	upstreamHost                string // share: optional Host header override for unix:// upstreams

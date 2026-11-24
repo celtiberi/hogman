@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS names (
 	member_id   INTEGER NOT NULL REFERENCES members(id),
 	device_id   INTEGER REFERENCES devices(id),
 	note        TEXT NOT NULL DEFAULT '',
-	held_until  INTEGER,                 -- non-NULL once the owner is removed; permanently retired (never reused)
+	private     INTEGER NOT NULL DEFAULT 0,
+	held_until  INTEGER,                 -- non-NULL once the owner is removed or private name released; permanently retired (never reused)
 	created_at  INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS audit (
@@ -93,6 +94,10 @@ func OpenStore(path string) (*Store, error) {
 	if err := migrateNamesNote(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate names.note: %w", err)
+	}
+	if err := migrateNamesPrivate(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate names.private: %w", err)
 	}
 	return &Store{db: db}, nil
 }
@@ -126,6 +131,19 @@ func migrateNamesNote(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`ALTER TABLE names ADD COLUMN note TEXT NOT NULL DEFAULT ''`); err != nil {
 		if has, checkErr := hasColumn(db, "names", "note"); checkErr == nil && has {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func migrateNamesPrivate(db *sql.DB) error {
+	if has, err := hasColumn(db, "names", "private"); err != nil || has {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE names ADD COLUMN private INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if has, checkErr := hasColumn(db, "names", "private"); checkErr == nil && has {
 			return nil
 		}
 		return err
@@ -651,6 +669,7 @@ type Name struct {
 	DeviceKind string `json:"-"`
 	HSNodeID   string `json:"-"`
 	Note       string `json:"note,omitempty"`
+	Private    bool   `json:"private,omitempty"`
 	IPv4       string `json:"ipv4,omitempty"`
 	IPv6       string `json:"ipv6,omitempty"`
 	// RetiredAt is stored in names.held_until for backward compatibility with existing DBs;
@@ -659,7 +678,7 @@ type Name struct {
 }
 
 func (s *Store) queryNames(where string, args ...any) ([]*Name, error) {
-	rows, err := s.db.Query(`SELECT n.name, n.member_id, m.handle, n.device_id, COALESCE(d.kind, ''), COALESCE(d.hs_node_id, ''), n.note, COALESCE(d.ipv4, ''), COALESCE(d.ipv6, ''), n.held_until
+	rows, err := s.db.Query(`SELECT n.name, n.member_id, m.handle, n.device_id, COALESCE(d.kind, ''), COALESCE(d.hs_node_id, ''), n.note, n.private, COALESCE(d.ipv4, ''), COALESCE(d.ipv6, ''), n.held_until
 		FROM names n JOIN members m ON m.id = n.member_id
 		LEFT JOIN devices d ON d.id = n.device_id AND d.removed_at IS NULL `+where+` ORDER BY n.name`, args...)
 	if err != nil {
@@ -669,9 +688,11 @@ func (s *Store) queryNames(where string, args ...any) ([]*Name, error) {
 	var out []*Name
 	for rows.Next() {
 		var n Name
-		if err := rows.Scan(&n.Name, &n.MemberID, &n.Member, &n.DeviceID, &n.DeviceKind, &n.HSNodeID, &n.Note, &n.IPv4, &n.IPv6, &n.RetiredAt); err != nil {
+		var priv int
+		if err := rows.Scan(&n.Name, &n.MemberID, &n.Member, &n.DeviceID, &n.DeviceKind, &n.HSNodeID, &n.Note, &priv, &n.IPv4, &n.IPv6, &n.RetiredAt); err != nil {
 			return nil, err
 		}
+		n.Private = priv != 0
 		out = append(out, &n)
 	}
 	return out, rows.Err()
@@ -691,10 +712,22 @@ func (s *Store) NameByName(name string) (*Name, error) {
 }
 
 func (s *Store) UpsertName(name string, memberID int64, deviceID *int64, note string) error {
-	res, err := s.db.Exec(`INSERT INTO names (name, member_id, device_id, note, created_at) VALUES (?,?,?,?,?)
-		ON CONFLICT(name) DO UPDATE SET member_id = excluded.member_id, device_id = excluded.device_id, note = excluded.note
+	return s.UpsertNameWithPrivate(name, memberID, deviceID, note, false)
+}
+
+func (s *Store) UpsertNameWithPrivate(name string, memberID int64, deviceID *int64, note string, private bool) error {
+	priv := 0
+	if private {
+		priv = 1
+	}
+	res, err := s.db.Exec(`INSERT INTO names (name, member_id, device_id, note, private, created_at) VALUES (?,?,?,?,?,?)
+		ON CONFLICT(name) DO UPDATE SET
+			member_id = excluded.member_id,
+			device_id = excluded.device_id,
+			note = excluded.note,
+			private = CASE WHEN names.private = 1 THEN 1 ELSE excluded.private END
 		WHERE names.held_until IS NULL`,
-		name, memberID, deviceID, note, now())
+		name, memberID, deviceID, note, priv, now())
 	if err != nil {
 		return err
 	}
@@ -706,6 +739,13 @@ func (s *Store) UpsertName(name string, memberID int64, deviceID *int64, note st
 
 func (s *Store) DeleteName(name string) error {
 	_, err := s.db.Exec(`DELETE FROM names WHERE name = ? AND held_until IS NULL`, name)
+	return err
+}
+
+// RetireName unpoints a single name and permanently retires it (D-21: random
+// private labels are never recycled once released).
+func (s *Store) RetireName(name string) error {
+	_, err := s.db.Exec(`UPDATE names SET device_id = NULL, held_until = ?, note = '' WHERE name = ? AND held_until IS NULL`, now(), name)
 	return err
 }
 

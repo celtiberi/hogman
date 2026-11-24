@@ -566,10 +566,20 @@ ul.devices.site-grid li:hover {
   overflow-wrap: anywhere;
 }
 
+.site-link-label {
+  font-family: inherit;
+}
+
 .site-main .muted {
   margin-top: 0.3rem;
   color: var(--bone);
   opacity: 0.84;
+}
+
+.site-main .site-host {
+  font-family: var(--mono);
+  opacity: 0.68;
+  overflow-wrap: anywhere;
 }
 
 ul.devices.site-grid li > .muted.small {
@@ -1041,6 +1051,11 @@ html[data-theme="work"] .card-head,
 html[data-theme="work"] .grow,
 html[data-theme="work"] .site-main .muted {
   color: var(--ink);
+}
+
+html[data-theme="work"] .site-main .site-host {
+  color: var(--muted);
+  opacity: 1;
 }
 
 html[data-theme="work"] h3,
