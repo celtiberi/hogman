@@ -654,19 +654,9 @@ func renderFirefoxNativeManifest(hostPath string, firefoxIDs []string) ([]byte, 
 // <configBase>/bin/hogman-native-host to it, and writes browser Native
 // Messaging manifests for installed browsers. Always user-space (no sudo).
 func installNativeHost(configBase string, extraChromeIDs, extraFirefoxIDs []string) (string, int, error) {
-	self, err := os.Executable()
+	canonicalBin, err := ensureCanonicalBinary(configBase)
 	if err != nil {
 		return "", 0, err
-	}
-	binDir := filepath.Join(configBase, "bin")
-	if err := os.MkdirAll(binDir, 0o700); err != nil {
-		return "", 0, err
-	}
-	canonicalBin := canonicalBinaryPath(configBase)
-	if !sameFilePath(self, canonicalBin) {
-		if err := copyExecutableAtomic(self, canonicalBin); err != nil {
-			return "", 0, err
-		}
 	}
 	hostPath := nativeHostBinaryPath(configBase)
 	if err := installNativeHostBinary(canonicalBin, hostPath); err != nil {

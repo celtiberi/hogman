@@ -33,6 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Added an all-member grace-period banner in `core/portal` served via `registrar` `GET /api/me` (`data/registrar/billing-status.json`), offering **Renew now** only to owners and admins.
 
 ### Fixed
+- `core/join`: routed `installNativeHost` through `ensureCanonicalBinary` so running an older `hogman` binary (e.g. re-running a link or `extension install`) cannot bypass the downgrade guard and overwrite a newer shared `<configBase>/bin/hogman` binary.
 - `core/join`: fixed multi-pen and running-agent upgrade paths from legacy `hogman-join` (I-10):
   - `hogman update` now migrates every pen instead of aborting on the first pen that cannot come back online, probes pen reachability quickly (~4s against `/hogman/v1/network`) to start unreachable pens' canonical agents without waiting 60s, prints per-pen results with `hogman leave <pen>` guidance, and exits non-zero at the end if any pen failed.
   - `startAgent` and `joinAlongside` now stop any running legacy `hogman-join` agent (service, `agent.pid`, or orphan process for that pen directory) before starting the canonical `hogman` agent so upgrades and `/start` never fail with `bind: address already in use`.

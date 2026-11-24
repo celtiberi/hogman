@@ -701,15 +701,16 @@ func canonicalBinaryPath(configBase string) string {
 	return filepath.Join(configBase, "bin", installedBinaryName(runtime.GOOS))
 }
 
-// installedBinary ensures the single canonical managed binary under
-// <configBase>/bin/hogman is up to date atomically, so all pen agents and
-// background shares share one copy instead of duplicating a binary per pen/share.
-func installedBinary(_ string) (string, error) {
+// ensureCanonicalBinary ensures the single canonical managed binary under
+// <configBase>/bin/hogman is up to date atomically, while refusing to let an
+// older CLI binary silently downgrade a newer canonical binary shared by other
+// pens on this computer.
+func ensureCanonicalBinary(configBase string) (string, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	dst := canonicalBinaryPath(hogmanConfigBase())
+	dst := canonicalBinaryPath(configBase)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return "", err
 	}
@@ -730,4 +731,11 @@ func installedBinary(_ string) (string, error) {
 		return "", err
 	}
 	return dst, nil
+}
+
+// installedBinary ensures the single canonical managed binary under
+// <configBase>/bin/hogman is up to date atomically, so all pen agents and
+// background shares share one copy instead of duplicating a binary per pen/share.
+func installedBinary(_ string) (string, error) {
+	return ensureCanonicalBinary(hogmanConfigBase())
 }
