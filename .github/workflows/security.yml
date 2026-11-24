@@ -75,34 +75,39 @@ jobs:
           pipx run 'zizmor==1.33.1' --offline --min-severity low .github/workflows
 
   gosec:
-    name: gosec (advisory)
+    name: gosec (advisory, ${{ matrix.module }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
       security-events: write   # upload results to code scanning
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [core/join, core/registrar, deploy/signup, deploy/challenge-dns, deploy/ops]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version-file: core/join/go.mod
+          go-version-file: ${{ matrix.module }}/go.mod
           cache: false
       - name: gosec
+        working-directory: ${{ matrix.module }}
         run: |
           set -euo pipefail
           go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
-          mkdir -p "$RUNNER_TEMP/sarif"
-          for m in core/join core/registrar deploy/signup deploy/challenge-dns deploy/ops; do
-            out="$RUNNER_TEMP/sarif/$(echo "$m" | tr / -).sarif"
-            (cd "$m" && "$(go env GOPATH)/bin/gosec" -quiet -no-fail -tests=false -fmt sarif -out "$out" ./...)
-          done
-          ls -l "$RUNNER_TEMP/sarif"
+          "$(go env GOPATH)/bin/gosec" -quiet -no-fail -tests=false -fmt sarif -out "$RUNNER_TEMP/gosec.sarif" ./...
+      - name: Category name
+        id: cat
+        env:
+          MODULE: ${{ matrix.module }}
+        run: echo "name=gosec-${MODULE//\//-}" >> "$GITHUB_OUTPUT"
       - name: Upload to code scanning
         # Pull requests from forks get a read-only token and can't upload.
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
         with:
-          sarif_file: ${{ runner.temp }}/sarif
-          category: gosec
+          sarif_file: ${{ runner.temp }}/gosec.sarif
+          category: ${{ steps.cat.outputs.name }}
