@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Added an all-member grace-period banner in `core/portal` served via `registrar` `GET /api/me` (`data/registrar/billing-status.json`), offering **Renew now** only to owners and admins.
 
 ### Fixed
+- `README.md`, `core/portal/index.html`, & `core/join-page/start.sh`: corrected legacy `hogman-join` upgrade instructions to download `~/hogman`, run `~/hogman update`, and then delete `~/hogman-join`, and updated `/start` to install `~/hogman` and run `update` automatically when invoked with no link on a machine that already has pens configured (I-9).
 - `deploy/build-bins.sh`, `.github/workflows/build.yml`, `deploy/release.sh`, & `core/join`: stamp compiled `hogman` binaries with the commit-derived release version (`YYYY.MM.DD-<shortsha>`) instead of `dev` (I-8), verify `--version` in CI and before publishing in `release.sh`, and treat same-date versions with different SHA suffixes as indeterminate rather than equal in `compareReleaseVersions`.
 - `deploy/hogman-host` & `deploy/test-host.sh`: raised `hogman-signup` broker `mem_limit` from `128m` to `384m` so `docker compose` / `buildx` child processes do not OOM-kill the broker mid-provision (I-5), and log broker container exit/OOM/restart state on shared-host E2E failure.
 

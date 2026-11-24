@@ -64,8 +64,14 @@ Paste your invite link: https://store-north.gate.hogman.network/join#t=(your inv
   `~/hogman update`, or leave one pen with `~/hogman leave <pen>` (its short name, full name or link).
   `~/hogman leave-all` leaves every pen and asks first.
 - Upgrading from an older `hogman-join` install: `hogman-join update` will fail with a checksum error
-  because the client was renamed to `hogman`; delete `~/hogman-join` and re-run the start command from
-  your pen's join page to install `~/hogman`.
+  because the client was renamed to `hogman`. Download `~/hogman`, run `update`, and then delete
+  `~/hogman-join`:
+
+  ```sh
+  curl -fsSLo ~/hogman "https://hogman.network/dl/hogman-$(uname -s)-$(uname -m)"
+  chmod +x ~/hogman
+  ~/hogman update
+  ```
 - To take Hogman off a computer entirely: `~/hogman uninstall` (asks first), then delete
   `~/hogman` and remove the browser extension if you added it.
 - Owners have no account recovery, so `leave`, `leave-all` and `uninstall` refuse a pen you own.
