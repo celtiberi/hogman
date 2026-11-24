@@ -37,6 +37,7 @@ import (
 	"syscall"
 	"time"
 
+	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tsnet"
 )
 
@@ -53,23 +54,25 @@ usage:
 <name> becomes https://<name>.<pen-zone>, open to everyone in the pen.
 
 options:
-  --note TEXT    short one-line description shown on the pen's home page (--note "" clears it)
-  --background   keep running in the background and start automatically after a restart
-  --no-service   with --background, don't register a login item, just run in the background
-  --pen ZONE     which pen, if this computer is on more than one
-  --force        with stop, remove local files even if the pen cannot be reached
+  --note TEXT         short one-line description shown on the pen's home page (--note "" clears it)
+  --background        keep running in the background and start automatically after a restart
+  --no-service        with --background, don't register a login item, just run in the background
+  --pen ZONE          which pen, if this computer is on more than one
+  --identity-headers  pass verified X-Hogman-* caller identity headers to a local upstream target
+  --force             with stop, remove local files even if the pen cannot be reached
 `
 
 type shareConfig struct {
-	Name         string `json:"name"`
-	Zone         string `json:"zone"`
-	LoginServer  string `json:"login_server"`
-	DNSServer    string `json:"dns_server"`
-	Target       string `json:"target"` // http://host:port, unix:///path/to.sock, or an absolute folder path
-	Folder       bool   `json:"folder,omitempty"`
-	Note         string `json:"note,omitempty"`
-	ControlCA    string `json:"control_ca,omitempty"`
-	UpstreamHost string `json:"upstream_host,omitempty"`
+	Name            string `json:"name"`
+	Zone            string `json:"zone"`
+	LoginServer     string `json:"login_server"`
+	DNSServer       string `json:"dns_server"`
+	Target          string `json:"target"` // http://host:port, unix:///path/to.sock, or an absolute folder path
+	Folder          bool   `json:"folder,omitempty"`
+	Note            string `json:"note,omitempty"`
+	ControlCA       string `json:"control_ca,omitempty"`
+	UpstreamHost    string `json:"upstream_host,omitempty"`
+	IdentityHeaders bool   `json:"identity_headers,omitempty"`
 }
 
 func (c *shareConfig) fqdn() string { return c.Name + "." + c.Zone }
@@ -187,10 +190,54 @@ func isAllowedShareIP(addr netip.Addr) bool {
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
+// isLoopbackShareIP reports whether addr is strictly a loopback address
+// (127.0.0.0/8 or ::1). Used when --identity-headers is enabled so verified
+// X-Hogman-* headers are never sent across a LAN hop.
+func isLoopbackShareIP(addr netip.Addr) bool {
+	if !addr.IsValid() || addr.Zone() != "" {
+		return false
+	}
+	return addr.Unmap().IsLoopback()
+}
+
+// validateIdentityTarget enforces that --identity-headers is only used with a
+// local upstream target (unix:// socket, localhost, or loopback IP), never a
+// static folder or a non-local LAN host.
+func validateIdentityTarget(target string, folder bool) error {
+	if folder {
+		return errorf("--identity-headers cannot be used with a folder share")
+	}
+	if strings.HasPrefix(target, "unix://") {
+		return nil
+	}
+	u, err := url.Parse(target)
+	if err != nil {
+		return errorf("--identity-headers: invalid share target %q: %v", target, err)
+	}
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if host == "localhost" {
+		return nil
+	}
+	if ip, err := netip.ParseAddr(host); err == nil && isLoopbackShareIP(ip) {
+		return nil
+	}
+	return errorf("--identity-headers requires a local target (localhost, 127.0.0.1, ::1, or unix:// socket), got %q", target)
+}
+
 // localOrLANDialContext enforces at dial time (after resolving DNS) that share
 // reverse-proxy requests only ever connect to loopback or private LAN IPs,
 // denying cloud metadata endpoints and public internet addresses.
 func localOrLANDialContext(lookup func(context.Context, string) ([]net.IPAddr, error), dial func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
+	return shareDialContext(isAllowedShareIP, "only local and private LAN targets are allowed", lookup, dial)
+}
+
+// loopbackOnlyDialContext enforces at dial time that upstream connections only
+// ever reach loopback addresses (127.0.0.0/8 or ::1).
+func loopbackOnlyDialContext(lookup func(context.Context, string) ([]net.IPAddr, error), dial func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
+	return shareDialContext(isLoopbackShareIP, "--identity-headers requires a loopback target", lookup, dial)
+}
+
+func shareDialContext(allowIP func(netip.Addr) bool, reason string, lookup func(context.Context, string) ([]net.IPAddr, error), dial func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
 	if lookup == nil {
 		lookup = net.DefaultResolver.LookupIPAddr
 	}
@@ -208,8 +255,8 @@ func localOrLANDialContext(lookup func(context.Context, string) ([]net.IPAddr, e
 		}
 		var targets []string
 		if ip, err := netip.ParseAddr(host); err == nil {
-			if !isAllowedShareIP(ip) {
-				return nil, errorf("refusing to proxy to disallowed address %q (only local and private LAN targets are allowed)", host)
+			if !allowIP(ip) {
+				return nil, errorf("refusing to proxy to disallowed address %q (%s)", host, reason)
 			}
 			if ip.Zone() != "" {
 				targets = []string{ip.String()}
@@ -233,8 +280,8 @@ func localOrLANDialContext(lookup func(context.Context, string) ([]net.IPAddr, e
 				if r.Zone != "" {
 					ip = ip.WithZone(r.Zone)
 				}
-				if !isAllowedShareIP(ip) {
-					return nil, errorf("refusing to proxy to disallowed address %s resolved for %q (only local and private LAN targets are allowed)", ip, host)
+				if !allowIP(ip) {
+					return nil, errorf("refusing to proxy to disallowed address %s resolved for %q (%s)", ip, host, reason)
 				}
 				targets = append(targets, ip.String())
 			}
@@ -362,6 +409,12 @@ func shareStart(name, what, rawLink string, o options) error {
 		}
 	}
 	cfg.Target, cfg.Folder = target, folder
+	cfg.IdentityHeaders = o.identityHeaders
+	if cfg.IdentityHeaders {
+		if err := validateIdentityTarget(cfg.Target, cfg.Folder); err != nil {
+			return err
+		}
+	}
 	if uh := strings.TrimSpace(o.upstreamHost); uh != "" {
 		if strings.ContainsAny(uh, " \t\r\n/\\@") || strings.Contains(uh, "://") {
 			return errorf("invalid --upstream-host %q (expected a bare hostname or host:port)", uh)
@@ -817,7 +870,7 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 		return fail(out)
 	}
 
-	h, closeH, err := shareHandler(c)
+	h, closeH, err := shareHandlerWithResolver(c, tsnetPeerResolver(node))
 	if err != nil {
 		if fresh {
 			undoFreshShare(hc, node, dir, c)
@@ -998,7 +1051,120 @@ func hasPathTraversal(u *url.URL) bool {
 	return false
 }
 
+var shareHandleRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`)
+
+// sharePeerIdentity holds the mesh-authenticated peer identity resolved from
+// tsnet WhoIs for an incoming request to a shared local app.
+type sharePeerIdentity struct {
+	Handle string
+	Node   string
+	IP     string
+	Tags   []string
+}
+
+type sharePeerResolver func(ctx context.Context, remoteAddr string) (*sharePeerIdentity, error)
+
+func cleanHeaderToken(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(raw))
+	for _, r := range raw {
+		if r <= 0x20 || r == 0x7f || r > 0x7e {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func peerIdentityFromWhoIs(remoteAddr string, who *apitype.WhoIsResponse) *sharePeerIdentity {
+	if who == nil || who.Node == nil {
+		return nil
+	}
+	rawIP := remoteAddr
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		rawIP = host
+	}
+	ip := ""
+	if addr, err := netip.ParseAddr(strings.TrimSpace(rawIP)); err == nil {
+		ip = addr.Unmap().String()
+	}
+
+	var tags []string
+	for _, t := range who.Node.Tags {
+		clean := cleanHeaderToken(t)
+		if clean == "" || strings.Contains(clean, ",") {
+			continue
+		}
+		tags = append(tags, clean)
+	}
+	sort.Strings(tags)
+
+	nodeName := cleanHeaderToken(who.Node.ComputedName)
+	if nodeName == "" {
+		rawName := strings.TrimSuffix(strings.TrimSpace(who.Node.Name), ".")
+		if before, _, ok := strings.Cut(rawName, "."); ok {
+			rawName = before
+		}
+		nodeName = cleanHeaderToken(rawName)
+	}
+
+	handle := ""
+	// Tagged nodes (such as tag:server) are not personal users and must never
+	// receive X-Hogman-Handle.
+	if len(tags) == 0 && !who.Node.IsTagged() && who.UserProfile != nil {
+		cand := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(who.UserProfile.LoginName)), "@")
+		if shareHandleRE.MatchString(cand) {
+			handle = cand
+		}
+	}
+
+	return &sharePeerIdentity{
+		Handle: handle,
+		Node:   nodeName,
+		IP:     ip,
+		Tags:   tags,
+	}
+}
+
+func tsnetPeerResolver(node *tsnet.Server) sharePeerResolver {
+	return func(ctx context.Context, remoteAddr string) (*sharePeerIdentity, error) {
+		if node == nil {
+			return nil, errors.New("no mesh node")
+		}
+		lc, err := node.LocalClient()
+		if err != nil {
+			return nil, err
+		}
+		who, err := lc.WhoIs(ctx, remoteAddr)
+		if err != nil {
+			return nil, err
+		}
+		return peerIdentityFromWhoIs(remoteAddr, who), nil
+	}
+}
+
+func stripHogmanHeaders(h http.Header) {
+	for k := range h {
+		if strings.HasPrefix(strings.ToLower(k), "x-hogman-") {
+			delete(h, k)
+		}
+	}
+}
+
 func shareHandler(c *shareConfig) (http.Handler, func(), error) {
+	return shareHandlerWithResolver(c, nil)
+}
+
+func shareHandlerWithResolver(c *shareConfig, resolve sharePeerResolver) (http.Handler, func(), error) {
+	if c.IdentityHeaders {
+		if err := validateIdentityTarget(c.Target, c.Folder); err != nil {
+			return nil, nil, permanentShare(err)
+		}
+	}
 	if c.Folder {
 		// os.Root keeps every read inside the folder: a symlink pointing out
 		// of it (to ~/.ssh, say) is refused, not followed; noDotfilesFS also
@@ -1043,7 +1209,11 @@ func shareHandler(c *shareConfig) (http.Handler, func(), error) {
 		if ip, err := netip.ParseAddr(u.Hostname()); err == nil && !isAllowedShareIP(ip) {
 			return nil, nil, permanentShare(errorf("share target %q is not a local or private LAN address", c.Target))
 		}
-		tr.DialContext = localOrLANDialContext(nil, nil)
+		if c.IdentityHeaders {
+			tr.DialContext = loopbackOnlyDialContext(nil, nil)
+		} else {
+			tr.DialContext = localOrLANDialContext(nil, nil)
+		}
 		targetURL = u
 	}
 
@@ -1055,17 +1225,39 @@ func shareHandler(c *shareConfig) (http.Handler, func(), error) {
 			if rewriteHost != "" {
 				pr.Out.Host = rewriteHost
 			}
-			// Never trust client-supplied forwarding headers: strip them before
-			// setting fresh values from the authenticated mesh connection.
+			// Never trust client-supplied forwarding or X-Hogman-* identity
+			// headers: strip them unconditionally before setting fresh values
+			// from the authenticated mesh connection.
 			pr.Out.Header.Del("Forwarded")
 			pr.Out.Header.Del("X-Forwarded-For")
 			pr.Out.Header.Del("X-Forwarded-Host")
 			pr.Out.Header.Del("X-Forwarded-Proto")
+			stripHogmanHeaders(pr.Out.Header)
+			stripHogmanHeaders(pr.Out.Trailer)
 			if clientIP, _, err := net.SplitHostPort(pr.In.RemoteAddr); err == nil && clientIP != "" {
 				pr.Out.Header.Set("X-Forwarded-For", clientIP)
 			}
 			pr.Out.Header.Set("X-Forwarded-Host", c.fqdn())
 			pr.Out.Header.Set("X-Forwarded-Proto", "https")
+			if c.IdentityHeaders && resolve != nil {
+				whoCtx, cancel := context.WithTimeout(pr.In.Context(), 2*time.Second)
+				id, err := resolve(whoCtx, pr.In.RemoteAddr)
+				cancel()
+				if err == nil && id != nil {
+					if id.Handle != "" {
+						pr.Out.Header.Set("X-Hogman-Handle", id.Handle)
+					}
+					if id.Node != "" {
+						pr.Out.Header.Set("X-Hogman-Node", id.Node)
+					}
+					if id.IP != "" {
+						pr.Out.Header.Set("X-Hogman-IP", id.IP)
+					}
+					if len(id.Tags) > 0 {
+						pr.Out.Header.Set("X-Hogman-Tags", strings.Join(id.Tags, ","))
+					}
+				}
+			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
