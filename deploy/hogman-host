@@ -245,12 +245,40 @@ write_front() {
 	}
 }
 
+(sleeping) {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Frame-Options DENY
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Cache-Control no-store
+		Content-Security-Policy "default-src 'none'"
+		Content-Type "text/html; charset=utf-8"
+		-Server
+	}
+	respond "<!doctype html><meta charset=utf-8><title>Pen asleep</title><body style='font-family:system-ui,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem'><h1>This pen is asleep</h1><p>Its state is kept for one year. Contact your host operator if an owner or admin needs to wake it for renewal.</p></body>" 503
+}
+
 EOF
     for n in $(pen_names); do
-      [ -f "$PENS/$n/.removed" ] || [ -f "$PENS/$n/.sleeping" ] && continue
+      [ -f "$PENS/$n/.removed" ] && continue
       host="$(pen_env "$n" PUBLIC_HOST)"
       [ -n "$host" ] || continue
       valid_host "$host" || die "invalid PUBLIC_HOST in pen $n: $host"
+      if [ -f "$PENS/$n/.sleeping" ]; then
+        cat <<EOF
+# pen (sleeping): $n
+http://$host {
+	redir https://{host}{uri} permanent
+}
+$host {
+$(gate_tls_line "$host")
+	import sleeping
+}
+
+EOF
+        continue
+      fi
       cat <<EOF
 # pen: $n
 http://$host {
@@ -344,7 +372,7 @@ front_join() {
   local c=hogman-front-front-1 n host attached
   attached="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$c" 2>/dev/null)" || return 1
   for n in $(pen_names); do
-    [ -f "$PENS/$n/.removed" ] && continue
+    [ -f "$PENS/$n/.removed" ] || [ -f "$PENS/$n/.sleeping" ] && continue
     host="$(pen_env "$n" PUBLIC_HOST)"
     [ -n "$host" ] || continue
     grep -qw "pen-$n-core" <<<"$attached" && continue
@@ -353,7 +381,7 @@ front_join() {
   for net in $attached; do
     case "$net" in pen-*-core) ;; *) continue ;; esac
     n="${net#pen-}"; n="${n%-core}"
-    if [ ! -d "$PENS/$n" ] || [ -f "$PENS/$n/.removed" ]; then
+    if [ ! -d "$PENS/$n" ] || [ -f "$PENS/$n/.removed" ] || [ -f "$PENS/$n/.sleeping" ]; then
       docker network disconnect "$net" "$c" >/dev/null 2>&1 || true
     fi
   done

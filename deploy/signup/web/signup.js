@@ -238,19 +238,23 @@
   const show = id => { activeView = id; for (const s of ['form', 'wait', 'waited', 'renew', 'renewed', 'working', 'done']) $(s).hidden = s !== id; };
   const cleanURL = () => location.pathname + location.search;
 
-  // D-35: pen renewal flow via /?renew=<pen> and confirmation via /?renewed=1.
+  // D-35: in-pen authenticated renewal flow via /#renew=<signed-token> and /?renewed=1.
+  // The token lives only in the URL fragment and is stripped immediately from history.
   const urlParams = new URLSearchParams(location.search);
-  const renewPenParam = (urlParams.get('renew') || '').trim().toLowerCase();
-  const renewedParam = urlParams.get('renewed') === '1';
-  if (renewedParam) {
-    const p = (urlParams.get('pen') || '').trim().toLowerCase();
-    if (/^[a-z][a-z0-9-]{1,28}[a-z0-9]$/.test(p) && $('renewed-text')) {
-      $('renewed-text').textContent = `Your renewal payment for ${p} is in. Your pen will stay active (or wake up within a minute if it was asleep) for a fresh year.`;
-    }
+  const renewMatch = location.hash.match(/(?:^|[#&])renew=([A-Za-z0-9._-]+)/);
+  let renewToken = renewMatch ? renewMatch[1] : '';
+  if (renewToken) {
+    history.replaceState(null, '', location.pathname);
   }
+  const renewedParam = urlParams.get('renewed') === '1';
   if ($('renew-go')) {
     $('renew-go').addEventListener('click', async () => {
       $('renew-err').hidden = true;
+      if (!renewToken) {
+        $('renew-err').textContent = 'This renewal link has already been used. Open your pen\u2019s home page and click Renew now to start a fresh one.';
+        $('renew-err').hidden = false;
+        return;
+      }
       if (tsSiteKey && !tsRenewToken) {
         $('renew-err').textContent = 'Please complete the verification check first.';
         $('renew-err').hidden = false;
@@ -258,9 +262,10 @@
       }
       $('renew-go').disabled = true;
       try {
-        const body = { pen: renewPenParam };
+        const body = { token: renewToken };
         if (tsSiteKey) body.turnstile_token = tsRenewToken;
         const r = await api('POST', '/renew', body);
+        renewToken = '';
         location.href = r.url;
       } catch (e) {
         resetTurnstile('renew');
@@ -389,8 +394,7 @@
     follow(pending);
   } else if (renewedParam) {
     show('renewed');
-  } else if (/^[a-z][a-z0-9-]{1,28}[a-z0-9]$/.test(renewPenParam)) {
-    if ($('renew-pen')) $('renew-pen').textContent = renewPenParam;
+  } else if (renewToken) {
     show('renew');
   } else if (location.hash === '#wait') {
     show('wait');   // a link straight to the waiting list

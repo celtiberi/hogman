@@ -187,20 +187,26 @@ func (sc *stripeCheckout) paramsFor(origin, plan string) *stripe.CheckoutSession
 	return p
 }
 
-func (sc *stripeCheckout) renewParamsFor(origin, pen, plan string) *stripe.CheckoutSessionCreateParams {
+func (sc *stripeCheckout) renewParamsFor(origin, pen, plan, payerHandle string) *stripe.CheckoutSessionCreateParams {
 	if origin == "" {
 		origin = sc.publicURL
 	}
 	if plan != planWork {
 		plan = planPersonal
 	}
-	meta := map[string]string{penMetaKey: penMetaValue, planMetaKey: plan, "action": "renew", "pen": pen}
+	meta := map[string]string{
+		penMetaKey:     penMetaValue,
+		planMetaKey:    plan,
+		"action":       "renew",
+		"pen":          pen,
+		"payer_handle": payerHandle,
+	}
 	subMeta := map[string]string{penMetaKey: penMetaValue, planMetaKey: plan, "pen": pen}
 	p := &stripe.CheckoutSessionCreateParams{
 		Mode:       stripe.String(string(stripe.CheckoutSessionModeSubscription)),
 		LineItems:  []*stripe.CheckoutSessionCreateLineItemParams{{Price: stripe.String(sc.priceForPlan(plan)), Quantity: stripe.Int64(1)}},
-		SuccessURL: stripe.String(origin + "/?renewed=1&pen=" + url.QueryEscape(pen)),
-		CancelURL:  stripe.String(origin + "/?renew=" + url.QueryEscape(pen)),
+		SuccessURL: stripe.String(origin + "/?renewed=1"),
+		CancelURL:  stripe.String(origin + "/"),
 		Metadata:   meta,
 		SubscriptionData: &stripe.CheckoutSessionCreateSubscriptionDataParams{
 			Metadata: subMeta,
@@ -225,9 +231,10 @@ func (sc *stripeCheckout) createCheckoutURL(ctx context.Context, p *stripe.Check
 	return s.URL, nil
 }
 
-// renew starts a Stripe Checkout Session to renew an existing pen that is in
-// grace or sleeping (D-35). The broker checks eligibility and returns the pen's
-// authoritative plan so the caller cannot pay a Personal price for a Work pen.
+// renew starts a Stripe Checkout Session ONLY for a valid, short-lived,
+// single-use signed renewal token minted inside the pen by an active owner or
+// admin (D-35). Pen, plan, and payer_handle all come from the verified token
+// via the broker — never from the browser.
 func (wb *web) renew(w http.ResponseWriter, r *http.Request) {
 	if wb.stripe == nil {
 		jsonOut(w, 404, map[string]string{"error": "pens aren't for sale here"})
@@ -237,7 +244,7 @@ func (wb *web) renew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Pen            string `json:"pen"`
+		Token          string `json:"token"`
 		TurnstileToken string `json:"turnstile_token"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
@@ -247,9 +254,9 @@ func (wb *web) renew(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "bad request"})
 		return
 	}
-	pen := strings.ToLower(strings.TrimSpace(in.Pen))
-	if _, ok := validPen(pen); !ok {
-		jsonOut(w, 400, map[string]string{"error": "invalid pen name"})
+	tok := strings.TrimSpace(in.Token)
+	if len(tok) < 20 || len(tok) > 512 {
+		jsonOut(w, 400, map[string]string{"error": "invalid renewal token"})
 		return
 	}
 	clientIP := wb.clientIP(r)
@@ -266,12 +273,14 @@ func (wb *web) renew(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 429, map[string]string{"error": "checkout is temporarily busy; try again in a few minutes"})
 		return
 	}
-	code, out := wb.ask(r.Context(), "POST", "/renew-check", map[string]string{"pen": pen})
+	code, out := wb.ask(r.Context(), "POST", "/renew-verify", map[string]string{"token": tok})
 	if code != 200 {
 		jsonOut(w, code, out)
 		return
 	}
+	pen, _ := out["pen"].(string)
 	plan, _ := out["plan"].(string)
+	payerHandle, _ := out["payer_handle"].(string)
 	if plan != planWork {
 		plan = planPersonal
 	}
@@ -281,7 +290,7 @@ func (wb *web) renew(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	checkoutURL, err := wb.stripe.createCheckoutURL(ctx, wb.stripe.renewParamsFor(wb.stripe.originForHost(r.Host), pen, plan))
+	checkoutURL, err := wb.stripe.createCheckoutURL(ctx, wb.stripe.renewParamsFor(wb.stripe.originForHost(r.Host), pen, plan, payerHandle))
 	if err != nil || !strings.HasPrefix(checkoutURL, "https://") {
 		log.Printf("stripe renew checkout (%s): %v", pen, err)
 		jsonOut(w, 502, map[string]string{"error": "the payment page didn't open; try again in a minute"})
@@ -539,14 +548,15 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if !alreadyApplied {
-				if wasSleeping {
-					go func(pen string) {
+				payerHandle := strings.ToLower(strings.TrimSpace(s.Metadata["payer_handle"]))
+				if wasSleeping || payerHandle != "" {
+					go func(pen, payer string, wake bool) {
 						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 						defer cancel()
-						if err := b.finishRenewalWork(ctx, pen, true); err != nil {
+						if err := b.finishRenewalWork(ctx, pen, payer, wake); err != nil {
 							log.Printf("stripe renew %s (%s) post-work: %v", s.ID, pen, err)
 						}
-					}(pen)
+					}(pen, payerHandle, wasSleeping)
 				}
 				b.notifyKind("raise", "Pen renewed ("+pen+")")
 			}
@@ -602,7 +612,7 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 					go func(pen string) {
 						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 						defer cancel()
-						if err := b.finishRenewalWork(ctx, pen, true); err != nil {
+						if err := b.finishRenewalWork(ctx, pen, "", true); err != nil {
 							log.Printf("stripe invoice %s (%s) wake: %v", inv.ID, pen, err)
 						}
 					}(pen)

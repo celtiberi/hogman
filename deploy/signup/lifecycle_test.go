@@ -2,7 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -13,6 +18,16 @@ import (
 
 	"github.com/stripe/stripe-go/v87"
 )
+
+func signTestRenewToken(key []byte, pen, handle, role string, exp int64, nonce string) string {
+	raw := fmt.Sprintf("v1|%s|%s|%s|%d|%s", pen, handle, role, exp, nonce)
+	payload := base64.RawURLEncoding.EncodeToString([]byte(raw))
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(renewTokenPurpose))
+	mac.Write([]byte(payload))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return payload + "." + sig
+}
 
 func TestLifecycleStateMachineD35(t *testing.T) {
 	t0 := time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC)
@@ -148,14 +163,14 @@ func TestDueBillingAlertOrderingAndUnconfiguredEmail(t *testing.T) {
 
 	// SF-6: Even on day 25 of grace, grace-start must fire BEFORE grace-day-23.
 	day25 := t0.Add(25 * 24 * time.Hour)
-	ms, _, _, due := dueBillingAlert("lab", rec, day25, "https://get.example.com/?renew=lab")
+	ms, _, _, due := dueBillingAlert("lab", rec, day25)
 	if !due || ms != "grace-start" {
 		t.Fatalf("expected grace-start first, got milestone=%q due=%v", ms, due)
 	}
 	rec.AlertsSent = map[string]int64{"grace-start": day25.Unix()}
-	ms, _, body, due := dueBillingAlert("lab", rec, day25, "https://get.example.com/?renew=lab")
-	if !due || ms != "grace-day-23" || !strings.Contains(body, "https://get.example.com/?renew=lab") {
-		t.Fatalf("expected grace-day-23 with renew URL, got milestone=%q due=%v body=%q", ms, due, body)
+	ms, _, body, due := dueBillingAlert("lab", rec, day25)
+	if !due || ms != "grace-day-23" || !strings.Contains(body, "pen's home page") || !strings.Contains(body, "becomes an owner") || strings.Contains(body, "?renew=") {
+		t.Fatalf("expected grace-day-23 with in-pen copy and no public renew URL, got milestone=%q due=%v body=%q", ms, due, body)
 	}
 
 	// SF-6: When Resend is unconfigured, sendBillingAlert returns (false, nil) so
@@ -222,6 +237,10 @@ exit 0
 	}
 
 	var sentAlerts []string
+	roles := map[string][2]string{
+		"alice": {"admin", "active"},
+		"bob":   {"member", "active"},
+	}
 	b := &broker{
 		home:      home,
 		tool:      fakeHost,
@@ -230,6 +249,10 @@ exit 0
 		alertSendFn: func(_ context.Context, to []string, subj, _ string) error {
 			sentAlerts = append(sentAlerts, strings.Join(to, ",")+":"+subj)
 			return nil
+		},
+		memberRoleFn: func(_ context.Context, _ string, handle string) (string, string, bool) {
+			r, ok := roles[handle]
+			return r[0], r[1], ok
 		},
 	}
 
@@ -244,7 +267,7 @@ exit 0
 		t.Fatal(err)
 	}
 
-	// 1. Entering grace writes data/registrar/billing-status.json with renew_url.
+	// 1. Entering grace writes data/registrar/billing-status.json with pen + origin only (no ?renew=).
 	trs, err := b.sweepLifecycles(context.Background(), paidUntil.Add(time.Hour), false)
 	if err != nil || len(trs) != 1 || trs[0].To != stateGrace || trs[0].AlertSent != "grace-start" {
 		t.Fatalf("grace sweep = (%+v, %v)", trs, err)
@@ -254,7 +277,7 @@ exit 0
 		t.Fatalf("expected registrar billing-status.json in grace: %v", err)
 	}
 	var banner portalBillingStatus
-	if err := json.Unmarshal(bannerBytes, &banner); err != nil || banner.State != stateGrace || banner.RenewURL != "https://get.example.com/?renew=lab" {
+	if err := json.Unmarshal(bannerBytes, &banner); err != nil || banner.Pen != pen || banner.State != stateGrace || banner.RenewURL != "https://get.example.com" {
 		t.Fatalf("invalid grace banner: %s (%v)", bannerBytes, err)
 	}
 
@@ -285,7 +308,7 @@ exit 0
 		t.Fatalf("duplicate renewal must be idempotent: rec2=%+v dup2=%v err=%v", rec2, dup2, err)
 	}
 	// Post-webhook wake fails while host is full -> PendingWake stays true.
-	if err := b.finishRenewalWork(context.Background(), pen, true); err == nil {
+	if err := b.finishRenewalWork(context.Background(), pen, "", true); err == nil {
 		t.Fatal("expected wake to fail while fail-wake flag exists")
 	}
 	// Once capacity frees up, next sweep retries wake and clears PendingWake.
@@ -298,9 +321,18 @@ exit 0
 	if err != nil || afterWake.PendingWake {
 		t.Fatalf("PendingWake should be cleared after successful wake retry: %+v (%v)", afterWake, err)
 	}
+	// 4. D-35: finishRenewalWork promotes verified active admin ("alice") to owner
+	// and refuses to promote non-admin ("bob", "mallory").
+	_ = b.finishRenewalWork(context.Background(), pen, "bob", false)
+	_ = b.finishRenewalWork(context.Background(), pen, "mallory", false)
+	_ = b.finishRenewalWork(context.Background(), pen, "alice", false)
 	calls, _ := os.ReadFile(logFile)
-	if !strings.Contains(string(calls), "wake lab") {
-		t.Fatalf("expected wake call in log:\n%s", calls)
+	callStr := string(calls)
+	if !strings.Contains(callStr, "wake lab") || !strings.Contains(callStr, "pen lab member role alice owner") {
+		t.Fatalf("expected wake and verified admin promotion in log:\n%s", callStr)
+	}
+	if strings.Contains(callStr, "role bob owner") || strings.Contains(callStr, "role mallory owner") {
+		t.Fatalf("non-admin must never be promoted:\n%s", callStr)
 	}
 }
 
@@ -313,20 +345,42 @@ func TestStripeRenewalWebhookChecksAndWebRenewFlow(t *testing.T) {
 	b.publicURL = "https://get.example.com"
 	h := b.handler()
 
-	// Seed a Work pen in grace.
-	_ = os.MkdirAll(filepath.Join(home, "pens", "acme", "data", "registrar"), 0o700)
+	// Seed a Work pen in grace with its per-pen 0600 renew.key and an expired nonce.
+	regDir := filepath.Join(home, "pens", "acme", "data", "registrar")
+	_ = os.MkdirAll(regDir, 0o700)
+	acmeKey := make([]byte, 32)
+	for i := range acmeKey {
+		acmeKey[i] = byte(0xa0 + i)
+	}
+	if err := os.WriteFile(b.renewKeyPath("acme"), []byte(hex.EncodeToString(acmeKey)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	otherKey := make([]byte, 32)
+	for i := range otherKey {
+		otherKey[i] = byte(0x10 + i)
+	}
 	t0 := time.Now().UTC().Add(-10 * 24 * time.Hour)
 	if err := savePenLifecycle(b.lifecyclePath("acme"), &penLifecycle{
-		Plan:           planWork,
-		State:          stateGrace,
-		PaidUntil:      t0.Unix(),
-		GraceUntil:     t0.Add(30 * 24 * time.Hour).Unix(),
-		SubscriptionID: "sub_work_1",
+		Plan:            planWork,
+		State:           stateGrace,
+		PaidUntil:       t0.Unix(),
+		GraceUntil:      t0.Add(30 * 24 * time.Hour).Unix(),
+		SubscriptionID:  "sub_work_1",
+		UsedRenewNonces: map[string]int64{"0011223344556677": time.Now().Add(-time.Hour).Unix()},
 	}); err != nil {
 		t.Fatal(err)
 	}
+	roles := map[string][2]string{
+		"alice": {"admin", "active"},
+		"bob":   {"member", "active"},
+	}
+	b.memberRoleFn = func(_ context.Context, _ string, handle string) (string, string, bool) {
+		r, ok := roles[handle]
+		return r[0], r[1], ok
+	}
 
-	// B3: POST /api/renew checks broker /renew-check and uses Work price for a Work pen.
+	// D-35: POST /api/renew accepts ONLY a valid, short-lived, single-use signed
+	// in-pen token (no unauthenticated {"pen":"acme"}).
 	bsrv := httptest.NewServer(h)
 	defer bsrv.Close()
 	wb := newWeb(bsrv.URL, testToken, "gate.example.com")
@@ -342,17 +396,61 @@ func TestStripeRenewalWebhookChecksAndWebRenewFlow(t *testing.T) {
 		},
 	}
 	wh := wb.handler()
-	req := httptest.NewRequest("POST", "https://get.example.com/api/renew", strings.NewReader(`{"pen":"acme"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "https://get.example.com")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	rec := httptest.NewRecorder()
-	wh.ServeHTTP(rec, req)
+	postRenew := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "https://get.example.com/api/renew", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "https://get.example.com")
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		rec := httptest.NewRecorder()
+		wh.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Unauthenticated {"pen":"acme"} is rejected (400 unknown field).
+	if rec := postRenew(`{"pen":"acme"}`); rec.Code != 400 {
+		t.Fatalf("unauthenticated pen body = %d, want 400 (%s)", rec.Code, rec.Body.String())
+	}
+	now := time.Now().UTC()
+	// Wrong key -> 403.
+	badKeyTok := signTestRenewToken(otherKey, "acme", "alice", "admin", now.Add(10*time.Minute).Unix(), "aabbccddeeff00112233445566778899")
+	if rec := postRenew(fmt.Sprintf(`{"token":%q}`, badKeyTok)); rec.Code != 403 {
+		t.Fatalf("wrong-key token = %d, want 403", rec.Code)
+	}
+	// Expired token -> 403.
+	expTok := signTestRenewToken(acmeKey, "acme", "alice", "admin", now.Add(-time.Minute).Unix(), "aabbccddeeff00112233445566778800")
+	if rec := postRenew(fmt.Sprintf(`{"token":%q}`, expTok)); rec.Code != 403 {
+		t.Fatalf("expired token = %d, want 403", rec.Code)
+	}
+	// Non-admin member ("bob") -> 403 even with valid HMAC.
+	bobTok := signTestRenewToken(acmeKey, "acme", "bob", "admin", now.Add(10*time.Minute).Unix(), "aabbccddeeff00112233445566778801")
+	if rec := postRenew(fmt.Sprintf(`{"token":%q}`, bobTok)); rec.Code != 403 {
+		t.Fatalf("non-admin member token = %d, want 403 (%s)", rec.Code, rec.Body.String())
+	}
+
+	// Valid active admin token succeeds, binds Work price + payer_handle from broker,
+	// prunes expired nonce, and refuses replay of the same nonce.
+	validTok := signTestRenewToken(acmeKey, "acme", "alice", "admin", now.Add(10*time.Minute).Unix(), "11223344556677889900aabbccddeeff")
+	rec := postRenew(fmt.Sprintf(`{"token":%q}`, validTok))
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "https://checkout.stripe.com/c/pay/cs_test_renew") {
 		t.Fatalf("POST /api/renew = %d %s", rec.Code, rec.Body.String())
 	}
-	if capturedParams == nil || *capturedParams.LineItems[0].Price != "price_work_120" || capturedParams.Metadata["action"] != "renew" || capturedParams.Metadata["pen"] != "acme" {
+	if capturedParams == nil || *capturedParams.LineItems[0].Price != "price_work_120" || capturedParams.Metadata["action"] != "renew" || capturedParams.Metadata["pen"] != "acme" || capturedParams.Metadata["payer_handle"] != "alice" {
 		t.Fatalf("unexpected stripe renew params: %+v", capturedParams)
+	}
+	// Replay of the exact same single-use token is rejected (403).
+	if replay := postRenew(fmt.Sprintf(`{"token":%q}`, validTok)); replay.Code != 403 {
+		t.Fatalf("replayed renew token = %d, want 403 (%s)", replay.Code, replay.Body.String())
+	}
+	// Expired nonce was pruned and fresh nonce recorded.
+	savedRec, err := loadPenLifecycle(b.lifecyclePath("acme"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, stillOld := savedRec.UsedRenewNonces["0011223344556677"]; stillOld {
+		t.Fatal("expired renew nonce should have been pruned")
+	}
+	if _, hasNew := savedRec.UsedRenewNonces["11223344556677889900aabbccddeeff"]; !hasNew {
+		t.Fatal("used renew nonce must be recorded in lifecycle.json")
 	}
 
 	// B2: Renewal checkout with wrong amount (Personal $50 for Work pen) or 100% coupon ($0) is rejected.
@@ -500,9 +598,13 @@ func TestHogmanHostPurgeSleepWakeGuardrails(t *testing.T) {
 	_ = os.Remove(filepath.Join(home, "fail-down"))
 
 	// B7: sleep -> wake by hand resets lifecycle.json to active (clears sleep_since & delete_after)
-	// so a manually woken pen can never be purged as expired sleep later.
+	// so a manually woken pen can never be purged as expired sleep later, and sleep writes the
+	// static sleeping front-door notice into front/Caddyfile.
 	if out, err := runHost("", "sleep", "lab"); err != nil {
 		t.Fatalf("sleep lab failed: err=%v out=%s", err, out)
+	}
+	if caddyRaw, err := os.ReadFile(filepath.Join(home, "front", "Caddyfile")); err != nil || !strings.Contains(string(caddyRaw), "import sleeping") {
+		t.Fatalf("sleep should write static sleeping route to front/Caddyfile: err=%v content=%s", err, caddyRaw)
 	}
 	if out, err := runHost("", "wake", "lab"); err != nil {
 		t.Fatalf("wake lab failed: err=%v out=%s", err, out)

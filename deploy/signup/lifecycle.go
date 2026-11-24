@@ -3,6 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -62,6 +67,7 @@ type penLifecycle struct {
 	BackdateRenewal bool             `json:"backdate_renewal"` // D-35 default: false
 	PendingWake     bool             `json:"pending_wake,omitempty"`
 	AppliedEvents   []string         `json:"applied_events,omitempty"`
+	UsedRenewNonces map[string]int64 `json:"used_renew_nonces,omitempty"` // nonce -> exp unix; pruned on use
 	AlertEmails     []string         `json:"alert_emails,omitempty"`
 	AlertsSent      map[string]int64 `json:"alerts_sent,omitempty"`
 	RenewURL        string           `json:"renew_url,omitempty"`
@@ -69,6 +75,7 @@ type penLifecycle struct {
 }
 
 type portalBillingStatus struct {
+	Pen        string `json:"pen,omitempty"`
 	State      string `json:"state"`
 	PaidUntil  string `json:"paid_until,omitempty"`
 	GraceUntil string `json:"grace_until,omitempty"`
@@ -95,18 +102,26 @@ func (b *broker) registrarBillingPath(pen string) string {
 	return filepath.Join(b.home, "pens", pen, "data", "registrar", "billing-status.json")
 }
 
-func (b *broker) renewURLForPen(pen, plan string) string {
+// renewKeyPath is the per-pen 256-bit HMAC key written by registrar (0600) and
+// read by broker to verify short-lived in-pen renewal tokens. Never served.
+func (b *broker) renewKeyPath(pen string) string {
+	return filepath.Join(b.home, "pens", pen, "data", "registrar", "renew.key")
+}
+
+// renewOriginForPen returns the HTTPS origin of the signup host for this pen's
+// plan (no pen name or secret in URL; registrar appends /#renew=<signed-token>).
+func (b *broker) renewOriginForPen(plan string) string {
 	base := strings.TrimRight(strings.TrimSpace(b.publicURL), "/")
 	if plan == planWork {
 		if wh := strings.TrimSpace(b.workSignupHost); wh != "" {
 			base = "https://" + strings.TrimPrefix(strings.TrimPrefix(wh, "https://"), "http://")
 		}
 	}
-	base = sanitizeHTTPSURL(base)
-	if base == "" {
+	u, err := url.Parse(sanitizeHTTPSURL(base))
+	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return ""
 	}
-	return base + "/?renew=" + url.QueryEscape(pen)
+	return "https://" + u.Host
 }
 
 func hasAppliedEvent(rec penLifecycle, eventID string) bool {
@@ -186,7 +201,7 @@ func savePenLifecycle(path string, rec *penLifecycle) error {
 	return nil
 }
 
-func syncRegistrarBillingBanner(billingPath string, rec *penLifecycle, fallbackRenewURL string) error {
+func syncRegistrarBillingBanner(pen, billingPath string, rec *penLifecycle, fallbackRenewOrigin string) error {
 	if rec.State != stateGrace {
 		err := os.Remove(billingPath)
 		if os.IsNotExist(err) {
@@ -197,13 +212,14 @@ func syncRegistrarBillingBanner(billingPath string, rec *penLifecycle, fallbackR
 	if fi, err := os.Stat(filepath.Dir(billingPath)); err != nil || !fi.IsDir() {
 		return nil
 	}
-	renewURL := sanitizeHTTPSURL(rec.RenewURL)
-	if renewURL == "" {
-		renewURL = sanitizeHTTPSURL(fallbackRenewURL)
+	renewOrigin := sanitizeHTTPSOrigin(rec.RenewURL)
+	if renewOrigin == "" {
+		renewOrigin = sanitizeHTTPSOrigin(fallbackRenewOrigin)
 	}
 	st := portalBillingStatus{
+		Pen:      pen,
 		State:    stateGrace,
-		RenewURL: renewURL,
+		RenewURL: renewOrigin,
 	}
 	if rec.PaidUntil > 0 {
 		st.PaidUntil = time.Unix(rec.PaidUntil, 0).UTC().Format(time.RFC3339)
@@ -248,6 +264,18 @@ func sanitizeHTTPSURL(raw string) string {
 		return ""
 	}
 	return u.String()
+}
+
+func sanitizeHTTPSOrigin(raw string) string {
+	s := sanitizeHTTPSURL(raw)
+	if s == "" {
+		return ""
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return "https://" + u.Host
 }
 
 // evaluateLifecycle computes at most ONE D-35 lifecycle transition for rec at
@@ -340,20 +368,12 @@ func applyRenewal(rec penLifecycle, now time.Time, backdate bool) (next penLifec
 
 // dueBillingAlert returns the milestone key and human message for an opt-in
 // owner/admin billing alert email if one is due and hasn't been sent yet.
-func dueBillingAlert(pen string, rec penLifecycle, now time.Time, fallbackRenewURL string) (milestone, subject, body string, due bool) {
+func dueBillingAlert(pen string, rec penLifecycle, now time.Time) (milestone, subject, body string, due bool) {
 	if len(rec.AlertEmails) == 0 || (rec.Plan != planPersonal && rec.Plan != planWork) {
 		return "", "", "", false
 	}
 	sent := func(k string) bool { return rec.AlertsSent != nil && rec.AlertsSent[k] > 0 }
 	nowUnix := now.Unix()
-	renewURL := sanitizeHTTPSURL(rec.RenewURL)
-	if renewURL == "" {
-		renewURL = sanitizeHTTPSURL(fallbackRenewURL)
-	}
-	renewLine := ""
-	if renewURL != "" {
-		renewLine = "\nRenew here: " + renewURL + "\n"
-	}
 
 	switch rec.State {
 	case stateActive:
@@ -361,7 +381,7 @@ func dueBillingAlert(pen string, rec penLifecycle, now time.Time, fallbackRenewU
 			dueDate := time.Unix(rec.PaidUntil, 0).UTC().Format("2006-01-02")
 			return "30d-before",
 				fmt.Sprintf("Hogman pen %s renews on %s", pen, dueDate),
-				fmt.Sprintf("Your Hogman pen (%s) is paid through %s.\nIf auto-renewal is off, any owner or admin can renew for another year before %s to avoid the 30-day grace period.%s", pen, dueDate, dueDate, renewLine),
+				fmt.Sprintf("Your Hogman pen (%s) is paid through %s.\nIf auto-renewal is off, any owner or admin can renew from the pen's home page before %s to avoid the 30-day grace period (an admin who pays becomes an owner).", pen, dueDate, dueDate),
 				true
 		}
 	case stateGrace:
@@ -370,14 +390,14 @@ func dueBillingAlert(pen string, rec penLifecycle, now time.Time, fallbackRenewU
 			sleepDate := time.Unix(rec.GraceUntil, 0).UTC().Format("2006-01-02")
 			return "grace-start",
 				fmt.Sprintf("Hogman pen %s entered its 30-day grace period", pen),
-				fmt.Sprintf("Your Hogman pen (%s) passed its paid-until date and is now in its 30-day grace period (stays awake until %s).\nAny owner or admin can pay for a fresh year starting from the day of payment.%s", pen, sleepDate, renewLine),
+				fmt.Sprintf("Your Hogman pen (%s) passed its paid-until date and is now in its 30-day grace period (stays awake until %s).\nAny owner or admin can renew from the pen's home page for a fresh year starting from the day of payment (an admin who pays becomes an owner).", pen, sleepDate),
 				true
 		}
 		if rec.GraceUntil > 0 && nowUnix >= rec.GraceUntil-int64(lifecycleFinalLead.Seconds()) && !sent("grace-day-23") {
 			sleepDate := time.Unix(rec.GraceUntil, 0).UTC().Format("2006-01-02")
 			return "grace-day-23",
 				fmt.Sprintf("Hogman pen %s goes to sleep on %s", pen, sleepDate),
-				fmt.Sprintf("Your Hogman pen (%s) is in its 30-day grace period and will go to sleep on %s.\nAny owner or admin can pay for a fresh year to keep it awake.%s", pen, sleepDate, renewLine),
+				fmt.Sprintf("Your Hogman pen (%s) is in its 30-day grace period and will go to sleep on %s.\nAny owner or admin can renew from the pen's home page for a fresh year to keep it awake (an admin who pays becomes an owner).", pen, sleepDate),
 				true
 		}
 	case stateSleeping:
@@ -385,7 +405,7 @@ func dueBillingAlert(pen string, rec penLifecycle, now time.Time, fallbackRenewU
 			delDate := time.Unix(rec.DeleteAfter, 0).UTC().Format("2006-01-02")
 			return "sleeping",
 				fmt.Sprintf("Hogman pen %s is now asleep", pen),
-				fmt.Sprintf("Your Hogman pen (%s) has been put to sleep after 30 days unpaid. Its state is kept until %s; any owner or admin can pay for a fresh year before then to wake it up.%s", pen, delDate, renewLine),
+				fmt.Sprintf("Your Hogman pen (%s) has been put to sleep after 30 days unpaid. Its state is kept until %s; contact your host operator if an owner or admin wants to wake it for renewal.", pen, delDate),
 				true
 		}
 	}
@@ -457,7 +477,7 @@ func (b *broker) initPenLifecycle(pen, plan, code string, paid bool, now time.Ti
 			rec.Plan = planPersonal
 		}
 		rec.PaidUntil = now.UTC().Add(lifecycleYearDuration).Unix()
-		rec.RenewURL = b.renewURLForPen(pen, rec.Plan)
+		rec.RenewURL = b.renewOriginForPen(rec.Plan)
 		if p, ok, err := b.findPaymentByCode(code); err == nil && ok {
 			if p.subscription != "" && p.subscription != "-" {
 				rec.SubscriptionID = p.subscription
@@ -502,12 +522,12 @@ func (b *broker) recordRenewal(pen, eventID, subID, custID string, now time.Time
 		updated.CustomerID = custID
 	}
 	if updated.RenewURL == "" {
-		updated.RenewURL = b.renewURLForPen(pen, updated.Plan)
+		updated.RenewURL = b.renewOriginForPen(updated.Plan)
 	}
 	if err := savePenLifecycle(path, &updated); err != nil {
 		return nil, false, false, err
 	}
-	if err := syncRegistrarBillingBanner(b.registrarBillingPath(pen), &updated, b.renewURLForPen(pen, updated.Plan)); err != nil {
+	if err := syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &updated, b.renewOriginForPen(updated.Plan)); err != nil {
 		log.Printf("lifecycle %s: clear grace banner: %v", pen, err)
 	}
 	b.ledger(fmt.Sprintf("%s renewed %s until %s (event=%s, backdate=%v, pending_wake=%v)",
@@ -515,9 +535,39 @@ func (b *broker) recordRenewal(pen, eventID, subID, custID string, now time.Time
 	return &updated, false, sleeping, nil
 }
 
-// finishRenewalWork executes post-webhook wake outside the webhook's
-// synchronous response path, alerting the operator if waking a paid pen fails.
-func (b *broker) finishRenewalWork(ctx context.Context, pen string, wake bool) error {
+// memberRole looks up handle's current role and status via `hogman-host pen <pen> member list`.
+func (b *broker) memberRole(ctx context.Context, pen, handle string) (role, status string, ok bool) {
+	if b.memberRoleFn != nil {
+		return b.memberRoleFn(ctx, pen, handle)
+	}
+	out, code, _ := b.run(ctx, "pen", pen, "member", "list")
+	if code != 0 {
+		return "", "", false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		// `registrar member list` columns: ID HANDLE ROLE STATUS ...
+		if len(f) >= 4 && strings.EqualFold(f[1], handle) {
+			return f[2], f[3], true
+		}
+	}
+	return "", "", false
+}
+
+func (b *broker) isPenAdmin(ctx context.Context, pen, handle string) bool {
+	role, status, ok := b.memberRole(ctx, pen, handle)
+	return ok && role == "admin" && status == "active"
+}
+
+func (b *broker) isPenAdminOrOwner(ctx context.Context, pen, handle string) bool {
+	role, status, ok := b.memberRole(ctx, pen, handle)
+	return ok && (role == "admin" || role == "owner") && status == "active"
+}
+
+// finishRenewalWork executes post-webhook wake and verified admin-to-owner
+// promotion (D-35) outside the webhook's synchronous response path, alerting
+// the operator if waking a paid pen fails.
+func (b *broker) finishRenewalWork(ctx context.Context, pen, payerHandle string, wake bool) error {
 	if wake {
 		_, code, stderr := b.runUnbounded(ctx, "wake", pen)
 		b.invalidateCapacityCache()
@@ -533,6 +583,18 @@ func (b *broker) finishRenewalWork(ctx context.Context, pen string, wake bool) e
 			_ = savePenLifecycle(b.lifecyclePath(pen), rec)
 		}
 		b.lifecycleMu.Unlock()
+	}
+	if h := strings.ToLower(strings.TrimSpace(payerHandle)); h != "" {
+		if _, ok := validHandle(h); ok {
+			if b.isPenAdmin(ctx, pen, h) {
+				_, code, stderr := b.runUnbounded(ctx, "pen", pen, "member", "role", h, "owner")
+				if code != 0 {
+					log.Printf("lifecycle %s: promote admin %s to owner (exit %d): %s", pen, h, code, strings.TrimSpace(stderr))
+				}
+			} else {
+				log.Printf("lifecycle %s: not promoting %q to owner (not an active admin of %s)", pen, h, pen)
+			}
+		}
 	}
 	return nil
 }
@@ -619,7 +681,7 @@ func (b *broker) sweepLifecycles(ctx context.Context, now time.Time, dryRun bool
 
 		next, changed := evaluateLifecycle(*rec, now)
 		if next.RenewURL == "" && (next.Plan == planPersonal || next.Plan == planWork) {
-			next.RenewURL = b.renewURLForPen(pen, next.Plan)
+			next.RenewURL = b.renewOriginForPen(next.Plan)
 		}
 		tr := lifecycleTransition{Pen: pen, From: rec.State, To: next.State, DryRun: dryRun}
 
@@ -631,7 +693,7 @@ func (b *broker) sweepLifecycles(ctx context.Context, now time.Time, dryRun bool
 						log.Printf("lifecycle %s: save grace: %v", pen, err)
 						continue
 					}
-					if err := syncRegistrarBillingBanner(b.registrarBillingPath(pen), &next, b.renewURLForPen(pen, next.Plan)); err != nil {
+					if err := syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &next, b.renewOriginForPen(next.Plan)); err != nil {
 						log.Printf("lifecycle %s: write grace banner: %v", pen, err)
 					}
 					b.ledger(fmt.Sprintf("%s lifecycle %s: active -> grace (until %s)",
@@ -647,7 +709,7 @@ func (b *broker) sweepLifecycles(ctx context.Context, now time.Time, dryRun bool
 						log.Printf("lifecycle %s: save sleeping: %v", pen, err)
 						continue
 					}
-					_ = syncRegistrarBillingBanner(b.registrarBillingPath(pen), &next, "")
+					_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &next, "")
 					b.ledger(fmt.Sprintf("%s lifecycle %s: %s -> sleeping (delete after %s)",
 						now.UTC().Format(time.RFC3339), pen, rec.State, time.Unix(next.DeleteAfter, 0).UTC().Format("2006-01-02")))
 				case stateDeleted:
@@ -667,7 +729,7 @@ func (b *broker) sweepLifecycles(ctx context.Context, now time.Time, dryRun bool
 			out = append(out, tr)
 		}
 
-		if milestone, subj, body, due := dueBillingAlert(pen, next, now, b.renewURLForPen(pen, next.Plan)); due {
+		if milestone, subj, body, due := dueBillingAlert(pen, next, now); due {
 			sent := false
 			if !dryRun {
 				var serr error
@@ -710,11 +772,90 @@ func (b *broker) lifecycleSweepHandler(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, map[string]any{"dry_run": dryRun, "transitions": transitions})
 }
 
-// renewCheck validates that a pen exists and is eligible for renewal (grace or
-// sleeping, not deleted) and returns its plan so signup-web charges the right tier.
-func (b *broker) renewCheck(w http.ResponseWriter, r *http.Request) {
+const (
+	renewTokenPurpose = "hogman-renew-v1:"
+	renewTokenMaxTTL  = 20 * time.Minute
+)
+
+type verifiedRenewToken struct {
+	Pen    string
+	Handle string
+	Role   string
+	Exp    int64
+	Nonce  string
+}
+
+func (b *broker) verifyRenewToken(raw string, now time.Time) (*verifiedRenewToken, error) {
+	raw = strings.TrimSpace(raw)
+	if len(raw) < 20 || len(raw) > 512 {
+		return nil, errors.New("invalid renewal token")
+	}
+	payloadB64, sigB64, ok := strings.Cut(raw, ".")
+	if !ok || payloadB64 == "" || sigB64 == "" || strings.Contains(sigB64, ".") {
+		return nil, errors.New("invalid renewal token")
+	}
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(payloadB64)
+	if err != nil {
+		return nil, errors.New("invalid renewal token")
+	}
+	sigBytes, err := base64.RawURLEncoding.DecodeString(sigB64)
+	if err != nil || len(sigBytes) != sha256.Size {
+		return nil, errors.New("invalid renewal token")
+	}
+	parts := strings.Split(string(payloadBytes), "|")
+	if len(parts) != 6 || parts[0] != "v1" {
+		return nil, errors.New("invalid renewal token")
+	}
+	pen := strings.ToLower(strings.TrimSpace(parts[1]))
+	handle := strings.ToLower(strings.TrimSpace(parts[2]))
+	role := strings.ToLower(strings.TrimSpace(parts[3]))
+	exp, err := strconv.ParseInt(parts[4], 10, 64)
+	nonce := strings.ToLower(strings.TrimSpace(parts[5]))
+	if _, ok := validPen(pen); !ok {
+		return nil, errors.New("invalid renewal token")
+	}
+	if _, ok := validHandle(handle); !ok {
+		return nil, errors.New("invalid renewal token")
+	}
+	if role != "owner" && role != "admin" {
+		return nil, errors.New("invalid renewal token")
+	}
+	if len(nonce) < 16 || len(nonce) > 64 {
+		return nil, errors.New("invalid renewal token")
+	}
+	if _, err := hex.DecodeString(nonce); err != nil {
+		return nil, errors.New("invalid renewal token")
+	}
+	nowUnix := now.UTC().Unix()
+	if err != nil || exp < nowUnix || exp > now.UTC().Add(renewTokenMaxTTL).Unix() {
+		return nil, errors.New("renewal link expired; open your pen's home page and click Renew now again")
+	}
+
+	// Verify HMAC against this pen's own 0600 key with fixed purpose prefix.
+	rawKey, err := os.ReadFile(b.renewKeyPath(pen))
+	if err != nil {
+		return nil, errors.New("invalid renewal token")
+	}
+	key, err := hex.DecodeString(strings.TrimSpace(string(rawKey)))
+	if err != nil || len(key) != 32 {
+		return nil, errors.New("invalid renewal token")
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(renewTokenPurpose))
+	mac.Write([]byte(payloadB64))
+	if !hmac.Equal(mac.Sum(nil), sigBytes) {
+		return nil, errors.New("invalid renewal token")
+	}
+	return &verifiedRenewToken{Pen: pen, Handle: handle, Role: role, Exp: exp, Nonce: nonce}, nil
+}
+
+// renewVerify authenticates a short-lived, single-use signed renewal token
+// minted inside the pen by an active owner or admin (D-35), marks its nonce
+// consumed BEFORE Stripe Checkout creation, and returns the authoritative
+// {pen, plan, payer_handle} so signup-web never trusts browser-supplied fields.
+func (b *broker) renewVerify(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Pen string `json:"pen"`
+		Token string `json:"token"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	dec := json.NewDecoder(r.Body)
@@ -723,21 +864,60 @@ func (b *broker) renewCheck(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "bad request"})
 		return
 	}
-	pen := strings.ToLower(strings.TrimSpace(in.Pen))
-	if _, ok := validPen(pen); !ok {
-		jsonOut(w, 400, map[string]string{"error": "invalid pen name"})
+	now := time.Now().UTC()
+	tok, err := b.verifyRenewToken(in.Token, now)
+	if err != nil {
+		jsonOut(w, 403, map[string]string{"error": err.Error()})
 		return
 	}
-	rec, err := loadPenLifecycle(b.lifecyclePath(pen))
+
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
+
+	path := b.lifecyclePath(tok.Pen)
+	rec, err := loadPenLifecycle(path)
 	if err != nil || rec.State == stateDeleted || (rec.Plan != planPersonal && rec.Plan != planWork) {
-		jsonOut(w, 404, map[string]string{"error": "that pen isn't eligible for renewal"})
+		jsonOut(w, 403, map[string]string{"error": "invalid renewal token"})
 		return
 	}
 	if rec.State != stateGrace && rec.State != stateSleeping {
-		jsonOut(w, 409, map[string]string{"error": "that pen is already paid and active"})
+		jsonOut(w, 409, map[string]string{"error": "this pen is already paid and active"})
 		return
 	}
-	jsonOut(w, 200, map[string]any{"ok": true, "pen": pen, "plan": rec.Plan, "state": rec.State})
+	// Prune expired nonces (keep-less-data) and reject replay.
+	nowUnix := now.Unix()
+	if rec.UsedRenewNonces == nil {
+		rec.UsedRenewNonces = map[string]int64{}
+	}
+	for n, exp := range rec.UsedRenewNonces {
+		if exp < nowUnix {
+			delete(rec.UsedRenewNonces, n)
+		}
+	}
+	if _, used := rec.UsedRenewNonces[tok.Nonce]; used {
+		jsonOut(w, 403, map[string]string{"error": "this renewal link was already used; click Renew now inside your pen for a fresh link"})
+		return
+	}
+	// Verify caller is still an active owner or admin of this pen.
+	if !b.isPenAdminOrOwner(r.Context(), tok.Pen, tok.Handle) {
+		jsonOut(w, 403, map[string]string{"error": "only active owners or admins can renew this pen"})
+		return
+	}
+	// Mark nonce used BEFORE returning so Checkout creation cannot replay it.
+	rec.UsedRenewNonces[tok.Nonce] = tok.Exp
+	rec.UpdatedAt = nowUnix
+	if err := savePenLifecycle(path, rec); err != nil {
+		log.Printf("lifecycle %s: save used renew nonce: %v", tok.Pen, err)
+		jsonOut(w, 500, map[string]string{"error": "could not process renewal right now"})
+		return
+	}
+	jsonOut(w, 200, map[string]any{
+		"ok":           true,
+		"pen":          tok.Pen,
+		"plan":         rec.Plan,
+		"state":        rec.State,
+		"payer_handle": tok.Handle,
+	})
 }
 
 // lifecycleAlertsHandler manages opt-in billing alert email addresses for a pen

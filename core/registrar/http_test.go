@@ -868,36 +868,78 @@ func TestNetworkInfoTheme(t *testing.T) {
 	}
 }
 
-func TestBillingStatusInMe(t *testing.T) {
+func TestBillingStatusInMeAndRenewToken(t *testing.T) {
 	e := newTestEnv(t)
-	if _, err := e.svc.AddMember(context.Background(), Actor{CLI: true}, "alice", "member"); err != nil {
+	if _, err := e.svc.AddMember(context.Background(), Actor{CLI: true}, "alice", "admin"); err != nil {
 		t.Fatal(err)
 	}
-	e.addDevice(t, "alice", "personal", "laptop", "100.64.0.10", "")
-	billingPath := filepath.Join(t.TempDir(), "billing-status.json")
+	if _, err := e.svc.AddMember(context.Background(), Actor{CLI: true}, "bob", "member"); err != nil {
+		t.Fatal(err)
+	}
+	e.addDevice(t, "alice", "personal", "alice-laptop", "100.64.0.10", "")
+	e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.11", "")
+	e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.12", "")
+
+	dir := t.TempDir()
+	billingPath := filepath.Join(dir, "billing-status.json")
 	e.svc.cfg.BillingStatusPath = billingPath
+	h := MeshHandler(e.svc)
 
 	// Absent file -> no billing field in /api/me.
-	rec := doMeshReq(MeshHandler(e.svc), "GET", "/api/me", "100.64.0.10", "", nil)
+	rec := doMeshReq(h, "GET", "/api/me", "100.64.0.10", "", nil)
 	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"billing"`) {
 		t.Fatalf("absent billing /api/me: %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Valid grace status -> returned in /api/me for members.
-	if err := os.WriteFile(billingPath, []byte(`{"state":"grace","grace_until":"2027-12-24T00:00:00Z","renew_url":"https://get.example.com/?renew=bobo"}`), 0o644); err != nil {
+	// Valid grace status -> admin sees can_renew:true, regular member sees can_renew:false (omitted),
+	// and neither sees raw renew_url or renew.key.
+	if err := os.WriteFile(billingPath, []byte(`{"pen":"bobo","state":"grace","grace_until":"2027-12-24T00:00:00Z","renew_url":"https://get.example.com"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rec = doMeshReq(MeshHandler(e.svc), "GET", "/api/me", "100.64.0.10", "", nil)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"state":"grace"`) || !strings.Contains(rec.Body.String(), `"renew_url":"https://get.example.com/?renew=bobo"`) {
-		t.Fatalf("grace billing /api/me: %d %s", rec.Code, rec.Body.String())
+	rec = doMeshReq(h, "GET", "/api/me", "100.64.0.10", "", nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"state":"grace"`) || !strings.Contains(rec.Body.String(), `"can_renew":true`) || strings.Contains(rec.Body.String(), "renew_url") {
+		t.Fatalf("admin grace billing /api/me: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doMeshReq(h, "GET", "/api/me", "100.64.0.12", "", nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"state":"grace"`) || strings.Contains(rec.Body.String(), `"can_renew":true`) {
+		t.Fatalf("member grace billing /api/me: %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Non-HTTPS renew_url is stripped.
-	if err := os.WriteFile(billingPath, []byte(`{"state":"grace","renew_url":"javascript:alert(1)"}`), 0o644); err != nil {
+	// Regular member and server device cannot mint a renew token (403).
+	js := map[string]string{"Content-Type": "application/json"}
+	if rec := doMeshReq(h, "POST", "/api/billing/renew-token", "100.64.0.12", `{}`, js); rec.Code != http.StatusForbidden {
+		t.Fatalf("member renew-token = %d, want 403 (%s)", rec.Code, rec.Body.String())
+	}
+	if rec := doMeshReq(h, "POST", "/api/billing/renew-token", "100.64.0.11", `{}`, js); rec.Code != http.StatusForbidden {
+		t.Fatalf("server renew-token = %d, want 403 (%s)", rec.Code, rec.Body.String())
+	}
+
+	// Active admin on personal device mints a short-lived signed fragment token and creates 0600 renew.key.
+	rec = doMeshReq(h, "POST", "/api/billing/renew-token", "100.64.0.10", `{}`, js)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin renew-token = %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		URL       string `json:"url"`
+		ExpiresAt string `json:"expires_at"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || !strings.HasPrefix(out.URL, "https://get.example.com/#renew=") {
+		t.Fatalf("unexpected renew-token response: %s", rec.Body.String())
+	}
+	fi, err := os.Stat(filepath.Join(dir, "renew.key"))
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("renew.key stat = (%v, %v), want 0600", fi, err)
+	}
+
+	// Non-HTTPS renew_url disables can_renew and refuses minting.
+	if err := os.WriteFile(billingPath, []byte(`{"pen":"bobo","state":"grace","renew_url":"javascript:alert(1)"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rec = doMeshReq(MeshHandler(e.svc), "GET", "/api/me", "100.64.0.10", "", nil)
-	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "javascript:") {
+	rec = doMeshReq(h, "GET", "/api/me", "100.64.0.10", "", nil)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"can_renew":true`) || strings.Contains(rec.Body.String(), "javascript:") {
 		t.Fatalf("non-https renew_url leaked: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := doMeshReq(h, "POST", "/api/billing/renew-token", "100.64.0.10", `{}`, js); rec.Code != http.StatusConflict {
+		t.Fatalf("renew-token with invalid renew_url = %d, want 409", rec.Code)
 	}
 }

@@ -458,18 +458,37 @@
         until = `${d.toISOString().slice(0, 10)} (${days} day${days === 1 ? '' : 's'} left)`;
       }
     }
-    p.append(document.createTextNode(
-      `this pen is in its 30-day grace period and will go to sleep on ${until}. ` +
-      'Renew for a fresh year to keep it awake.'
-    ));
-    if (typeof st.renew_url === 'string' && st.renew_url.startsWith('https://')) {
-      p.append(document.createTextNode(' '));
-      const a = document.createElement('a');
-      a.href = st.renew_url;
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-      a.textContent = 'Renew now';
-      p.append(a);
+    if (me && me.is_admin) {
+      p.append(document.createTextNode(
+        `this pen is in its 30-day grace period and will go to sleep on ${until}. ` +
+        'Any owner or admin can renew from this page for a fresh year (an admin who pays becomes an owner).'
+      ));
+      if (st.can_renew) {
+        p.append(document.createTextNode(' '));
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'link';
+        btn.textContent = 'Renew now';
+        btn.onclick = async () => {
+          btn.disabled = true;
+          try {
+            const r = await api('POST', '/billing/renew-token', {});
+            if (typeof r.url === 'string' && r.url.startsWith('https://')) {
+              window.open(r.url, '_blank', 'noopener,noreferrer');
+            }
+          } catch (e) {
+            showError(e);
+          } finally {
+            btn.disabled = false;
+          }
+        };
+        p.append(btn);
+      }
+    } else {
+      p.append(document.createTextNode(
+        `this pen is in its 30-day grace period and will go to sleep on ${until}. ` +
+        'Ask an owner or admin to renew it from this page.'
+      ));
     }
     el.replaceChildren(p);
     el.hidden = false;
