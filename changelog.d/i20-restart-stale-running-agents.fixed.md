@@ -1,0 +1,1 @@
+- Pen agents now report their startup executable SHA-256 (`bin_sha256`) on local `/status`, and `hogman update` detects and restarts any running agent whose binary differs from the target release (including older agents that don't report `bin_sha256`), even when the on-disk binaries are already up to date (I-20).
