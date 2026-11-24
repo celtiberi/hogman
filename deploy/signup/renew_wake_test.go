@@ -587,7 +587,8 @@ func TestRenewWakeWatcherRetriesPendingWakeAndPromotesOwnerI7(t *testing.T) {
 		return "", "", false
 	}
 
-	// First tick: wake fails transiently -> PendingWake stays true, PendingOwner untouched.
+	// First tick (t=0): wake fails transiently -> PendingWake stays true,
+	// PendingWakeAttempts=1, backed off 1m; PendingOwner untouched.
 	trs, err := b.sweepExpiredRenewWakes(context.Background(), now)
 	if err != nil {
 		t.Fatalf("first sweepExpiredRenewWakes: %v", err)
@@ -596,8 +597,8 @@ func TestRenewWakeWatcherRetriesPendingWakeAndPromotesOwnerI7(t *testing.T) {
 		t.Fatalf("expected failed pending_wake transition for paidpen, got %+v", trs)
 	}
 	rec, _ := loadPenLifecycle(filepath.Join(penDir, "lifecycle.json"))
-	if !rec.PendingWake || rec.PendingOwner != "alice" {
-		t.Fatalf("failed wake retry must keep PendingWake and PendingOwner: %+v", rec)
+	if !rec.PendingWake || rec.PendingOwner != "alice" || rec.PendingWakeAttempts != 1 || rec.PendingWakeNextAt != now.Add(time.Minute).Unix() {
+		t.Fatalf("failed wake retry must persist backoff and keep PendingWake/PendingOwner: %+v", rec)
 	}
 	// Unrelated pen must NOT have been touched by the 1-minute watcher.
 	otherRec, _ := loadPenLifecycle(filepath.Join(otherDir, "lifecycle.json"))
@@ -605,18 +606,40 @@ func TestRenewWakeWatcherRetriesPendingWakeAndPromotesOwnerI7(t *testing.T) {
 		t.Fatalf("1-minute watcher must not transition unrelated active pen to grace: %+v", otherRec)
 	}
 
-	// Second tick: transient failure clears -> PendingWake clears, marker/status removed, alice promoted.
-	_ = os.Remove(failFlag)
+	// Still inside 1m backoff (+30s): watcher MUST skip paidpen.
+	trs, err = b.sweepExpiredRenewWakes(context.Background(), now.Add(30*time.Second))
+	if err != nil || len(trs) != 0 {
+		t.Fatalf("expected skip during 1m backoff, got trs=%+v err=%v", trs, err)
+	}
+
+	// At +1m, host is still full -> attempt 2 fails and backs off 2m (to +3m).
 	trs, err = b.sweepExpiredRenewWakes(context.Background(), now.Add(time.Minute))
+	if err != nil || len(trs) != 1 || trs[0].Woken {
+		t.Fatalf("expected second failed retry at +1m, got trs=%+v err=%v", trs, err)
+	}
+	rec, _ = loadPenLifecycle(filepath.Join(penDir, "lifecycle.json"))
+	if rec.PendingWakeAttempts != 2 || rec.PendingWakeNextAt != now.Add(3*time.Minute).Unix() {
+		t.Fatalf("second failure should set attempts=2 and next=+3m: %+v", rec)
+	}
+
+	// At +2m (inside 2m backoff): watcher MUST skip paidpen even though 1m elapsed.
+	trs, err = b.sweepExpiredRenewWakes(context.Background(), now.Add(2*time.Minute))
+	if err != nil || len(trs) != 0 {
+		t.Fatalf("expected skip during 2m backoff at +2m, got trs=%+v err=%v", trs, err)
+	}
+
+	// At +3m, transient failure clears -> PendingWake & backoff clear, marker/status removed, alice promoted.
+	_ = os.Remove(failFlag)
+	trs, err = b.sweepExpiredRenewWakes(context.Background(), now.Add(3*time.Minute))
 	if err != nil {
-		t.Fatalf("second sweepExpiredRenewWakes: %v", err)
+		t.Fatalf("recovery sweepExpiredRenewWakes: %v", err)
 	}
 	if len(trs) != 1 || trs[0].Pen != "paidpen" || !trs[0].Woken {
 		t.Fatalf("expected successful pending_wake transition for paidpen, got %+v", trs)
 	}
 	rec, _ = loadPenLifecycle(filepath.Join(penDir, "lifecycle.json"))
-	if rec.PendingWake || rec.PendingOwner != "" {
-		t.Fatalf("successful wake retry should clear PendingWake and PendingOwner: %+v", rec)
+	if rec.PendingWake || rec.PendingWakeAttempts != 0 || rec.PendingWakeNextAt != 0 || rec.PendingOwner != "" {
+		t.Fatalf("successful wake retry should clear PendingWake, backoff, and PendingOwner: %+v", rec)
 	}
 	if _, err := os.Stat(filepath.Join(penDir, "data", "registrar", ".renew-only")); !os.IsNotExist(err) {
 		t.Fatal(".renew-only must be cleared after successful pending_wake retry")
@@ -627,5 +650,80 @@ func TestRenewWakeWatcherRetriesPendingWakeAndPromotesOwnerI7(t *testing.T) {
 	calls, _ := os.ReadFile(logFile)
 	if !strings.Contains(string(calls), "pen paidpen member role alice owner") {
 		t.Fatalf("expected pending_owner promotion after pending_wake retry, calls=%s", string(calls))
+	}
+}
+
+func TestPendingWakeInFlightSkipsOverlappingWatcherAndSweepI7(t *testing.T) {
+	b, home := newTestBroker(t, "")
+	now := time.Date(2026, 12, 1, 12, 0, 0, 0, time.UTC)
+	b.nowFn = func() time.Time { return now }
+	b.publicURL = "https://get.example.com"
+
+	penDir := filepath.Join(home, "pens", "racepen")
+	_ = os.MkdirAll(filepath.Join(penDir, "data", "registrar"), 0o700)
+	_ = savePenLifecycle(filepath.Join(penDir, "lifecycle.json"), &penLifecycle{
+		Plan:        planPersonal,
+		State:       stateActive,
+		PaidUntil:   now.Add(365 * 24 * time.Hour).Unix(),
+		PendingWake: true,
+	})
+
+	startedFile := filepath.Join(home, "wake-started")
+	releaseFile := filepath.Join(home, "wake-release")
+	callsFile := filepath.Join(home, "wake-calls.log")
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> \"" + callsFile + "\"\n" +
+		"if [ \"$1\" = wake ]; then\n" +
+		"  touch \"" + startedFile + "\"\n" +
+		"  i=0\n" +
+		"  while [ ! -f \"" + releaseFile + "\" ] && [ $i -lt 200 ]; do\n" +
+		"    sleep 0.05\n" +
+		"    i=$((i+1))\n" +
+		"  done\n" +
+		"fi\n" +
+		"exit 0\n"
+	b.tool = filepath.Join(t.TempDir(), "hogman-host")
+	_ = os.WriteFile(b.tool, []byte(script), 0o755)
+
+	doneCh := make(chan error, 1)
+	go func() {
+		doneCh <- b.finishRenewalWork(context.Background(), "racepen", true)
+	}()
+
+	// Wait until finishRenewalWork is actively inside `hogman-host wake racepen`.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(startedFile); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Stat(startedFile); err != nil {
+		t.Fatal("finishRenewalWork never started hogman-host wake")
+	}
+
+	// While finishRenewalWork's wake is in flight, both the 1-minute watcher and
+	// the daily sweep MUST skip racepen instead of starting a second overlapping wake.
+	trsWatcher, err := b.sweepExpiredRenewWakes(context.Background(), now)
+	if err != nil || len(trsWatcher) != 0 {
+		t.Fatalf("watcher must skip in-flight wake, got trs=%+v err=%v", trsWatcher, err)
+	}
+	trsSweep, err := b.sweepLifecycles(context.Background(), now, false)
+	if err != nil || len(trsSweep) != 0 {
+		t.Fatalf("daily sweep must skip in-flight wake, got trs=%+v err=%v", trsSweep, err)
+	}
+
+	// Release the in-flight wake and confirm it finishes cleanly with exactly 1 wake call.
+	_ = os.WriteFile(releaseFile, []byte("go"), 0o600)
+	if err := <-doneCh; err != nil {
+		t.Fatalf("finishRenewalWork returned error: %v", err)
+	}
+	rec, _ := loadPenLifecycle(filepath.Join(penDir, "lifecycle.json"))
+	if rec.PendingWake {
+		t.Fatalf("finishRenewalWork should have cleared PendingWake: %+v", rec)
+	}
+	rawCalls, _ := os.ReadFile(callsFile)
+	if got := strings.Count(string(rawCalls), "wake racepen"); got != 1 {
+		t.Fatalf("expected exactly 1 wake invocation (no overlap), got %d:\n%s", got, string(rawCalls))
 	}
 }
