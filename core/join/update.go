@@ -686,7 +686,7 @@ func probePenLoginServer(p *penTarget, o options) error {
 	if err != nil {
 		return err
 	}
-	resp, err := c.Get(baseURL + "/join/network.json")
+	resp, err := c.Get(baseURL + "/hogman/v1/network")
 	if err != nil {
 		return err
 	}

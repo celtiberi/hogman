@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -581,5 +584,34 @@ func TestUpdateContinuesPastUnreachablePenAndLegacySHA256MessageI10(t *testing.T
 		!strings.Contains(err.Error(), "older release") ||
 		!strings.Contains(err.Error(), "hogman update") {
 		t.Fatalf("legacy SHA256SUMS err = %v, want older-release + plain hogman update hint", err)
+	}
+
+	// 3. probePenLoginServer probes /hogman/v1/network (the real public route used by fetchNetwork).
+	var statusCode int = http.StatusOK
+	var gotPath string
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.URL.Path != "/hogman/v1/network" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(statusCode)
+		_, _ = w.Write([]byte(`{"zone":"lab.example.test"}`))
+	}))
+	defer ts.Close()
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ts.Certificate().Raw})
+	probeTarget := &penTarget{
+		zone: "lab.example.test",
+		cfg:  &agentConfig{Zone: "lab.example.test", LoginServer: ts.URL, ControlCA: string(caPEM)},
+	}
+	if err := probePenLoginServer(probeTarget, options{}); err != nil {
+		t.Fatalf("probePenLoginServer against live /hogman/v1/network failed: %v (path=%q)", err, gotPath)
+	}
+	if gotPath != "/hogman/v1/network" {
+		t.Fatalf("probed path = %q, want /hogman/v1/network", gotPath)
+	}
+	statusCode = http.StatusServiceUnavailable
+	if err := probePenLoginServer(probeTarget, options{}); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("probePenLoginServer on 503 = %v, want 503 error", err)
 	}
 }

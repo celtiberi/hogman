@@ -737,6 +737,7 @@ out="$(run dave-laptop sh -c 'HOGMAN_RELEASE_BASE="https://dave-server:8443" "/d
 t_multi=$(( $(date +%s) - t0 ))
 check "hogman update with one dead pen + one live pen reports failure (exit $rc, ${t_multi}s)" bash -c 'test "$1" != 0 && grep -q "hogman leave aaa-dead.example.test" <<<"$2"' _ "$rc" "$out"
 check "... skipped the 60s wait on the unreachable pen (${t_multi}s < 45s)" test "$t_multi" -lt 45
+check "... started the unreachable pen's new agent without waiting (B1)" retry 10 run dave-laptop sh -c 'pid="$(cat /root/.config/hogman/aaa-dead.example.test/agent.pid 2>/dev/null || true)"; test -n "$pid" && kill -0 "$pid" 2>/dev/null'
 AFTER_MULTI_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>/dev/null | tr -d '\r')"
 check "... still migrated and restarted the healthy pen ($BEFORE_MULTI_PID -> $AFTER_MULTI_PID)" test -n "$BEFORE_MULTI_PID" -a -n "$AFTER_MULTI_PID" -a "$BEFORE_MULTI_PID" != "$AFTER_MULTI_PID"
 check "... removed legacy hogman-join copy on BOTH pens" run dave-laptop sh -c 'test ! -e /root/.config/hogman/aaa-dead.example.test/hogman-join && test ! -e "/root/.config/hogman/'"$ZONE"'/hogman-join"'
