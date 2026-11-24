@@ -58,6 +58,8 @@ type broker struct {
 	renewWakeReserve       *int // nil defaults to renewWakeDefaultReserve (2); 0 disables reserve
 	renewWakeMaxConcurrent int  // <= 0 defaults to renewWakeDefaultMaxConcurrent (2)
 	globalCapFullSince     time.Time
+	wakeFlightMu           sync.Mutex
+	wakesInFlight          map[string]bool
 	globalCapAlertedAt     time.Time
 }
 

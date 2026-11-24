@@ -116,9 +116,11 @@ type penLifecycle struct {
 	SubscriptionID    string                      `json:"subscription_id,omitempty"`
 	CustomerID        string                      `json:"customer_id,omitempty"`
 	CancelledAt       int64                       `json:"cancelled_at,omitempty"`
-	BackdateRenewal   bool                        `json:"backdate_renewal"` // D-35 default: false
-	PendingWake       bool                        `json:"pending_wake,omitempty"`
-	PendingOwner      string                      `json:"pending_owner,omitempty"`
+	BackdateRenewal     bool                        `json:"backdate_renewal"` // D-35 default: false
+	PendingWake         bool                        `json:"pending_wake,omitempty"`
+	PendingWakeAttempts int                         `json:"pending_wake_attempts,omitempty"`
+	PendingWakeNextAt   int64                       `json:"pending_wake_next_at,omitempty"`
+	PendingOwner        string                      `json:"pending_owner,omitempty"`
 	PendingCancelSubs []pendingCancelSub          `json:"pending_cancel_subs,omitempty"` // I-6: replaced Stripe sub IDs awaiting cancel by web
 	ReplacedSubs      map[string]int64            `json:"replaced_subs,omitempty"`       // I-6: recently replaced sub IDs -> replaced_at unix (for double-charge invoice alerts)
 	AppliedEvents     []string                    `json:"applied_events,omitempty"`
@@ -479,6 +481,8 @@ func applyRenewal(rec penLifecycle, now time.Time, backdate bool) (next penLifec
 	next.WakeCeiling = 0
 	next.CancelledAt = 0
 	next.PendingWake = wasSleeping
+	next.PendingWakeAttempts = 0
+	next.PendingWakeNextAt = 0
 	next.AlertsSent = nil
 	next.UpdatedAt = nowUnix
 	return next, wasSleeping
@@ -772,24 +776,90 @@ func (b *broker) applyPendingOwner(ctx context.Context, pen, handle string) (don
 	return true, nil
 }
 
+// tryBeginWake claims the in-memory per-pen wake/sleep flight slot so two
+// concurrent `hogman-host wake` or `sleep` calls (e.g. finishRenewalWork and
+// the 1-minute watcher) never overlap on the same pen.
+func (b *broker) tryBeginWake(pen string) bool {
+	b.wakeFlightMu.Lock()
+	defer b.wakeFlightMu.Unlock()
+	if b.wakesInFlight == nil {
+		b.wakesInFlight = map[string]bool{}
+	}
+	if b.wakesInFlight[pen] {
+		return false
+	}
+	b.wakesInFlight[pen] = true
+	return true
+}
+
+func (b *broker) endWake(pen string) {
+	b.wakeFlightMu.Lock()
+	delete(b.wakesInFlight, pen)
+	b.wakeFlightMu.Unlock()
+}
+
+// pendingWakeBackoff returns the retry delay after the given number of failed
+// paid-renewal wake attempts (1m -> 2m -> 5m -> 15m -> 30m -> 1h) so a full
+// host does not fork `hogman-host wake` every minute.
+func pendingWakeBackoff(attempts int) time.Duration {
+	switch {
+	case attempts <= 1:
+		return time.Minute
+	case attempts == 2:
+		return 2 * time.Minute
+	case attempts == 3:
+		return 5 * time.Minute
+	case attempts == 4:
+		return 15 * time.Minute
+	case attempts == 5:
+		return 30 * time.Minute
+	default:
+		return time.Hour
+	}
+}
+
 // finishRenewalWork executes post-webhook wake and persisted PendingOwner
 // promotion (D-35, B9) outside the webhook's synchronous response path.
 func (b *broker) finishRenewalWork(ctx context.Context, pen string, wake bool) error {
 	if wake {
-		_, code, stderr := b.runUnbounded(ctx, "wake", pen)
-		b.invalidateCapacityCache()
-		if code != 0 {
-			err := fmt.Errorf("wake %s failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
-			b.notifyKind("health", fmt.Sprintf("Pen %s was renewed and paid, but wake failed: %v", pen, err))
-			return err
+		if !b.tryBeginWake(pen) {
+			// Another wake is already in flight for this pen; PendingWake stays
+			// persisted so the 1-minute watcher will retry if it did not complete.
+			return nil
 		}
-		b.lifecycleMu.Lock()
-		if rec, err := loadPenLifecycle(b.lifecyclePath(pen)); err == nil && rec.PendingWake {
-			rec.PendingWake = false
-			rec.UpdatedAt = time.Now().UTC().Unix()
-			_ = savePenLifecycle(b.lifecyclePath(pen), rec)
+		wakeErr := func() error {
+			defer b.endWake(pen)
+			_, code, stderr := b.runUnbounded(ctx, "wake", pen)
+			b.invalidateCapacityCache()
+			now := b.now().UTC()
+			if code != 0 {
+				err := fmt.Errorf("wake %s failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
+				b.notifyKind("health", fmt.Sprintf("Pen %s was renewed and paid, but wake failed: %v", pen, err))
+				b.lifecycleMu.Lock()
+				if rec, lerr := loadPenLifecycle(b.lifecyclePath(pen)); lerr == nil && rec.PendingWake {
+					rec.PendingWakeAttempts++
+					rec.PendingWakeNextAt = now.Add(pendingWakeBackoff(rec.PendingWakeAttempts)).Unix()
+					rec.UpdatedAt = now.Unix()
+					_ = savePenLifecycle(b.lifecyclePath(pen), rec)
+				}
+				b.lifecycleMu.Unlock()
+				return err
+			}
+			b.lifecycleMu.Lock()
+			if rec, lerr := loadPenLifecycle(b.lifecyclePath(pen)); lerr == nil && rec.PendingWake {
+				rec.PendingWake = false
+				rec.PendingWakeAttempts = 0
+				rec.PendingWakeNextAt = 0
+				rec.UpdatedAt = now.Unix()
+				_ = savePenLifecycle(b.lifecyclePath(pen), rec)
+				_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), rec, b.renewOriginForPen(rec.Plan))
+			}
+			b.lifecycleMu.Unlock()
+			return nil
+		}()
+		if wakeErr != nil {
+			return wakeErr
 		}
-		b.lifecycleMu.Unlock()
 	}
 
 	b.lifecycleMu.Lock()
@@ -806,7 +876,7 @@ func (b *broker) finishRenewalWork(ctx context.Context, pen string, wake bool) e
 		b.lifecycleMu.Lock()
 		if rec, lerr := loadPenLifecycle(b.lifecyclePath(pen)); lerr == nil && rec.PendingOwner == pendingOwner {
 			rec.PendingOwner = ""
-			rec.UpdatedAt = time.Now().UTC().Unix()
+			rec.UpdatedAt = b.now().UTC().Unix()
 			_ = savePenLifecycle(b.lifecyclePath(pen), rec)
 		}
 		b.lifecycleMu.Unlock()
@@ -877,18 +947,31 @@ func (b *broker) sweepLifecycles(ctx context.Context, now time.Time, dryRun bool
 		if rec.State == stateActive && rec.PendingWake {
 			tr := lifecycleTransition{Pen: pen, From: stateSleeping, To: stateActive, DryRun: dryRun, Woken: true}
 			if !dryRun {
-				_, code, stderr := b.runUnbounded(ctx, "wake", pen)
-				b.invalidateCapacityCache()
-				if code != 0 {
-					log.Printf("lifecycle %s: retry wake failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
-					b.notifyKind("health", fmt.Sprintf("Pen %s paid renewal wake retry failed (exit %d): %s", pen, code, strings.TrimSpace(stderr)))
-					tr.Woken = false
-					tr.ActionNote = "wake retry failed"
-				} else {
-					rec.PendingWake = false
-					rec.UpdatedAt = now.UTC().Unix()
-					_ = savePenLifecycle(path, rec)
+				if !b.tryBeginWake(pen) {
+					continue
 				}
+				func() {
+					defer b.endWake(pen)
+					_, code, stderr := b.runUnbounded(ctx, "wake", pen)
+					b.invalidateCapacityCache()
+					if code != 0 {
+						log.Printf("lifecycle %s: retry wake failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
+						b.notifyKind("health", fmt.Sprintf("Pen %s paid renewal wake retry failed (exit %d): %s", pen, code, strings.TrimSpace(stderr)))
+						rec.PendingWakeAttempts++
+						rec.PendingWakeNextAt = now.UTC().Add(pendingWakeBackoff(rec.PendingWakeAttempts)).Unix()
+						rec.UpdatedAt = now.UTC().Unix()
+						_ = savePenLifecycle(path, rec)
+						tr.Woken = false
+						tr.ActionNote = "wake retry failed"
+					} else {
+						rec.PendingWake = false
+						rec.PendingWakeAttempts = 0
+						rec.PendingWakeNextAt = 0
+						rec.UpdatedAt = now.UTC().Unix()
+						_ = savePenLifecycle(path, rec)
+						_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), rec, b.renewOriginForPen(rec.Plan))
+					}
+				}()
 			}
 			out = append(out, tr)
 			if rec.PendingWake {
@@ -1668,11 +1751,23 @@ func (b *broker) runRenewWakeAsync(pen string, wakeStartedAt, ceilingUnix int64)
 	ctx, cancel := context.WithTimeout(context.Background(), renewWakeCeiling)
 	defer cancel()
 
-	_, code, stderr := b.runUnbounded(ctx, "wake", "--renew-only", pen)
-	b.invalidateCapacityCache()
-	if code != 0 {
-		log.Printf("lifecycle wake %s: wake --renew-only failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
+	if !b.tryBeginWake(pen) {
+		log.Printf("lifecycle wake %s: wake already in flight; rolling back renew-only request", pen)
 		b.rollbackFailedRenewWake(pen, wakeStartedAt)
+		return
+	}
+	started := func() bool {
+		defer b.endWake(pen)
+		_, code, stderr := b.runUnbounded(ctx, "wake", "--renew-only", pen)
+		b.invalidateCapacityCache()
+		if code != 0 {
+			log.Printf("lifecycle wake %s: wake --renew-only failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
+			b.rollbackFailedRenewWake(pen, wakeStartedAt)
+			return false
+		}
+		return true
+	}()
+	if !started {
 		return
 	}
 
@@ -1782,19 +1877,29 @@ func (b *broker) lifecycleWakeHandler(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 202, map[string]any{"ok": true})
 }
 
-// sweepExpiredRenewWakes handles ONLY expired renew_only deadlines (never
-// running active->grace, alerts, or purges for unrelated pens) so the 1-minute
-// watcher stays narrowly scoped to ephemeral wakes.
+// sweepExpiredRenewWakes handles ONLY expired renew_only deadlines and
+// pending_wake retries from paid renewals (never running active->grace,
+// billing alerts, or purges for unrelated pens) so the 1-minute watcher stays
+// narrowly scoped to ephemeral wakes and paid-renewal recovery.
+//
+// Pending-wake retries execute outside lifecycleMu and are serialized per pen
+// via tryBeginWake/endWake so they never overlap finishRenewalWork. Expired
+// renew_only sleeps hold lifecycleMu across `hogman-host sleep` and the final
+// save so a concurrent renewal payment cannot land in the gap and get
+// overwritten back to sleeping by `hogman-host sleep`.
 func (b *broker) sweepExpiredRenewWakes(ctx context.Context, now time.Time) ([]lifecycleTransition, error) {
-	b.lifecycleMu.Lock()
-	defer b.lifecycleMu.Unlock()
+	nowUTC := now.UTC()
+	nowUnix := nowUTC.Unix()
 
+	b.lifecycleMu.Lock()
 	pensDir := filepath.Join(b.home, "pens")
 	entries, err := os.ReadDir(pensDir)
 	if os.IsNotExist(err) {
+		b.lifecycleMu.Unlock()
 		return nil, nil
 	}
 	if err != nil {
+		b.lifecycleMu.Unlock()
 		return nil, err
 	}
 	names := make([]string, 0, len(entries))
@@ -1806,40 +1911,144 @@ func (b *broker) sweepExpiredRenewWakes(ctx context.Context, now time.Time) ([]l
 	sort.Strings(names)
 
 	concurrent := 0
-	var out []lifecycleTransition
+	var pendingWakePens []string
+	var expiredRenewPens []string
 	for _, pen := range names {
-		path := b.lifecyclePath(pen)
-		rec, err := loadPenLifecycle(path)
-		if err != nil || rec.State != stateRenewOnly {
+		rec, lerr := loadPenLifecycle(b.lifecyclePath(pen))
+		if lerr != nil {
 			continue
 		}
-		concurrent++
-		next, changed := evaluateLifecycle(*rec, now)
-		if !changed || next.State != stateSleeping {
+		if rec.State == stateActive && rec.PendingWake {
+			if rec.PendingWakeNextAt == 0 || nowUnix >= rec.PendingWakeNextAt {
+				pendingWakePens = append(pendingWakePens, pen)
+			}
 			continue
 		}
-		_, code, stderr := b.runUnbounded(ctx, "sleep", pen)
-		b.invalidateCapacityCache()
-		if code != 0 {
-			log.Printf("renew-wake watcher %s: sleep failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
-			continue
+		if rec.State == stateRenewOnly {
+			concurrent++
+			if next, changed := evaluateLifecycle(*rec, nowUTC); changed && next.State == stateSleeping {
+				expiredRenewPens = append(expiredRenewPens, pen)
+			}
 		}
-		if err := savePenLifecycle(path, &next); err != nil {
-			log.Printf("renew-wake watcher %s: save sleeping: %v", pen, err)
-			continue
-		}
-		_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &next, "")
-		b.ledger(fmt.Sprintf("%s lifecycle %s: renew_only -> sleeping (delete after %s)",
-			now.UTC().Format(time.RFC3339), pen, time.Unix(next.DeleteAfter, 0).UTC().Format("2006-01-02")))
-		concurrent--
-		out = append(out, lifecycleTransition{Pen: pen, From: stateRenewOnly, To: stateSleeping})
 	}
-	b.checkGlobalWakeCapHealth(now, concurrent)
+	b.lifecycleMu.Unlock()
+
+	var out []lifecycleTransition
+	for _, pen := range pendingWakePens {
+		if !b.tryBeginWake(pen) {
+			continue
+		}
+		var pendingOwner string
+		func() {
+			defer b.endWake(pen)
+			path := b.lifecyclePath(pen)
+			b.lifecycleMu.Lock()
+			rec, lerr := loadPenLifecycle(path)
+			stillDue := lerr == nil && rec.State == stateActive && rec.PendingWake &&
+				(rec.PendingWakeNextAt == 0 || nowUnix >= rec.PendingWakeNextAt)
+			b.lifecycleMu.Unlock()
+			if !stillDue {
+				return
+			}
+
+			tr := lifecycleTransition{Pen: pen, From: stateSleeping, To: stateActive, Woken: true}
+			_, code, stderr := b.runUnbounded(ctx, "wake", pen)
+			b.invalidateCapacityCache()
+			if code != 0 {
+				log.Printf("renew-wake watcher %s: pending_wake retry failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
+				b.notifyKind("health", fmt.Sprintf("Pen %s paid renewal wake retry failed (exit %d): %s", pen, code, strings.TrimSpace(stderr)))
+				b.lifecycleMu.Lock()
+				if cur, cerr := loadPenLifecycle(path); cerr == nil && cur.PendingWake {
+					cur.PendingWakeAttempts++
+					cur.PendingWakeNextAt = nowUTC.Add(pendingWakeBackoff(cur.PendingWakeAttempts)).Unix()
+					cur.UpdatedAt = nowUnix
+					_ = savePenLifecycle(path, cur)
+				}
+				b.lifecycleMu.Unlock()
+				tr.Woken = false
+				tr.ActionNote = "wake retry failed"
+				out = append(out, tr)
+				return
+			}
+
+			b.lifecycleMu.Lock()
+			if cur, cerr := loadPenLifecycle(path); cerr == nil && cur.State == stateActive {
+				cur.PendingWake = false
+				cur.PendingWakeAttempts = 0
+				cur.PendingWakeNextAt = 0
+				cur.UpdatedAt = nowUnix
+				if serr := savePenLifecycle(path, cur); serr != nil {
+					log.Printf("renew-wake watcher %s: save active after pending_wake: %v", pen, serr)
+					b.lifecycleMu.Unlock()
+					return
+				}
+				_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), cur, b.renewOriginForPen(cur.Plan))
+				pendingOwner = cur.PendingOwner
+			}
+			b.lifecycleMu.Unlock()
+			out = append(out, tr)
+		}()
+
+		if pendingOwner != "" {
+			if done, perr := b.applyPendingOwner(ctx, pen, pendingOwner); perr != nil {
+				log.Printf("renew-wake watcher %s: retry pending_owner %s: %v", pen, pendingOwner, perr)
+			} else if done {
+				b.lifecycleMu.Lock()
+				if cur, cerr := loadPenLifecycle(b.lifecyclePath(pen)); cerr == nil && cur.PendingOwner == pendingOwner {
+					cur.PendingOwner = ""
+					cur.UpdatedAt = nowUnix
+					_ = savePenLifecycle(b.lifecyclePath(pen), cur)
+				}
+				b.lifecycleMu.Unlock()
+			}
+		}
+	}
+
+	for _, pen := range expiredRenewPens {
+		if !b.tryBeginWake(pen) {
+			continue
+		}
+		func() {
+			defer b.endWake(pen)
+			path := b.lifecyclePath(pen)
+			b.lifecycleMu.Lock()
+			defer b.lifecycleMu.Unlock()
+			rec, lerr := loadPenLifecycle(path)
+			if lerr != nil || rec.State != stateRenewOnly {
+				return
+			}
+			next, changed := evaluateLifecycle(*rec, nowUTC)
+			if !changed || next.State != stateSleeping {
+				return
+			}
+
+			_, code, stderr := b.runUnbounded(ctx, "sleep", pen)
+			b.invalidateCapacityCache()
+			if code != 0 {
+				log.Printf("renew-wake watcher %s: sleep failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
+				return
+			}
+			if serr := savePenLifecycle(path, &next); serr != nil {
+				log.Printf("renew-wake watcher %s: save sleeping: %v", pen, serr)
+				return
+			}
+			_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), &next, "")
+			b.ledger(fmt.Sprintf("%s lifecycle %s: renew_only -> sleeping (delete after %s)",
+				nowUTC.Format(time.RFC3339), pen, time.Unix(next.DeleteAfter, 0).UTC().Format("2006-01-02")))
+			concurrent--
+			out = append(out, lifecycleTransition{Pen: pen, From: stateRenewOnly, To: stateSleeping})
+		}()
+	}
+
+	b.lifecycleMu.Lock()
+	b.checkGlobalWakeCapHealth(nowUTC, concurrent)
+	b.lifecycleMu.Unlock()
 	return out, nil
 }
 
-// runRenewWakeWatcher periodically enforces persisted renew_only deadlines
-// (even across broker restarts) and alerts if the global wake cap stays full.
+// runRenewWakeWatcher periodically enforces persisted renew_only deadlines,
+// retries failed paid-renewal wakes (pending_wake), and alerts if the global
+// wake cap stays full.
 func (b *broker) runRenewWakeWatcher() {
 	time.Sleep(15 * time.Second)
 	t := time.NewTicker(time.Minute)
