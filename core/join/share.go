@@ -353,6 +353,7 @@ type meView struct {
 		Kind string `json:"kind"`
 	} `json:"this_device"`
 	Network *networkInfo `json:"network"`
+	IsOwner *bool        `json:"is_owner"`
 }
 
 func homeAPI(c *http.Client, zone, method, path string, in, out any) (int, error) {

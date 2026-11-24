@@ -11,6 +11,10 @@ type systemProxyState struct {
 	OSProxyDetail   string // detailed description for local CLI `status` output only (never sent to extensions)
 	VPNOverride     bool
 	VPNInterface    string
+	// StalePAC is an automatic-proxy address an old Hogman pen left behind
+	// (nothing answers there, or a Hogman agent does). It's ours to clear,
+	// not someone else's proxy, so it's reported apart from conflicts.
+	StalePAC string
 }
 
 type scutilProxyInfo struct {
@@ -85,8 +89,12 @@ func evaluateDarwinProxyState(proxy scutilProxyInfo, primaryIface string, servic
 		kinds = append(kinds, "socks")
 	}
 	if proxy.PACOn && proxy.PACURL != "" && !isHogmanPACURL(proxy.PACURL, known) {
-		conflicts = append(conflicts, fmt.Sprintf("PAC (%s)", proxy.PACURL))
-		kinds = append(kinds, "pac")
+		if staleHogmanPAC(proxy.PACURL) {
+			st.StalePAC = proxy.PACURL
+		} else {
+			conflicts = append(conflicts, fmt.Sprintf("PAC (%s)", proxy.PACURL))
+			kinds = append(kinds, "pac")
+		}
 	}
 	if len(conflicts) > 0 {
 		st.OSProxyConflict = true

@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- `core/join`: `hogman-join leave <pen>` no longer needs a keyed join link (I-2). It accepts a link with or without its key, the control host, or the pen zone, and works from saved settings, so a pen whose server is gone can still be left. `leave` with no pen does nothing and points to `leave-all`. `leave`, `leave-all` and `uninstall` refuse a pen the person owns (owners have no account recovery) or one that can't be reached to check; `--force` overrides only after a warning and typing the exact pen name, which `--yes` never skips. Before macOS asks for a password to change the proxy setting, `hogman-join` says why. `leave-all` and `uninstall` also clear an automatic-proxy setting an old pen left behind (for example after a cancelled password prompt), and `hogman-join status` reports it as a stale Hogman setting rather than a non-Hogman proxy. `status` only mentions the optional browser extension when it's installed or a VPN override makes it useful.
+
+### Added
+- `core/join`: `hogman-join leave-all` (lists every pen and asks first) and `hogman-join uninstall` (all or nothing: asks first, then leaves every pen and removes Hogman's settings folders and browser native-messaging host, and prints how to delete the program and the extension).
+
 ### Added
 - `deploy/challenge-dns`, `deploy/signup`, and `deploy/hogman-host`: Work tier plan with higher per-pen certificate caps and separate Stripe pricing (D-30, D-31):
   - `deploy/challenge-dns`: added per-credential `plan` (`personal` default or `work`, zero `state.json` schema migration) with per-plan certificate & EAB caps — Personal stays at **5/hour & 20/7 days** (`CDNS_HOURLY_CAP`, `CDNS_WEEKLY_CAP`), Work gets **10/hour & 60/7 days** (`CDNS_WORK_HOURLY_CAP`, `CDNS_WORK_WEEKLY_CAP`) while keeping the shared **40/hour soft / 60/hour hard global ceiling** and `<2`-name quiet-pen floor so busy Work pens cannot starve quiet or new pens; added `challenge-dns cred add pen <name> --plan work` and live `challenge-dns cred plan <id-or-pen> personal|work` (`PUT /admin/creds/{id}/plan`).

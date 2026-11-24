@@ -25,6 +25,8 @@ func TestHogmanShapedPACURL(t *testing.T) {
 		"http://corp.example/proxy.pac":               false,
 		"http://127.0.0.1:20441/other.pac":            false,
 		"http://127.0.0.1:80/proxy.pac":               false,
+		"http://127.0.0.1:8080/proxy.pac":             false, // outside Hogman's 17000-26999
+		"http://127.0.0.1:27000/proxy.pac":            false,
 		"http://user@127.0.0.1:20441/proxy.pac":       false,
 	} {
 		if got := hogmanShapedPACURL(u); got != want {
@@ -35,10 +37,7 @@ func TestHogmanShapedPACURL(t *testing.T) {
 
 func TestStaleHogmanPAC(t *testing.T) {
 	// Nothing listens: a dead setting a removed pen left behind.
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	l := listenHogmanPort(t)
 	dead := l.Addr().(*net.TCPAddr).Port
 	l.Close()
 	if !realStaleHogmanPAC("http://127.0.0.1:" + strconv.Itoa(dead) + "/proxy.pac?v=1") {
@@ -46,7 +45,10 @@ func TestStaleHogmanPAC(t *testing.T) {
 	}
 
 	serve := func(body string) string {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
+		srv.Listener.Close()
+		srv.Listener = listenHogmanPort(t)
+		srv.Start()
 		t.Cleanup(srv.Close)
 		return srv.URL + "/proxy.pac"
 	}
@@ -59,9 +61,12 @@ func TestStaleHogmanPAC(t *testing.T) {
 		}
 	}
 	// A redirect is judged as it stands, never followed.
-	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	redir := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, serve(renderPAC([]*agentConfig{p1})), http.StatusFound)
 	}))
+	redir.Listener.Close()
+	redir.Listener = listenHogmanPort(t)
+	redir.Start()
 	t.Cleanup(redir.Close)
 	if realStaleHogmanPAC(redir.URL + "/proxy.pac") {
 		t.Error("a redirect to a Hogman PAC must not count as ours")
@@ -91,4 +96,17 @@ func TestStalePACIsReplacedAndCleared(t *testing.T) {
 	if got := planAutoProxyAction("http://corp.example/proxy.pac", true, []*agentConfig{p}, want); got != "leave" {
 		t.Errorf("join over a company PAC: got %q, want leave", got)
 	}
+}
+
+// listenHogmanPort listens on a free 127.0.0.1 port in the range Hogman's
+// agents use (17000-26999), so stale-PAC checks treat it as Hogman-shaped.
+func listenHogmanPort(t *testing.T) net.Listener {
+	t.Helper()
+	for p := hogmanPortMin + 7919%1000; p <= hogmanPortMax; p += 37 {
+		if l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(p)); err == nil {
+			return l
+		}
+	}
+	t.Fatal("no free port in Hogman's range")
+	return nil
 }

@@ -159,6 +159,7 @@ func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, error) {
 		case "noop":
 			done = append(done, svc)
 		case "set":
+			explainSudo("to point this Mac's automatic proxy at the pen")
 			if out, err := run(true, "/usr/sbin/networksetup", "-setautoproxyurl", svc, want); err != nil {
 				return "", fmt.Errorf("%s (%s). To do it by hand, %s", firstLine(out), svc, manual)
 			}
@@ -192,10 +193,12 @@ func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {
 		cur, enabled := autoProxyState(svc)
 		switch planClearAutoProxyAction(cur, enabled, known, nextURL) {
 		case "off":
+			explainSudo("to remove the pen from this Mac's automatic proxy setting")
 			if _, err := run(true, "/usr/sbin/networksetup", "-setautoproxystate", svc, "off"); err == nil {
 				turnedOff = true
 			}
 		case "set":
+			explainSudo("to update this Mac's automatic proxy setting")
 			if _, err := run(true, "/usr/sbin/networksetup", "-setautoproxyurl", svc, nextURL); err == nil {
 				updated = true
 			}
