@@ -125,6 +125,23 @@
     <p class="hint switch-link"><a href="#" id="waited-back">&larr; Back</a> &middot; <a href="#" id="waited-code">I have a code</a></p>
   </section>
 
+  <section id="renew" class="panel" hidden>
+    <h2 id="renew-title">Renew your pen</h2>
+    <p class="panel-intro">Renew <strong id="renew-pen"></strong> for another year. Renewal starts a fresh 365-day year from the day of payment — no backdating.</p>
+    <div class="turnstile" id="ts-renew" hidden></div>
+    <div class="actions">
+      <button class="btn" id="renew-go" type="button">Continue to payment</button>
+    </div>
+    <p class="error" id="renew-err" role="alert" hidden></p>
+    <p class="hint switch-link"><a href="/" id="renew-back">&larr; Back to sign-up</a></p>
+  </section>
+
+  <section id="renewed" class="panel" hidden aria-live="polite">
+    <h2>Payment received</h2>
+    <p class="panel-intro" id="renewed-text">Your renewal payment is in. Your pen will stay active (or wake up within a minute if it was asleep) for a fresh year.</p>
+    <p class="hint switch-link"><a href="/">Back to sign-up</a></p>
+  </section>
+
   <section id="working" class="panel" hidden aria-live="polite">
     <h2 id="working-title">Raising your pen</h2>
     <p class="panel-intro">Setting up your isolated control plane and HTTPS certificate. You can reload this page — it picks up where it left off.</p>

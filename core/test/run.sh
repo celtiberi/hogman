@@ -257,6 +257,21 @@ check "the portal knows alice from her mesh address (alice, admin)" \
 me="$(api bob-tools GET /api/me)"
 check "... and bob from his (bob, member)" test "$(jq -r '.member.handle + "/" + .member.role' <<<"$me")" = bob/member
 
+# D-35 grace-period banner: host writes data/registrar/billing-status.json, all members see it via /api/me.
+printf '{"state":"grace","grace_until":"2027-12-24T00:00:00Z","renew_url":"https://get.example.com/?renew=bobo"}\n' \
+  > "$WORK/data/registrar/billing-status.json"
+chmod 0644 "$WORK/data/registrar/billing-status.json"
+me_grace_alice="$(api alice-laptop-tools GET /api/me)"
+me_grace_bob="$(api bob-tools GET /api/me)"
+check "alice sees grace billing status in /api/me" \
+  jq -e '.billing.state == "grace" and .billing.renew_url == "https://get.example.com/?renew=bobo"' <<<"$me_grace_alice"
+check "bob (non-admin member) also sees grace billing status in /api/me" \
+  jq -e '.billing.state == "grace" and .billing.renew_url == "https://get.example.com/?renew=bobo"' <<<"$me_grace_bob"
+rm -f "$WORK/data/registrar/billing-status.json"
+me_clear="$(api bob-tools GET /api/me)"
+check "removing billing-status.json clears /api/me billing field" \
+  jq -e '.billing == null' <<<"$me_clear"
+
 step "Alice adds a server and shares a site"
 srv="$(api alice-laptop-tools POST /api/devices '{"kind":"server"}')"
 ALICE_SERVER_KEY="$(jq -r .auth_key <<<"$srv")"

@@ -17,7 +17,7 @@ ENTRYPOINT ["/hogman-signup"]
 
 # hogman-host and ./hogman run in here, so it carries what they use.
 FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS broker
-RUN apk add --no-cache bash coreutils findutils grep sed gawk tar gzip rsync age openssl curl util-linux \
+RUN apk add --no-cache bash coreutils findutils grep sed gawk tar gzip rsync age openssl curl util-linux sqlite \
       ca-certificates docker-cli docker-cli-compose docker-cli-buildx
 COPY --from=build /hogman-signup /usr/local/bin/hogman-signup
 ENV ROLE=broker

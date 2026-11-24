@@ -11,8 +11,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -227,11 +229,91 @@ func runBrokerHealth() {
 	}
 }
 
+func runBrokerLifecycleSweep(args []string) {
+	dryRun := false
+	for _, a := range args {
+		switch a {
+		case "--dry-run":
+			dryRun = true
+		default:
+			fmt.Fprintf(os.Stderr, "usage: hogman-signup lifecycle-sweep [--dry-run]\n")
+			os.Exit(2)
+		}
+	}
+	u := strings.TrimSuffix(brokerHealthURL(env("BROKER_ADDR", ":9090")), "/health") + "/lifecycle/sweep"
+	if dryRun {
+		u += "?dry_run=1"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", u, nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	req.Header.Set("Authorization", "Bearer "+readToken())
+	resp, err := (&http.Client{Timeout: 10 * time.Minute}).Do(req)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "lifecycle sweep HTTP %d: %s\n", resp.StatusCode, strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
+	_, _ = os.Stdout.Write(body)
+}
+
+func runBrokerLifecycleAlerts(args []string) {
+	if len(args) < 2 || len(args) > 3 {
+		fmt.Fprintf(os.Stderr, "usage: hogman-signup lifecycle-alert <pen> <list|add|remove> [email]\n")
+		os.Exit(2)
+	}
+	payload := map[string]string{"pen": args[0], "action": args[1]}
+	if len(args) == 3 {
+		payload["email"] = args[2]
+	}
+	raw, _ := json.Marshal(payload)
+	u := strings.TrimSuffix(brokerHealthURL(env("BROKER_ADDR", ":9090")), "/health") + "/lifecycle/alerts"
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", u, bytes.NewReader(raw))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	req.Header.Set("Authorization", "Bearer "+readToken())
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "lifecycle-alert HTTP %d: %s\n", resp.StatusCode, strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
+	_, _ = os.Stdout.Write(body)
+}
+
 func main() {
 	log.SetFlags(0)
-	if len(os.Args) > 1 && os.Args[1] == "health" {
-		runBrokerHealth()
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "health":
+			runBrokerHealth()
+			return
+		case "lifecycle-sweep":
+			runBrokerLifecycleSweep(os.Args[2:])
+			return
+		case "lifecycle-alert":
+			runBrokerLifecycleAlerts(os.Args[2:])
+			return
+		}
 	}
 	switch env("ROLE", "") {
 	case "web":

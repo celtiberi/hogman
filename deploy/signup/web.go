@@ -118,6 +118,7 @@ func (wb *web) handler() http.Handler {
 	mux.HandleFunc("POST /api/waitlist", wb.waitlist)
 	mux.HandleFunc("POST /api/waitlist/leave", wb.leaveWaitlist)
 	mux.HandleFunc("POST /api/checkout", wb.checkout)
+	mux.HandleFunc("POST /api/renew", wb.renew)
 	mux.HandleFunc("POST /api/stripe/webhook", wb.stripeWebhook)
 	mux.HandleFunc("GET /api/paid", wb.paid)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

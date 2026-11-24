@@ -867,3 +867,37 @@ func TestNetworkInfoTheme(t *testing.T) {
 		t.Fatal("invalid theme accepted by NewService")
 	}
 }
+
+func TestBillingStatusInMe(t *testing.T) {
+	e := newTestEnv(t)
+	if _, err := e.svc.AddMember(context.Background(), Actor{CLI: true}, "alice", "member"); err != nil {
+		t.Fatal(err)
+	}
+	e.addDevice(t, "alice", "personal", "laptop", "100.64.0.10", "")
+	billingPath := filepath.Join(t.TempDir(), "billing-status.json")
+	e.svc.cfg.BillingStatusPath = billingPath
+
+	// Absent file -> no billing field in /api/me.
+	rec := doMeshReq(MeshHandler(e.svc), "GET", "/api/me", "100.64.0.10", "", nil)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"billing"`) {
+		t.Fatalf("absent billing /api/me: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Valid grace status -> returned in /api/me for members.
+	if err := os.WriteFile(billingPath, []byte(`{"state":"grace","grace_until":"2027-12-24T00:00:00Z","renew_url":"https://get.example.com/?renew=bobo"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec = doMeshReq(MeshHandler(e.svc), "GET", "/api/me", "100.64.0.10", "", nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"state":"grace"`) || !strings.Contains(rec.Body.String(), `"renew_url":"https://get.example.com/?renew=bobo"`) {
+		t.Fatalf("grace billing /api/me: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Non-HTTPS renew_url is stripped.
+	if err := os.WriteFile(billingPath, []byte(`{"state":"grace","renew_url":"javascript:alert(1)"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec = doMeshReq(MeshHandler(e.svc), "GET", "/api/me", "100.64.0.10", "", nil)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "javascript:") {
+		t.Fatalf("non-https renew_url leaked: %d %s", rec.Code, rec.Body.String())
+	}
+}

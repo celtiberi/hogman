@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -208,7 +209,7 @@ func MeshHandler(s *Service) http.Handler {
 		}
 		invs, _ := s.st.Invites(&c.member.ID)
 		a := c.actor()
-		writeJSON(w, 200, map[string]any{
+		resp := map[string]any{
 			"member": c.member, "this_device": c.device, "devices": devs, "names": mine,
 			"invites": inviteViews(invs), "zone": s.cfg.Zone,
 			// What the page should offer. The API checks again on every call.
@@ -218,7 +219,11 @@ func MeshHandler(s *Service) http.Handler {
 			"owners": ownerCount(s, a),
 			// What `hogman share` needs to start a server of its own.
 			"network": s.NetworkInfo(),
-		})
+		}
+		if billing := readBillingStatus(s.cfg.BillingStatusPath); billing != nil {
+			resp["billing"] = billing
+		}
+		writeJSON(w, 200, resp)
 	})
 
 	h("POST /api/devices", false, false, func(w http.ResponseWriter, r *http.Request, c caller) {
@@ -639,6 +644,38 @@ func fail(w http.ResponseWriter, err error) {
 	}
 	log.Printf("internal error: %v", err)
 	writeJSON(w, 500, map[string]string{"error": "internal error"})
+}
+
+// billingStatus is the optional read-only grace-period notice written by the
+// host into /var/lib/registrar/billing-status.json and returned on GET /api/me.
+type billingStatus struct {
+	State      string `json:"state"`
+	PaidUntil  string `json:"paid_until,omitempty"`
+	GraceUntil string `json:"grace_until,omitempty"`
+	RenewURL   string `json:"renew_url,omitempty"`
+}
+
+func readBillingStatus(path string) *billingStatus {
+	if path == "" {
+		return nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) > 4096 {
+		return nil
+	}
+	var st billingStatus
+	if err := json.Unmarshal(b, &st); err != nil || st.State != "grace" {
+		return nil
+	}
+	if st.RenewURL != "" {
+		u, err := url.Parse(strings.TrimSpace(st.RenewURL))
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+			st.RenewURL = ""
+		} else {
+			st.RenewURL = u.String()
+		}
+	}
+	return &st
 }
 
 // ownerCount tells an owner how many owners the pen has; others get 0.

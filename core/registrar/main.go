@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -87,21 +88,23 @@ func setup() *Service {
 		}
 		acmeBackend = cli
 	}
+	dbPath := env("DB", "/var/lib/registrar/registrar.db")
 	cfg := Config{
-		Zone:             mustEnv("ZONE"),
-		PublicHost:       mustEnv("PUBLIC_HOST"),
-		CoreIP:           coreIP,
-		Theme:            env("THEME", ""),
-		InviteTTL:        durEnv("INVITE_TTL", 7*24*time.Hour),
-		DeviceKeyTTL:     durEnv("DEVICE_KEY_TTL", time.Hour),
-		MembersCanInvite: env("MEMBERS_CAN_INVITE", "false") == "true",
-		ACMEBackend:      acmeBackend,
+		Zone:              mustEnv("ZONE"),
+		PublicHost:        mustEnv("PUBLIC_HOST"),
+		CoreIP:            coreIP,
+		Theme:             env("THEME", ""),
+		InviteTTL:         durEnv("INVITE_TTL", 7*24*time.Hour),
+		DeviceKeyTTL:      durEnv("DEVICE_KEY_TTL", time.Hour),
+		MembersCanInvite:  env("MEMBERS_CAN_INVITE", "false") == "true",
+		BillingStatusPath: env("BILLING_STATUS_FILE", filepath.Join(filepath.Dir(dbPath), "billing-status.json")),
+		ACMEBackend:       acmeBackend,
 	}
 	key, err := os.ReadFile(env("HEADSCALE_API_KEY_FILE", "/secrets/headscale_api_key"))
 	if err != nil {
 		log.Fatalf("headscale API key: %v", err)
 	}
-	st, err := OpenStore(env("DB", "/var/lib/registrar/registrar.db"))
+	st, err := OpenStore(dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}
