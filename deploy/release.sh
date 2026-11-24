@@ -159,6 +159,16 @@ if [ "${NO_DEPLOY:-}" != 1 ]; then
   for cb in "${cli_bins[@]}"; do
     release_files+=("$out/$cb")
   done
+  {
+    printf 'Release `%s` from commit `%s` (compiled binaries verified via GitHub build provenance).\n' "$ver" "$full"
+    if [ -x "$REPO/deploy/changelog-fold.sh" ]; then
+      notes="$(CHANGELOG_REPO="$REPO" "$REPO/deploy/changelog-fold.sh" --notes "$REF" || true)"
+      if [ -n "$notes" ]; then
+        printf '\n%s\n' "$notes"
+      fi
+    fi
+  } > "$work/release-notes.md"
+
   # Upload every asset into a draft release first, verify the asset list, then
   # publish and mark latest atomically (required for immutable releases).
   gh release create "$tag" \
@@ -166,7 +176,7 @@ if [ "${NO_DEPLOY:-}" != 1 ]; then
     --draft \
     --target "$full" \
     --title "Hogman $ver" \
-    --notes "Release \`$ver\` from commit \`$full\` (compiled binaries verified via GitHub build provenance)." \
+    --notes-file "$work/release-notes.md" \
     "${release_files[@]}"
 
   want_assets="$(printf '%s\n' "$bins" "$tarball" "SHA256SUMS" "install.sh" "latest" "hogman-SHA256SUMS" "${cli_bins[@]}" | sort)"
