@@ -50,7 +50,6 @@
     <div id="unix-panel">
       <div class="step-card">
         <div class="step-head">
-          <span class="step-num" aria-hidden="true">1</span>
           <span class="step-title">Run this command</span>
         </div>
         <pre id="cmd"></pre>
@@ -60,20 +59,7 @@
         </p>
       </div>
 
-      <div id="link-step" class="step-card">
-        <div class="step-head">
-          <span class="step-num" aria-hidden="true">2</span>
-          <span class="step-title">Paste your invite link when prompted</span>
-        </div>
-        <p class="step-desc">The script asks for your invite link. Copy it here and paste it into Terminal:</p>
-        <p class="action-row">
-          <button id="copy-link" class="primary" type="button">Copy my invite link</button>
-          <span class="ok-msg" id="copied-link" aria-live="polite"></span>
-        </p>
-        <p class="callout warn">Your link works once. Treat it like a password and don't share it.</p>
-      </div>
-
-      <p class="callout warn" id="key-warn" hidden>This command embeds a one-time key — treat it like a password and don't share it.</p>
+      <p class="callout warn" id="key-warn">This command embeds a one-time key — treat it like a password and don't share it.</p>
 
       <details id="manual" class="manual-box">
         <summary>Rather not pipe a script into <code>sh</code>?</summary>

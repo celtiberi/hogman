@@ -41,13 +41,12 @@ SLSA-attested release binaries.
 
 ### Joining a pen
 
-Invited to a pen? Open the invite link and run the short command it shows:
+Invited to a pen? Open the invite link and run the single command it shows:
 
 ```text
-$ curl -fsSL https://store-north.gate.hogman.network/start | sh
-Paste your invite link: https://store-north.gate.hogman.network/join#t=(your invite)
+$ curl -fsSL --proto =https --proto-redir =https https://<your-pen>.gate.hogman.network/start | HOGMAN_EXPECTED_HOST='<your-pen>.gate.hogman.network' sh -s -- 'https://<your-pen>.gate.hogman.network/join#t=...'
 
-• Downloading hogman for Darwin arm64 from store-north.gate.hogman.network
+• Downloading hogman for Darwin arm64 from <your-pen>.gate.hogman.network
   checked: SHA-256 matches
   saved as ~/hogman (keep it: it updates, shares and leaves later)
 
@@ -55,7 +54,7 @@ Paste your invite link: https://store-north.gate.hogman.network/join#t=(your inv
   Choose your name on the network: alice
   welcome, alice
 
-✓ You're in. You are alice on store-north.pens.hogman.network.
+✓ You're in. You are alice on <your-pen>.pens.hogman.network.
 ```
 
 - Runs unprivileged as your user (no `TUN` interface, no root daemon) and leaves your regular

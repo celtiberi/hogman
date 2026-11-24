@@ -1,0 +1,1 @@
+- `core/join-page` & `README.md`: simplified the `/join` page from two copy-paste steps to a single command (`curl ... /start | HOGMAN_EXPECTED_HOST=... sh -s -- '<link>'`) with the one-time-key warning shown inline; `/start` still prompts interactively when run without arguments.
