@@ -239,6 +239,7 @@ func serve(s *Service) {
 			PropagationDelay:   durEnv("ACME_PROPAGATION_DELAY", 0),
 			PropagationTimeout: propTimeoutEnv("ACME_PROPAGATION_TIMEOUT"),
 			Backend:            s.acme,
+			BillingStatusPath:  s.cfg.BillingStatusPath,
 		})
 		if err != nil {
 			log.Fatalf("acme home manager: %v", err)

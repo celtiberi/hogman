@@ -37,6 +37,10 @@ func PublicHandlerWithRateLimit(s *Service, redeemLimit int, window time.Duratio
 	lim := newIPRateLimiter(redeemLimit, window)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /hogman/v1/redeem", func(w http.ResponseWriter, r *http.Request) {
+		if s.isRenewOnly() {
+			fail(w, forbidden("this pen is woken for renewal only; invites and new devices are unavailable until renewal"))
+			return
+		}
 		if !lim.allow(rateLimitKey(clientIP(r)), time.Now()) {
 			fail(w, &Problem{Status: http.StatusTooManyRequests, Msg: "too many requests; try again shortly"})
 			return
@@ -184,6 +188,16 @@ func MeshHandler(s *Service) http.Handler {
 	h := func(pattern string, admin, allowServer bool, fn func(w http.ResponseWriter, r *http.Request, c caller)) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			c := r.Context().Value(ctxKey{}).(caller)
+			if s.isRenewOnly() {
+				if c.device.Kind == "server" || c.member.Status != "active" || !c.actor().IsAdmin() {
+					fail(w, forbidden("this pen is woken for renewal only; only active owners or admins on personal devices can access billing"))
+					return
+				}
+				if pattern != "GET /api/me" && pattern != "POST /api/billing/renew-token" {
+					fail(w, forbidden("this pen is woken for renewal only; shares, devices, invites, and directory are unavailable until renewal"))
+					return
+				}
+			}
 			if !allowServer && c.device.Kind == "server" {
 				fail(w, forbidden("server devices cannot perform this action; use a personal device"))
 				return
@@ -232,6 +246,7 @@ func MeshHandler(s *Service) http.Handler {
 				State:      billing.State,
 				PaidUntil:  billing.PaidUntil,
 				GraceUntil: billing.GraceUntil,
+				WakeUntil:  billing.WakeUntil,
 				CanRenew:   a.IsAdmin() && billing.Pen != "" && billing.RenewURL != "",
 			}
 		}
@@ -243,8 +258,8 @@ func MeshHandler(s *Service) http.Handler {
 	// returned in the URL fragment (#renew=<token>) so it never hits logs or referers.
 	h("POST /api/billing/renew-token", true, false, func(w http.ResponseWriter, r *http.Request, c caller) {
 		billing := readBillingStatus(s.cfg.BillingStatusPath)
-		if billing == nil || billing.State != "grace" || billing.Pen == "" || billing.RenewURL == "" {
-			fail(w, &Problem{Status: http.StatusConflict, Msg: "this pen is not currently in a renewable grace period"})
+		if billing == nil || (billing.State != "grace" && billing.State != "renew_only") || billing.Pen == "" || billing.RenewURL == "" {
+			fail(w, &Problem{Status: http.StatusConflict, Msg: "this pen is not currently in a renewable grace or wake window"})
 			return
 		}
 		if c.member.Status != "active" || (c.member.Role != "owner" && c.member.Role != "admin") {
@@ -684,13 +699,14 @@ func fail(w http.ResponseWriter, err error) {
 	writeJSON(w, 500, map[string]string{"error": "internal error"})
 }
 
-// billingStatus is the host-written grace-period notice at
+// billingStatus is the host-written grace/renew-only notice at
 // /var/lib/registrar/billing-status.json.
 type billingStatus struct {
 	Pen        string `json:"pen,omitempty"`
 	State      string `json:"state"`
 	PaidUntil  string `json:"paid_until,omitempty"`
 	GraceUntil string `json:"grace_until,omitempty"`
+	WakeUntil  string `json:"wake_until,omitempty"`
 	RenewURL   string `json:"renew_url,omitempty"`
 }
 
@@ -700,6 +716,7 @@ type billingView struct {
 	State      string `json:"state"`
 	PaidUntil  string `json:"paid_until,omitempty"`
 	GraceUntil string `json:"grace_until,omitempty"`
+	WakeUntil  string `json:"wake_until,omitempty"`
 	CanRenew   bool   `json:"can_renew,omitempty"`
 }
 
@@ -778,7 +795,7 @@ func readBillingStatus(path string) *billingStatus {
 		return nil
 	}
 	var st billingStatus
-	if err := json.Unmarshal(b, &st); err != nil || st.State != "grace" {
+	if err := json.Unmarshal(b, &st); err != nil || (st.State != "grace" && st.State != "renew_only") {
 		return nil
 	}
 	st.Pen = strings.ToLower(strings.TrimSpace(st.Pen))

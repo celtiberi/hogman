@@ -77,6 +77,16 @@ Paste your invite link: https://store-north.gate.hogman.network/join#t=(your inv
 - Owners have no account recovery, so `leave`, `leave-all` and `uninstall` refuse a pen you own.
   Make someone else an owner first. `--force` overrides this only after a warning and typing the
   pen's name exactly.
+- **Renewing a sleeping pen:** paid pens enter a 30-day grace period after their paid year ends,
+  then go to sleep (containers stopped, state kept for 1 year). To renew a sleeping pen, open its
+  sleeping notice (or `https://<signup-host>/#wake=<pen>`) and press **Wake pen for renewal**. Once
+  the pen's HTTPS certificate is ready (usually 1–2 minutes), it opens for a 10-minute renew-only
+  window (capped at 20 minutes from button press, 3 wakes/day and 10/month per pen, and 2 concurrent
+  wakes per host): only active owners and admins on already-joined personal devices can load
+  `https://home.<zone>` and click **Renew now**; shares, invites, devices, and access for regular
+  members stay off until payment lands. As soon as payment completes, normal access restores
+  automatically without a restart. If wake limits or host capacity are reached, contact your host
+  operator.
 
 ### Hosting HTTPS servers (`share`)
 

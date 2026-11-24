@@ -1503,34 +1503,49 @@ func splitIPs(ips []string) (v4, v6 string) {
 	return
 }
 
+func (s *Service) isRenewOnly() bool {
+	st := readBillingStatus(s.cfg.BillingStatusPath)
+	return st != nil && st.State == "renew_only"
+}
+
 // buildPolicy is the default-deny policy of DESIGN.md section 8, expressed
 // over the addresses of devices whose members are active. Suspended and
 // removed members' devices appear nowhere, so they can reach nothing.
+// During a renew_only wake (I-7 Part 2), only active owner/admin personal
+// devices can reach tag:infra (DNS 53 + portal 443); regular members, server
+// devices, and all shares are excluded from the Headscale netmap.
 func (s *Service) buildPolicy() (string, error) {
 	live, err := s.st.LiveDevices()
 	if err != nil {
 		return "", err
 	}
-	status := map[int64]string{}
+	membersByID := map[int64]*Member{}
 	ms, err := s.st.Members()
 	if err != nil {
 		return "", err
 	}
 	for _, m := range ms {
-		status[m.ID] = m.Status
+		membersByID[m.ID] = m
 	}
+	renewOnly := s.isRenewOnly()
 	src := []string{}
 	servers := []string{}
 	for _, d := range live {
-		if status[d.MemberID] != "active" {
+		m := membersByID[d.MemberID]
+		if m == nil || m.Status != "active" {
 			continue
+		}
+		if renewOnly {
+			if d.Kind != "personal" || (m.Role != "owner" && m.Role != "admin") {
+				continue
+			}
 		}
 		for _, ip := range []string{d.IPv4, d.IPv6} {
 			if ip == "" {
 				continue
 			}
 			src = append(src, ip)
-			if d.Kind == "server" {
+			if !renewOnly && d.Kind == "server" {
 				servers = append(servers, ip)
 			}
 		}
@@ -1546,7 +1561,7 @@ func (s *Service) buildPolicy() (string, error) {
 	}
 	// The pen's own services: DNS and the home page (HTTPS).
 	grants := []grant{{Src: src, Dst: []string{"tag:infra"}, IP: []string{"53", "443"}}}
-	if len(servers) > 0 {
+	if !renewOnly && len(servers) > 0 {
 		// HTTPS only (D-11): members reach servers on 443 and nothing else.
 		grants = append(grants, grant{Src: src, Dst: servers, IP: []string{"443"}})
 	}

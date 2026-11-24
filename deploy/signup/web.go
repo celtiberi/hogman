@@ -41,6 +41,7 @@ type web struct {
 	leaves          *limiter // taking yourself off the list (its own allowance)
 	checkouts       *limiter // starting a payment
 	globalCheckouts *limiter // server-wide cap on Stripe Checkout session creation
+	wakes           *limiter // public sleeping-pen renew-only wakes (I-7 Part 2)
 	webhooks        *limiter // Stripe's calls (it retries what we refuse)
 	jobs            *jobStore
 	stripe          *stripeCheckout // nil: pens aren't for sale
@@ -106,6 +107,7 @@ func newWeb(brokerURL, token, domain string) *web {
 		leaves:          newLimiter(5, time.Hour),
 		checkouts:       newLimiter(10, time.Hour),
 		globalCheckouts: newLimiterWithCap(300, time.Hour, 4),
+		wakes:           newLimiter(5, time.Hour),
 		webhooks:        newLimiter(120, time.Minute),
 		jobs:            newJobStore(defaultMaxOpenJobs, defaultMaxStoredJobs, defaultJobTTL, defaultDeliveredTTL),
 	}
@@ -123,6 +125,7 @@ func (wb *web) handler() http.Handler {
 	mux.HandleFunc("POST /api/waitlist/leave", wb.leaveWaitlist)
 	mux.HandleFunc("POST /api/checkout", wb.checkout)
 	mux.HandleFunc("POST /api/renew", wb.renew)
+	mux.HandleFunc("POST /api/wake", wb.wake)
 	mux.HandleFunc("POST /api/stripe/webhook", wb.stripeWebhook)
 	mux.HandleFunc("GET /api/paid", wb.paid)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -770,4 +773,47 @@ func (wb *web) leaveWaitlist(w http.ResponseWriter, r *http.Request) {
 	}
 	code, out := wb.ask(r.Context(), "POST", "/waitlist/leave", map[string]string{"email": in.Email})
 	jsonOut(w, code, out)
+}
+
+const uniformWakeMessage = "If this pen is asleep and eligible to wake, it will open for renewal for 10 minutes once its certificate is ready (usually 1–2 minutes). Open your pen's home page from a joined owner or admin device to renew. If it does not open after a few minutes — or if daily wake limits or host capacity were reached — contact your host operator."
+
+// wake handles public sleeping-pen renewal wake requests (I-7 Part 2).
+// Protected by same-origin JSON check, per-IP rate limit (5/hr), and Turnstile.
+// Answers 202 immediately with a uniform message and performs the wake
+// asynchronously in the broker so responses reveal nothing about pen existence,
+// state, plan, dates, or caps.
+func (wb *web) wake(w http.ResponseWriter, r *http.Request) {
+	if !wb.requireSameOriginJSON(w, r) {
+		return
+	}
+	ip := wb.clientIP(r)
+	if wb.wakes != nil && !wb.wakes.allow(rateLimitKey(ip), time.Now()) {
+		jsonOut(w, 429, map[string]string{"error": "too many wake attempts from here; try again in an hour or contact your host operator"})
+		return
+	}
+	var in struct {
+		Pen            string `json:"pen"`
+		TurnstileToken string `json:"turnstile_token"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		jsonOut(w, 400, map[string]string{"error": "bad request"})
+		return
+	}
+	pen := strings.ToLower(strings.TrimSpace(in.Pen))
+	if why, ok := validPen(pen); !ok {
+		jsonOut(w, 400, map[string]string{"error": why})
+		return
+	}
+	if !wb.verifyTurnstile(w, r, in.TurnstileToken, ip) {
+		return
+	}
+	code, _ := wb.ask(r.Context(), "POST", "/lifecycle/wake", map[string]string{"pen": pen})
+	if code >= 500 {
+		jsonOut(w, 502, map[string]string{"error": "the wake service is temporarily unavailable; try again or contact your host operator"})
+		return
+	}
+	jsonOut(w, 202, map[string]any{"ok": true, "message": uniformWakeMessage})
 }
