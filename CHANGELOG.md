@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `deploy/release.sh` & `deploy/install.sh`: release archives now record every file as owned by root (0:0), and `release.sh` refuses to publish one that doesn't or that contains the builder's account name. `install.sh` unpacks with `--no-same-owner` and sets root ownership before copying, which also corrects files left by earlier installs. Before this, the compiled-parts archive carried the builder's uid, so on a server with a local user of that uid the installed binaries were writable by that user.
 
 ### Added
+- `core/test/run.sh`: strengthened the I-10 unreachable-pen B1 assertion to verify the old agent PID was replaced by a live canonical `hogman` process, and added an E2E check verifying an older-dated client cannot downgrade a newer shared canonical binary.
 - `.github/workflows/e2e.yml`: added a fast per-PR `docker image builds` job that builds `core/registrar`, `deploy/signup` (`web` and `broker`), and `core/join` in their isolated Docker contexts so Dockerfile-context `go vet`/`go test` regressions fail early.
 - `core/registrar`, `core/portal`, `core/hogman`, `deploy/hogman-host`, `deploy/signup`, `README.md`, & `deploy/README.md`: Renew-only ephemeral wake for sleeping pens (I-7 Part 2):
   - Added public `/#wake=<pen>` flow (`POST /api/wake` on `signup-web` with same-origin JSON, `5/hr` per-IP limit, Turnstile, and immediate uniform `202` response so callers cannot infer pen state or caps by body or timing) linked from sleeping pens' static front-door notice.
