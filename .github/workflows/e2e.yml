@@ -71,13 +71,19 @@ jobs:
           docker build --progress=plain --target broker -t hogman-signup-broker-check deploy/signup
       - name: Test join client in isolated Docker context
         run: docker build --progress=plain --target test -t hogman-join-test core/join
+      - name: Validate changelog fragments
+        run: |
+          if [ -x deploy/changelog-fold.sh ]; then
+            deploy/changelog-fold.sh --check
+            deploy/test-changelog-fold.sh
+          fi
 
-  pen:
-    name: pen (core/test/run.sh)
+  pen-core:
+    name: pen core (core/test/run.sh)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Tools
@@ -91,10 +97,46 @@ jobs:
       # folders (certificates, keys) into the bind-mounted data directory.
       - name: Run the pen suite
         run: sudo --preserve-env=PATH core/test/run.sh
+
+  pen-acme:
+    name: pen ACME (core/test/acme-pebble.sh)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run the ACME Pebble suite
         run: sudo --preserve-env=PATH core/test/acme-pebble.sh
+
+  pen-sidecar:
+    name: pen sidecar (core/test/sidecar-check.sh)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run the sealed sidecar check
         run: core/test/sidecar-check.sh
+
+  # Required status check on main (keeps the exact existing check name while
+  # running the three pen suites above in parallel).
+  pen:
+    name: pen (core/test/run.sh)
+    needs: [changes, pen-core, pen-acme, pen-sidecar]
+    if: always() && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Verify all pen suites passed
+        env:
+          CORE: ${{ needs.pen-core.result }}
+          ACME: ${{ needs.pen-acme.result }}
+          SIDECAR: ${{ needs.pen-sidecar.result }}
+        run: |
+          echo "pen-core=$CORE pen-acme=$ACME pen-sidecar=$SIDECAR"
+          [ "$CORE" = "success" ] && [ "$ACME" = "success" ] && [ "$SIDECAR" = "success" ]
 
   host:
     name: shared host (deploy/test-host.sh)
