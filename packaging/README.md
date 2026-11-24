@@ -5,7 +5,7 @@ Hogman publishes standalone, SLSA-attested `hogman` client binaries and
 (`celtiberi/hogman/releases/tag/v<version>`).
 
 - `homebrew/hogman.rb.tmpl`: Homebrew formula installing `hogman`.
-- `winget/Celtiberi.Hogman.yaml.tmpl`: WinGet portable manifest installing `hogman`.
+- `winget/Galderwood.Hogman*.yaml.tmpl`: WinGet multi-file portable manifest set (`version`, `installer`, and `locale.en-US`) installing `hogman`.
 
 When installed via Homebrew, Scoop, WinGet, or an OS package under `/usr/bin`,
 `hogman update` detects the package manager and prints its upgrade command

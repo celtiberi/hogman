@@ -89,7 +89,7 @@ func TestDetectPackageManager(t *testing.T) {
 		{"/home/linuxbrew/.linuxbrew/Cellar/hogman/1.0/bin/hogman", "linux", "Homebrew", true},
 		{"/usr/bin/hogman", "linux", "your system package manager", true},
 		{`C:\Users\alice\scoop\apps\hogman\current\hogman.exe`, "windows", "Scoop", true},
-		{`C:\Users\alice\AppData\Local\Microsoft\WinGet\Packages\Celtiberi.Hogman\hogman.exe`, "windows", "winget", true},
+		{`C:\Users\alice\AppData\Local\Microsoft\WinGet\Packages\Galderwood.Hogman\hogman.exe`, "windows", "winget", true},
 		{"/tmp/hogman", "darwin", "", false},
 		{"/usr/local/bin/hogman", "linux", "", false},
 	} {
@@ -299,15 +299,21 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 		t.Fatalf("install native host binary: %v", err)
 	}
 
-	// 2. First verify rollback on failed restart: if restartNew fails, restartOld
-	//    brings alpha back up on alphaLegacyBin with zero gap and preserves it.
+	// 2. First verify rollback on failed restart: if restartNew fails, ops.stop
+	//    runs BEFORE restartOld (so a partially started new agent is stopped),
+	//    alpha comes back up on alphaLegacyBin with zero gap, and alphaLegacyBin is kept.
 	var rolledBackBin string
+	var rollbackSeq []string
 	rollbackOps := penUpdateOps{
 		isRunning:  func(string, *agentConfig) bool { return true },
 		hasService: func(string) bool { return true },
-		stop:       func(string, *agentConfig) {},
-		restartNew: func(*penTarget, string, bool, options) error { return errors.New("boom") },
+		stop:       func(string, *agentConfig) { rollbackSeq = append(rollbackSeq, "stop") },
+		restartNew: func(*penTarget, string, bool, options) error {
+			rollbackSeq = append(rollbackSeq, "restartNew")
+			return errors.New("boom")
+		},
 		restartOld: func(_ *penTarget, bin string, _ bool, _ options) error {
+			rollbackSeq = append(rollbackSeq, "restartOld")
 			rolledBackBin = bin
 			return nil
 		},
@@ -322,8 +328,14 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 	if rolledBackBin != alphaLegacyBin {
 		t.Fatalf("rollback restarted %q, want legacy %q", rolledBackBin, alphaLegacyBin)
 	}
+	if strings.Join(rollbackSeq, ",") != "stop,restartNew,stop,restartOld" {
+		t.Fatalf("rollback sequence = %v, want [stop restartNew stop restartOld]", rollbackSeq)
+	}
 	if _, err := os.Stat(alphaLegacyBin); err != nil {
 		t.Fatalf("legacy binary should be preserved after rollback: %v", err)
+	}
+	if interrupted, _ := readUpdatingMarker(alphaDir); interrupted {
+		t.Fatal("updating marker should be cleared after successful rollback")
 	}
 
 	// 3. Now run the full upgrade migration for running alpha, stopped beta, and running blog share.
@@ -427,6 +439,64 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 			if !strings.Contains(text, canonBin) {
 				t.Errorf("login item %s does not reference canonical %s:\n%s", u, canonBin, text)
 			}
+		}
+	}
+}
+
+func TestInterruptedUpdateRecoveryAndVersionGuard(t *testing.T) {
+	// 1. Interrupted update recovery: if .updating ("service") was left behind
+	//    after stopAgent removed the login item and the process died before
+	//    restartNew, re-running migrateAndRestartPen restores the agent & service.
+	dir := t.TempDir()
+	cfg := &agentConfig{Zone: "interrupted.pens.example.com"}
+	legacy := filepath.Join(dir, legacyBinaryName(runtime.GOOS))
+	if err := os.WriteFile(legacy, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeUpdatingMarker(dir, true)
+
+	var restarted bool
+	var restoredService bool
+	ops := penUpdateOps{
+		isRunning:  func(string, *agentConfig) bool { return false },
+		hasService: func(string) bool { return false },
+		stop:       func(string, *agentConfig) {},
+		restartNew: func(_ *penTarget, _ string, hadService bool, _ options) error {
+			restarted = true
+			restoredService = hadService
+			return nil
+		},
+	}
+	p := &penTarget{zone: cfg.Zone, dir: dir, cfg: cfg}
+	if err := migrateAndRestartPen(p, "/tmp/canon/hogman", legacy, "/tmp/self", options{}, ops); err != nil {
+		t.Fatalf("interrupted recovery failed: %v", err)
+	}
+	if !restarted || !restoredService {
+		t.Fatalf("restarted=%v restoredService=%v, want true/true", restarted, restoredService)
+	}
+	if interrupted, _ := readUpdatingMarker(dir); interrupted {
+		t.Fatal(".updating marker was not cleared after recovery")
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy binary should be removed after recovery (err=%v)", err)
+	}
+
+	// 2. Version comparison helper for canonical binary downgrade protection.
+	for _, tc := range []struct {
+		a, b    string
+		wantCmp int
+		wantOK  bool
+	}{
+		{"2026.11.24", "2026.11.23", 1, true},
+		{"2026.11.23", "2026.11.24", -1, true},
+		{"v0.2.0", "0.2.0", 0, true},
+		{"2026.11.24-rc1", "2026.11.23", 1, true},
+		{"dev", "2026.11.24", 0, false},
+		{"", "2026.11.24", 0, false},
+	} {
+		got, ok := compareReleaseVersions(tc.a, tc.b)
+		if ok != tc.wantOK || got != tc.wantCmp {
+			t.Errorf("compareReleaseVersions(%q, %q) = (%d, %v), want (%d, %v)", tc.a, tc.b, got, ok, tc.wantCmp, tc.wantOK)
 		}
 	}
 }

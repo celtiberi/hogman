@@ -668,6 +668,16 @@ func installedBinary(_ string) (string, error) {
 	if sameFilePath(self, dst) {
 		return dst, nil
 	}
+	// Never let an older CLI binary (e.g. a forgotten ~/hogman-join or old ~/hogman)
+	// silently downgrade a newer canonical binary shared by other pens on this machine.
+	if _, err := os.Stat(dst); err == nil {
+		if existingVer := queryBinaryVersion(dst); existingVer != "" {
+			if cmp, ok := compareReleaseVersions(existingVer, version); ok && cmp > 0 {
+				note("keeping newer shared binary %s (%s > %s); run 'hogman update' to update %s", dst, existingVer, version, self)
+				return dst, nil
+			}
+		}
+	}
 	if err := copyExecutableAtomic(self, dst); err != nil {
 		return "", err
 	}

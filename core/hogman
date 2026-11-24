@@ -265,13 +265,17 @@ use_prebuilt_or_build() {
   if [ -f prebuilt/join/SHA256SUMS ]; then
     info "Using the prebuilt join tool from this release"
     mkdir -p "$DATA/join-dl"
+    rm -f "$DATA/join-dl"/hogman-join-*
     cp prebuilt/join/* "$DATA/join-dl/"
   elif [ -n "${FRONT_JOIN_DL:-}" ] && [ -f "$FRONT_JOIN_DL/SHA256SUMS" ]; then
     info "Using the join tool built for the front door"
     mkdir -p "$DATA/join-dl"
+    rm -f "$DATA/join-dl"/hogman-join-*
     cp "$FRONT_JOIN_DL"/* "$DATA/join-dl/"
   else
     info "Building the join tool for download"
+    mkdir -p "$DATA/join-dl"
+    rm -f "$DATA/join-dl"/hogman-join-*
     docker build -q --output "type=local,dest=$DATA/join-dl" join >/dev/null
   fi
   chmod 755 "$DATA/join-dl" 2>/dev/null || true

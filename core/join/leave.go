@@ -142,7 +142,29 @@ func leaveCmd(args []string, o options) error {
 			return err
 		}
 	}
+	cleanupOrphanCanonicalBinary()
 	return nil
+}
+
+// cleanupOrphanCanonicalBinary removes the shared <configBase>/bin/hogman binary
+// once this computer has left its last pen and last share (keep-less-data).
+func cleanupOrphanCanonicalBinary() {
+	if len(localLeaveTargets()) > 0 {
+		return
+	}
+	cfgBase := hogmanConfigBase()
+	selfPath, _ := resolvedExePath()
+	canon := canonicalBinaryPath(cfgBase)
+	nh := nativeHostBinaryPath(cfgBase)
+	if fi, err := os.Lstat(nh); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 || !sameFilePath(nh, selfPath) {
+			_ = os.Remove(nh)
+		}
+	}
+	if !sameFilePath(canon, selfPath) {
+		_ = os.Remove(canon)
+	}
+	_ = os.Remove(filepath.Join(cfgBase, "bin"))
 }
 
 // leaveAllCmd takes this computer out of every pen it's in, after showing the
@@ -172,6 +194,7 @@ func leaveAll(args []string, o options, question string) (kept int, err error) {
 	if err := leaveTargets(go_); err != nil {
 		return len(stay), err
 	}
+	cleanupOrphanCanonicalBinary()
 	return len(stay), nil
 }
 

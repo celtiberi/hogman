@@ -85,8 +85,10 @@ $ ~/hogman share app 3000 --background
 ```
 
 Each share joins as its own isolated server node (`tag:server`), so personal laptops accept zero
-inbound connections and zero inbound router ports are opened. Take a share down anytime with
-`~/hogman share stop app`.
+inbound connections and zero inbound router ports are opened. Share targets are limited to local
+and private LAN addresses (loopback, RFC 1918, ULA, and link-local); public internet IPs, cloud
+metadata endpoints, and CGNAT/Tailscale addresses (`100.64.0.0/10`) are refused after DNS
+resolution. Take a share down anytime with `~/hogman share stop app`.
 
 Full guides: [Quickstart](https://work.hogman.network/docs/) ·
 [Joining a pen](https://work.hogman.network/docs/join.html) ·

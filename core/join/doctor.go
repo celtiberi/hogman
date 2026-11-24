@@ -130,8 +130,15 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 				})
 			default:
 				reason := p.statusReason
-				if reason == "" {
-					reason = "agent not running"
+				penDir := filepath.Join(configBase, p.Zone)
+				if interrupted, _ := readUpdatingMarker(penDir); interrupted {
+					reason = "interrupted update left agent stopped"
+				} else if reason == "" {
+					if !serviceConfigured(p.Zone) {
+						reason = "agent not running and no login item registered"
+					} else {
+						reason = "agent not running"
+					}
 				}
 				fix := cliBinaryName() + " update"
 				if strings.Contains(strings.ToLower(reason), "removed") {
