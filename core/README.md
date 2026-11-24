@@ -89,9 +89,9 @@ address it comes from (`X-Forwarded-For` over the Unix socket shared only with `
 | `DELETE /api/names/{name}` | Release a name and everything under it |
 | `POST/DELETE /api/acme/txt` | Write/delete `_acme-challenge.*` TXT records via `challenge-dns` for names owned solely by the calling `server` device |
 | `POST /api/acme/eab` | Mint a single-use fallback CA EAB credential for a `server` device that owns at least one name |
-| `GET /api/directory` | Every site on the network, its owner and note |
+| `GET /api/directory` | Every site on the network, its owner, note, and live server `online` / `last_seen` from Headscale |
 | `POST /api/invites` | Mint an invite (admins; members if `MEMBERS_CAN_INVITE=true`) |
-| `GET /api/admin/members`, `/devices`, `/invites`, `/audit` | Admins |
+| `GET /api/admin/members`, `/devices`, `/invites`, `/audit` | Admins (`/devices` includes live `online` / `last_seen` from Headscale without storing history) |
 | `POST /api/admin/members/{handle}/suspend\|resume\|kick\|role` | Admins |
 
 Names: first come, first served. Owning `alice` gives you everything under it

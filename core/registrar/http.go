@@ -176,6 +176,7 @@ type ctxKey struct{}
 type caller struct {
 	member *Member
 	device *Device
+	nodes  []HSNode
 }
 
 func (c caller) actor() Actor { return Actor{Member: c.member} }
@@ -418,9 +419,20 @@ func MeshHandler(s *Service) http.Handler {
 			fail(w, err)
 			return
 		}
-		out := []map[string]string{}
+		byID := indexNodesByID(c.nodes)
+		out := make([]directoryEntry, 0, len(names))
 		for _, n := range names {
-			out = append(out, map[string]string{"name": n.Name + "." + s.cfg.Zone, "member": n.Member, "note": n.Note})
+			entry := directoryEntry{
+				Name:   n.Name + "." + s.cfg.Zone,
+				Member: n.Member,
+				Note:   n.Note,
+			}
+			// Only expose live presence for sites/servers on /api/directory;
+			// personal device presence stays admin-only on /api/admin/devices.
+			if n.DeviceKind == "server" {
+				entry.Online, entry.LastSeen = nodePresence(byID, n.HSNodeID)
+			}
+			out = append(out, entry)
 		}
 		writeJSON(w, 200, out)
 	})
@@ -529,7 +541,13 @@ func MeshHandler(s *Service) http.Handler {
 			fail(w, err)
 			return
 		}
-		writeJSON(w, 200, ds)
+		byID := indexNodesByID(c.nodes)
+		out := make([]deviceView, 0, len(ds))
+		for _, d := range ds {
+			online, lastSeen := nodePresence(byID, d.HSNodeID)
+			out = append(out, deviceView{Device: d, Online: online, LastSeen: lastSeen})
+		}
+		writeJSON(w, 200, out)
 	})
 
 	h("GET /api/admin/invites", true, false, func(w http.ResponseWriter, r *http.Request, c caller) {
@@ -613,7 +631,7 @@ func identify(s *Service, next http.Handler) http.Handler {
 			fail(w, forbidden("this device is not enrolled in the network"))
 			return
 		}
-		m, d, err := s.VerifyLiveCaller(r.Context(), src)
+		m, d, nodes, err := s.verifyLiveCallerWithNodes(r.Context(), src)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
 				fail(w, forbidden("this device is not enrolled in the network"))
@@ -626,11 +644,62 @@ func identify(s *Service, next http.Handler) http.Handler {
 			fail(w, forbidden("membership %s", m.Status))
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, caller{member: m, device: d})))
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, caller{member: m, device: d, nodes: nodes})))
 	})
 }
 
 // --------------------------------------------------------------- helpers --
+
+type directoryEntry struct {
+	Name     string `json:"name"`
+	Member   string `json:"member"`
+	Note     string `json:"note"`
+	Online   *bool  `json:"online,omitempty"`
+	LastSeen string `json:"last_seen,omitempty"`
+}
+
+type deviceView struct {
+	*Device
+	Online   *bool  `json:"online,omitempty"`
+	LastSeen string `json:"last_seen,omitempty"`
+}
+
+func indexNodesByID(nodes []HSNode) map[string]HSNode {
+	if len(nodes) == 0 {
+		return nil
+	}
+	byID := make(map[string]HSNode, len(nodes))
+	for _, n := range nodes {
+		if n.ID != "" {
+			byID[n.ID] = n
+		}
+	}
+	return byID
+}
+
+func normalizeLastSeen(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil || t.IsZero() || t.Unix() <= 0 {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+func nodePresence(byID map[string]HSNode, hsNodeID string) (*bool, string) {
+	if hsNodeID == "" || len(byID) == 0 {
+		return nil, ""
+	}
+	n, ok := byID[hsNodeID]
+	if !ok {
+		return nil, ""
+	}
+	online := n.Online
+	return &online, normalizeLastSeen(n.LastSeen)
+}
 
 type inviteView struct {
 	*Invite

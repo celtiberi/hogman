@@ -47,6 +47,7 @@ type HSNode struct {
 	PreAuthKey  *HSPreAuthKey `json:"preAuthKey"`
 	Tags        []string      `json:"tags"`
 	Online      bool          `json:"online"`
+	LastSeen    string        `json:"lastSeen,omitempty"`
 }
 
 func (n *HSNode) HasTag(t string) bool {
