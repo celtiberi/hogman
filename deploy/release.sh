@@ -93,7 +93,9 @@ fi
 for a in "$out/$tarball" "$out/$bins"; do
   bad="$(tar --numeric-owner -tvzf "$a" | awk '{ o = ($2 ~ "/") ? $2 : $3 "/" $4; if (o != "0/0") n++ } END { print n + 0 }')"
   [ "$bad" = 0 ] || { echo "$(basename "$a"): $bad entries are not owned by 0:0: not releasing" >&2; exit 1; }
-  if tar -tvzf "$a" | grep -qw -- "$(id -un)"; then
+  # (root is the name every entry is meant to carry, so skip this when run as root.)
+  me="$(id -un)"
+  if [ "$me" != root ] && tar -tvzf "$a" | awk '{ print $2, $3, $4 }' | grep -qw -- "$me"; then
     echo "$(basename "$a") contains this account's name: not releasing" >&2; exit 1
   fi
 done
