@@ -52,6 +52,8 @@ usage:
 <target> is a port on this computer (3000), a local web address
 (http://localhost:8080) or a folder (./site) to serve as a website.
 <name> becomes https://<name>.<pen-zone>, open to everyone in the pen.
+Note: <name> is publicly visible in certificate logs (contents stay private);
+don't put anything sensitive in it.
 
 options:
   --note TEXT         short one-line description shown on the pen's home page (--note "" clears it)
@@ -471,6 +473,10 @@ func shareStart(name, what, rawLink string, o options) error {
 		}
 	}
 
+	if fresh {
+		say("%s", formatShareCertLogNotice(cfg.fqdn()))
+	}
+
 	if o.enrollOnly {
 		step("Enrolling %s into %s", cfg.url(), dir)
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -506,6 +512,10 @@ func shareStart(name, what, rawLink string, o options) error {
 		shareReady(c, false, false)
 		say("  Stop: Ctrl-C. The name stays yours: run the same command to bring it back.")
 	})
+}
+
+func formatShareCertLogNotice(fqdn string) string {
+	return fmt.Sprintf("• Note: %s will be publicly visible in certificate logs (contents stay private). Don't put anything sensitive in the name.", fqdn)
 }
 
 func shareReady(c *shareConfig, background, managed bool) {

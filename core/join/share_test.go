@@ -492,3 +492,13 @@ func TestLocalOrLANDialContext(t *testing.T) {
 		t.Fatalf("LAN hostname dial = (%q, %v), want 10.0.1.25:8080", dialed, err)
 	}
 }
+
+func TestShareCertLogNotice(t *testing.T) {
+	got := formatShareCertLogNotice("blog.alpha.pens.example.com")
+	if !strings.Contains(got, "blog.alpha.pens.example.com") || !strings.Contains(got, "certificate logs") || strings.Contains(got, "Certificate Transparency") {
+		t.Fatalf("unexpected share cert log notice: %q", got)
+	}
+	if !strings.Contains(shareUsage, "certificate logs") {
+		t.Fatalf("shareUsage missing certificate logs warning")
+	}
+}

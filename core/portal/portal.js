@@ -93,6 +93,8 @@
       Object.assign(document.createElement('code'), { textContent: '~/hogman share stop cooler-1' }),
       document.createTextNode(' takes it down and frees the name.')
     );
+    $('host-hint-ctlog').textContent =
+      "Note: bridged site names are publicly visible in certificate logs (traffic and contents stay private). Don't put anything sensitive in a site name — use neutral labels like cooler-1 or panel-b2.";
     $('host-hint-2').replaceChildren(
       document.createTextNode('Running on a dedicated on-site bridge computer (Raspberry Pi or mini PC)? Press '),
       Object.assign(document.createElement('em'), { textContent: 'Get a share link' }),
