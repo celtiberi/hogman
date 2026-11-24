@@ -57,6 +57,7 @@
       ['Docs', 'https://work.hogman.network/docs/'],
       ['Security', 'https://work.hogman.network/docs/security.html'],
       ['FAQ', 'https://work.hogman.network/docs/faq.html'],
+      ['Contact', 'mailto:hogman-support@proton.me'],
       ['GitHub', 'https://github.com/celtiberi/hogman'],
     ], ' \u00b7 ');
   };
