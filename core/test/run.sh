@@ -71,7 +71,7 @@ cleanup() {
     docker volume rm -f "hogman-e2e-state-$$" "hogman-e2e-in-$$" >/dev/null 2>&1 || true
     docker rmi -f "hogman-sidecar-e2e:$$" >/dev/null 2>&1 || true
     dc down -v --remove-orphans >/dev/null 2>&1
-    docker network rm hogman-test-acme >/dev/null 2>&1 || true
+    docker network rm "${COMPOSE_PROJECT_NAME}_core" hogman-test-acme >/dev/null 2>&1 || true
     rm -rf "$WORK"
   fi
 }
@@ -114,6 +114,11 @@ JSON
 docker run -d --name hogman-run-pebble --network hogman-test-acme --network-alias pebble -e PEBBLE_VA_NOSLEEP=1 \
   -v "$ACME/certs:/certs:ro" -v "$ACME/pebble.json:/pebble.json:ro" \
   ghcr.io/letsencrypt/pebble:2.10.3 -config /pebble.json -dnsserver hogman-run-cdns:53 >/dev/null
+# Connect Pebble and challenge-dns to the pen's single core network so registrar
+# stays single-homed (matching production) while still reaching the test CA/DNS.
+docker network inspect "${COMPOSE_PROJECT_NAME}_core" >/dev/null 2>&1 || docker network create "${COMPOSE_PROJECT_NAME}_core" >/dev/null
+docker network connect "${COMPOSE_PROJECT_NAME}_core" hogman-run-cdns >/dev/null 2>&1 || true
+docker network connect --alias pebble "${COMPOSE_PROJECT_NAME}_core" hogman-run-pebble >/dev/null 2>&1 || true
 retry 30 docker run --rm --network hogman-test-acme -v "$ACME/certs:/c:ro" nicolaka/netshoot:v0.14 \
   curl -sf --cacert /c/ca.crt https://pebble:14000/dir || exit 1
 docker run --rm --network hogman-test-acme -v "$ACME/certs:/c:ro" nicolaka/netshoot:v0.14 \
@@ -430,7 +435,20 @@ page_ok() {
 net_ok()   { from_internet "https://$PUBLIC_HOST/hogman/v1/network" | jq -e --arg z "$ZONE" '.zone == $z and .cert_mode == "public" and (.root_ca // "") == "" and (.root_fingerprint // "") == ""'; }
 check "https://<host>/join serves the join page" page_ok
 check "edge runs non-root ($HOGMAN_UID:$HOGMAN_GID)" bash -c 'test "$1" != 0 && test "$2" = "$1:$3"' _ "$HOGMAN_UID" "$(docker inspect -f '{{.Config.User}}' "$(dc ps -q edge)")" "$HOGMAN_GID"
-check "portal runs non-root ($HOGMAN_UID:$HOGMAN_GID)" bash -c 'test "$1" != 0 && test "$2" = "$1:$3"' _ "$HOGMAN_UID" "$(docker inspect -f '{{.Config.User}}' "$(dc ps -q portal)")" "$HOGMAN_GID"
+check "registrar (portal + DNS + core mesh) runs non-root ($HOGMAN_UID:$HOGMAN_GID)" bash -c 'test "$1" != 0 && test "$2" = "$1:$3"' _ "$HOGMAN_UID" "$(docker inspect -f '{{.Config.User}}' "$(dc ps -q registrar)")" "$HOGMAN_GID"
+check "core-mesh and portal containers are gone (I-15)" bash -c 'test -z "$1" && test -z "$2"' _ "$(dc ps -q core-mesh 2>/dev/null || true)" "$(dc ps -q portal 2>/dev/null || true)"
+tcp_dns_ok() {
+  local out
+  out="$(run bob-tools dig +tcp +short "@$CORE_MESH_IP" "home.$ZONE" | tr -d '\r')" || return 1
+  grep -qx -- "$CORE_MESH_IP" <<<"$out"
+}
+check "TCP :53 DNS resolves home.$ZONE over tsnet" tcp_dns_ok
+xff_spoof_refused() {
+  local code
+  code="$(run bob-tools curl -s -m5 -o /dev/null -w '%{http_code}' --cacert "$ROOT" -H "X-Forwarded-For: $ALICE_LAPTOP_IP" "https://home.$ZONE/api/admin/members" | tr -d '\r')" || return 1
+  test "$code" = 403
+}
+check "direct tsnet identity ignores spoofed X-Forwarded-For on /api/admin/members" xff_spoof_refused
 join_hdrs="$(from_internet -sI "https://$PUBLIC_HOST/join" | tr -d '\r')"
 check "the join page sets anti-framing headers and Origin-Agent-Cluster" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\" && grep -iq '^origin-agent-cluster: ?1' <<<\"\$1\"" _ "$join_hdrs"
 portal_hdrs="$(run bob-tools curl -sfI --cacert $ROOT "https://home.$ZONE/" | tr -d '\r')"

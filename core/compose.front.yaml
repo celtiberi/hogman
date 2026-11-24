@@ -1,20 +1,20 @@
 # Front-door mode (FRONT_DOOR=true in .env): this pen shares a host with other
 # pens. The host's shared front door (deploy/hogman-host) holds ports 80/443,
 # terminates TLS, serves /join and /join/dl, blocks /api/* and /swagger*, and
-# proxies /hogman/* to this pen's registrar (core-mesh:8081) and everything
+# proxies /hogman/* to this pen's registrar (registrar:8081) and everything
 # else to its headscale (:8080) over this pen's private network.
 #
 # Isolation: no container of this pen joins the shared "hogman-front" network.
 # Every container stays on this pen's own private network ("pen-<name>-core").
 # The front door joins each pen's private network and addresses each pen by its
-# unique container names (pen-<name>-core-mesh-1, pen-<name>-headscale-1).
+# unique container names (pen-<name>-registrar-1, pen-<name>-headscale-1).
 
 services:
   edge:
     # Unused behind the shared front door; standalone installs omit this file.
     profiles: [standalone]
 
-  core-mesh:
+  registrar:
     depends_on: !override
       headscale: { condition: service_healthy }
 

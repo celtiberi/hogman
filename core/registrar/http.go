@@ -181,10 +181,21 @@ type caller struct {
 
 func (c caller) actor() Actor { return Actor{Member: c.member} }
 
-// MeshHandler is the member and admin API, served only on the mesh behind the
-// portal (https://home.<zone>/api/). The caller is identified by the mesh
-// address their request came from: no passwords, no sessions.
+// MeshHandler is the member and admin API, served over the Unix socket (or
+// loopback TCP in dev/tests) behind a reverse proxy that sets X-Forwarded-For.
 func MeshHandler(s *Service) http.Handler {
+	return requireSameOriginAndJSON(s.cfg.Zone, identify(s, meshMux(s)))
+}
+
+// MeshHandlerDirect is the member and admin API served directly on the
+// embedded tsnet listener (https://home.<zone>/api/). Caller identity comes
+// strictly from the WireGuard connection's RemoteAddr verified via tsnet WhoIs;
+// X-Forwarded-For and all other HTTP headers are ignored.
+func MeshHandlerDirect(s *Service, resolvePeer func(ctx context.Context, remoteAddr string) (string, error)) http.Handler {
+	return requireSameOriginAndJSON(s.cfg.Zone, identifyDirect(s, resolvePeer, meshMux(s)))
+}
+
+func meshMux(s *Service) http.Handler {
 	mux := http.NewServeMux()
 	h := func(pattern string, admin, allowServer bool, fn func(w http.ResponseWriter, r *http.Request, c caller)) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
@@ -599,7 +610,101 @@ func MeshHandler(s *Service) http.Handler {
 		writeJSON(w, 200, log)
 	})
 
-	return requireSameOriginAndJSON(s.cfg.Zone, identify(s, mux))
+	return mux
+}
+
+// identifyDirect resolves the calling device strictly from the authenticated
+// WireGuard peer address (RemoteAddr verified via tsnet WhoIs). X-Forwarded-For
+// is never consulted.
+func identifyDirect(s *Service, resolvePeer func(ctx context.Context, remoteAddr string) (string, error), next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil || net.ParseIP(host) == nil {
+			fail(w, forbidden("this device is not enrolled in the network"))
+			return
+		}
+		src := host
+		if resolvePeer != nil {
+			peerIP, err := resolvePeer(r.Context(), r.RemoteAddr)
+			if err != nil || peerIP == "" || net.ParseIP(peerIP) == nil {
+				fail(w, forbidden("this device is not enrolled in the network"))
+				return
+			}
+			src = peerIP
+		}
+		m, d, nodes, err := s.verifyLiveCallerWithNodes(r.Context(), src)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				fail(w, forbidden("this device is not enrolled in the network"))
+				return
+			}
+			fail(w, err)
+			return
+		}
+		if m.Status != "active" {
+			fail(w, forbidden("membership %s", m.Status))
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, caller{member: m, device: d, nodes: nodes})))
+	})
+}
+
+// PortalHandler serves https://home.<zone> directly inside the registrar:
+// static assets from portalDir and /api/* via apiHandler, with the same strict
+// security headers previously set by portal.Caddyfile.
+func PortalHandler(zone, portalDir string, apiHandler http.Handler) http.Handler {
+	wantHost := "home." + strings.ToLower(strings.TrimSuffix(strings.TrimSpace(zone), "."))
+	fileSrv := http.FileServer(noDirListingFS{http.Dir(portalDir)})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqHost := strings.ToLower(strings.TrimSpace(r.Host))
+		if h, _, err := net.SplitHostPort(reqHost); err == nil {
+			reqHost = h
+		}
+		if wantHost != "home." && reqHost != wantHost {
+			http.NotFound(w, r)
+			return
+		}
+		h := w.Header()
+		h.Set("Strict-Transport-Security", "max-age=31536000")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Cache-Control", "no-store")
+		h.Set("Origin-Agent-Cluster", "?1")
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			apiHandler.ServeHTTP(w, r)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		fileSrv.ServeHTTP(w, r)
+	})
+}
+
+type noDirListingFS struct{ fs http.FileSystem }
+
+func (n noDirListingFS) Open(name string) (http.File, error) {
+	f, err := n.fs.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if fi.IsDir() {
+		idx, err := n.fs.Open(strings.TrimSuffix(name, "/") + "/index.html")
+		if err != nil {
+			_ = f.Close()
+			return nil, os.ErrNotExist
+		}
+		_ = idx.Close()
+	}
+	return f, nil
 }
 
 // requireSameOriginAndJSON blocks cross-site browser requests (CSRF and

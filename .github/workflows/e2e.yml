@@ -163,6 +163,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Fetch previous release tag for legacy upgrade test
+        run: git fetch --no-tags --depth=1 origin refs/tags/v2026.11.24-76d2903:refs/tags/v2026.11.24-76d2903
       - name: Tools
         run: |
           docker version --format 'docker {{.Server.Version}}'

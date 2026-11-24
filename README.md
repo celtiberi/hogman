@@ -162,9 +162,11 @@ A stranger looking up the same name publicly: NODATA from ns1. Zero A/AAAA recor
 - **HTTPS (`:443`) to servers only:** default-deny ACLs block SSH, raw TCP/UDP, exit nodes, and all
   inbound connections to personal devices. `hogman`'s loopback proxy pins every dialed IP to a
   verified mesh peer via `WhoIs`, never touching `127.0.0.1` or LAN hosts.
-- **Isolated hosted pens:** each pen runs in 4 non-root containers (`uid 65532`) on its own Docker
-  bridge (~75 MB RAM) behind a shared `*.gate.hogman.network` front door, with nightly encrypted
-  off-host backups and automated health checks.
+- **Isolated hosted pens:** each pen runs in 2 unprivileged, read-only containers (`uid 65532`,
+  `cap_drop: ALL`, no `NET_ADMIN` or `/dev/net/tun` — `headscale` and `registrar` with embedded
+  `tsnet`, authoritative DNS, and portal) on its own Docker bridge (~30–40 MB idle RAM) behind a
+  shared `*.gate.hogman.network` front door, with nightly encrypted off-host backups and automated
+  health checks.
 - **Verifiable releases:** every `hogman` release binary is built by GitHub Actions with SLSA
   provenance:
   ```bash

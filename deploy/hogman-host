@@ -147,6 +147,17 @@ sync_front_assets() {
   chmod -R a+rX "$FRONT/join-page" "$FRONT/join-dl" 2>/dev/null || true
 }
 
+pen_public_upstream() { # pen_public_upstream <pen-name>
+  # Mixed-fleet routing (I-15): legacy 4-container pens still run core-mesh
+  # (sharing its netns with registrar:8081); folded 2-container pens expose
+  # registrar:8081 directly on pen-<name>-registrar-1.
+  if [ -f "$PENS/$1/compose.yaml" ] && grep -qE '^[[:space:]]*core-mesh:' "$PENS/$1/compose.yaml"; then
+    echo "pen-$1-core-mesh-1:8081"
+  else
+    echo "pen-$1-registrar-1:8081"
+  fi
+}
+
 write_front() {
   sync_front_assets
   local fids fuid fgid
@@ -231,7 +242,7 @@ write_front() {
 		request_body {
 			max_size 16KB
 		}
-		reverse_proxy pen-{args[0]}-core-mesh-1:8081
+		reverse_proxy {args[1]}
 	}
 	# Expose only the Tailscale control/relay routes clients need and the
 	# health endpoint used by monitoring; keep Headscale's admin REST API,
@@ -297,7 +308,7 @@ http://$host {
 }
 $host {
 $(gate_tls_line "$host")
-	import pen $n
+	import pen $n $(pen_public_upstream "$n")
 }
 
 EOF
@@ -351,7 +362,8 @@ EOF
   } > "$caddy"
   # The front door joins "hogman-front" (for the sign-up page) and each live
   # pen's own private network, addressing each pen by its unique container names
-  # (pen-<name>-core-mesh-1, pen-<name>-headscale-1). Pens never share a network
+  # (pen-<name>-registrar-1 and pen-<name>-headscale-1, or pen-<name>-core-mesh-1
+  # for legacy 4-container pens). Pens never share a network
   # with each other's core or join "hogman-front".
   # Pen networks are attached to the running front door (reload_front), not
   # listed here: listing them would recreate it on every new pen, cutting every
@@ -711,6 +723,17 @@ cmd_plan() {
   info "Pen $n plan set to $want (challenge-dns caps updated live)"
 }
 
+stop_pen_container_and_confirm() {  # stop_pen_container_and_confirm <container-name>
+  local cname="$1"
+  docker rm -f "$cname" >/dev/null 2>&1 || true
+  local i
+  for i in $(seq 15); do
+    [ -z "$(docker ps -q --filter "name=^/${cname}$" 2>/dev/null)" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+
 cmd_upgrade() {
   load_host
   local n="${1:-}"
@@ -718,13 +741,52 @@ cmd_upgrade() {
   [ -d "$PENS/$n" ] || die "no pen $n"
   [ ! -f "$PENS/$n/.retired" ] || die "pen $n has already been deleted"
   [ -f "$PENS/$n/.env" ] || die "pen $n has no .env (restoring? put the backup's .env and data/ in $PENS/$n)"
-  rsync -a --exclude data --exclude .env "$SRC/" "$PENS/$n/"
+
+  # Detect 4-container (core-mesh) -> 2-container (embedded tsnet registrar) migration (I-15).
+  local migrating_tsnet=0 rollback_dir=""
+  if [ -f "$PENS/$n/compose.yaml" ] && grep -qE '^[[:space:]]*core-mesh:' "$PENS/$n/compose.yaml" \
+     && [ -f "$SRC/compose.yaml" ] && ! grep -qE '^[[:space:]]*core-mesh:' "$SRC/compose.yaml"; then
+    migrating_tsnet=1
+  fi
+
   # If the pen is asleep (and not currently in a renew_only wake), update its
   # code in place without waking or starting containers.
   if [ -f "$PENS/$n/.sleeping" ] && [ ! -f "$PENS/$n/.renew-wake" ]; then
+    rsync -a --exclude data --exclude .env "$SRC/" "$PENS/$n/"
     info "pen $n code updated while sleeping (stays asleep until woken)"
     return 0
   fi
+
+  if [ "$migrating_tsnet" = 1 ]; then
+    rollback_dir="$(mktemp -d)"
+    rsync -a --exclude data --exclude .env "$PENS/$n/" "$rollback_dir/"
+    # Rule 1: never run core-mesh and registrar's tsnet with the same node key at once.
+    # Stop and remove legacy core-mesh (plus portal and old registrar) and confirm gone
+    # BEFORE copying tailscaled.state or starting the new registrar.
+    info "pen $n: migrating from 4-container (core-mesh/portal) to 2-container (embedded tsnet registrar)"
+    stop_pen_container_and_confirm "pen-$n-portal-1" || true
+    stop_pen_container_and_confirm "pen-$n-registrar-1" || true
+    stop_pen_container_and_confirm "pen-$n-core-mesh-1" \
+      || { rm -rf "$rollback_dir"; die "pen $n: legacy core-mesh is still running; aborting upgrade before state copy"; }
+
+    # Rule 2: copy (never move) data/mesh/core/tailscaled.state -> data/registrar/tsnet/
+    # as 0600 owned by the pen's unprivileged UID/GID, keeping data/mesh/core/ intact for rollback.
+    if [ -f "$PENS/$n/data/mesh/core/tailscaled.state" ] && [ ! -f "$PENS/$n/data/registrar/tsnet/tailscaled.state" ]; then
+      local puid pgid
+      puid="$(awk -F= '$1=="HOGMAN_UID"{print $2}' "$PENS/$n/data/state.env" 2>/dev/null | tr -d '\r\n' || true)"
+      pgid="$(awk -F= '$1=="HOGMAN_GID"{print $2}' "$PENS/$n/data/state.env" 2>/dev/null | tr -d '\r\n' || true)"
+      puid="${puid:-$PEN_UID}"; pgid="${pgid:-$PEN_GID}"
+      mkdir -p "$PENS/$n/data/registrar/tsnet"
+      chmod 700 "$PENS/$n/data/registrar/tsnet"
+      ( umask 077; cp "$PENS/$n/data/mesh/core/tailscaled.state" "$PENS/$n/data/registrar/tsnet/tailscaled.state" )
+      chmod 600 "$PENS/$n/data/registrar/tsnet/tailscaled.state"
+      if [ "$(id -u)" = 0 ]; then
+        chown -R "$puid:$pgid" "$PENS/$n/data/registrar/tsnet"
+      fi
+    fi
+  fi
+
+  rsync -a --exclude data --exclude .env "$SRC/" "$PENS/$n/"
   # Also brings back a pen restored from a backup onto a new server.
   rm -f "$PENS/$n/.removed"
   docker network inspect "pen-$n-core" >/dev/null 2>&1 || docker network create "pen-$n-core" >/dev/null
@@ -732,7 +794,34 @@ cmd_upgrade() {
   reload_front
   local front_ca=""
   [ -n "${FRONT_TLS_MODE:-}" ] && front_ca="$FRONT/data/caddy/pki/authorities/local/root.crt"
-  (cd "$PENS/$n" && FRONT_CA="$front_ca" FRONT_JOIN_DL="$FRONT/join-dl" ./hogman up)
+
+  local up_rc=0
+  if [ "$migrating_tsnet" = 1 ] && [ "${HOGMAN_TEST_FAIL_UPGRADE:-0}" = 1 ]; then
+    # Test hook (used by deploy/test-host.sh) to exercise the exact rollback path
+    # when the new embedded-tsnet registrar fails to become healthy.
+    (cd "$PENS/$n" && FRONT_CA="$front_ca" FRONT_JOIN_DL="$FRONT/join-dl" \
+      TSNET_CONTROL_URL="https://invalid.invalid" TSNET_UP_TIMEOUT=5s REGISTRAR_WAIT_SECS=10 ./hogman up) || up_rc=$?
+    up_rc=1
+  else
+    (cd "$PENS/$n" && FRONT_CA="$front_ca" FRONT_JOIN_DL="$FRONT/join-dl" ./hogman up) || up_rc=$?
+  fi
+
+  if [ "$up_rc" -ne 0 ] && [ "$migrating_tsnet" = 1 ]; then
+    info "pen $n: 2-container upgrade failed (exit $up_rc); rolling back to 4-container layout"
+    # Rule 1 (rollback): stop and confirm new registrar is gone BEFORE core-mesh comes back.
+    stop_pen_container_and_confirm "pen-$n-registrar-1" \
+      || { rm -rf "$rollback_dir"; die "pen $n: rollback halted because new registrar is still running"; }
+    rm -rf "$PENS/$n/data/registrar/tsnet"
+    rsync -a --delete --exclude data --exclude .env "$rollback_dir/" "$PENS/$n/"
+    rm -rf "$rollback_dir"
+    write_front
+    reload_front
+    (cd "$PENS/$n" && FRONT_CA="$front_ca" FRONT_JOIN_DL="$FRONT/join-dl" ./hogman up) \
+      || die "pen $n: rollback to 4-container layout also failed"
+    die "pen $n: 2-container upgrade failed; restored 4-container layout with original core-mesh intact"
+  fi
+  [ -n "$rollback_dir" ] && rm -rf "$rollback_dir"
+  return "$up_rc"
 }
 
 cmd_remove() {
