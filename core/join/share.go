@@ -178,33 +178,6 @@ func shareTarget(what string) (target string, folder bool, err error) {
 	return abs, true, nil
 }
 
-// ------------------------------------------------------------- commands --
-
-func shareCmd(args []string, o options) error {
-	if len(args) >= 1 && args[0] == "list" {
-		if len(args) != 1 {
-			return errorf("usage: hogman-join share list [--pen ZONE]")
-		}
-		return shareList(o.pen)
-	}
-	if len(args) >= 1 && args[0] == "stop" {
-		if len(args) != 2 {
-			return errorf("usage: hogman-join share stop NAME [--pen ZONE] [--force]")
-		}
-		return shareStop(args[1], o)
-	}
-	if len(args) == 2 || len(args) == 3 {
-		link := ""
-		if len(args) == 3 {
-			link = args[2]
-		}
-		return shareStart(args[0], args[1], link, o)
-	}
-	fmt.Fprint(os.Stderr, shareUsage)
-	os.Exit(2)
-	return nil
-}
-
 func resolveShareNote(old *shareConfig, note string, noteSet bool) string {
 	if noteSet {
 		return strings.TrimSpace(note)
@@ -369,25 +342,7 @@ func myPens() []penConn {
 }
 
 func pickPen(want string) (*penConn, error) {
-	var found []penConn
-	for _, p := range myPens() {
-		if want == "" || p.zone == want {
-			found = append(found, p)
-		}
-	}
-	switch {
-	case len(found) == 1:
-		return &found[0], nil
-	case len(found) == 0 && want != "":
-		return nil, errorf("this computer is not on %s", want)
-	case len(found) == 0:
-		return nil, errorf("this computer is not on a pen yet. Join first (hogman-join '<link>'),\n  or share with a server link: hogman-join share NAME WHAT '<server link>'")
-	}
-	zs := []string{}
-	for _, p := range found {
-		zs = append(zs, p.zone)
-	}
-	return nil, errorf("this computer is on several pens (%s); pick one with --pen", strings.Join(zs, ", "))
+	return resolvePenConn(myPens(), want)
 }
 
 // memberClient talks to the pen's home page as this computer's member.
@@ -1030,13 +985,17 @@ func shareListState(running, managed bool) string {
 }
 
 func shareList(zone string) error {
-	zone = strings.ToLower(strings.TrimSpace(zone))
-	dirs := allShares(zone)
+	all := allShares("")
+	resolvedZone, err := resolveShareZoneFilter(all, zone)
+	if err != nil {
+		return err
+	}
+	dirs := allShares(resolvedZone)
 	if len(dirs) == 0 {
-		if zone != "" {
-			say("This computer shares nothing on %s.", zone)
+		if resolvedZone != "" {
+			say("This computer shares nothing on %s.", resolvedZone)
 		} else {
-			say("This computer shares nothing. Start with: hogman-join share NAME WHAT")
+			say("This computer shares nothing. Start with: hogman-join share <name> <target>")
 		}
 		return nil
 	}
@@ -1060,9 +1019,13 @@ func shareList(zone string) error {
 
 func findShare(name, zone string) (string, error) {
 	name = strings.ToLower(strings.TrimSpace(name))
-	zone = strings.ToLower(strings.TrimSpace(zone))
+	all := allShares("")
+	resolvedZone, err := resolveShareZoneFilter(all, zone)
+	if err != nil {
+		return "", err
+	}
 	var hits []string
-	for _, d := range allShares(zone) {
+	for _, d := range allShares(resolvedZone) {
 		if filepath.Base(d) == name {
 			hits = append(hits, d)
 		}
@@ -1073,7 +1036,19 @@ func findShare(name, zone string) (string, error) {
 	case 1:
 		return hits[0], nil
 	}
-	return "", errorf("%s is shared on more than one pen here; pick one with --pen", name)
+	if isTerminalFn() {
+		say("%s is shared on more than one pen:", name)
+		for i, d := range hits {
+			say("  %d) %s", i+1, filepath.Base(filepath.Dir(d)))
+		}
+		ans := strings.TrimSpace(askFn(fmt.Sprintf("  Choose a pen [1-%d]: ", len(hits))))
+		idx, err := strconv.Atoi(ans)
+		if err != nil || idx < 1 || idx > len(hits) {
+			return "", errorf("cancelled: choose a number between 1 and %d (or pass --pen <zone>)", len(hits))
+		}
+		return hits[idx-1], nil
+	}
+	return "", errorf("%s is shared on more than one pen here; pick one with --pen <zone> or set HOGMAN_PEN", name)
 }
 
 func shareStop(name string, o options) error {

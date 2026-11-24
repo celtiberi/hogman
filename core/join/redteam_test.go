@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,8 +10,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
-	"flag"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -71,6 +70,18 @@ func TestRedTeamLoopbackStatusTransportNoLeak(t *testing.T) {
 }
 
 func TestRedTeamCLIParseSubcommandFlagValidationAndDoubleDash(t *testing.T) {
+	noop := cliHandlers{
+		join:         func(string, options) error { return nil },
+		update:       func([]string, options) error { return nil },
+		leave:        func([]string, options) error { return nil },
+		leaveAll:     func([]string, options) error { return nil },
+		uninstall:    func([]string, options) error { return nil },
+		status:       func() error { return nil },
+		browserSetup: func([]string, options) error { return nil },
+		shareStart:   func(string, string, string, options) error { return nil },
+		shareList:    func(string) error { return nil },
+		shareStop:    func(string, options) error { return nil },
+	}
 	badCases := []struct {
 		name string
 		args []string
@@ -85,13 +96,16 @@ func TestRedTeamCLIParseSubcommandFlagValidationAndDoubleDash(t *testing.T) {
 		{"browser-setup dry-run", []string{"browser-setup", "--dry-run"}, "--dry-run"},
 		{"status pen", []string{"status", "--pen", "bobo.pens.example.com"}, "--pen"},
 		{"update background", []string{"update", "--background"}, "--background"},
-		{"unknown cmd dry-run", []string{"bogus", "--dry-run"}, "--dry-run"},
+		{"unknown cmd dry-run", []string{"bogus", "--dry-run"}, "unknown command"},
 	}
 	for _, tc := range badCases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, err := parseCLIArgs(tc.args)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("parseCLIArgs(%v) err = %v, want mention of %q", tc.args, err, tc.want)
+			var out, errOut bytes.Buffer
+			h := noop
+			h.out, h.errOut = &out, &errOut
+			rc := runCLI(tc.args, h)
+			if rc != 2 || !strings.Contains(errOut.String(), tc.want) {
+				t.Fatalf("runCLI(%v) rc=%d stderr=%q, want rc=2 containing %q", tc.args, rc, errOut.String(), tc.want)
 			}
 		})
 	}
@@ -109,56 +123,64 @@ func TestRedTeamCLIParseSubcommandFlagValidationAndDoubleDash(t *testing.T) {
 		{"--no-open", "update", "--dry-run"},
 		{"--verbose", "status"},
 	} {
-		if _, _, _, err := parseCLIArgs(okArgs); err != nil {
-			t.Fatalf("parseCLIArgs(%v) failed unexpectedly: %v", okArgs, err)
+		var out, errOut bytes.Buffer
+		h := noop
+		h.out, h.errOut = &out, &errOut
+		if rc := runCLI(okArgs, h); rc != 0 {
+			t.Fatalf("runCLI(%v) failed unexpectedly: rc=%d stderr=%q", okArgs, rc, errOut.String())
 		}
 	}
 
-	// --help / -h returns flag.ErrHelp with subcommand preserved.
+	// --help / -h returns exit 0 and writes usage to stdout.
 	for _, tc := range []struct {
 		args []string
-		sub  string
+		want string
 	}{
-		{[]string{"--help"}, ""},
-		{[]string{"-h"}, ""},
-		{[]string{"share", "--help"}, "share"},
-		{[]string{"update", "-h"}, "update"},
+		{[]string{"--help"}, "hogman-join"},
+		{[]string{"-h"}, "hogman-join"},
+		{[]string{"share", "--help"}, "share <name> <target>"},
+		{[]string{"update", "-h"}, "GitHub Releases"},
 	} {
-		pos, _, _, err := parseCLIArgs(tc.args)
-		if !errors.Is(err, flag.ErrHelp) {
-			t.Fatalf("parseCLIArgs(%v) err = %v, want flag.ErrHelp", tc.args, err)
-		}
-		gotSub := ""
-		if len(pos) > 0 {
-			gotSub = pos[0]
-		}
-		if gotSub != tc.sub {
-			t.Fatalf("parseCLIArgs(%v) sub = %q, want %q", tc.args, gotSub, tc.sub)
+		var out, errOut bytes.Buffer
+		h := noop
+		h.out, h.errOut = &out, &errOut
+		if rc := runCLI(tc.args, h); rc != 0 || !strings.Contains(out.String(), tc.want) {
+			t.Fatalf("runCLI(%v) rc=%d out=%q err=%q, want %q", tc.args, rc, out.String(), errOut.String(), tc.want)
 		}
 	}
 
 	// `--` stops option parsing so following dash-prefixed args stay positional.
-	pos, o, _, err := parseCLIArgs([]string{"share", "--", "--dry-run", "./dir"})
-	if err != nil {
-		t.Fatalf("parseCLIArgs with --: %v", err)
+	var gotName, gotTarget string
+	var gotO options
+	h := noop
+	h.shareStart = func(name, target, _ string, o options) error {
+		gotName, gotTarget, gotO = name, target, o
+		return nil
 	}
-	if o.dryRun || strings.Join(pos, ",") != "share,--dry-run,./dir" {
-		t.Fatalf("got pos=%v dryRun=%v", pos, o.dryRun)
+	if rc := runCLI([]string{"share", "--", "--dry-run", "./dir"}, h); rc != 0 {
+		t.Fatalf("runCLI with -- rc=%d", rc)
+	}
+	if gotO.dryRun || gotName != "--dry-run" || gotTarget != "./dir" {
+		t.Fatalf("got name=%q target=%q dryRun=%v", gotName, gotTarget, gotO.dryRun)
 	}
 
 	// `--note --` consumes `--` as the flag's value, NOT as end-of-options.
-	pos, o, _, err = parseCLIArgs([]string{"share", "--note", "--", "blog", "3000", "--background"})
-	if err != nil {
-		t.Fatalf("parseCLIArgs(--note --): %v", err)
+	if rc := runCLI([]string{"share", "--note", "--", "blog", "3000", "--background"}, h); rc != 0 {
+		t.Fatalf("runCLI(--note --) rc=%d", rc)
 	}
-	if o.note != "--" || !o.noteSet || !o.background || strings.Join(pos, ",") != "share,blog,3000" {
-		t.Fatalf("got pos=%v note=%q noteSet=%v bg=%v", pos, o.note, o.noteSet, o.background)
+	if gotO.note != "--" || !gotO.noteSet || !gotO.background || gotName != "blog" || gotTarget != "3000" {
+		t.Fatalf("got name=%q target=%q note=%q noteSet=%v bg=%v", gotName, gotTarget, gotO.note, gotO.noteSet, gotO.background)
 	}
 
 	// Valid --force on share stop.
-	pos, o, _, err = parseCLIArgs([]string{"share", "stop", "blog", "--force", "--pen", "bobo.pens.example.com"})
-	if err != nil || !o.force || o.pen != "bobo.pens.example.com" || strings.Join(pos, ",") != "share,stop,blog" {
-		t.Fatalf("share stop --force: pos=%v o=%+v err=%v", pos, o, err)
+	var stopName string
+	var stopO options
+	h.shareStop = func(name string, o options) error {
+		stopName, stopO = name, o
+		return nil
+	}
+	if rc := runCLI([]string{"share", "stop", "blog", "--force", "--pen", "bobo.pens.example.com"}, h); rc != 0 || !stopO.force || stopO.pen != "bobo.pens.example.com" || stopName != "blog" {
+		t.Fatalf("share stop --force: rc=%d name=%q o=%+v", rc, stopName, stopO)
 	}
 }
 

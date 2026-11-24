@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- `core/join`: Phase 1 CLI foundation modernization:
+  - Migrated CLI parsing to pinned `spf13/cobra` (`v1.10.2`) with per-subcommand flags, auto-generated `--help`, typo-friendly errors, opt-in stdout shell completions (`hogman-join completion bash|zsh|fish|powershell`, never modifying shell rc files), and byte-for-byte compatibility for existing root `hogman-join '<link>'` invocations, interspersed flags, and installed-service hidden commands (`agent <dir>`, `__share-run <dir>`, `__agent-logout <dir>`).
+  - Added explicit `hogman-join join` subcommand with interactive `Paste your join link:` prompt on a TTY (plus `--link-stdin` for scripts) so unquoted `#` and `&` in join links stop breaking shell commands.
+  - Unified pen resolution across `share`, `share list`, `share stop`, and `update --pen` (`--pen` short-name/host/full-zone matching, `HOGMAN_PEN` environment variable, ambiguous-short-name refusal, and interactive TTY numbered picker when multiple pens are installed).
 - `deploy/release.sh` & `core/join`: `hogman-join update` now defaults to immutable GitHub Releases on `celtiberi/hogman` (I-4), resolving `releases/latest/download/latest` once, verifying the pinned `hogman-join-SHA256SUMS` and standalone SLSA-attested platform binary over HTTPS (allowing redirects strictly to GitHub's official asset hosts), and updating all local pen agents, shares, and native-host copies even when no pens are joined yet; passing `--pen <zone>` or an explicit pen host/link continues to update from a pen's server (for E2E tests and firewalled networks). Also updated `hogman-join` and `share` usage text to `<name> <target>`.
 
 ### Fixed

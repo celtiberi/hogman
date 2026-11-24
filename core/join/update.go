@@ -42,6 +42,8 @@ options:
   --dry-run         check checksums and show what would change without modifying files
   --no-service      keep restarted agents in the background rather than a login item
   --control-ca FILE extra certificate to trust for a custom server
+
+(HOGMAN_RELEASE_BASE is a test-only override for offline release tests.)
 `
 
 const (
@@ -461,12 +463,16 @@ func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (
 			return nil, err
 		}
 		plan := &updatePlan{baseURL: baseURL, host: host}
-		var penMatched, shareMatched bool
+		var matchedZones []string
+		seenZone := map[string]bool{}
 		for _, p := range allPens {
-			if penFilter != "" && p.zone != penFilter {
+			if penFilter != "" && !penMatchesQuery(p.zone, p.cfg.LoginServer, penFilter) {
 				continue
 			}
-			penMatched = true
+			if !seenZone[p.zone] {
+				seenZone[p.zone] = true
+				matchedZones = append(matchedZones, p.zone)
+			}
 			if penFilter != "" && p.cfg.LoginServer != baseURL {
 				return nil, errorf("%s uses %s, not %s", p.zone, p.cfg.LoginServer, baseURL)
 			}
@@ -478,10 +484,13 @@ func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (
 			}
 		}
 		for _, s := range allSharesList {
-			if penFilter != "" && s.zone != penFilter {
+			if penFilter != "" && !penMatchesQuery(s.zone, s.cfg.LoginServer, penFilter) {
 				continue
 			}
-			shareMatched = true
+			if !seenZone[s.zone] {
+				seenZone[s.zone] = true
+				matchedZones = append(matchedZones, s.zone)
+			}
 			if penFilter != "" && s.cfg.LoginServer != baseURL {
 				return nil, errorf("%s uses %s, not %s", s.zone, s.cfg.LoginServer, baseURL)
 			}
@@ -492,8 +501,12 @@ func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (
 				}
 			}
 		}
-		if penFilter != "" && !penMatched && !shareMatched {
+		if penFilter != "" && len(matchedZones) == 0 {
 			return nil, errorf("this computer is not on %s", penFilter)
+		}
+		if penFilter != "" && len(matchedZones) > 1 {
+			sort.Strings(matchedZones)
+			return nil, errorf("%q matches more than one pen (%s); pass the full zone name with --pen", penFilter, strings.Join(matchedZones, ", "))
 		}
 		return plan, nil
 	}
@@ -508,7 +521,7 @@ func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (
 	var matchedShares []shareTargetDir
 
 	for _, p := range allPens {
-		if penFilter != "" && p.zone != penFilter {
+		if penFilter != "" && !penMatchesQuery(p.zone, p.cfg.LoginServer, penFilter) {
 			continue
 		}
 		matchedPens = append(matchedPens, p)
@@ -521,7 +534,7 @@ func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (
 		sources[p.cfg.LoginServer] = cur
 	}
 	for _, s := range allSharesList {
-		if penFilter != "" && s.zone != penFilter {
+		if penFilter != "" && !penMatchesQuery(s.zone, s.cfg.LoginServer, penFilter) {
 			continue
 		}
 		matchedShares = append(matchedShares, s)
@@ -539,6 +552,14 @@ func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (
 			return nil, errorf("this computer is not on %s", penFilter)
 		}
 		return nil, errorf("this computer is not on any pen yet. Pass a link or host: hogman-join update 'https://<host>'")
+	}
+	if len(zonesSeen) > 1 && penFilter != "" {
+		zones := make([]string, 0, len(zonesSeen))
+		for z := range zonesSeen {
+			zones = append(zones, z)
+		}
+		sort.Strings(zones)
+		return nil, errorf("%q matches more than one pen (%s); pass the full zone name with --pen", penFilter, strings.Join(zones, ", "))
 	}
 	if len(sources) > 1 {
 		zones := make([]string, 0, len(zonesSeen))

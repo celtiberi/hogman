@@ -108,17 +108,24 @@ func TestShareNoteResolutionAndFlags(t *testing.T) {
 		noteSet bool
 		bg      bool
 	}{
-		{[]string{"share", "notes", "./dir"}, []string{"share", "notes", "./dir"}, "", false, false},
-		{[]string{"share", "notes", "./dir", "--note", "Summer trip", "--background"}, []string{"share", "notes", "./dir"}, "Summer trip", true, true},
-		{[]string{"share", "--note", "", "notes", "./dir"}, []string{"share", "notes", "./dir"}, "", true, false},
+		{[]string{"share", "notes", "./dir"}, []string{"notes", "./dir"}, "", false, false},
+		{[]string{"share", "notes", "./dir", "--note", "Summer trip", "--background"}, []string{"notes", "./dir"}, "Summer trip", true, true},
+		{[]string{"share", "--note", "", "notes", "./dir"}, []string{"notes", "./dir"}, "", true, false},
 	}
 	for _, tc := range cases {
-		pos, o, ver, err := parseCLIArgs(tc.args)
-		if err != nil || ver {
-			t.Fatalf("parseCLIArgs(%v): ver=%v err=%v", tc.args, ver, err)
+		var gotName, gotTarget string
+		var gotO options
+		rc := runCLI(tc.args, cliHandlers{
+			shareStart: func(name, target, _ string, o options) error {
+				gotName, gotTarget, gotO = name, target, o
+				return nil
+			},
+		})
+		if rc != 0 {
+			t.Fatalf("runCLI(%v) rc=%d", tc.args, rc)
 		}
-		if strings.Join(pos, ",") != strings.Join(tc.wantPos, ",") || o.note != tc.note || o.noteSet != tc.noteSet || o.background != tc.bg {
-			t.Fatalf("parseCLIArgs(%v) = pos:%v note:%q noteSet:%v bg:%v", tc.args, pos, o.note, o.noteSet, o.background)
+		if gotName != tc.wantPos[0] || gotTarget != tc.wantPos[1] || gotO.note != tc.note || gotO.noteSet != tc.noteSet || gotO.background != tc.bg {
+			t.Fatalf("runCLI(%v) = (%q,%q) note:%q noteSet:%v bg:%v", tc.args, gotName, gotTarget, gotO.note, gotO.noteSet, gotO.background)
 		}
 	}
 }
