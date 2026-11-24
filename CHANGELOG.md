@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2026.11.24-6142bbf] - 2026-11-24
+
+### Changed
+- Simplified the pen portal's **Host something** / **Bridge equipment or host an app** card (and empty-sites hint) to remove inline example CLI snippets and link directly to the hosting/bridging guide with a primary button.
+- `hogman share` now runs in the background (and starts at login) by default; pass `--foreground` to stay attached to the terminal (Ctrl-C to stop). `--background` remains accepted as a backwards-compatible flag, and `--state-dir` containers continue to run in the foreground.
+- `hogman share list` now prints an aligned `NAME | PEN | URL | TARGET | [NOTE] | STATUS` table so share names are immediately obvious.
+- `hogman share stop` now shows usage and active share names when run without arguments (instead of Cobra's `accepts 1 arg(s)` error), accepts `<name>`, `<name>.<pen>`, full hostnames, or full `https://` URLs, and lists active share names when an unknown name is passed.
+
+### Fixed
+- `core/join-page/join.js` & `README.md`: the join and share commands shown to people quote `'=https'`. Unquoted, zsh (the default shell in macOS Terminal) treats `=https` as a program path and stops with `zsh: https not found`, so the one-line join command failed on every Mac. New CI check `core/test/zsh-commands.sh` runs the join page's and README's commands under zsh, with pipefail so a failure before `| sh` isn't hidden.
+- Waitlist sign-up form and emails no longer ask for or promise a bare vanity pen name (free waitlist codes always append a random 4-character suffix); the sign-up page keeps pen-creation fields collapsed until a complete sign-up code (`PIG-XXXX-XXXX`) is entered; and the post-signup screen now shows the copy-paste terminal join command directly (eliminating the extra `/join` browser hop, keeping the setup link + QR tucked under a "Setting up a different computer?" drawer) and stops showing the private `home.<zone>` URL ahead of Step 1.
+
 ## [2026.11.24-e1a24c1] - 2026-11-24
 
 ### Added

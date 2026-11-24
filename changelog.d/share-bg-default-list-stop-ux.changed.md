@@ -1,3 +1,0 @@
-- `hogman share` now runs in the background (and starts at login) by default; pass `--foreground` to stay attached to the terminal (Ctrl-C to stop). `--background` remains accepted as a backwards-compatible flag, and `--state-dir` containers continue to run in the foreground.
-- `hogman share list` now prints an aligned `NAME | PEN | URL | TARGET | [NOTE] | STATUS` table so share names are immediately obvious.
-- `hogman share stop` now shows usage and active share names when run without arguments (instead of Cobra's `accepts 1 arg(s)` error), accepts `<name>`, `<name>.<pen>`, full hostnames, or full `https://` URLs, and lists active share names when an unknown name is passed.
