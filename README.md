@@ -28,8 +28,10 @@ SLSA-attested release binaries.
 ## How it works
 
 1. **Create a pen** at [get.hogman.network](https://get.hogman.network). You claim an isolated
-   private DNS zone (`<pen>.pens.hogman.network`) and an in-pen management page where you control
-   membership — and can suspend or kick anyone across all their devices in about two seconds.
+   private DNS zone (`<pen>.pens.hogman.network`) and an in-pen management portal
+   (`https://home.<pen>.pens.hogman.network`) where owners and admins see a summary of members,
+   devices, sites, and status, inspect **All devices** and **Recent activity** (audit log), and
+   suspend or remove anyone across all their devices in about two seconds.
 2. **Invite your people.** Send each person a single-use invite link. They open it, run one
    command, pick a handle, and browse your pen in Chrome, Safari, or Firefox. Everyone without an
    invite sees nothing.

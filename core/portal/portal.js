@@ -225,23 +225,30 @@
     }
 
     const b = me.billing;
-    if (b && b.plan) {
-      const planName = b.plan === 'work' ? 'Work' : (b.plan === 'personal' ? 'Personal' : (b.plan === 'free' ? 'Free' : b.plan));
-      $('stat-plan').textContent = planName;
-      if (b.state === 'grace' && b.grace_until) {
-        $('stat-plan-sub').textContent = `Grace until ${String(b.grace_until).slice(0, 10)}`;
-        $('stat-plan-sub').classList.add('warn-text');
-      } else if (b.paid_until) {
-        $('stat-plan-sub').textContent = `Active until ${String(b.paid_until).slice(0, 10)}`;
-        $('stat-plan-sub').classList.remove('warn-text');
-      } else {
-        $('stat-plan-sub').textContent = b.state ? String(b.state) : 'Active';
-        $('stat-plan-sub').classList.remove('warn-text');
-      }
+    const planLabel = b && b.plan
+      ? (b.plan === 'work' ? 'Work' : (b.plan === 'personal' ? 'Personal' : (b.plan === 'free' ? 'Free' : String(b.plan))))
+      : '';
+    $('stat-plan-label').textContent = planLabel ? 'Plan & status' : 'Status';
+    const planSub = $('stat-plan-sub');
+    planSub.classList.remove('warn-text');
+    if (b && b.state === 'grace') {
+      $('stat-plan').textContent = planLabel ? `${planLabel} · Grace` : 'Grace period';
+      planSub.textContent = b.grace_until
+        ? `Sleeps ${String(b.grace_until).slice(0, 10)}`
+        : 'Renewal needed';
+      planSub.classList.add('warn-text');
+    } else if (b && b.state === 'renew_only') {
+      $('stat-plan').textContent = 'Renewal window';
+      planSub.textContent = 'Temporary wake';
+      planSub.classList.add('warn-text');
+    } else if (b && b.state === 'active') {
+      $('stat-plan').textContent = planLabel || 'Active';
+      planSub.textContent = b.paid_until
+        ? `Paid until ${String(b.paid_until).slice(0, 10)}`
+        : 'Current';
     } else {
-      $('stat-plan').textContent = isWork ? 'Work pen' : 'Active pen';
-      $('stat-plan-sub').textContent = 'Isolated control plane';
-      $('stat-plan-sub').classList.remove('warn-text');
+      $('stat-plan').textContent = planLabel || 'Active';
+      planSub.textContent = 'Private HTTPS only';
     }
   };
 
@@ -635,20 +642,21 @@
 
   const auditActionLabels = {
     'member.add': 'member added',
-    'member.join': 'joined',
     'member.role': 'role changed',
     'member.suspend': 'suspended',
     'member.resume': 'resumed',
     'member.kick': 'removed',
     'invite.mint': 'invite created',
     'invite.revoke': 'invite revoked',
-    'invite.redeem': 'invite used',
-    'device.add': 'device added',
-    'device.remove': 'device removed',
+    'invite.redeem': 'invite redeemed',
     'device.key': 'device link created',
+    'device.join': 'device joined',
+    'device.remove': 'device removed',
+    'device.gone': 'device left',
+    'device.reject': 'device rejected',
     'name.claim': 'site added',
     'name.release': 'site removed',
-    'billing.renew': 'renewal started',
+    'acme.eab': 'cert fallback issued',
   };
 
   const renderAudit = () => {
@@ -667,7 +675,8 @@
       const head = el('div', 'audit-head');
       const rawAct = a.action || 'event';
       const label = auditActionLabels[rawAct] || rawAct;
-      const actTag = el('span', rawAct.includes('kick') || rawAct.includes('suspend') || rawAct.includes('revoke') ? 'tag warn' : 'tag', label);
+      const isWarn = rawAct.includes('kick') || rawAct.includes('suspend') || rawAct.includes('revoke') || rawAct.includes('reject');
+      const actTag = el('span', isWarn ? 'tag warn' : 'tag', label);
       head.append(actTag);
       const summary = a.target ? `${a.actor || 'system'} → ${a.target}` : (a.actor || 'system');
       head.append(el('span', 'audit-summary', summary));
