@@ -373,6 +373,22 @@ func TestWebPageAndHeaders(t *testing.T) {
 	if oac := rec.Header().Get("Origin-Agent-Cluster"); oac != "?1" {
 		t.Fatalf("Origin-Agent-Cluster: %q, want ?1", oac)
 	}
+	if !strings.Contains(body, `src="/signup.js?v=`) || !strings.Contains(body, `href="/signup.css?v=`) {
+		t.Fatalf("index.html missing cache-busted asset query params")
+	}
+	for _, asset := range []string{"/", "/index.html", "/paid.html", "/signup.js", "/paid.js", "/signup.css"} {
+		ar := httptest.NewRecorder()
+		h.ServeHTTP(ar, httptest.NewRequest("GET", asset, nil))
+		if ar.Code != 200 {
+			t.Fatalf("%s returned %d, want 200", asset, ar.Code)
+		}
+		if cc := ar.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Fatalf("%s Cache-Control = %q, want no-store", asset, cc)
+		}
+		if asset == "/paid.html" && !strings.Contains(ar.Body.String(), `src="/paid.js?v=`) {
+			t.Fatalf("paid.html missing cache-busted /paid.js?v=")
+		}
+	}
 	if code, _ := call(h, "GET", "/api/status", "", nil); code != 502 {
 		t.Fatalf("broker down should be 502, got %d", code)
 	}

@@ -1,0 +1,1 @@
+- Signup page static scripts and styles (`/signup.js`, `/paid.js`, `/signup.css`) now send `Cache-Control: no-store` and are referenced with content-hashed `?v=` query strings in `index.html` and `paid.html`, preventing HTML/JS version skew through CDN and browser caches after deploys.
