@@ -228,6 +228,72 @@ func statusHasPeerIP(st *ipnstate.Status, want netip.Addr) bool {
 	return false
 }
 
+func peerHasTag(p *ipnstate.PeerStatus, want string) bool {
+	if p == nil || p.Tags == nil {
+		return false
+	}
+	for _, t := range p.Tags.All() {
+		if t == want {
+			return true
+		}
+	}
+	return false
+}
+
+// resolvePenDNSIP returns the mesh IP of the pen's DNS server from st.
+// It prefers the configured DNSServer when that peer is still in the tailnet,
+// and falls back to an active tag:infra peer (preferring online IPv4, then any
+// IPv4, then IPv6, sorted deterministically) if the pen's core node moved IP.
+// Only tag:infra peers are eligible as fallback — members and tag:server nodes
+// can never claim tag:infra.
+func resolvePenDNSIP(st *ipnstate.Status, configured string) (netip.Addr, bool) {
+	if st == nil {
+		return netip.Addr{}, false
+	}
+	if configured != "" {
+		if ip, err := netip.ParseAddr(configured); err == nil && statusHasPeerIP(st, ip) {
+			return ip.Unmap(), true
+		}
+	}
+	var onlineV4, anyV4, onlineV6, anyV6 []netip.Addr
+	for _, p := range st.Peer {
+		if !peerHasTag(p, "tag:infra") {
+			continue
+		}
+		for _, raw := range p.TailscaleIPs {
+			ip := raw.Unmap()
+			switch {
+			case ip.Is4() && p.Online:
+				onlineV4 = append(onlineV4, ip)
+			case ip.Is4():
+				anyV4 = append(anyV4, ip)
+			case ip.Is6() && p.Online:
+				onlineV6 = append(onlineV6, ip)
+			case ip.Is6():
+				anyV6 = append(anyV6, ip)
+			}
+		}
+	}
+	pick := func(list []netip.Addr) (netip.Addr, bool) {
+		if len(list) == 0 {
+			return netip.Addr{}, false
+		}
+		best := list[0]
+		for _, ip := range list[1:] {
+			if ip.Less(best) {
+				best = ip
+			}
+		}
+		return best, true
+	}
+	for _, bucket := range [][]netip.Addr{onlineV4, anyV4, onlineV6, anyV6} {
+		if ip, ok := pick(bucket); ok {
+			return ip, true
+		}
+	}
+	return netip.Addr{}, false
+}
+
 // evaluateLiveNodeStatus translates a running tsnet node's current Status into
 // (up, needsLogin, reason). needsLogin is true only when the control plane
 // explicitly reports BackendState == "NeedsLogin"; missing peers or other
@@ -242,7 +308,7 @@ func evaluateLiveNodeStatus(st *ipnstate.Status, dnsServer string) (up bool, nee
 			return false, false, "device session expired"
 		}
 		if dnsServer != "" {
-			if dnsIP, err := netip.ParseAddr(dnsServer); err == nil && !statusHasPeerIP(st, dnsIP) {
+			if _, ok := resolvePenDNSIP(st, dnsServer); !ok {
 				return false, false, "not connected to pen"
 			}
 		}
@@ -403,10 +469,23 @@ func newAgent(c *agentConfig, node *tsnet.Server) *agent {
 	if node != nil {
 		a.resolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			// The pen's DNS server is a dial like any other: only to a device
-			// this pen's node knows.
+			// this pen's node knows. Prefer the configured DNSServer; if the
+			// pen's core node moved IP, follow the live tag:infra peer instead.
 			ip, err := netip.ParseAddr(c.DNSServer)
 			if err != nil || !a.allowed(ctx, ip) {
-				return nil, errOutside
+				lc, lerr := node.LocalClient()
+				if lerr != nil {
+					return nil, errOutside
+				}
+				st, serr := lc.Status(ctx)
+				if serr != nil {
+					return nil, errOutside
+				}
+				found, ok := resolvePenDNSIP(st, c.DNSServer)
+				if !ok || !a.allowed(ctx, found) {
+					return nil, errOutside
+				}
+				ip = found
 			}
 			return node.Dial(ctx, network, net.JoinHostPort(ip.Unmap().String(), "53"))
 		}}
