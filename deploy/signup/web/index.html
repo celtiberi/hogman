@@ -158,17 +158,19 @@
 
   <section id="done" class="panel" hidden>
     <h2 id="done-title">Your pen is up</h2>
-    <p class="panel-intro"><strong id="done-zone"></strong> <span id="done-intro-rest">is yours. Once your laptop joins, your pen's home page will be</span> <code id="done-home"></code>.</p>
+    <p class="panel-intro"><strong id="done-zone"></strong> <span id="done-intro-rest">is up. Because it's private, your browser can't reach it until you connect this computer in Step 1 below.</span></p>
     <ol class="done-steps">
       <li>
-        <p>Open this setup link <strong>on your laptop</strong> (macOS or Linux):</p>
+        <p>Open your setup page <strong>on this computer</strong> (macOS or Linux):</p>
         <div class="linkbox" id="link"></div>
-        <button class="btn small" id="copy" type="button">Copy link</button>
+        <div class="done-actions">
+          <a class="btn small" id="open-setup" target="_blank" rel="noopener noreferrer" hidden>Open setup page</a>
+          <button class="btn small ghost" id="copy" type="button">Copy link</button>
+        </div>
       </li>
-      <li>The link opens a page with one command to paste into a terminal. It downloads <code>hogman</code>,
-        sets up a local connection for your pen, and joins.</li>
-      <li id="done-step-3">You land on <code id="done-home-step"></code>, <span id="done-step-3-rest">where you add other devices, invite
-        people, and run the herd.</span></li>
+      <li>Run the one-line command shown on that page in your terminal. It installs <code>hogman</code>,
+        connects your computer to the pen, and wires up your browser.</li>
+      <li id="done-step-3">Once that finishes, <code id="done-home-step"></code> will start working and open automatically — <span id="done-step-3-rest">that's where you add other devices, invite people, and run the herd.</span></li>
     </ol>
     <div class="qr">
       <img id="qr" alt="QR code of the same link">

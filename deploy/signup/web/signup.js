@@ -128,8 +128,8 @@
     $('stage').textContent = 'Provisioning isolated network\u2026';
 
     $('done-title').textContent = 'Your pen is ready';
-    $('done-intro-rest').textContent = 'is ready. Once your workstation joins, your management portal will be';
-    $('done-step-3-rest').textContent = 'where you can add workstations, bridge on-site equipment, and manage members.';
+    $('done-intro-rest').textContent = 'is ready. Because it\u2019s private, your browser can\u2019t reach it until you connect this workstation in Step 1 below.';
+    $('done-step-3-rest').textContent = 'that\u2019s where you can add workstations, bridge on-site equipment, and manage members.';
     $('done-backup-warn').replaceChildren(
       Object.assign(document.createElement('strong'), { textContent: 'Appoint a backup owner right away: ' }),
       document.createTextNode('promote a second trusted person to Owner under '),
@@ -388,9 +388,18 @@
   const showDone = r => {
     $('done-zone').textContent = r.zone;
     const homeURL = 'https://home.' + r.zone;
-    $('done-home').textContent = homeURL;
     $('done-home-step').textContent = homeURL;
     $('link').textContent = r.join_link;
+    const openBtn = $('open-setup');
+    if (openBtn) {
+      if (/^https:\/\//i.test(r.join_link || '')) {
+        openBtn.href = r.join_link;
+        openBtn.hidden = false;
+      } else {
+        openBtn.removeAttribute('href');
+        openBtn.hidden = true;
+      }
+    }
     if (r.join_qr_svg) { $('qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(r.join_qr_svg); $('qr').closest('.qr').hidden = false; }
     else $('qr').closest('.qr').hidden = true;
     $('copy').onclick = async () => { await navigator.clipboard.writeText(r.join_link); $('copy').textContent = 'Copied'; };

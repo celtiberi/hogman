@@ -350,7 +350,8 @@ func TestWebPageAndHeaders(t *testing.T) {
 		t.Fatalf("page: %d", rec.Code)
 	}
 	for _, want := range []string{
-		`id="done-home"`,
+		`id="done-home-step"`,
+		`id="open-setup"`,
 		`treat it like a password`,
 		`Network name (your pen)`,
 		`Your personal name in it`,
@@ -1259,5 +1260,11 @@ func TestSignupPageCodeGateAndWaitlistMarkup(t *testing.T) {
 	}
 	if !(codeFieldsIdx < tsFormIdx && tsFormIdx < formActionsIdx) {
 		t.Fatalf("expected #ts-form between #code-fields and #form-actions so Buy a pen works without a code")
+	}
+	if strings.Contains(html, `id="done-home"`) {
+		t.Fatal("post-signup intro must not display the unresolvable home URL ahead of Step 1")
+	}
+	if !strings.Contains(html, `id="open-setup" target="_blank" rel="noopener noreferrer"`) {
+		t.Fatal("post-signup Step 1 must include a safe clickable Open setup page link button")
 	}
 }
