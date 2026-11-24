@@ -21,7 +21,7 @@ check() {  # check <label> <command>
   fi
 }
 
-# The join page builds its commands from these two templates in join.js.
+# The join page and signup done screen build their commands from these templates.
 while IFS= read -r tmpl; do
   cmd="$(printf '%s' "$tmpl" \
     | sed -e "s|\${host}|$host|g" -e "s|\${quoted}|'$link'|g" \
@@ -29,6 +29,12 @@ while IFS= read -r tmpl; do
           -e 's|&& \./hogman .*|\&\& true|')"
   check "join.js: ${cmd:0:60}" "$cmd"
 done < <(sed -n "s/^  const make[A-Za-z]*Cmd = [a-z]* => \`\(.*\)\`;\$/\1/p" core/join-page/join.js)
+
+while IFS= read -r tmpl; do
+  cmd="$(printf '%s' "$tmpl" \
+    | sed -e "s|\${host}|$host|g" -e "s|\${quoted}|'$link'|g")"
+  check "signup.js: ${cmd:0:60}" "$cmd"
+done < <(sed -n "s/^  const make[A-Za-z]*Cmd = ([a-z, ]*) => \`\(.*\)\`;\$/\2/p" deploy/signup/web/signup.js)
 
 # README code lines that start with "$ curl".
 while IFS= read -r line; do

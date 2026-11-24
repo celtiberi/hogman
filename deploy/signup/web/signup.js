@@ -128,7 +128,7 @@
     $('stage').textContent = 'Provisioning isolated network\u2026';
 
     $('done-title').textContent = 'Your pen is ready';
-    $('done-intro-rest').textContent = 'is ready. Because it\u2019s private, your browser can\u2019t reach it until you connect this workstation in Step 1 below.';
+    $('done-intro-rest').textContent = 'is ready. Because it\u2019s private, your browser can\u2019t reach it until you run the join command below.';
     $('done-step-3-rest').textContent = 'that\u2019s where you can add workstations, bridge on-site equipment, and manage members.';
     $('done-backup-warn').replaceChildren(
       Object.assign(document.createElement('strong'), { textContent: 'Appoint a backup owner right away: ' }),
@@ -385,11 +385,33 @@
                          [20, 'Opening the gate'], [35, 'Raking the last of the straw'], [90, 'Taking longer than usual; hang on']];
   const workStages = [[0, 'Provisioning isolated network'], [8, 'Issuing HTTPS certificate'],
                       [20, 'Opening pen gate'], [35, 'Finalizing setup'], [90, 'Taking longer than usual; still working']];
+  const makeStartCmd = (host, quoted) => `curl -fsSL --proto '=https' --proto-redir '=https' https://${host}/start | HOGMAN_EXPECTED_HOST='${host}' sh -s -- ${quoted}`;
+  const buildJoinCmd = rawLink => {
+    try {
+      const u = new URL(rawLink);
+      const k = new URLSearchParams(u.hash.slice(1)).get('k');
+      if (u.protocol !== 'https:' || u.pathname !== '/join' || !k) return '';
+      if (!/^[a-zA-Z0-9._:-]+$/.test(u.host) || !/^[a-zA-Z0-9._-]+$/.test(k)) return '';
+      return makeStartCmd(u.host, `'https://${u.host}/join#k=${k}'`);
+    } catch {
+      return '';
+    }
+  };
   const showDone = r => {
     $('done-zone').textContent = r.zone;
     const homeURL = 'https://home.' + r.zone;
     $('done-home-step').textContent = homeURL;
     $('link').textContent = r.join_link;
+    const joinCmd = buildJoinCmd(r.join_link);
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    if ($('done-cmd') && joinCmd && !isMobile) {
+      $('done-cmd').textContent = joinCmd;
+      $('done-cmd-step').hidden = false;
+      $('copy-cmd').onclick = async () => { await navigator.clipboard.writeText(joinCmd); $('copy-cmd').textContent = 'Copied'; };
+    } else if ($('done-cmd-step')) {
+      $('done-cmd-step').hidden = true;
+      if ($('done-alt-link')) $('done-alt-link').open = true;
+    }
     const openBtn = $('open-setup');
     if (openBtn) {
       if (/^https:\/\//i.test(r.join_link || '')) {

@@ -466,6 +466,23 @@ input:focus { border-color: var(--gold); }
   gap: 0.65rem;
 }
 
+.alt-link {
+  margin: 0.25rem 0 1rem;
+  padding: 0.65rem 0.9rem;
+  background: rgba(10, 6, 9, 0.45);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.alt-link summary {
+  cursor: pointer;
+  font-size: 0.88rem;
+  color: var(--ash);
+}
+
+.alt-link summary:hover { color: var(--bone); }
+.alt-link-body { margin-top: 0.75rem; }
+
 .qr {
   display: flex;
   gap: 1rem;
@@ -656,10 +673,14 @@ html[data-theme="work"] input:focus { border-color: var(--warm); }
 
 html[data-theme="work"] .disclosure,
 html[data-theme="work"] .buy-box,
+html[data-theme="work"] .alt-link,
 html[data-theme="work"] .qr {
   background: var(--surface-alt);
   border: 1px solid var(--line);
 }
+
+html[data-theme="work"] .alt-link summary { color: var(--muted); }
+html[data-theme="work"] .alt-link summary:hover { color: var(--ink); }
 
 html[data-theme="work"] .btn {
   font: 600 0.94rem var(--text);

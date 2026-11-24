@@ -350,9 +350,11 @@ func TestWebPageAndHeaders(t *testing.T) {
 		t.Fatalf("page: %d", rec.Code)
 	}
 	for _, want := range []string{
+		`id="done-cmd"`,
+		`id="copy-cmd"`,
 		`id="done-home-step"`,
 		`id="open-setup"`,
-		`treat it like a password`,
+		`treat them like a password`,
 		`Network name (your pen)`,
 		`Your personal name in it`,
 		`Back up your keeper access`,
@@ -1264,7 +1266,10 @@ func TestSignupPageCodeGateAndWaitlistMarkup(t *testing.T) {
 	if strings.Contains(html, `id="done-home"`) {
 		t.Fatal("post-signup intro must not display the unresolvable home URL ahead of Step 1")
 	}
+	if !strings.Contains(html, `id="done-cmd"`) || !strings.Contains(html, `id="copy-cmd"`) {
+		t.Fatal("post-signup Step 1 must display the direct terminal join command with a Copy command button")
+	}
 	if !strings.Contains(html, `id="open-setup" target="_blank" rel="noopener noreferrer"`) {
-		t.Fatal("post-signup Step 1 must include a safe clickable Open setup page link button")
+		t.Fatal("post-signup fallback must include a safe clickable Open setup page link button")
 	}
 }
