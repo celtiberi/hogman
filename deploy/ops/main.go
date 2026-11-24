@@ -39,19 +39,19 @@ type Snapshot struct {
 }
 
 type HostSnapshot struct {
-	Name          string            `json:"name"`
-	Version       string            `json:"version"`
-	UptimeSec     int64             `json:"uptime_sec"`
-	Load          [3]float64        `json:"load"`
-	RAMUsedBytes  uint64            `json:"ram_used_bytes"`
-	RAMTotalBytes uint64            `json:"ram_total_bytes"`
-	SwapUsedBytes uint64            `json:"swap_used_bytes"`
-	SwapTotalBytes uint64           `json:"swap_total_bytes"`
-	DiskUsedBytes uint64            `json:"disk_used_bytes"`
-	DiskTotalBytes uint64           `json:"disk_total_bytes"`
-	Capacity      CapacitySnapshot  `json:"capacity"`
-	Services      map[string]string `json:"services"`
-	LastBackupAt  string            `json:"last_backup_at,omitempty"`
+	Name           string            `json:"name"`
+	Version        string            `json:"version"`
+	UptimeSec      int64             `json:"uptime_sec"`
+	Load           [3]float64        `json:"load"`
+	RAMUsedBytes   uint64            `json:"ram_used_bytes"`
+	RAMTotalBytes  uint64            `json:"ram_total_bytes"`
+	SwapUsedBytes  uint64            `json:"swap_used_bytes"`
+	SwapTotalBytes uint64            `json:"swap_total_bytes"`
+	DiskUsedBytes  uint64            `json:"disk_used_bytes"`
+	DiskTotalBytes uint64            `json:"disk_total_bytes"`
+	Capacity       CapacitySnapshot  `json:"capacity"`
+	Services       map[string]string `json:"services"`
+	LastBackupAt   string            `json:"last_backup_at,omitempty"`
 }
 
 type CapacitySnapshot struct {

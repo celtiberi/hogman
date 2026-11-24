@@ -1749,11 +1749,6 @@ func shareStop(name string, o options) error {
 	return nil
 }
 
-// removeShare stops a share, gives its name back and removes its device.
-func removeShare(dir string, c *shareConfig) error {
-	return removeShareWithOptions(dir, c, 30*time.Second, false)
-}
-
 // removeShareForLeave tears down a share during `hogman leave`, bounding
 // network wait and cleaning up local state even if the pen already removed it
 // or is unreachable.

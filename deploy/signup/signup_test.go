@@ -224,7 +224,7 @@ func TestBrokerFailureKeepsCode(t *testing.T) {
 		t.Fatalf("failed vanity provision error = %q, want guidance to pick another pen name", errMsg)
 	}
 	j2 := `{"code":"PIG-CCCC-DDDD","pen":"explode","owner":"bob"}`
-	code, out = call(b.handler(), "POST", "/provision", j2, auth)
+	code, _ = call(b.handler(), "POST", "/provision", j2, auth)
 	if code != 500 {
 		t.Fatalf("a failed suffixed provision: %d", code)
 	}
@@ -378,7 +378,8 @@ func TestWebPageAndHeaders(t *testing.T) {
 func TestLimiter(t *testing.T) {
 	l := newLimiter(2, time.Minute)
 	now := time.Now()
-	if !l.allow("a", now) || !l.allow("a", now) || l.allow("a", now) {
+	first, second, third := l.allow("a", now), l.allow("a", now), l.allow("a", now)
+	if !first || !second || third {
 		t.Fatal("limit of 2 not kept")
 	}
 	if !l.allow("b", now) {

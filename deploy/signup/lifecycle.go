@@ -103,33 +103,33 @@ type renewNonceRecord struct {
 }
 
 type penLifecycle struct {
-	Plan              string                      `json:"plan"` // "free" | "personal" | "work"
-	State             string                      `json:"state"`
-	PaidUntil         int64                       `json:"paid_until,omitempty"`
-	GraceUntil        int64                       `json:"grace_until,omitempty"`
-	SleepSince        int64                       `json:"sleep_since,omitempty"`
-	DeleteAfter       int64                       `json:"delete_after,omitempty"`
-	WakeStartedAt     int64                       `json:"wake_started_at,omitempty"`
-	WakeReadyAt       int64                       `json:"wake_ready_at,omitempty"`
-	WakeUntil         int64                       `json:"wake_until,omitempty"`
-	WakeCeiling       int64                       `json:"wake_ceiling,omitempty"`
-	WakeHistory       []int64                     `json:"wake_history,omitempty"`
-	SubscriptionID    string                      `json:"subscription_id,omitempty"`
-	CustomerID        string                      `json:"customer_id,omitempty"`
-	CancelledAt       int64                       `json:"cancelled_at,omitempty"`
+	Plan                string                      `json:"plan"` // "free" | "personal" | "work"
+	State               string                      `json:"state"`
+	PaidUntil           int64                       `json:"paid_until,omitempty"`
+	GraceUntil          int64                       `json:"grace_until,omitempty"`
+	SleepSince          int64                       `json:"sleep_since,omitempty"`
+	DeleteAfter         int64                       `json:"delete_after,omitempty"`
+	WakeStartedAt       int64                       `json:"wake_started_at,omitempty"`
+	WakeReadyAt         int64                       `json:"wake_ready_at,omitempty"`
+	WakeUntil           int64                       `json:"wake_until,omitempty"`
+	WakeCeiling         int64                       `json:"wake_ceiling,omitempty"`
+	WakeHistory         []int64                     `json:"wake_history,omitempty"`
+	SubscriptionID      string                      `json:"subscription_id,omitempty"`
+	CustomerID          string                      `json:"customer_id,omitempty"`
+	CancelledAt         int64                       `json:"cancelled_at,omitempty"`
 	BackdateRenewal     bool                        `json:"backdate_renewal"` // D-35 default: false
 	PendingWake         bool                        `json:"pending_wake,omitempty"`
 	PendingWakeAttempts int                         `json:"pending_wake_attempts,omitempty"`
 	PendingWakeNextAt   int64                       `json:"pending_wake_next_at,omitempty"`
 	PendingOwner        string                      `json:"pending_owner,omitempty"`
-	PendingCancelSubs []pendingCancelSub          `json:"pending_cancel_subs,omitempty"` // I-6: replaced Stripe sub IDs awaiting cancel by web
-	ReplacedSubs      map[string]int64            `json:"replaced_subs,omitempty"`       // I-6: recently replaced sub IDs -> replaced_at unix (for double-charge invoice alerts)
-	AppliedEvents     []string                    `json:"applied_events,omitempty"`
-	RenewNonces       map[string]renewNonceRecord `json:"renew_nonces,omitempty"` // broker-verified nonces; pruned by RetainExp
-	AlertEmails       []string                    `json:"alert_emails,omitempty"`
-	AlertsSent        map[string]int64            `json:"alerts_sent,omitempty"`
-	RenewURL          string                      `json:"renew_url,omitempty"`
-	UpdatedAt         int64                       `json:"updated_at,omitempty"`
+	PendingCancelSubs   []pendingCancelSub          `json:"pending_cancel_subs,omitempty"` // I-6: replaced Stripe sub IDs awaiting cancel by web
+	ReplacedSubs        map[string]int64            `json:"replaced_subs,omitempty"`       // I-6: recently replaced sub IDs -> replaced_at unix (for double-charge invoice alerts)
+	AppliedEvents       []string                    `json:"applied_events,omitempty"`
+	RenewNonces         map[string]renewNonceRecord `json:"renew_nonces,omitempty"` // broker-verified nonces; pruned by RetainExp
+	AlertEmails         []string                    `json:"alert_emails,omitempty"`
+	AlertsSent          map[string]int64            `json:"alerts_sent,omitempty"`
+	RenewURL            string                      `json:"renew_url,omitempty"`
+	UpdatedAt           int64                       `json:"updated_at,omitempty"`
 }
 
 type portalBillingStatus struct {
@@ -1501,14 +1501,12 @@ func (b *broker) clearPendingCancelSub(subID string, now time.Time) {
 		if err != nil || len(rec.PendingCancelSubs) == 0 {
 			continue
 		}
-		kept := make([]pendingCancelSub, 0, len(rec.PendingCancelSubs))
 		removed := false
 		for _, q := range rec.PendingCancelSubs {
 			if q.SubscriptionID == subID {
 				removed = true
-				continue
+				break
 			}
-			kept = append(kept, q)
 		}
 		if removed {
 			_ = withPenLifecycleFileLock(path, func() error {
