@@ -460,7 +460,7 @@
     }
     p.append(document.createTextNode(
       `this pen is in its 30-day grace period and will go to sleep on ${until}. ` +
-      'Any owner or admin can renew for a fresh year (an admin who pays becomes an owner).'
+      'Renew for a fresh year to keep it awake.'
     ));
     if (typeof st.renew_url === 'string' && st.renew_url.startsWith('https://')) {
       p.append(document.createTextNode(' '));

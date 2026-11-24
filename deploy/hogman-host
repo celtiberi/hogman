@@ -707,6 +707,39 @@ cmd_sleep() {
   info "pen $n put to sleep (slot freed; state kept at $PENS/$n)"
 }
 
+lifecycle_mark_awake() {  # lifecycle_mark_awake <pen>
+  local n="$1" f="$PENS/$1/lifecycle.json" now tmp
+  [ -f "$f" ] || return 0
+  now="$(date -u +%s)"
+  tmp="$(mktemp "$PENS/$n/.lifecycle.XXXXXX")"
+  if command -v jq >/dev/null 2>&1; then
+    jq --argjson now "$now" \
+      'del(.sleep_since, .delete_after, .pending_wake) | .state = "active" | .updated_at = $now' "$f" > "$tmp"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["state"]="active"; d.pop("sleep_since",None); d.pop("delete_after",None); d.pop("pending_wake",None); d["updated_at"]=int(sys.argv[2]); print(json.dumps(d, indent=2))' \
+      "$f" "$now" > "$tmp"
+  else
+    awk -v now="$now" '
+      /^[[:space:]]*"(state|sleep_since|delete_after|pending_wake|updated_at)"[[:space:]]*:/ { next }
+      /^[[:space:]]*}[[:space:]]*$/ {
+        if (n > 0 && lines[n] !~ /[{,][[:space:]]*$/) {
+          lines[n] = lines[n] ","
+        }
+        for (i = 1; i <= n; i++) print lines[i]
+        printf "  \"state\": \"active\",\n  \"updated_at\": %s\n}\n", now
+        done = 1
+        next
+      }
+      { lines[++n] = $0 }
+      END {
+        if (!done) {
+          printf "{\n  \"state\": \"active\",\n  \"updated_at\": %s\n}\n", now
+        }
+      }' "$f" > "$tmp"
+  fi
+  chmod 0600 "$tmp" && mv "$tmp" "$f"
+}
+
 cmd_wake() {
   load_host
   local n="${1:-}"
@@ -723,6 +756,9 @@ cmd_wake() {
     die "host is at capacity ($live/$max live pens); cannot wake $n"
   fi
   rm -f "$PENS/$n/.sleeping"
+  # B7: clear sleeping/delete_after in lifecycle.json so a manually woken pen
+  # can never be purged as expired sleep later.
+  lifecycle_mark_awake "$n"
   docker network inspect "pen-$n-core" >/dev/null 2>&1 || docker network create "pen-$n-core" >/dev/null
   write_front
   reload_front
@@ -750,8 +786,16 @@ cmd_purge() {
   [ -d "$PENS/$n" ] || die "no pen $n"
 
   if [ "$due" = 1 ]; then
-    # B5: non-interactive sweep mode ONLY deletes pens whose lifecycle.json is
-    # sleeping and past delete_after.
+    # B5 & B7: non-interactive sweep mode ONLY deletes pens that have .sleeping,
+    # no running containers, and lifecycle.json showing sleeping + past delete_after.
+    [ -f "$PENS/$n/.sleeping" ] || die "purge --due refused: pen $n does not have a .sleeping marker"
+    local running=""
+    if [ -f "$PENS/$n/compose.yaml" ]; then
+      running="$(cd "$PENS/$n" && docker compose ps -q --status running 2>/dev/null || true)"
+    else
+      running="$(docker ps -q --filter "label=com.docker.compose.project=pen-$n" 2>/dev/null || true)"
+    fi
+    [ -z "$running" ] || die "purge --due refused: pen $n still has running containers"
     local lf="$PENS/$n/lifecycle.json"
     [ -f "$lf" ] || die "purge --due refused: $n has no lifecycle.json"
     local st del now

@@ -222,10 +222,6 @@ exit 0
 	}
 
 	var sentAlerts []string
-	roles := map[string][2]string{
-		"alice": {"admin", "active"},
-		"bob":   {"member", "active"},
-	}
 	b := &broker{
 		home:      home,
 		tool:      fakeHost,
@@ -234,10 +230,6 @@ exit 0
 		alertSendFn: func(_ context.Context, to []string, subj, _ string) error {
 			sentAlerts = append(sentAlerts, strings.Join(to, ",")+":"+subj)
 			return nil
-		},
-		memberRoleFn: func(_ context.Context, _ string, handle string) (string, string, bool) {
-			r, ok := roles[handle]
-			return r[0], r[1], ok
 		},
 	}
 
@@ -293,7 +285,7 @@ exit 0
 		t.Fatalf("duplicate renewal must be idempotent: rec2=%+v dup2=%v err=%v", rec2, dup2, err)
 	}
 	// Post-webhook wake fails while host is full -> PendingWake stays true.
-	if err := b.finishRenewalWork(context.Background(), pen, "", true); err == nil {
+	if err := b.finishRenewalWork(context.Background(), pen, true); err == nil {
 		t.Fatal("expected wake to fail while fail-wake flag exists")
 	}
 	// Once capacity frees up, next sweep retries wake and clears PendingWake.
@@ -306,19 +298,9 @@ exit 0
 	if err != nil || afterWake.PendingWake {
 		t.Fatalf("PendingWake should be cleared after successful wake retry: %+v (%v)", afterWake, err)
 	}
-
-	// 4. B2: finishRenewalWork refuses to promote non-admin ("bob" or "mallory"),
-	// and promotes verified active admin ("alice") to owner.
-	_ = b.finishRenewalWork(context.Background(), pen, "bob", false)
-	_ = b.finishRenewalWork(context.Background(), pen, "mallory", false)
-	_ = b.finishRenewalWork(context.Background(), pen, "alice", false)
 	calls, _ := os.ReadFile(logFile)
-	callStr := string(calls)
-	if strings.Contains(callStr, "role bob owner") || strings.Contains(callStr, "role mallory owner") {
-		t.Fatalf("non-admin must never be promoted to owner:\n%s", callStr)
-	}
-	if !strings.Contains(callStr, "pen lab member role alice owner") {
-		t.Fatalf("verified active admin alice should be promoted to owner:\n%s", callStr)
+	if !strings.Contains(string(calls), "wake lab") {
+		t.Fatalf("expected wake call in log:\n%s", calls)
 	}
 }
 
@@ -443,8 +425,10 @@ func TestHogmanHostPurgeSleepWakeGuardrails(t *testing.T) {
 	home := t.TempDir()
 	binDir := filepath.Join(home, "bin")
 	_ = os.MkdirAll(binDir, 0o700)
-	// Stub docker so reload_front and network rm succeed in unit tests without a daemon.
-	_ = os.WriteFile(filepath.Join(binDir, "docker"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	// Stub docker so reload_front and network rm succeed in unit tests without a daemon,
+	// and can simulate a running container when fake-running exists.
+	dockerStub := "#!/bin/sh\nif [ \"$1\" = ps ] && [ -f \"" + home + "/fake-running\" ]; then echo container123; fi\nexit 0\n"
+	_ = os.WriteFile(filepath.Join(binDir, "docker"), []byte(dockerStub), 0o755)
 	_ = os.WriteFile(filepath.Join(home, "host.env"), []byte("MAX_PENS=8\n"), 0o600)
 	_ = os.MkdirAll(filepath.Join(home, "front"), 0o700)
 	penDir := filepath.Join(home, "pens", "lab")
@@ -474,6 +458,17 @@ func TestHogmanHostPurgeSleepWakeGuardrails(t *testing.T) {
 	if out, err := runHost("lab\n", "purge", "--force", "lab"); err == nil || !strings.Contains(out, "interactive terminal") {
 		t.Fatalf("non-TTY purge --force must fail: err=%v out=%s", err, out)
 	}
+	// B5 & B7: purge --due refuses when .sleeping marker is absent.
+	if out, err := runHost("", "purge", "--due", "lab"); err == nil || !strings.Contains(out, ".sleeping") {
+		t.Fatalf("purge --due without .sleeping must fail: err=%v out=%s", err, out)
+	}
+	_ = os.WriteFile(filepath.Join(penDir, ".sleeping"), nil, 0o600)
+	// B7: purge --due refuses when running containers exist even if .sleeping is set.
+	_ = os.WriteFile(filepath.Join(home, "fake-running"), []byte("1"), 0o600)
+	if out, err := runHost("", "purge", "--due", "lab"); err == nil || !strings.Contains(out, "running containers") {
+		t.Fatalf("purge --due with running containers must fail: err=%v out=%s", err, out)
+	}
+	_ = os.Remove(filepath.Join(home, "fake-running"))
 	// B5: purge --due refuses when lifecycle.json is missing.
 	if out, err := runHost("", "purge", "--due", "lab"); err == nil || !strings.Contains(out, "no lifecycle.json") {
 		t.Fatalf("purge --due without lifecycle.json must fail: err=%v out=%s", err, out)
@@ -492,6 +487,7 @@ func TestHogmanHostPurgeSleepWakeGuardrails(t *testing.T) {
 	if out, err := runHost("", "purge", "--due", "lab"); err == nil || !strings.Contains(out, "not due for deletion") {
 		t.Fatalf("purge --due before delete_after must fail: err=%v out=%s", err, out)
 	}
+	_ = os.Remove(filepath.Join(penDir, ".sleeping"))
 
 	// SF-3: sleep fails and does NOT write .sleeping when ./hogman down fails.
 	_ = os.WriteFile(filepath.Join(home, "fail-down"), []byte("1"), 0o600)
@@ -503,6 +499,19 @@ func TestHogmanHostPurgeSleepWakeGuardrails(t *testing.T) {
 	}
 	_ = os.Remove(filepath.Join(home, "fail-down"))
 
+	// B7: sleep -> wake by hand resets lifecycle.json to active (clears sleep_since & delete_after)
+	// so a manually woken pen can never be purged as expired sleep later.
+	if out, err := runHost("", "sleep", "lab"); err != nil {
+		t.Fatalf("sleep lab failed: err=%v out=%s", err, out)
+	}
+	if out, err := runHost("", "wake", "lab"); err != nil {
+		t.Fatalf("wake lab failed: err=%v out=%s", err, out)
+	}
+	wokenRec, err := loadPenLifecycle(filepath.Join(penDir, "lifecycle.json"))
+	if err != nil || wokenRec.State != stateActive || wokenRec.SleepSince != 0 || wokenRec.DeleteAfter != 0 {
+		t.Fatalf("wake must reset lifecycle.json to active: %+v (%v)", wokenRec, err)
+	}
+
 	// SF-2: wake refuses a .removed pen.
 	_ = os.WriteFile(filepath.Join(penDir, ".removed"), nil, 0o600)
 	if out, err := runHost("", "wake", "lab"); err == nil || !strings.Contains(out, "was removed") {
@@ -510,7 +519,8 @@ func TestHogmanHostPurgeSleepWakeGuardrails(t *testing.T) {
 	}
 	_ = os.Remove(filepath.Join(penDir, ".removed"))
 
-	// B5: purge --due succeeds once delete_after is in the past, removing data/ and setting .retired.
+	// B5: purge --due succeeds once .sleeping exists and delete_after is in the past.
+	_ = os.WriteFile(filepath.Join(penDir, ".sleeping"), nil, 0o600)
 	_ = savePenLifecycle(filepath.Join(penDir, "lifecycle.json"), &penLifecycle{
 		Plan: planPersonal, State: stateSleeping, SleepSince: time.Now().Add(-400 * 24 * time.Hour).Unix(), DeleteAfter: time.Now().Add(-time.Hour).Unix(),
 	})

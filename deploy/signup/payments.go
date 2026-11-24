@@ -539,15 +539,14 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if !alreadyApplied {
-				payerHandle := s.Metadata["payer_handle"]
-				if wasSleeping || strings.TrimSpace(payerHandle) != "" {
-					go func(pen, payer string, wake bool) {
+				if wasSleeping {
+					go func(pen string) {
 						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 						defer cancel()
-						if err := b.finishRenewalWork(ctx, pen, payer, wake); err != nil {
+						if err := b.finishRenewalWork(ctx, pen, true); err != nil {
 							log.Printf("stripe renew %s (%s) post-work: %v", s.ID, pen, err)
 						}
-					}(pen, payerHandle, wasSleeping)
+					}(pen)
 				}
 				b.notifyKind("raise", "Pen renewed ("+pen+")")
 			}
@@ -603,7 +602,7 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 					go func(pen string) {
 						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 						defer cancel()
-						if err := b.finishRenewalWork(ctx, pen, "", true); err != nil {
+						if err := b.finishRenewalWork(ctx, pen, true); err != nil {
 							log.Printf("stripe invoice %s (%s) wake: %v", inv.ID, pen, err)
 						}
 					}(pen)

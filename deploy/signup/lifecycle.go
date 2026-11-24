@@ -470,31 +470,10 @@ func (b *broker) initPenLifecycle(pen, plan, code string, paid bool, now time.Ti
 	return savePenLifecycle(b.lifecyclePath(pen), rec)
 }
 
-// isPenAdmin checks via `hogman-host pen <pen> member list` that handle is
-// currently an active admin of pen before promoting them to owner (D-35).
-func (b *broker) isPenAdmin(ctx context.Context, pen, handle string) bool {
-	if b.memberRoleFn != nil {
-		role, status, ok := b.memberRoleFn(ctx, pen, handle)
-		return ok && role == "admin" && status == "active"
-	}
-	out, code, _ := b.run(ctx, "pen", pen, "member", "list")
-	if code != 0 {
-		return false
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(line)
-		// `registrar member list` columns: ID HANDLE ROLE STATUS ...
-		if len(f) >= 4 && strings.EqualFold(f[1], handle) {
-			return f[2] == "admin" && f[3] == "active"
-		}
-	}
-	return false
-}
-
 // recordRenewal idempotently records a Stripe renewal event (invoice or checkout
-// session) into lifecycle.json and clears the grace banner. Slow actions (waking
-// a sleeping pen or promoting an admin) happen asynchronously or via the sweep
-// so the Stripe webhook returns 200 immediately without double-crediting retries.
+// session) into lifecycle.json and clears the grace banner. Waking a sleeping
+// pen happens asynchronously or via the sweep so the Stripe webhook returns 200
+// immediately without double-crediting retries.
 func (b *broker) recordRenewal(pen, eventID, subID, custID string, now time.Time) (next *penLifecycle, alreadyApplied bool, wasSleeping bool, err error) {
 	b.lifecycleMu.Lock()
 	defer b.lifecycleMu.Unlock()
@@ -536,14 +515,16 @@ func (b *broker) recordRenewal(pen, eventID, subID, custID string, now time.Time
 	return &updated, false, sleeping, nil
 }
 
-// finishRenewalWork executes post-webhook wake and verified admin-to-owner
-// promotion outside the webhook's synchronous response path.
-func (b *broker) finishRenewalWork(ctx context.Context, pen, payerHandle string, wake bool) error {
+// finishRenewalWork executes post-webhook wake outside the webhook's
+// synchronous response path, alerting the operator if waking a paid pen fails.
+func (b *broker) finishRenewalWork(ctx context.Context, pen string, wake bool) error {
 	if wake {
 		_, code, stderr := b.runUnbounded(ctx, "wake", pen)
 		b.invalidateCapacityCache()
 		if code != 0 {
-			return fmt.Errorf("wake %s failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
+			err := fmt.Errorf("wake %s failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
+			b.notifyKind("health", fmt.Sprintf("Pen %s was renewed and paid, but wake failed: %v", pen, err))
+			return err
 		}
 		b.lifecycleMu.Lock()
 		if rec, err := loadPenLifecycle(b.lifecyclePath(pen)); err == nil && rec.PendingWake {
@@ -552,19 +533,6 @@ func (b *broker) finishRenewalWork(ctx context.Context, pen, payerHandle string,
 			_ = savePenLifecycle(b.lifecyclePath(pen), rec)
 		}
 		b.lifecycleMu.Unlock()
-	}
-	if h := strings.ToLower(strings.TrimSpace(payerHandle)); h != "" {
-		if _, ok := validHandle(h); ok {
-			// B2: broker verifies handle is currently an active admin of pen before promoting.
-			if b.isPenAdmin(ctx, pen, h) {
-				_, code, stderr := b.runUnbounded(ctx, "pen", pen, "member", "role", h, "owner")
-				if code != 0 {
-					log.Printf("lifecycle %s: promote admin %s to owner (exit %d): %s", pen, h, code, strings.TrimSpace(stderr))
-				}
-			} else {
-				log.Printf("lifecycle %s: refusing to promote %q to owner (not an active admin of %s)", pen, h, pen)
-			}
-		}
 	}
 	return nil
 }
@@ -636,6 +604,7 @@ func (b *broker) sweepLifecycles(ctx context.Context, now time.Time, dryRun bool
 				b.invalidateCapacityCache()
 				if code != 0 {
 					log.Printf("lifecycle %s: retry wake failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
+					b.notifyKind("health", fmt.Sprintf("Pen %s paid renewal wake retry failed (exit %d): %s", pen, code, strings.TrimSpace(stderr)))
 					tr.Woken = false
 					tr.ActionNote = "wake retry failed"
 				} else {

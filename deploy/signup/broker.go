@@ -51,7 +51,6 @@ type broker struct {
 	resendAPIKey     string                 // optional Resend key for opt-in billing alert emails
 	billingFrom      string                 // optional From address for billing alert emails
 	alertSendFn      func(ctx context.Context, to []string, subject, text string) error
-	memberRoleFn     func(ctx context.Context, pen, handle string) (role, status string, ok bool)
 }
 
 func (b *broker) nextSuffix() (string, error) {
