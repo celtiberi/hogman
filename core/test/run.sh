@@ -295,9 +295,9 @@ ALICE_SHARE_LINK="$(jq -r .join_link <<<"$srv_share")"
 dc up -d alice-share
 retry 20 run alice-share test -s /etc/ssl/certs/ca-certificates.crt
 run alice-share sh -c 'mkdir -p /tmp/www && echo "hello from alice.'"$ZONE"'" > /tmp/www/index.html'
-out="$(run alice-share sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open share alice /tmp/www "$1" --background' _ "$ALICE_SHARE_LINK" 2>&1)"; rc=$?
+out="$(run alice-share sh -c '"/dl/hogman-$(uname -s)-$(uname -m)" --no-open share alice /tmp/www "$1" --background' _ "$ALICE_SHARE_LINK" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
-check "alice shares https://alice.$ZONE with hogman-join share (exit $rc)" grep -q "https://alice.$ZONE is up" <<<"$out"
+check "alice shares https://alice.$ZONE with hogman share (exit $rc)" grep -q "https://alice.$ZONE is up" <<<"$out"
 
 step "Naming"
 check "bob resolves srv.$ZONE to alice's server" retry 30 resolves_to srv.$ZONE "$ALICE_SERVER_IP"
@@ -390,7 +390,7 @@ from_internet_status() {
 page_ok() {
   local html
   html="$(from_internet "https://$PUBLIC_HOST/join")" || return 1
-  grep -q 'hogman-join' <<<"$html"
+  grep -q 'hogman' <<<"$html"
 }
 net_ok()   { from_internet "https://$PUBLIC_HOST/hogman/v1/network" | jq -e --arg z "$ZONE" '.zone == $z and .cert_mode == "public" and (.root_ca // "") == "" and (.root_fingerprint // "") == ""'; }
 check "https://<host>/join serves the join page" page_ok
@@ -420,7 +420,7 @@ edge_blocked_routes_ok() {
 }
 check "edge blocks Headscale root, register, auth, apple, windows, version (-> 404)" edge_blocked_routes_ok
 sums="$(from_internet "https://$PUBLIC_HOST/join/dl/SHA256SUMS")"
-check "the join tool is downloadable for 5 platforms" test "$(grep -c hogman-join <<<"$sums")" = 5
+check "the join tool is downloadable for 5 platforms" test "$(grep -c hogman <<<"$sums")" = 5
 check "the network info endpoint is public" net_ok
 
 step "The join tool, on a fresh computer"
@@ -428,7 +428,7 @@ dc up -d carol-laptop carol-desktop
 retry 30 run carol-laptop tailscale status --json
 join_tool() {  # join_tool <container> <args...>
   local c="$1"; shift
-  run "$c" sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open "$@"' _ "$@"
+  run "$c" sh -c '"/dl/hogman-$(uname -s)-$(uname -m)" --no-open "$@"' _ "$@"
 }
 CAROL_LINK="$($H invite create --note carol | awk '/^link:/ {print $2}')"
 check "the invite link carries no fingerprint" bash -c '! grep -q "fp=" <<<"$1"' _ "$CAROL_LINK"
@@ -528,7 +528,7 @@ check "a server link is marked for share" grep -q 'for=share' <<<"$SHARE_LINK"
 check "the server link carries no fingerprint" bash -c '! grep -q "fp=" <<<"$1"' _ "$SHARE_LINK"
 out="$(join_tool dave-server --hostname dave-server "$SHARE_LINK" 2>&1)"; rc=$?
 check "joining a whole computer with a server link is refused (exit $rc)" test $rc != 0
-check "... and says to use it with share" grep -q "hogman-join share" <<<"$out"
+check "... and says to use it with share" grep -q "hogman share" <<<"$out"
 no_dave_server() { local out; out="$($H device list)" || return 1; [ -z "$(awk '$2 == "dave" && $4 == "dave-server"' <<<"$out")" ]; }
 check "... and adds no device" no_dave_server
 
@@ -542,15 +542,23 @@ out="$(join_tool dave-server share stop app 2>&1)"; rc=$?
 check "and it stops cleanly (exit $rc)" grep -q "app.$ZONE is down" <<<"$out"
 
 out="$(join_tool dave-laptop update --pen "$ZONE" --dry-run 2>&1)"; rc=$?
-check "hogman-join update --dry-run checks SHA256SUMS cleanly (exit $rc)" bash -c 'test "$1" = 0 && grep -q "already up to date" <<<"$2"' _ "$rc" "$out"
+check "hogman update --dry-run checks SHA256SUMS cleanly (exit $rc)" bash -c 'test "$1" = 0 && grep -q "already up to date" <<<"$2"' _ "$rc" "$out"
 BEFORE_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>/dev/null | tr -d '\r')"
-run dave-laptop sh -c 'printf "#!/bin/sh\nexit 1\n" > "/root/.config/hogman/'"$ZONE"'/.stale-join" && chmod 755 "/root/.config/hogman/'"$ZONE"'/.stale-join" && mv "/root/.config/hogman/'"$ZONE"'/.stale-join" "/root/.config/hogman/'"$ZONE"'/hogman-join"'
+# Simulate an existing hogman-join install layout (stale canonical binary,
+# legacy per-pen hogman-join copy, and a regular-file native-host copy).
+run dave-laptop sh -c '
+  cp "/dl/hogman-$(uname -s)-$(uname -m)" "/root/.config/hogman/'"$ZONE"'/hogman-join"
+  cp "/dl/hogman-$(uname -s)-$(uname -m)" "/root/.config/hogman/bin/hogman-native-host"
+  printf "#!/bin/sh\nexit 1\n" > "/root/.config/hogman/bin/.stale-join" && chmod 755 "/root/.config/hogman/bin/.stale-join" && mv "/root/.config/hogman/bin/.stale-join" "/root/.config/hogman/bin/hogman"
+'
 out="$(join_tool dave-laptop update --pen "$ZONE" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
-check "hogman-join update repairs stale pen copy and restarts agent (exit $rc)" bash -c 'test "$1" = 0 && grep -q "Updated " <<<"$2"' _ "$rc" "$out"
+check "hogman update consolidates legacy hogman-join layout and restarts agent (exit $rc)" bash -c 'test "$1" = 0 && grep -q "Updated " <<<"$2"' _ "$rc" "$out"
 AFTER_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>/dev/null | tr -d '\r')"
 check "... restarted agent with a new process" test -n "$BEFORE_PID" -a -n "$AFTER_PID" -a "$BEFORE_PID" != "$AFTER_PID"
-check "... and installed binary matches /join/dl exactly" run dave-laptop sh -c 'cmp -s "/root/.config/hogman/'"$ZONE"'/hogman-join" "/dl/hogman-join-$(uname -s)-$(uname -m)"'
+check "... and installed binary matches /join/dl exactly" run dave-laptop sh -c 'cmp -s "/root/.config/hogman/bin/hogman" "/dl/hogman-$(uname -s)-$(uname -m)"'
+check "... and removed legacy per-pen hogman-join copy" run dave-laptop sh -c 'test ! -e "/root/.config/hogman/'"$ZONE"'/hogman-join"'
+check "... and converted hogman-native-host into a symlink to hogman" run dave-laptop sh -c 'test -L "/root/.config/hogman/bin/hogman-native-host"'
 check "... and restarted agent still loads alice.$ZONE" retry 20 alice_via
 
 out="$(join_tool dave-laptop leave "$DAVE_LINK" 2>&1)"; rc=$?

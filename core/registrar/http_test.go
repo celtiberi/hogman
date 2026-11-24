@@ -124,7 +124,7 @@ func TestMeshCSRFProtection(t *testing.T) {
 	}
 }
 
-// A server (what `hogman-join share` starts) may name itself, release its own
+// A server (what `hogman share` starts) may name itself, release its own
 // names and remove itself, but not touch its member's other names or devices.
 func TestMeshServerNamesItself(t *testing.T) {
 	e := newTestEnv(t)

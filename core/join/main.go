@@ -1,6 +1,6 @@
-// Command hogman-join puts a device on a Hogman network in one step:
+// Command hogman puts a device on a Hogman network in one step:
 //
-//	hogman-join 'https://bobo.gate.example.com/join#t=...'
+//	hogman 'https://bobo.gate.example.com/join#t=...'
 //
 // It verifies the network over this computer's built-in trusted certificates,
 // redeems the invite (or uses the device key in the link), joins side by side
@@ -38,6 +38,7 @@ func errorf(f string, a ...any) error { return &userError{fmt.Sprintf(f, a...)} 
 type options struct {
 	handle, hostname, controlCA string
 	yes, dryRun, noOpen         bool
+	jsonOut                     bool // status/share list/doctor: machine-readable JSON on stdout
 	linkStdin                   bool // join: read join link from stdin
 	force                       bool // leave/uninstall/share stop: override checks or clean up unreachable pen
 	alongside                   bool // accepted for old scripts; it's the only way now
@@ -298,7 +299,7 @@ func join(raw string, o options) error {
 	}
 	if link.ForShare {
 		return errorf("that's a server link: it's for putting something in the pen, not for joining a computer.\n" +
-			"  Use it with share, for example: hogman-join share blog 8080 '<this link>'")
+			"  Use it with share, for example: hogman share blog 8080 '<this link>'")
 	}
 	client, err := controlClient(o.controlCA)
 	if err != nil {
@@ -321,7 +322,7 @@ func join(raw string, o options) error {
 		if st, err := ts.Status(); err == nil && st.BackendState == "Running" && st.OnNetwork(n.Zone) {
 			return errorf("this computer is on %s through its Tailscale app, which Hogman no longer uses.\n"+
 				"  First get a fresh one-time link: open %s, press Add a device, copy the link.\n"+
-				"  Then run hogman-join leave %s, and join with the fresh link.", n.Zone, n.Portal, n.Zone)
+				"  Then run hogman leave %s, and join with the fresh link.", n.Zone, n.Portal, n.Zone)
 		}
 	}
 	return joinAlongside(link, n, client, o, "the pen's own small connection: HTTPS to the pen and nothing else")

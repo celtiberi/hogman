@@ -50,7 +50,7 @@
       document.createTextNode('macOS VPN apps override the system automatic proxy while connected. Pause the VPN while visiting pen dashboards, or set Firefox\u2019s built-in '),
       Object.assign(document.createElement('em'), { textContent: 'Automatic proxy configuration URL' }),
       document.createTextNode(' to the address printed by '),
-      Object.assign(document.createElement('code'), { textContent: 'hogman-join' }),
+      Object.assign(document.createElement('code'), { textContent: 'hogman' }),
       document.createTextNode('.')
     );
 
@@ -62,14 +62,14 @@
       ['FAQ', 'https://work.hogman.network/docs/faq.html'],
     ], ' \u00b7 ');
     if (forShare) {
-      $('lead').textContent = 'Run this command on the on-site computer or bridge machine. It downloads hogman-join and bridges your LAN controller or internal web app over HTTPS:';
+      $('lead').textContent = 'Run this command on the on-site computer or bridge machine. It downloads hogman and bridges your LAN controller or internal web app over HTTPS:';
       $('title').textContent = 'Bridge into ' + zone;
     }
   };
 
   // The secret is kept for this tab only (so a refresh still works) and taken
   // out of the address bar and browser history.
-  const KEY = 'hogman-join-link';
+  const KEY = 'hogman-link';
   let hash = location.hash.slice(1);
   if (hash) sessionStorage.setItem(KEY, hash); else hash = sessionStorage.getItem(KEY) || '';
   const q = new URLSearchParams(hash);
@@ -106,7 +106,7 @@
   }
   const cleanLink = `https://${host}/join#${t ? 't=' + t : 'k=' + k}${forShare ? '&for=share' : ''}`;
   const quoted = `'${cleanLink}'`;
-  const makeLongCmd = verb => `curl -fsSLo hogman-join "https://${host}/join/dl/hogman-join-$(uname -s)-$(uname -m)" && chmod +x hogman-join && ./hogman-join ${verb}${quoted}`;
+  const makeLongCmd = verb => `curl -fsSLo hogman "https://${host}/join/dl/hogman-$(uname -s)-$(uname -m)" && chmod +x hogman && ./hogman ${verb}${quoted}`;
   const verb = forShare ? 'share blog 8080 ' : '';
   let longCmd = makeLongCmd(verb);
   // Joining: one short command that's the same for everyone; it asks for the
@@ -126,7 +126,7 @@
   $('vpn-note').hidden = forShare;
   if (forShare) {
     $('lead').textContent =
-      'Copy this into a terminal on the computer hosting your app or folder. It downloads hogman-join (no other software needed):';
+      'Copy this into a terminal on the computer hosting your app or folder. It downloads hogman (no other software needed):';
   }
   const show = os => {
     const isWin = os === 'win';

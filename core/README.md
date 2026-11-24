@@ -1,6 +1,6 @@
 # Hogman core node
 
-The backbone of a Hogman pen: control plane, registrar, portal, and the `hogman-join` client.
+The backbone of a Hogman pen: control plane, registrar, portal, and the `hogman` client.
 
 > **Hosted pens (D-24):** Production pens run behind [`deploy/hogman-host`](../deploy/hogman-host) on `hogman.network`. The standalone compose stack here (`edge`, `./hogman`, `test/run.sh`, `test/acme-pebble.sh`) is kept as the local and CI test harness rather than a supported self-hosted deployment.
 
@@ -38,8 +38,8 @@ Each invite prints a link like `https://<PUBLIC_HOST>/join#t=…`. Send it howev
 Opening it shows a page with one command to copy into a terminal:
 
 ```bash
-curl -fsSLo hogman-join "https://<PUBLIC_HOST>/join/dl/hogman-join-$(uname -s)-$(uname -m)" \
-  && chmod +x hogman-join && ./hogman-join '<the link>'
+curl -fsSLo hogman "https://<PUBLIC_HOST>/join/dl/hogman-$(uname -s)-$(uname -m)" \
+  && chmod +x hogman && ./hogman '<the link>'
 ```
 
 The join tool ([join/](join/)) runs side by side as your own user (no root, no `TUN` device, no OS trust-store changes):
@@ -49,27 +49,29 @@ The join tool ([join/](join/)) runs side by side as your own user (no root, no `
 3. runs its embedded `tsnet` node and local `:443`-only loopback proxy (`WhoIs`-pinned dialing so pen DNS cannot reach `127.0.0.1`, LAN, or other tailnets), serves `/proxy.pac` for all joined pens, and checks `https://home.<ZONE>` loads over HTTPS before configuring the system proxy.
 
 More devices: each member adds their own from the home page (`POST /api/devices`), which prints a
-device link (`https://<PUBLIC_HOST>/join#k=…`, or with `&for=share` for `hogman-join share`). Nobody can
-make one for someone else: there is no account recovery. `hogman-join update` defaults to
+device link (`https://<PUBLIC_HOST>/join#k=…`, or with `&for=share` for `hogman share`). Nobody can
+make one for someone else: there is no account recovery. `hogman update` defaults to
 immutable GitHub Releases on `celtiberi/hogman` (working with 0, 1, or many pens; pass `--pen <zone>`
 or a pen host URL to update from a pen's server instead; `HOGMAN_RELEASE_BASE` is a test-only
 override), verifies downloads against SHA-256 over HTTPS, cleans up any leftover legacy private-CA
 root certificates, and restarts background agents and service-managed shares. New client releases
 maintain backward compatibility with at least the previous registrar release (one release back).
-`hogman-join leave <pen>` (a join link
+`hogman leave <pen>` (a join link
 with or without its key, the control host, the pen zone, or its short name) stops shares on that pen, cleans up any
 legacy root cert, logs the device out, and removes its local settings. It works from saved settings,
 so a pen whose server is gone can still be left. `leave` with no pen does nothing and points to
-`leave-all`, which lists every pen and asks `[y/N]`. `hogman-join uninstall` leaves every pen
+`leave-all`, which lists every pen and asks `[y/N]`. `hogman uninstall` leaves every pen
 (asking first) and removes Hogman's settings folders. All three refuse a pen whose person is an
 owner (no account recovery) or one that can't be reached to check. `--force` overrides that only
 after a warning and typing the exact pen name; `--yes` never skips the name, and there's no
 override without a terminal. `uninstall` is all or nothing: if any pen is refused, nothing changes.
-`hogman-join share list [--pen ZONE]` lists local shares with any error state, `hogman-join share stop NAME [--force]`
-tears down a share (or removes local files when unreachable with `--force`), `hogman-join join` prompts to paste
+`hogman share list [--pen ZONE]` lists local shares with any error state, `hogman share stop NAME [--force]`
+tears down a share (or removes local files when unreachable with `--force`), `hogman join` prompts to paste
 a link interactively on a terminal (or reads `--link-stdin`), `--pen` / `HOGMAN_PEN` accept short pen names or open
-an interactive picker when multiple pens are installed, and `hogman-join version` / `help` / `completion <shell>`
-print version, usage, or shell completions to stdout.
+an interactive picker when multiple pens are installed, `hogman doctor [--json]` checks pen/share/proxy/extension
+health, `status --json` and `share list --json` emit machine-readable JSON on stdout, and `hogman version` /
+`help` / `completion <shell>` print version, usage, or shell completions to stdout. All pen agents and background
+shares run from one shared binary under `<configBase>/bin/`.
 
 Built for macOS (Apple silicon, Intel), Linux (x86-64, ARM64) and Windows (x86-64; untested).
 
@@ -136,10 +138,10 @@ registrar, a suspension and a kick.
 test/run.sh            # add --keep to leave it running
 ```
 
-### Test-only `hogman-join` environment variables
+### Test-only `hogman` environment variables
 
 - `HOGMAN_DISABLE_NETNS=1` — **test-only, for isolated networks with no default route** (such as Docker `--internal` bridges). Disables Tailscale's `netns` `SO_BINDTODEVICE` hook (which otherwise binds unprivileged sockets to `lo` on Linux 5.7+ when no default gateway exists). Do **not** set this on ordinary laptops or desktops: it turns off `tsnet`'s VPN bypass.
-- `HOGMAN_ACME_CA_ROOT` / `HOGMAN_ACME_CA_URL` / `HOGMAN_ACME_RESOLVERS` — point `hogman-join` at a local Pebble test ACME CA during offline tests.
+- `HOGMAN_ACME_CA_ROOT` / `HOGMAN_ACME_CA_URL` / `HOGMAN_ACME_RESOLVERS` — point `hogman` at a local Pebble test ACME CA during offline tests.
 
 Also covers the join page and downloads, and the join tool on two fresh Linux machines
 with only Tailscale installed: a tampered link refused before the invite is used, a full

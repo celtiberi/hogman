@@ -216,7 +216,7 @@ func MeshHandler(s *Service) http.Handler {
 			"is_admin":   a.IsAdmin(), "is_owner": a.IsOwner(),
 			// A lone owner is warned: another owner is the only way back in (D-16).
 			"owners": ownerCount(s, a),
-			// What `hogman-join share` needs to start a server of its own.
+			// What `hogman share` needs to start a server of its own.
 			"network": s.NetworkInfo(),
 		})
 	})
@@ -244,7 +244,7 @@ func MeshHandler(s *Service) http.Handler {
 		writeJSON(w, 201, out)
 	})
 
-	// A server may remove itself (how `hogman-join share stop` cleans up), and
+	// A server may remove itself (how `hogman share stop` cleans up), and
 	// nothing else.
 	h("DELETE /api/devices/{id}", false, true, func(w http.ResponseWriter, r *http.Request, c caller) {
 		id, ok := pathID(w, r)
@@ -259,7 +259,7 @@ func MeshHandler(s *Service) http.Handler {
 	})
 
 	// A server may claim a name for itself (device_id 0 or its own id), as long
-	// as the name is new or already points at it: `hogman-join share` names
+	// as the name is new or already points at it: `hogman share` names
 	// itself without a trip to the home page, but cannot take over its
 	// member's other names.
 	h("POST /api/names", false, true, func(w http.ResponseWriter, r *http.Request, c caller) {

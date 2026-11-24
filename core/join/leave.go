@@ -101,9 +101,9 @@ func matchLeaveTargets(local []leaveTarget, key string) []leaveTarget {
 func leaveCmd(args []string, o options) error {
 	if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
 		local := localLeaveTargets()
-		return errorf("leave which pen? Name it, for example:  hogman-join leave %s\n"+
+		return errorf("leave which pen? Name it, for example:  hogman leave %s\n"+
 			"  Pens on this computer: %s\n"+
-			"  To leave every pen, run hogman-join leave-all (it asks first).",
+			"  To leave every pen, run hogman leave-all (it asks first).",
 			firstZoneOr(local, "home.example.pens.hogman.network"), zoneList(local))
 	}
 	local := localLeaveTargets()
@@ -142,7 +142,31 @@ func leaveCmd(args []string, o options) error {
 			return err
 		}
 	}
+	cleanupOrphanCanonicalBinary()
 	return nil
+}
+
+// cleanupOrphanCanonicalBinary removes the shared <configBase>/bin/hogman binary
+// and native-messaging registration once this computer has left its last pen and
+// last share (keep-less-data).
+func cleanupOrphanCanonicalBinary() {
+	if len(localLeaveTargets()) > 0 {
+		return
+	}
+	cfgBase := hogmanConfigBase()
+	removeNativeHost(cfgBase)
+	selfPath, _ := resolvedExePath()
+	canon := canonicalBinaryPath(cfgBase)
+	nh := nativeHostBinaryPath(cfgBase)
+	if fi, err := os.Lstat(nh); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 || !sameFilePath(nh, selfPath) {
+			_ = os.Remove(nh)
+		}
+	}
+	if !sameFilePath(canon, selfPath) {
+		_ = os.Remove(canon)
+	}
+	_ = os.Remove(filepath.Join(cfgBase, "bin"))
 }
 
 // leaveAllCmd takes this computer out of every pen it's in, after showing the
@@ -155,7 +179,7 @@ func leaveAllCmd(args []string, o options) error {
 
 func leaveAll(args []string, o options, question string) (kept int, err error) {
 	if len(args) != 0 {
-		return 0, errorf("leave-all takes no pen name; to leave one pen: hogman-join leave '<pen>'")
+		return 0, errorf("leave-all takes no pen name; to leave one pen: hogman leave '<pen>'")
 	}
 	local := localLeaveTargets()
 	if len(local) == 0 {
@@ -172,6 +196,7 @@ func leaveAll(args []string, o options, question string) (kept int, err error) {
 	if err := leaveTargets(go_); err != nil {
 		return len(stay), err
 	}
+	cleanupOrphanCanonicalBinary()
 	return len(stay), nil
 }
 
@@ -218,7 +243,7 @@ func leaveTargets(ts []leaveTarget) error {
 // sweepStaleProxyFn clears any automatic-proxy setting an old Hogman pen left
 // behind (for example when an earlier leave's password prompt was cancelled),
 // pointing it at the remaining pens or turning it off. macOS only: elsewhere
-// hogman-join never changes the system proxy itself. A seam for tests.
+// hogman never changes the system proxy itself. A seam for tests.
 var sweepStaleProxyFn = func() {
 	if runtime.GOOS != "darwin" {
 		return
@@ -404,7 +429,7 @@ func leaveOne(t leaveTarget) error {
 // The program file itself is left for the person to delete.
 func uninstallCmd(args []string, o options) error {
 	if len(args) != 0 {
-		return errorf("usage: hogman-join uninstall")
+		return errorf("usage: hogman uninstall")
 	}
 	local := localLeaveTargets()
 	go_, stay := planLeave(local, o)
@@ -414,7 +439,7 @@ func uninstallCmd(args []string, o options) error {
 			names[i] = k.t.zone
 		}
 		return errorf("Hogman can't be removed from this computer yet, so nothing was changed: %s stays.\n"+
-			"  Sort that out (make someone else an owner first), or run hogman-join uninstall --force and type each pen's name.",
+			"  Sort that out (make someone else an owner first), or run hogman uninstall --force and type each pen's name.",
 			strings.Join(names, ", "))
 	}
 	question := "Leave these pens and remove Hogman from this computer?"

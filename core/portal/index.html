@@ -47,7 +47,7 @@
       <a class="section-link" id="sites-host-link" href="#host">Host a site &darr;</a>
     </div>
     <p class="muted hint" id="sites-empty" hidden>No sites yet. Put a folder or a website here with
-      <code>~/hogman-join share NAME FOLDER-or-PORT</code> (see <a href="#host">Host something</a> below).</p>
+      <code>~/hogman share NAME FOLDER-or-PORT</code> (see <a href="#host">Host something</a> below).</p>
     <ul class="devices site-grid" id="directory"></ul>
     <p class="error" id="sites-err" hidden></p>
   </section>
@@ -138,15 +138,17 @@
       <a class="section-link" id="host-guide-link" href="https://hogman.network/docs/share.html" target="_blank" rel="noopener noreferrer">Hosting guide &rarr;</a>
     </div>
     <p class="host-intro" id="host-intro">One command puts a folder or a web server in the pen, with its own name and a real browser padlock.
-      Run it with the same <code>hogman-join</code> you joined with, on a computer that's in the pen:</p>
-    <pre><code id="host-code">~/hogman-join share photos ~/holiday --note "Summer trip photos"
-~/hogman-join share blog 3000            # a site you're building, by its port</code></pre>
+      Run it with the same <code>hogman</code> you joined with, on a computer that's in the pen:</p>
+    <pre><code id="host-code">~/hogman share photos ~/holiday --note "Summer trip photos"
+~/hogman share blog 3000            # a site you're building, by its port</code></pre>
     <p class="muted hint" id="host-hint-1">Everyone in the pen can then open <code>https://blog.<span class="zone">&lt;network&gt;.pens.hogman.network</span></code>.
       Add <code>--background</code> to keep it running after the window closes;
-      <code>~/hogman-join share stop blog</code> takes it down and frees the name.</p>
+      <code>~/hogman share stop blog</code> takes it down and frees the name.</p>
     <p class="muted hint" id="host-hint-2">Running from a spare computer that isn't in the pen? Click <em>Get a share link</em>
-      above and pass the link at the end: <code>~/hogman-join share blog 3000 '&lt;share link&gt;'</code>.
+      above and pass the link at the end: <code>~/hogman share blog 3000 '&lt;share link&gt;'</code>.
       Already run Caddy or nginx? Share its port.</p>
+    <p class="muted hint" id="host-hint-upgrade">Upgrading from an older <code>hogman-join</code> binary? Its <code>update</code>
+      command will fail with a checksum message — delete <code>~/hogman-join</code> and re-run the start command to install <code>~/hogman</code>.</p>
   </section>
 </main>
 

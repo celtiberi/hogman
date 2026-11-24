@@ -24,7 +24,7 @@ type Link struct {
 	Host        string // the network's public control host
 	InviteToken string
 	DeviceKey   string
-	ForShare    bool // a server link: only for `hogman-join share`, never a whole-computer join
+	ForShare    bool // a server link: only for `hogman share`, never a whole-computer join
 }
 
 func normaliseFP(s string) string {

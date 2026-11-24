@@ -120,7 +120,7 @@ func extractSystemdExecStartArgs(t *testing.T, unit string) []string {
 func TestCLIInstalledServiceGoldenCommands(t *testing.T) {
 	agentDir := "/tmp/hogman state/bobo.pens.example.com"
 	shareDirPath := "/tmp/hogman shares/bobo.pens.example.com/blog"
-	bin := "/tmp/hogman bin/hogman-join"
+	bin := "/tmp/hogman bin/hogman"
 	sc := &shareConfig{Name: "blog", Zone: "bobo.pens.example.com"}
 
 	agentPlist, err := renderLaunchPlist(launchLabel("bobo.pens.example.com"), bin, agentDir, filepath.Join(agentDir, "agent.log"))
@@ -213,7 +213,7 @@ func TestCLIJoinInteractivePasteAndStdin(t *testing.T) {
 	oldTTY, oldAsk := isTerminalFn, askFn
 	t.Cleanup(func() { isTerminalFn, askFn = oldTTY, oldAsk })
 
-	// Interactive TTY prompt when running `hogman-join join` with 0 args.
+	// Interactive TTY prompt when running `hogman join` with 0 args.
 	isTerminalFn = func() bool { return true }
 	askFn = func(prompt string) string {
 		if !strings.Contains(prompt, "Paste your join link") {
@@ -366,7 +366,7 @@ func TestSingleDashLongFlagsGolden(t *testing.T) {
 
 	t.Run("legacy -version and -help", func(t *testing.T) {
 		var out, errBuf bytes.Buffer
-		if rc := runCLI([]string{"-version"}, cliHandlers{out: &out, errOut: &errBuf}); rc != 0 || !strings.Contains(out.String(), "hogman-join") {
+		if rc := runCLI([]string{"-version"}, cliHandlers{out: &out, errOut: &errBuf}); rc != 0 || !strings.Contains(out.String(), "hogman ") {
 			t.Fatalf("-version: rc=%d out=%q err=%q", rc, out.String(), errBuf.String())
 		}
 		out.Reset()

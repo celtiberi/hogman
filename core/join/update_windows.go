@@ -27,3 +27,6 @@ func replaceExecutable(tmpPath, dstPath string) error {
 func startExistingBinary(bin, dir string, _ *agentConfig, _ bool) error {
 	return startDetached(bin, dir)
 }
+
+func rewriteAgentService(string, string, *agentConfig) error { return nil }
+func rewriteShareService(string, string, *shareConfig) error { return nil }

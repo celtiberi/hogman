@@ -2,9 +2,9 @@ package main
 
 // Sharing: one command puts something on the pen under a name of its own.
 //
-//	hogman-join share blog 3000                     https://blog.<pen>.hogman -> this computer's port 3000
-//	hogman-join share notes ./public                a folder, served as a website
-//	hogman-join share blog 3000 '<server link>'     a computer that isn't on the pen yet
+//	hogman share blog 3000                     https://blog.<pen>.hogman -> this computer's port 3000
+//	hogman share notes ./public                a folder, served as a website
+//	hogman share blog 3000 '<server link>'     a computer that isn't on the pen yet
 //
 // Each share is a small device of its own: a server (so the pen lets members
 // in), named after the share. It names itself, gets a publicly trusted
@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -39,13 +40,13 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const shareUsage = `hogman-join share: put something on your pen under its own name
+const shareUsage = `hogman share: put something on your pen under its own name
 
 usage:
-  hogman-join share <name> <target>                  share from this computer (it must be on the pen)
-  hogman-join share <name> <target> '<server link>'  share from a computer that isn't on the pen
-  hogman-join share list                             what this computer shares
-  hogman-join share stop <name>                      take a share down and give its name back
+  hogman share <name> <target>                  share from this computer (it must be on the pen)
+  hogman share <name> <target> '<server link>'  share from a computer that isn't on the pen
+  hogman share list                             what this computer shares
+  hogman share stop <name>                      take a share down and give its name back
 
 <target> is a port on this computer (3000), a local web address
 (http://localhost:8080) or a folder (./site) to serve as a website.
@@ -109,15 +110,15 @@ func (c *shareConfig) save(dir string) error {
 	return os.WriteFile(filepath.Join(dir, "share.json"), b, 0o600)
 }
 
-// allShares lists this computer's shares, optionally for one pen.
-func allShares(zone string) []string {
-	pattern := filepath.Join(sharesBase(), "*", "*", "share.json")
+// allSharesIn lists share directories under a given shares root, optionally for one pen.
+func allSharesIn(base, zone string) []string {
+	pattern := filepath.Join(base, "*", "*", "share.json")
 	if zone != "" {
 		clean, err := validatePenQuery(zone)
 		if err != nil {
 			return nil
 		}
-		pattern = filepath.Join(sharesBase(), clean, "*", "share.json")
+		pattern = filepath.Join(base, clean, "*", "share.json")
 	}
 	m, _ := filepath.Glob(pattern)
 	sort.Strings(m)
@@ -126,6 +127,11 @@ func allShares(zone string) []string {
 		out = append(out, filepath.Dir(f))
 	}
 	return out
+}
+
+// allShares lists this computer's shares, optionally for one pen.
+func allShares(zone string) []string {
+	return allSharesIn(sharesBase(), zone)
 }
 
 var (
@@ -147,7 +153,104 @@ func isReservedShareName(name string) bool {
 	return reservedShareTop[labels[len(labels)-1]]
 }
 
-// shareTarget reads WHAT: a port, a local web address or a folder.
+var blockedShareMetadataIPs = map[netip.Addr]bool{
+	netip.MustParseAddr("169.254.169.254"): true, // AWS/GCP/Azure/DO/Oracle IMDS
+	netip.MustParseAddr("169.254.170.2"):   true, // AWS ECS task metadata
+	netip.MustParseAddr("169.254.169.253"): true, // AWS VPC DNS
+	netip.MustParseAddr("169.254.169.123"): true, // AWS Time Sync
+	netip.MustParseAddr("100.100.100.200"): true, // Alibaba Cloud IMDS
+	netip.MustParseAddr("fd00:ec2::254"):   true, // AWS IPv6 IMDS
+}
+
+func isBlockedMetadataHost(host string) bool {
+	h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	return h == "metadata.google.internal" || h == "metadata.goog" || h == "instance-data"
+}
+
+// isAllowedShareIP reports whether addr is a local or private LAN address
+// suitable as a share target: loopback (127.0.0.0/8, ::1), RFC 1918
+// (10/8, 172.16/12, 192.168/16), IPv6 ULA (fc00::/7), or link-local LAN
+// (169.254/16, fe80::/10) — always denying cloud metadata endpoints,
+// unspecified/multicast addresses, and public internet IPs.
+func isAllowedShareIP(addr netip.Addr) bool {
+	if !addr.IsValid() {
+		return false
+	}
+	ip := addr.Unmap()
+	if addr.Zone() != "" && !ip.IsLinkLocalUnicast() {
+		return false
+	}
+	if blockedShareMetadataIPs[ip] || ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
+// localOrLANDialContext enforces at dial time (after resolving DNS) that share
+// reverse-proxy requests only ever connect to loopback or private LAN IPs,
+// denying cloud metadata endpoints and public internet addresses.
+func localOrLANDialContext(lookup func(context.Context, string) ([]net.IPAddr, error), dial func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
+	if lookup == nil {
+		lookup = net.DefaultResolver.LookupIPAddr
+	}
+	if dial == nil {
+		d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		dial = d.DialContext
+	}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		if isBlockedMetadataHost(host) {
+			return nil, errorf("refusing to proxy to cloud metadata host %q", host)
+		}
+		var targets []string
+		if ip, err := netip.ParseAddr(host); err == nil {
+			if !isAllowedShareIP(ip) {
+				return nil, errorf("refusing to proxy to disallowed address %q (only local and private LAN targets are allowed)", host)
+			}
+			if ip.Zone() != "" {
+				targets = []string{ip.String()}
+			} else {
+				targets = []string{ip.Unmap().String()}
+			}
+		} else {
+			resolved, err := lookup(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+			if len(resolved) == 0 {
+				return nil, errorf("host %q did not resolve to any address", host)
+			}
+			for _, r := range resolved {
+				ip, ok := netip.AddrFromSlice(r.IP)
+				if !ok {
+					return nil, errorf("refusing to proxy to invalid resolved address for %q", host)
+				}
+				ip = ip.Unmap()
+				if r.Zone != "" {
+					ip = ip.WithZone(r.Zone)
+				}
+				if !isAllowedShareIP(ip) {
+					return nil, errorf("refusing to proxy to disallowed address %s resolved for %q (only local and private LAN targets are allowed)", ip, host)
+				}
+				targets = append(targets, ip.String())
+			}
+		}
+		var lastErr error
+		for _, ipStr := range targets {
+			conn, err := dial(ctx, network, net.JoinHostPort(ipStr, port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+		return nil, lastErr
+	}
+}
+
+// shareTarget reads WHAT: a port, a local/LAN web address or a folder.
 func shareTarget(what string) (target string, folder bool, err error) {
 	if n, err := strconv.Atoi(what); err == nil {
 		if n < 1 || n > 65535 {
@@ -162,6 +265,13 @@ func shareTarget(what string) (target string, folder bool, err error) {
 		}
 		if u.User != nil {
 			return "", false, errorf("the share target must not contain credentials")
+		}
+		host := u.Hostname()
+		if isBlockedMetadataHost(host) {
+			return "", false, errorf("%q is a cloud metadata address and cannot be shared", what)
+		}
+		if ip, err := netip.ParseAddr(host); err == nil && !isAllowedShareIP(ip) {
+			return "", false, errorf("%q is not a local or private LAN address (public internet and cloud metadata addresses cannot be shared)", what)
 		}
 		if p := u.Port(); p != "" {
 			n, perr := strconv.Atoi(p)
@@ -222,7 +332,7 @@ func shareStart(name, what, rawLink string, o options) error {
 	fresh := true
 	if old, err := loadShare(dir); err == nil {
 		if pid := sharePID(dir); pid != 0 {
-			return errorf("%s is already being shared from this computer (process %d). Stop it first: hogman-join share stop %s", old.url(), pid, name)
+			return errorf("%s is already being shared from this computer (process %d). Stop it first: hogman share stop %s", old.url(), pid, name)
 		}
 		_, hasUnspentKey := os.Stat(filepath.Join(dir, "authkey"))
 		st := readShareStatus(dir)
@@ -290,7 +400,7 @@ func shareReady(c *shareConfig, background, managed bool) {
 			say("  It runs in the background until this computer restarts.")
 		}
 	}
-	say("  Take it down and give the name back: hogman-join share stop %s", c.Name)
+	say("  Take it down and give the name back: hogman share stop %s", c.Name)
 }
 
 // shareFromLink sets up a share on a computer that only has a server link.
@@ -446,7 +556,7 @@ func shareFromMembership(name string, o options) (*shareConfig, string, error) {
 		return cfg, "", nil // already has its device
 	}
 	if me.ThisDevice.Kind == "server" {
-		return nil, "", errorf("this computer is one of your servers, so it can't add devices.\n  Share from a personal device, or with a server link: hogman-join share NAME WHAT '<server link>'")
+		return nil, "", errorf("this computer is one of your servers, so it can't add devices.\n  Share from a personal device, or with a server link: hogman share NAME WHAT '<server link>'")
 	}
 	step("Adding a server for %s.%s to your devices (%s)", name, p.zone, me.Member.Handle)
 	var dk struct {
@@ -825,8 +935,18 @@ func shareHandler(c *shareConfig) (http.Handler, func(), error) {
 	if err != nil {
 		return nil, nil, permanentShare(err)
 	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, nil, permanentShare(errorf("share target %q must use http:// or https://", c.Target))
+	}
+	if isBlockedMetadataHost(u.Hostname()) {
+		return nil, nil, permanentShare(errorf("share target %q is a cloud metadata address and cannot be shared", c.Target))
+	}
+	if ip, err := netip.ParseAddr(u.Hostname()); err == nil && !isAllowedShareIP(ip) {
+		return nil, nil, permanentShare(errorf("share target %q is not a local or private LAN address", c.Target))
+	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil // always connect directly to the local/LAN share target
+	tr.DialContext = localOrLANDialContext(nil, nil)
 	rp := &httputil.ReverseProxy{
 		Transport: tr,
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -988,21 +1108,21 @@ func shareListState(running, managed bool) string {
 	}
 }
 
-func shareList(zone string) error {
-	all := allShares("")
-	resolvedZone, err := resolveShareZoneFilter(all, zone)
-	if err != nil {
-		return err
-	}
-	dirs := allShares(resolvedZone)
-	if len(dirs) == 0 {
-		if resolvedZone != "" {
-			say("This computer shares nothing on %s.", resolvedZone)
-		} else {
-			say("This computer shares nothing. Start with: hogman-join share <name> <target>")
-		}
-		return nil
-	}
+type shareListItemJSON struct {
+	Name    string `json:"name"`
+	Zone    string `json:"zone"`
+	URL     string `json:"url"`
+	Target  string `json:"target"`
+	Folder  bool   `json:"folder"`
+	Note    string `json:"note,omitempty"`
+	Running bool   `json:"running"`
+	Managed bool   `json:"managed"`
+	State   string `json:"state"`
+	Error   string `json:"error,omitempty"`
+}
+
+func collectShareListItems(dirs []string) []shareListItemJSON {
+	items := make([]shareListItemJSON, 0, len(dirs))
 	for _, d := range dirs {
 		c, err := loadShare(d)
 		if err != nil {
@@ -1011,12 +1131,53 @@ func shareList(zone string) error {
 		running := sharePID(d) != 0
 		managed := shareServiceConfigured(c)
 		state := shareListState(running, managed)
+		errMsg := ""
 		if !running {
 			if st := readShareStatus(d); st.State == "error" && st.Error != "" {
-				state += ": " + firstLine(st.Error)
+				errMsg = firstLine(st.Error)
+				state += ": " + errMsg
 			}
 		}
-		say("%-40s %s  (%s)", c.url(), c.showing(), state)
+		items = append(items, shareListItemJSON{
+			Name:    c.Name,
+			Zone:    c.Zone,
+			URL:     c.url(),
+			Target:  c.Target,
+			Folder:  c.Folder,
+			Note:    c.Note,
+			Running: running,
+			Managed: managed,
+			State:   state,
+			Error:   errMsg,
+		})
+	}
+	return items
+}
+
+func shareList(zone string, asJSON bool) error {
+	all := allShares("")
+	resolvedZone, err := resolveShareZoneFilter(all, zone)
+	if err != nil {
+		return err
+	}
+	dirs := allShares(resolvedZone)
+	if asJSON {
+		return writeJSON(os.Stdout, collectShareListItems(dirs))
+	}
+	if len(dirs) == 0 {
+		if resolvedZone != "" {
+			say("This computer shares nothing on %s.", resolvedZone)
+		} else {
+			say("This computer shares nothing. Start with: hogman share <name> <target>")
+		}
+		return nil
+	}
+	for _, item := range collectShareListItems(dirs) {
+		showing := item.Target
+		if item.Folder {
+			showing = "the folder " + item.Target
+		}
+		say("%-40s %s  (%s)", item.URL, showing, item.State)
 	}
 	return nil
 }
@@ -1036,7 +1197,7 @@ func findShare(name, zone string) (string, error) {
 	}
 	switch len(hits) {
 	case 0:
-		return "", errorf("this computer doesn't share anything called %s (see: hogman-join share list)", name)
+		return "", errorf("this computer doesn't share anything called %s (see: hogman share list)", name)
 	case 1:
 		return hits[0], nil
 	}
@@ -1077,7 +1238,7 @@ func removeShare(dir string, c *shareConfig) error {
 	return removeShareWithOptions(dir, c, 30*time.Second, false)
 }
 
-// removeShareForLeave tears down a share during `hogman-join leave`, bounding
+// removeShareForLeave tears down a share during `hogman leave`, bounding
 // network wait and cleaning up local state even if the pen already removed it
 // or is unreachable.
 func removeShareForLeave(dir string, c *shareConfig) error {

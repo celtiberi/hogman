@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -371,7 +372,7 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 		// computer to the pen. Undo the join.
 		leaveAlongside(n.Zone, false)
 		return errorf("that's a server link: it's for putting something in the pen, not for joining a computer.\n" +
-			"  Use a new one with share, for example: hogman-join share blog 8080 '<server link>'")
+			"  Use a new one with share, for example: hogman share blog 8080 '<server link>'")
 	}
 	note("online as %s", strings.Join(st.IPs, ", "))
 
@@ -416,7 +417,7 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	say("    curl / most CLIs:  https_proxy=%s curl https://<site>.%s", cfg.proxyURL(), n.Zone)
 	say("    git:               git config --global http.https://%s/.proxy %s   (per site)", "<site>."+n.Zone, cfg.proxyURL())
 	say("  The pen carries HTTPS only.")
-	say("  To leave: hogman-join leave '<this link>'")
+	say("  To leave: hogman leave '<this link>'")
 	if !o.noOpen {
 		openURL(n.Portal)
 	}
@@ -646,21 +647,36 @@ func stopDetached(dir string) {
 	_ = os.Remove(pidPath)
 }
 
-// installedBinary copies this program next to the agent's settings atomically,
-// so the background service keeps working after the download is deleted without
-// truncating symlinked binaries or invalidating macOS arm64 code signatures.
-func installedBinary(dir string) (string, error) {
+// canonicalBinaryPath is the single managed hogman binary shared by all
+// pen agents and background shares on this computer.
+func canonicalBinaryPath(configBase string) string {
+	return filepath.Join(configBase, "bin", installedBinaryName(runtime.GOOS))
+}
+
+// installedBinary ensures the single canonical managed binary under
+// <configBase>/bin/hogman is up to date atomically, so all pen agents and
+// background shares share one copy instead of duplicating a binary per pen/share.
+func installedBinary(_ string) (string, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	name := "hogman-join"
-	if strings.HasSuffix(strings.ToLower(self), ".exe") {
-		name += ".exe"
+	dst := canonicalBinaryPath(hogmanConfigBase())
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return "", err
 	}
-	dst := filepath.Join(dir, name)
 	if sameFilePath(self, dst) {
 		return dst, nil
+	}
+	// Never let an older CLI binary (e.g. a forgotten ~/hogman-join or old ~/hogman)
+	// silently downgrade a newer canonical binary shared by other pens on this machine.
+	if _, err := os.Stat(dst); err == nil {
+		if existingVer := queryBinaryVersion(dst); existingVer != "" {
+			if cmp, ok := compareReleaseVersions(existingVer, version); ok && cmp > 0 {
+				note("keeping newer shared binary %s (%s > %s); run 'hogman update' to update %s", dst, existingVer, version, self)
+				return dst, nil
+			}
+		}
 	}
 	if err := copyExecutableAtomic(self, dst); err != nil {
 		return "", err

@@ -180,8 +180,8 @@ for pen in bobo zebra; do
   retry 20 in_client "$pen" test -s /etc/ssl/certs/ca-certificates.crt
   info_ok() { in_client "$pen" curl -sf "https://$host/hogman/v1/network" | jq -e --arg z "$zone" '.zone == $z and .cert_mode == "public" and (.root_ca // "") == "" and (.root_fingerprint // "") == ""'; }
   check "https://$host answers as public pen $pen" info_ok
-  check "the join page is served for $pen" match hogman-join in_client "$pen" curl -sf "https://$host/join"
-  out="$(in_client "$pen" sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open --handle member1 --hostname laptop "$1"' _ "$link" 2>&1)"; rc=$?
+  check "the join page is served for $pen" match hogman in_client "$pen" curl -sf "https://$host/join"
+  out="$(in_client "$pen" sh -c '"/dl/hogman-$(uname -s)-$(uname -m)" --no-open --handle member1 --hostname laptop "$1"' _ "$link" 2>&1)"; rc=$?
   [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
   check "a member joins $pen (exit $rc)" grep -q "You're in. You are member1 on $zone" <<<"$out"
   check "nothing was added to the computer's trust store" no_match hogman docker exec "client-$pen" ls /usr/local/share/ca-certificates
@@ -256,13 +256,13 @@ out3="$(in_client zebra sh -c 'curl -fsSL https://bobo.gate.hogman.test/start | 
 [ $rc3 = 0 ] || echo "$out3" | tail -12 | sed 's/^/        | /'
 check "it checks the download's SHA-256" grep -q "checked: SHA-256 matches" <<<"$out3"
 check "a member joins bobo with it (exit $rc3)" grep -q "You're in. You are member3 on bobo.pens.hogman.test" <<<"$out3"
-check "the tool is kept as ~/hogman-join" in_client zebra test -x /root/hogman-join
+check "the tool is kept as ~/hogman" in_client zebra test -x /root/hogman
 bad_link="$(in_client zebra sh -c 'curl -fsSL https://bobo.gate.hogman.test/start | sh -s -- "https://evil.example/notjoin" 2>&1' || true)"
 check "it refuses something that isn't an invite link" grep -q "doesn't look like a Hogman invite link" <<<"$bad_link"
 
 step "One computer joins two pens (combined PAC)"
 link2="$("$HOST" pen zebra invite create --note multi-pen | awk '/^link:/ {print $2}')"
-out2="$(in_client bobo sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open --handle member2 --hostname laptop2 "$1"' _ "$link2" 2>&1)"; rc2=$?
+out2="$(in_client bobo sh -c '"/dl/hogman-$(uname -s)-$(uname -m)" --no-open --handle member2 --hostname laptop2 "$1"' _ "$link2" 2>&1)"; rc2=$?
 [ $rc2 = 0 ] || echo "$out2" | sed 's/^/        | /'
 check "client-bobo joins zebra too (exit $rc2)" grep -q "You're in. You are member2 on zebra.pens.hogman.test" <<<"$out2"
 bobo_proxy="$(in_client bobo sh -c 'jq -r .proxy_addr "${XDG_CONFIG_HOME:-$HOME/.config}/hogman/bobo.pens.hogman.test/config.json"')"
@@ -273,7 +273,7 @@ check "bobo /proxy.pac routes bobo and zebra" bash -c 'grep -q "dnsDomainIs(host
 check "zebra /proxy.pac matches bobo /proxy.pac" test "$pac_bobo" = "$pac_zebra"
 check "client-bobo reaches home.bobo.pens.hogman.test through bobo proxy" in_client bobo sh -c 'curl -sf --cacert /issued-root.crt -x "http://$1" https://home.bobo.pens.hogman.test/api/me | jq -e ".member.handle == \"member1\""' _ "$bobo_proxy"
 check "client-bobo reaches home.zebra.pens.hogman.test through zebra proxy" in_client bobo sh -c 'curl -sf --cacert /issued-root.crt -x "http://$1" https://home.zebra.pens.hogman.test/api/me | jq -e ".member.handle == \"member2\""' _ "$zebra_proxy"
-out_leave="$(in_client bobo sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" leave "$1" </dev/null' _ "$link2" 2>&1)"; rc_leave=$?
+out_leave="$(in_client bobo sh -c '"/dl/hogman-$(uname -s)-$(uname -m)" leave "$1" </dev/null' _ "$link2" 2>&1)"; rc_leave=$?
 [ $rc_leave = 0 ] || echo "$out_leave" | sed 's/^/        | /'
 check "client-bobo leaves zebra cleanly (exit $rc_leave)" test $rc_leave = 0
 pac_after="$(in_client bobo curl -sf "http://$bobo_proxy/proxy.pac")"
@@ -407,7 +407,7 @@ check "the pen is marked hosted" grep -q '^HOSTED=true' "$HOGMAN_HOME/pens/smith
 check "it has public certificates: no root key at all" test ! -e "$HOGMAN_HOME/pens/smithy/data/pki"
 check "the keeper's link carries no fingerprint" bash -c '[[ "$1" =~ ^https://smithy\.gate\.hogman\.test/join#k=[A-Za-z0-9_-]+$ ]]' _ "$link"
 docker cp "$HOGMAN_HOME/pens/smithy/data/join-dl" client-signup:/dl >/dev/null
-out="$(docker exec client-signup sh -c '"/dl/hogman-join-$(uname -s)-$(uname -m)" --no-open --hostname laptop "$1"' _ "$link" 2>&1)"; rc=$?
+out="$(docker exec client-signup sh -c '"/dl/hogman-$(uname -s)-$(uname -m)" --no-open --hostname laptop "$1"' _ "$link" 2>&1)"; rc=$?
 [ $rc = 0 ] || echo "$out" | tail -8 | sed 's/^/        | /'
 check "the keeper joins with the link (exit $rc)" grep -q "You're in. You are keeper on smithy.pens.hogman.test" <<<"$out"
 check "and is the pen's owner" match 'keeper.*owner' "$HOST" pen smithy member list

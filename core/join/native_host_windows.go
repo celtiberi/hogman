@@ -25,6 +25,13 @@ var windowsNativeRegKeys = []struct {
 	{kind: "firefox", key: `HKCU\Software\Mozilla\NativeMessagingHosts\` + nativeHostName},
 }
 
+func installNativeHostBinary(canonicalBin, hostPath string) error {
+	if sameFilePath(canonicalBin, hostPath) {
+		return nil
+	}
+	return copyExecutableAtomic(canonicalBin, hostPath)
+}
+
 func registerNativeManifests(configBase, hostPath string, chromeIDs, firefoxIDs []string) (int, error) {
 	binDir := filepath.Join(configBase, "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {

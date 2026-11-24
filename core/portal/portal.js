@@ -46,7 +46,7 @@
     $('sites-host-link').textContent = 'Bridge a device or app \u2193';
     $('sites-empty').replaceChildren(
       document.createTextNode('No bridged devices or apps yet. Add one with '),
-      Object.assign(document.createElement('code'), { textContent: '~/hogman-join share cooler-1 http://192.168.1.40 --background' }),
+      Object.assign(document.createElement('code'), { textContent: '~/hogman share cooler-1 http://192.168.1.40 --background' }),
       document.createTextNode(' (see '),
       Object.assign(document.createElement('a'), { href: '#host', textContent: 'Bridge equipment or host an app' }),
       document.createTextNode(' below).')
@@ -64,12 +64,12 @@
     $('host-guide-link').href = 'https://work.hogman.network/docs/share.html';
     $('host-intro').replaceChildren(
       document.createTextNode('Bridge a local LAN controller (plain HTTP is fine on the LAN) or an internal web app into this pen over standard HTTPS (port 443) with '),
-      Object.assign(document.createElement('code'), { textContent: 'hogman-join' }),
+      Object.assign(document.createElement('code'), { textContent: 'hogman' }),
       document.createTextNode(':')
     );
     $('host-code').textContent =
-      '~/hogman-join share cooler-1 http://192.168.1.40 --background\n' +
-      '~/hogman-join share inventory 8080 --note "Warehouse inventory"';
+      '~/hogman share cooler-1 http://192.168.1.40 --background\n' +
+      '~/hogman share inventory 8080 --note "Warehouse inventory"';
 
     const zoneSpan = document.createElement('span');
     zoneSpan.className = 'zone';
@@ -82,14 +82,14 @@
       document.createTextNode('. Add '),
       Object.assign(document.createElement('code'), { textContent: '--background' }),
       document.createTextNode(' to keep it running across reboots; '),
-      Object.assign(document.createElement('code'), { textContent: '~/hogman-join share stop cooler-1' }),
+      Object.assign(document.createElement('code'), { textContent: '~/hogman share stop cooler-1' }),
       document.createTextNode(' takes it down and frees the name.')
     );
     $('host-hint-2').replaceChildren(
       document.createTextNode('Running on a dedicated on-site bridge computer (Raspberry Pi or mini PC)? Press '),
       Object.assign(document.createElement('em'), { textContent: 'Get a share link' }),
       document.createTextNode(' above and pass the link at the end: '),
-      Object.assign(document.createElement('code'), { textContent: "./hogman-join share cooler-1 http://192.168.1.40 '<share link>' --background" }),
+      Object.assign(document.createElement('code'), { textContent: "./hogman share cooler-1 http://192.168.1.40 '<share link>' --background" }),
       document.createTextNode('. Remember: a pen hides devices from the internet, it does not patch firmware.')
     );
 
@@ -202,8 +202,8 @@
       $('phone-line').hidden = kind === 'server';
       $('computer-line').textContent = kind === 'server'
         ? (isWork
-            ? 'Share link: on the on-site bridge computer, open this link (it shows the command), or run ./hogman-join share NAME URL-or-PORT \'<this link>\' --background:'
-            : 'Share link: on the computer that runs the thing you want to share, open this link (it shows the command), or run ./hogman-join share NAME PORT-or-FOLDER \'<this link>\':')
+            ? 'Share link: on the on-site bridge computer, open this link (it shows the command), or run ./hogman share NAME URL-or-PORT \'<this link>\' --background:'
+            : 'Share link: on the computer that runs the thing you want to share, open this link (it shows the command), or run ./hogman share NAME PORT-or-FOLDER \'<this link>\':')
         : 'Computer: open this link on it and follow the steps:';
       $('linktext').textContent = r.join_link;
       $('newlink').hidden = false;

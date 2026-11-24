@@ -583,7 +583,7 @@ func (a *agent) pac() string {
 
 // rejectBrowserProbe applies Fetch Metadata resource isolation to the local
 // agent's control endpoints (/proxy.pac, /status). Non-browser callers (OS PAC
-// fetchers, hogman-join, native host) send no Fetch Metadata headers, and
+// fetchers, hogman, native host) send no Fetch Metadata headers, and
 // Firefox's internal PAC loader sends Sec-Fetch-Site: none (with Dest: empty).
 // Cross-site/same-site web requests and subresource loads (<script>, <img>,
 // <iframe>) are rejected with 403.

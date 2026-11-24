@@ -109,7 +109,7 @@ func resolvePenConn(pens []penConn, want string) (*penConn, error) {
 
 	switch len(sorted) {
 	case 0:
-		return nil, errorf("this computer is not on a pen yet. Join first (hogman-join '<link>'),\n  or share with a server link: hogman-join share <name> <target> '<server link>'")
+		return nil, errorf("this computer is not on a pen yet. Join first (hogman '<link>'),\n  or share with a server link: hogman share <name> <target> '<server link>'")
 	case 1:
 		return &sorted[0], nil
 	}

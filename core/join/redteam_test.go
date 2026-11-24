@@ -76,10 +76,11 @@ func TestRedTeamCLIParseSubcommandFlagValidationAndDoubleDash(t *testing.T) {
 		leave:        func([]string, options) error { return nil },
 		leaveAll:     func([]string, options) error { return nil },
 		uninstall:    func([]string, options) error { return nil },
-		status:       func() error { return nil },
+		status:       func(options) error { return nil },
+		doctor:       func(options) error { return nil },
 		browserSetup: func([]string, options) error { return nil },
 		shareStart:   func(string, string, string, options) error { return nil },
-		shareList:    func(string) error { return nil },
+		shareList:    func(string, bool) error { return nil },
 		shareStop:    func(string, options) error { return nil },
 	}
 	badCases := []struct {
@@ -136,8 +137,8 @@ func TestRedTeamCLIParseSubcommandFlagValidationAndDoubleDash(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"--help"}, "hogman-join"},
-		{[]string{"-h"}, "hogman-join"},
+		{[]string{"--help"}, "hogman"},
+		{[]string{"-h"}, "hogman"},
 		{[]string{"share", "--help"}, "share <name> <target>"},
 		{[]string{"update", "-h"}, "GitHub Releases"},
 	} {
@@ -334,10 +335,18 @@ func TestRedTeamJoinRollbackAndReenrollPreserveInvite(t *testing.T) {
 }
 
 func TestRedTeamInstalledBinaryDirect(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("AppData", filepath.Join(home, "AppData", "Roaming"))
 	dir := t.TempDir()
 	got, err := installedBinary(dir)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got, home) {
+		t.Fatalf("installedBinary wrote outside isolated test home: %s (home=%s)", got, home)
 	}
 	fi, err := os.Stat(got)
 	if err != nil || fi.Size() == 0 {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
@@ -23,14 +24,14 @@ import (
 	"time"
 )
 
-const updateUsage = `hogman-join update: update hogman-join from GitHub Releases (or a pen's server)
+const updateUsage = `hogman update: update hogman from GitHub Releases (or a pen's server)
 
 usage:
-  hogman-join update ['<link|host>']
+  hogman update ['<link|host>']
 
 By default, resolves the latest immutable release on GitHub
 (celtiberi/hogman), verifies the matching binary against
-hogman-join-SHA256SUMS over HTTPS, updates this computer's joined pen agents
+hogman-SHA256SUMS over HTTPS, updates this computer's joined pen agents
 (restarting them if running), and updates cached share and browser-host
 binaries. Works even when this computer is not on any pen yet.
 
@@ -89,21 +90,28 @@ func allowedUpdateRedirectHost(expectedHost, gotHost string) bool {
 func platformBinaryName(goos, goarch string) (string, error) {
 	switch goos + "/" + goarch {
 	case "darwin/arm64":
-		return "hogman-join-Darwin-arm64", nil
+		return "hogman-Darwin-arm64", nil
 	case "darwin/amd64":
-		return "hogman-join-Darwin-x86_64", nil
+		return "hogman-Darwin-x86_64", nil
 	case "linux/amd64":
-		return "hogman-join-Linux-x86_64", nil
+		return "hogman-Linux-x86_64", nil
 	case "linux/arm64":
-		return "hogman-join-Linux-aarch64", nil
+		return "hogman-Linux-aarch64", nil
 	case "windows/amd64":
-		return "hogman-join-windows-amd64.exe", nil
+		return "hogman-windows-amd64.exe", nil
 	default:
 		return "", errorf("automatic updates are not built for %s/%s", goos, goarch)
 	}
 }
 
 func installedBinaryName(goos string) string {
+	if goos == "windows" {
+		return "hogman.exe"
+	}
+	return "hogman"
+}
+
+func legacyBinaryName(goos string) string {
 	if goos == "windows" {
 		return "hogman-join.exe"
 	}
@@ -213,12 +221,12 @@ func fetchLatestReleaseTag(client *http.Client, releaseBase string) (ver, tag, d
 	resp, err := client.Get(urlStr)
 	if err != nil {
 		return "", "", "", errorf("cannot reach GitHub Releases at %s: %v\n"+
-			"  To update from a pen's server instead: hogman-join update --pen <zone> or hogman-join update 'https://<pen-host>'", urlStr, err)
+			"  To update from a pen's server instead: hogman update --pen <zone> or hogman update 'https://<pen-host>'", urlStr, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return "", "", "", errorf("GitHub Releases returned HTTP %d for %s\n"+
-			"  To update from a pen's server instead: hogman-join update --pen <zone> or hogman-join update 'https://<pen-host>'", resp.StatusCode, urlStr)
+			"  To update from a pen's server instead: hogman update --pen <zone> or hogman update 'https://<pen-host>'", resp.StatusCode, urlStr)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxLatestTagBytes+1))
 	if err != nil {
@@ -332,7 +340,7 @@ func stageAndVerify(srcPath, dstPath, wantHex string) error {
 	defer src.Close()
 
 	dstDir := filepath.Dir(dstPath)
-	tmp, err := os.CreateTemp(dstDir, ".hogman-join-*")
+	tmp, err := os.CreateTemp(dstDir, ".hogman-*")
 	if err != nil {
 		return err
 	}
@@ -556,7 +564,7 @@ func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (
 		if penFilter != "" {
 			return nil, errorf("this computer is not on %s", penFilter)
 		}
-		return nil, errorf("this computer is not on any pen yet. Pass a link or host: hogman-join update 'https://<host>'")
+		return nil, errorf("this computer is not on any pen yet. Pass a link or host: hogman update 'https://<host>'")
 	}
 	if len(zonesSeen) > 1 && penFilter != "" {
 		zones := make([]string, 0, len(zonesSeen))
@@ -628,22 +636,24 @@ func agentRunning(dir string, c *agentConfig) bool {
 }
 
 type penUpdateOps struct {
-	isRunning  func(dir string, c *agentConfig) bool
-	hasService func(zone string) bool
-	stop       func(dir string, c *agentConfig)
-	stage      func(srcPath, dstPath, wantHex string) error
-	restartNew func(p *penTarget, binPath string, hadService bool, o options) error
-	restartOld func(p *penTarget, binPath string, hadService bool, o options) error
+	isRunning      func(dir string, c *agentConfig) bool
+	hasService     func(zone string) bool
+	stop           func(dir string, c *agentConfig)
+	stage          func(srcPath, dstPath, wantHex string) error
+	restartNew     func(p *penTarget, binPath string, hadService bool, o options) error
+	restartOld     func(p *penTarget, binPath string, hadService bool, o options) error
+	rewriteService func(binPath, dir string, c *agentConfig) error
 }
 
 func defaultPenUpdateOps() penUpdateOps {
 	return penUpdateOps{
-		isRunning:  agentRunning,
-		hasService: serviceConfigured,
-		stop:       stopAgent,
-		stage:      stageAndVerify,
-		restartNew: restartPenAgent,
-		restartOld: restartOldPenAgent,
+		isRunning:      agentRunning,
+		hasService:     serviceConfigured,
+		stop:           stopAgent,
+		stage:          stageAndVerify,
+		restartNew:     restartPenAgent,
+		restartOld:     restartOldPenAgent,
+		rewriteService: rewriteAgentService,
 	}
 }
 
@@ -653,13 +663,13 @@ func restartPenAgent(p *penTarget, binPath string, hadService bool, o options) e
 	if err := startExistingBinary(binPath, p.dir, p.cfg, noService); err != nil {
 		return errorf("updated %s, but its new agent could not start: %v.\n"+
 			"  Log: %s\n"+
-			"  To get back on: run 'hogman-join update' again, or re-run hogman-join with your link.",
+			"  To get back on: run 'hogman update' again, or re-run hogman with your link.",
 			p.zone, err, logPath)
 	}
 	if _, err := waitAgentUp(p.cfg, 60*time.Second); err != nil {
 		return errorf("updated %s, but its new agent did not come online: %v.\n"+
 			"  Log: %s\n"+
-			"  To get back on: fix what the log shows and run 'hogman-join agent %s', or re-run hogman-join with your link.",
+			"  To get back on: fix what the log shows and run 'hogman agent %s', or re-run hogman with your link.",
 			p.zone, err, logPath, p.dir)
 	}
 	note("%s agent restarted", p.zone)
@@ -686,7 +696,7 @@ func updatePenAgent(p *penTarget, binPath, verifiedSrc, wantHex string, o option
 		if running {
 			if rerr := ops.restartOld(p, binPath, hadService, o); rerr != nil {
 				return errorf("could not update %s agent binary (%v), and restarting the previous agent also failed (%v).\n"+
-					"  To get back on: run '%s agent %s', or re-run hogman-join with your link.",
+					"  To get back on: run '%s agent %s', or re-run hogman with your link.",
 					p.zone, err, rerr, binPath, p.dir)
 			}
 			note("restarted the previous %s agent so you stay connected", p.zone)
@@ -701,12 +711,13 @@ func updatePenAgent(p *penTarget, binPath, verifiedSrc, wantHex string, o option
 }
 
 type shareUpdateOps struct {
-	isRunning  func(dir string) bool
-	hasService func(c *shareConfig) bool
-	stop       func(dir string, c *shareConfig)
-	stage      func(srcPath, dstPath, wantHex string) error
-	restartNew func(s *shareTargetDir, binPath string, o options) error
-	restartOld func(s *shareTargetDir, binPath string, o options) error
+	isRunning      func(dir string) bool
+	hasService     func(c *shareConfig) bool
+	stop           func(dir string, c *shareConfig)
+	stage          func(srcPath, dstPath, wantHex string) error
+	restartNew     func(s *shareTargetDir, binPath string, o options) error
+	restartOld     func(s *shareTargetDir, binPath string, o options) error
+	rewriteService func(binPath, dir string, c *shareConfig) error
 }
 
 func defaultShareUpdateOps() shareUpdateOps {
@@ -721,6 +732,7 @@ func defaultShareUpdateOps() shareUpdateOps {
 		restartOld: func(s *shareTargetDir, binPath string, o options) error {
 			return restartShareService(s, binPath, o, false)
 		},
+		rewriteService: rewriteShareService,
 	}
 }
 
@@ -753,7 +765,7 @@ func updateShareBinary(s *shareTargetDir, binPath, verifiedSrc, wantHex string, 
 		if err := ops.stage(verifiedSrc, binPath, wantHex); err != nil {
 			if rerr := ops.restartOld(s, binPath, o); rerr != nil {
 				return errorf("could not update %s share binary (%v), and restarting the previous share also failed (%v).\n"+
-					"  To bring it back up: hogman-join share %s %s --background",
+					"  To bring it back up: hogman share %s %s --background",
 					s.cfg.fqdn(), err, rerr, s.cfg.Name, s.cfg.Target)
 			}
 			return errorf("could not update %s share binary: %v", s.cfg.fqdn(), err)
@@ -761,7 +773,7 @@ func updateShareBinary(s *shareTargetDir, binPath, verifiedSrc, wantHex string, 
 		note("updated %s", binPath)
 		if err := ops.restartNew(s, binPath, o); err != nil {
 			return errorf("updated %s share binary, but restarting it failed (%v).\n"+
-				"  To bring it back up: hogman-join share %s %s --background",
+				"  To bring it back up: hogman share %s %s --background",
 				s.cfg.fqdn(), err, s.cfg.Name, s.cfg.Target)
 		}
 		return nil
@@ -776,9 +788,241 @@ func updateShareBinary(s *shareTargetDir, binPath, verifiedSrc, wantHex string, 
 	return nil
 }
 
+// detectPackageManager reports whether exePath appears to be installed and
+// managed by a system or user package manager (Homebrew, Scoop, WinGet, or OS
+// packages under /usr/bin) so `update` refuses to overwrite it in place.
+func detectPackageManager(exePath, goos string) (name, upgradeCmd string, ok bool) {
+	p := filepath.ToSlash(strings.ReplaceAll(exePath, "\\", "/"))
+	lp := strings.ToLower(p)
+	if goos == "darwin" || goos == "linux" {
+		if strings.HasPrefix(p, "/opt/homebrew/Cellar/") ||
+			strings.HasPrefix(p, "/usr/local/Cellar/") ||
+			strings.Contains(p, "/.linuxbrew/Cellar/") {
+			return "Homebrew", "brew upgrade hogman", true
+		}
+		if p == "/usr/bin/hogman" || p == "/usr/bin/hogman-join" {
+			return "your system package manager", "upgrade via your OS package manager", true
+		}
+	}
+	if goos == "windows" {
+		if strings.Contains(lp, "/scoop/apps/") {
+			return "Scoop", "scoop update hogman", true
+		}
+		if strings.Contains(lp, "/microsoft/winget/packages/") {
+			return "winget", "winget upgrade Galderwood.Hogman", true
+		}
+	}
+	return "", "", false
+}
+
+const updatingMarkerName = ".updating"
+
+// queryBinaryVersion runs `<bin> --version` with a short timeout and extracts
+// its version token (e.g. "2026.11.24" from "hogman 2026.11.24 darwin/arm64").
+func queryBinaryVersion(binPath string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, binPath, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) >= 2 {
+		return strings.TrimPrefix(fields[1], "v")
+	}
+	return ""
+}
+
+// compareReleaseVersions compares two dot-separated numeric release versions
+// (such as "2026.11.24" or "0.2.1"). Returns (-1/0/+1, true) when both strings
+// parse as numeric release versions, or (0, false) for "dev"/non-numeric builds.
+func compareReleaseVersions(a, b string) (int, bool) {
+	parse := func(raw string) ([]int, bool) {
+		s := strings.TrimPrefix(strings.TrimSpace(raw), "v")
+		if s == "" {
+			return nil, false
+		}
+		// Strip optional pre-release/build suffix after '-' or '+'.
+		if i := strings.IndexAny(s, "-+"); i >= 0 {
+			s = s[:i]
+		}
+		parts := strings.Split(s, ".")
+		if len(parts) < 2 {
+			return nil, false
+		}
+		nums := make([]int, len(parts))
+		for i, p := range parts {
+			if p == "" {
+				return nil, false
+			}
+			n, err := strconv.Atoi(p)
+			if err != nil || n < 0 {
+				return nil, false
+			}
+			nums[i] = n
+		}
+		return nums, true
+	}
+	pa, okA := parse(a)
+	pb, okB := parse(b)
+	if !okA || !okB {
+		return 0, false
+	}
+	n := len(pa)
+	if len(pb) > n {
+		n = len(pb)
+	}
+	for i := 0; i < n; i++ {
+		va, vb := 0, 0
+		if i < len(pa) {
+			va = pa[i]
+		}
+		if i < len(pb) {
+			vb = pb[i]
+		}
+		if va < vb {
+			return -1, true
+		}
+		if va > vb {
+			return 1, true
+		}
+	}
+	return 0, true
+}
+
+func readUpdatingMarker(dir string) (present bool, hadService bool) {
+	b, err := os.ReadFile(filepath.Join(dir, updatingMarkerName))
+	if err != nil {
+		return false, false
+	}
+	return true, strings.TrimSpace(string(b)) == "service"
+}
+
+func writeUpdatingMarker(dir string, hadService bool) {
+	val := "detached\n"
+	if hadService {
+		val = "service\n"
+	}
+	tmp, err := os.CreateTemp(dir, ".updating-*")
+	if err != nil {
+		return
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.WriteString(val); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return
+	}
+	_ = tmp.Chmod(0o600)
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := os.Rename(tmpPath, filepath.Join(dir, updatingMarkerName)); err != nil {
+		_ = os.Remove(tmpPath)
+	}
+}
+
+func clearUpdatingMarker(dir string) {
+	_ = os.Remove(filepath.Join(dir, updatingMarkerName))
+}
+
+// migrateAndRestartPen atomically transitions a pen's agent service to
+// canonicalBin (rewriting its LaunchAgent/systemd unit and waiting for it to
+// come online) and removes any legacy per-pen duplicate copy only after success.
+func migrateAndRestartPen(p *penTarget, canonicalBin, legacyBin, selfPath string, o options, ops penUpdateOps) error {
+	running := ops.isRunning(p.dir, p.cfg)
+	hadService := ops.hasService(p.cfg.Zone)
+	interrupted, prevService := readUpdatingMarker(p.dir)
+	if interrupted {
+		running = true
+		if prevService {
+			hadService = true
+		}
+	}
+	if running {
+		step("Restarting %s agent", p.zone)
+		writeUpdatingMarker(p.dir, hadService)
+		ops.stop(p.dir, p.cfg)
+		if err := ops.restartNew(p, canonicalBin, hadService, o); err != nil {
+			// Stop any partially started new agent before rolling back so
+			// systemd enable --now isn't a no-op and detached mode never leaves two agents.
+			ops.stop(p.dir, p.cfg)
+			if legacyBin != "" && ops.restartOld != nil {
+				if _, serr := os.Stat(legacyBin); serr == nil {
+					if rerr := ops.restartOld(p, legacyBin, hadService, o); rerr == nil {
+						clearUpdatingMarker(p.dir)
+						note("restarted the previous %s agent so you stay connected", p.zone)
+					}
+				}
+			}
+			return err
+		}
+		clearUpdatingMarker(p.dir)
+	} else if hadService && ops.rewriteService != nil {
+		if err := ops.rewriteService(canonicalBin, p.dir, p.cfg); err != nil {
+			return errorf("could not update login item for %s: %v", p.zone, err)
+		}
+	}
+	if legacyBin != "" && !sameFilePath(legacyBin, selfPath) && !sameFilePath(legacyBin, canonicalBin) {
+		if _, err := os.Stat(legacyBin); err == nil {
+			if err := os.Remove(legacyBin); err == nil {
+				note("consolidated %s -> %s", legacyBin, canonicalBin)
+			}
+		}
+	}
+	return nil
+}
+
+// migrateAndRestartShare atomically transitions a managed share to canonicalBin
+// and removes any legacy per-share duplicate copy only after it is healthy.
+func migrateAndRestartShare(s *shareTargetDir, canonicalBin, legacyBin, selfPath string, o options, ops shareUpdateOps) error {
+	running := ops.isRunning(s.dir)
+	managed := ops.hasService(s.cfg)
+	interrupted, prevManaged := readUpdatingMarker(s.dir)
+	if interrupted && prevManaged {
+		running = true
+		managed = true
+	}
+	if running && managed {
+		step("Restarting %s share", s.cfg.fqdn())
+		writeUpdatingMarker(s.dir, true)
+		ops.stop(s.dir, s.cfg)
+		if err := ops.restartNew(s, canonicalBin, o); err != nil {
+			ops.stop(s.dir, s.cfg)
+			if legacyBin != "" && ops.restartOld != nil {
+				if _, serr := os.Stat(legacyBin); serr == nil {
+					if rerr := ops.restartOld(s, legacyBin, o); rerr == nil {
+						clearUpdatingMarker(s.dir)
+					}
+				}
+			}
+			return errorf("updated share binary, but restarting %s failed (%v).\n"+
+				"  To bring it back up: hogman share %s %s --background",
+				s.cfg.fqdn(), err, s.cfg.Name, s.cfg.Target)
+		}
+		clearUpdatingMarker(s.dir)
+	} else if running {
+		note("share %s is still running the previous process; restart it when ready", s.cfg.url())
+		return nil
+	} else if managed && ops.rewriteService != nil {
+		if err := ops.rewriteService(canonicalBin, s.dir, s.cfg); err != nil {
+			return errorf("could not update login item for share %s: %v", s.cfg.fqdn(), err)
+		}
+	}
+	if legacyBin != "" && !sameFilePath(legacyBin, selfPath) && !sameFilePath(legacyBin, canonicalBin) {
+		if _, err := os.Stat(legacyBin); err == nil {
+			if err := os.Remove(legacyBin); err == nil {
+				note("consolidated %s -> %s", legacyBin, canonicalBin)
+			}
+		}
+	}
+	return nil
+}
+
 func updateCmd(args []string, o options) error {
 	if len(args) > 1 {
-		return errorf("usage: hogman-join update [--pen ZONE] [--dry-run] ['<link|host>']")
+		return errorf("usage: hogman update [--pen ZONE] [--dry-run] ['<link|host>']")
 	}
 	binName, err := platformBinaryName(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
@@ -807,7 +1051,7 @@ func updateCmd(args []string, o options) error {
 			return err
 		}
 		note("latest release: %s (%s)", ver, tag)
-		sumsURL = dlBase + "/hogman-join-SHA256SUMS"
+		sumsURL = dlBase + "/hogman-SHA256SUMS"
 		binURL = dlBase + "/" + binName
 	} else {
 		step("Checking %s for updates (%s)", plan.host, binName)
@@ -823,69 +1067,121 @@ func updateCmd(args []string, o options) error {
 	selfHash, _ := fileSHA256(selfPath)
 	selfNeedsUpdate := !digestEqualHex(selfHash, wantHex)
 
-	instName := installedBinaryName(runtime.GOOS)
-	type copyStatus struct {
-		path       string
-		needsCopy  bool
-		pen        *penTarget
-		share      *shareTargetDir
-		nativeHost bool
+	pkgMgr, pkgUpgradeCmd, pkgManaged := detectPackageManager(selfPath, runtime.GOOS)
+	if selfNeedsUpdate && pkgManaged && !o.dryRun {
+		return errorf("%s is managed by %s — upgrade with: %s\n"+
+			"  (after upgrading, run '%s update' if any background agents need syncing)",
+			selfPath, pkgMgr, pkgUpgradeCmd, cliBinaryName())
 	}
-	var updates []copyStatus
 
-	for i := range plan.pens {
-		p := &plan.pens[i]
-		pBin := filepath.Join(p.dir, instName)
-		if sameFilePath(selfPath, pBin) {
-			continue
+	instName := installedBinaryName(runtime.GOOS)
+	oldInstName := legacyBinaryName(runtime.GOOS)
+	canonicalBin := canonicalBinaryPath(configBase)
+	canonicalNeeded := len(plan.pens) > 0 || len(plan.shares) > 0
+	if _, err := os.Stat(canonicalBin); err == nil {
+		canonicalNeeded = true
+	}
+	nhBin := nativeHostBinaryPath(configBase)
+	if _, err := os.Lstat(nhBin); err == nil {
+		canonicalNeeded = true
+	}
+	canonicalNeedsUpdate := false
+	if canonicalNeeded && !sameFilePath(selfPath, canonicalBin) {
+		h, _ := fileSHA256(canonicalBin)
+		canonicalNeedsUpdate = !digestEqualHex(h, wantHex)
+	}
+
+	nhNeedsUpdate := false
+	if !sameFilePath(selfPath, nhBin) {
+		if fi, err := os.Lstat(nhBin); err == nil {
+			if runtime.GOOS != "windows" {
+				// On Unix, convert any old regular-file copy to a symlink to canonicalBin.
+				nhNeedsUpdate = fi.Mode()&os.ModeSymlink == 0 || !sameFilePath(canonicalBin, nhBin)
+			} else {
+				h, _ := fileSHA256(nhBin)
+				nhNeedsUpdate = !digestEqualHex(h, wantHex)
+			}
 		}
-		h, _ := fileSHA256(pBin)
-		updates = append(updates, copyStatus{path: pBin, needsCopy: !digestEqualHex(h, wantHex), pen: p})
+	}
+
+	legacyCopyIn := func(dir string) string {
+		for _, name := range []string{instName, oldInstName} {
+			p := filepath.Join(dir, name)
+			if sameFilePath(p, selfPath) || sameFilePath(p, canonicalBin) {
+				continue
+			}
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+		return ""
+	}
+	hasLegacyCopy := func(dir string) bool { return legacyCopyIn(dir) != "" }
+
+	oldBinCanonical := filepath.Join(configBase, "bin", oldInstName)
+	hasOldBinCanonical := false
+	if !sameFilePath(oldBinCanonical, selfPath) && !sameFilePath(oldBinCanonical, canonicalBin) {
+		if _, err := os.Stat(oldBinCanonical); err == nil {
+			hasOldBinCanonical = true
+		}
+	}
+
+	anyLegacy := hasOldBinCanonical
+	anyInterrupted := false
+	for i := range plan.pens {
+		if hasLegacyCopy(plan.pens[i].dir) {
+			anyLegacy = true
+		}
+		if interrupted, _ := readUpdatingMarker(plan.pens[i].dir); interrupted {
+			anyInterrupted = true
+		}
 	}
 	for i := range plan.shares {
-		s := &plan.shares[i]
-		sBin := filepath.Join(s.dir, instName)
-		if sameFilePath(selfPath, sBin) {
-			continue
+		if hasLegacyCopy(plan.shares[i].dir) {
+			anyLegacy = true
 		}
-		if _, err := os.Stat(sBin); err != nil {
-			continue
-		}
-		h, _ := fileSHA256(sBin)
-		updates = append(updates, copyStatus{path: sBin, needsCopy: !digestEqualHex(h, wantHex), share: s})
-	}
-	if nhBin := nativeHostBinaryPath(hogmanConfigBase()); !sameFilePath(selfPath, nhBin) {
-		if _, err := os.Stat(nhBin); err == nil {
-			h, _ := fileSHA256(nhBin)
-			updates = append(updates, copyStatus{path: nhBin, needsCopy: !digestEqualHex(h, wantHex), nativeHost: true})
+		if interrupted, _ := readUpdatingMarker(plan.shares[i].dir); interrupted {
+			anyInterrupted = true
 		}
 	}
 
-	anyUpdate := selfNeedsUpdate
-	for _, u := range updates {
-		if u.needsCopy {
-			anyUpdate = true
-			break
-		}
-	}
+	anyUpdate := selfNeedsUpdate || canonicalNeedsUpdate || nhNeedsUpdate || anyLegacy || anyInterrupted
 	cleanupOps := defaultLegacyCleanupOps()
 	if !anyUpdate {
 		if !o.dryRun {
 			cleanupLegacyRootsForUpdate(plan, false, cleanupOps)
 		}
-		say("\n✓ hogman-join is already up to date (%s).", wantHex[:12])
+		say("\n✓ %s is already up to date (%s).", cliBinaryName(), wantHex[:12])
 		return nil
 	}
 
 	if o.dryRun {
 		step("Dry run: nothing changed. Would update to %s:", wantHex[:12])
 		if selfNeedsUpdate {
-			note("%s (current %s)", selfPath, shortDigest(selfHash))
-		}
-		for _, u := range updates {
-			if u.needsCopy {
-				note("%s", u.path)
+			if pkgManaged {
+				note("%s is managed by %s (upgrade with: %s)", selfPath, pkgMgr, pkgUpgradeCmd)
+			} else {
+				note("%s (current %s)", selfPath, shortDigest(selfHash))
 			}
+		}
+		if canonicalNeedsUpdate {
+			note("%s", canonicalBin)
+		}
+		if nhNeedsUpdate {
+			note("%s", nhBin)
+		}
+		for i := range plan.pens {
+			if legacy := legacyCopyIn(plan.pens[i].dir); legacy != "" {
+				note("consolidate %s -> %s", legacy, canonicalBin)
+			}
+		}
+		for i := range plan.shares {
+			if legacy := legacyCopyIn(plan.shares[i].dir); legacy != "" {
+				note("consolidate %s -> %s", legacy, canonicalBin)
+			}
+		}
+		if hasOldBinCanonical {
+			note("consolidate %s -> %s", oldBinCanonical, canonicalBin)
 		}
 		cleanupLegacyRootsForUpdate(plan, true, cleanupOps)
 		return nil
@@ -893,14 +1189,20 @@ func updateCmd(args []string, o options) error {
 
 	if selfNeedsUpdate {
 		if err := checkDirWritable(filepath.Dir(selfPath)); err != nil {
-			return errorf("cannot update %s (%v). Move hogman-join to a writable folder or re-run with write permission", selfPath, err)
+			return errorf("cannot update %s (%v). Move hogman to a writable folder or re-run with write permission", selfPath, err)
 		}
 	}
-	for _, u := range updates {
-		if u.needsCopy {
-			if err := checkDirWritable(filepath.Dir(u.path)); err != nil {
-				return errorf("cannot update %s (%v)", u.path, err)
-			}
+	if canonicalNeedsUpdate {
+		if err := os.MkdirAll(filepath.Dir(canonicalBin), 0o700); err != nil {
+			return errorf("cannot prepare %s: %v", filepath.Dir(canonicalBin), err)
+		}
+		if err := checkDirWritable(filepath.Dir(canonicalBin)); err != nil {
+			return errorf("cannot update %s (%v)", canonicalBin, err)
+		}
+	}
+	if nhNeedsUpdate {
+		if err := checkDirWritable(filepath.Dir(nhBin)); err != nil {
+			return errorf("cannot update %s (%v)", nhBin, err)
 		}
 	}
 
@@ -927,63 +1229,80 @@ func updateCmd(args []string, o options) error {
 		note("updated %s", selfPath)
 	}
 
-	ops := defaultPenUpdateOps()
-	shareOps := defaultShareUpdateOps()
-	for _, u := range updates {
-		if !u.needsCopy {
-			continue
-		}
-		if u.pen != nil {
-			if err := updatePenAgent(u.pen, u.path, verifiedSrc, wantHex, o, ops); err != nil {
-				return err
+	if canonicalNeedsUpdate {
+		// Prevent `hogman update --pen X` from silently downgrading the shared
+		// canonical binary used by other pens on this computer.
+		if !plan.fromRelease {
+			inPlanCheck := map[string]bool{}
+			for _, p := range plan.pens {
+				inPlanCheck[p.zone] = true
 			}
-			continue
-		}
-		if u.share != nil {
-			if err := updateShareBinary(u.share, u.path, verifiedSrc, wantHex, o, shareOps); err != nil {
-				return err
+			var otherPens []string
+			for _, p := range loadPenTargets(configBase) {
+				if !inPlanCheck[p.zone] {
+					otherPens = append(otherPens, p.zone)
+				}
 			}
-			continue
-		}
-		if u.nativeHost {
-			if err := stageAndVerify(verifiedSrc, u.path, wantHex); err != nil {
-				note("could not update %s: %v", u.path, err)
-				continue
+			if len(otherPens) > 0 {
+				curVer := queryBinaryVersion(canonicalBin)
+				newVer := queryBinaryVersion(verifiedSrc)
+				if cmp, ok := compareReleaseVersions(newVer, curVer); ok && cmp < 0 {
+					return errorf("refusing to downgrade shared binary %s (%s -> %s) from %s while other pens (%s) share it.\n"+
+						"  Run 'hogman update' (without --pen) to update all pens from GitHub Releases.",
+						canonicalBin, curVer, newVer, plan.host, strings.Join(otherPens, ", "))
+				}
 			}
-			note("updated %s", u.path)
+		}
+		if err := stageAndVerify(verifiedSrc, canonicalBin, wantHex); err != nil {
+			return errorf("could not update %s: %v", canonicalBin, err)
+		}
+		note("updated %s", canonicalBin)
+	}
+	if nhNeedsUpdate {
+		srcForNH := canonicalBin
+		if !canonicalNeeded {
+			srcForNH = verifiedSrc
+		}
+		if err := installNativeHostBinary(srcForNH, nhBin); err != nil {
+			note("could not update %s: %v", nhBin, err)
+		} else {
+			note("updated %s", nhBin)
 		}
 	}
 
-	// If selfPath itself IS a pen agent or managed share binary and was replaced, restart it too.
-	if selfNeedsUpdate {
-		for i := range plan.pens {
-			p := &plan.pens[i]
-			pBin := filepath.Join(p.dir, instName)
-			if !sameFilePath(selfPath, pBin) {
-				continue
-			}
-			if ops.isRunning(p.dir, p.cfg) {
-				hadService := ops.hasService(p.cfg.Zone)
-				step("Restarting %s agent", p.zone)
-				ops.stop(p.dir, p.cfg)
-				if err := ops.restartNew(p, pBin, hadService, o); err != nil {
-					return err
-				}
-			}
+	// Atomically migrate and restart running pen agents and managed shares onto
+	// canonicalBin, deleting legacy per-pen/share copies only after health checks pass.
+	serviceBin := canonicalBin
+	if sameFilePath(selfPath, canonicalBin) || !canonicalNeeded {
+		serviceBin = selfPath
+	}
+	ops := defaultPenUpdateOps()
+	shareOps := defaultShareUpdateOps()
+	for i := range plan.pens {
+		p := &plan.pens[i]
+		legacy := legacyCopyIn(p.dir)
+		interrupted, _ := readUpdatingMarker(p.dir)
+		if !selfNeedsUpdate && !canonicalNeedsUpdate && legacy == "" && !hasOldBinCanonical && !interrupted {
+			continue
 		}
-		for i := range plan.shares {
-			s := &plan.shares[i]
-			sBin := filepath.Join(s.dir, instName)
-			if !sameFilePath(selfPath, sBin) {
-				continue
-			}
-			if shareOps.isRunning(s.dir) && shareOps.hasService(s.cfg) {
-				step("Restarting %s share", s.cfg.fqdn())
-				shareOps.stop(s.dir, s.cfg)
-				if err := shareOps.restartNew(s, sBin, o); err != nil {
-					return err
-				}
-			}
+		if err := migrateAndRestartPen(p, serviceBin, legacy, selfPath, o, ops); err != nil {
+			return err
+		}
+	}
+	for i := range plan.shares {
+		s := &plan.shares[i]
+		legacy := legacyCopyIn(s.dir)
+		interrupted, _ := readUpdatingMarker(s.dir)
+		if !selfNeedsUpdate && !canonicalNeedsUpdate && legacy == "" && !hasOldBinCanonical && !interrupted {
+			continue
+		}
+		if err := migrateAndRestartShare(s, serviceBin, legacy, selfPath, o, shareOps); err != nil {
+			return err
+		}
+	}
+	if hasOldBinCanonical {
+		if err := os.Remove(oldBinCanonical); err == nil {
+			note("consolidated %s -> %s", oldBinCanonical, canonicalBin)
 		}
 	}
 
@@ -1002,7 +1321,8 @@ func updateCmd(args []string, o options) error {
 		}
 	}
 	if len(skipped) > 0 {
-		note("other pens were not updated: %s (run 'hogman-join update --pen <zone>' for each)", strings.Join(skipped, ", "))
+		note("shared binary %s updated from %s; other pens (%s) will use it on next restart (run 'hogman update' to update and restart all pens from GitHub Releases)",
+			canonicalBin, plan.host, strings.Join(skipped, ", "))
 	}
 
 	verLine := ""
@@ -1012,7 +1332,7 @@ func updateCmd(args []string, o options) error {
 	if verLine != "" {
 		say("\n✓ Updated %s (SHA-256 %s).", verLine, wantHex[:12])
 	} else {
-		say("\n✓ Updated hogman-join (SHA-256 %s).", wantHex[:12])
+		say("\n✓ Updated hogman (SHA-256 %s).", wantHex[:12])
 	}
 	return nil
 }

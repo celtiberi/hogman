@@ -219,7 +219,7 @@ func (s *Service) InviteLink(token string) string {
 
 // DeviceLink is the one-time link for a device key. A server key's link is
 // marked for=share: server links only put things in the pen with
-// `hogman-join share`, they don't join a whole computer (D-11).
+// `hogman share`, they don't join a whole computer (D-11).
 func (s *Service) DeviceLink(key, kind string) string {
 	link := fmt.Sprintf("https://%s/join#k=%s", s.cfg.PublicHost, key)
 	if kind == "server" {
@@ -977,7 +977,7 @@ func (s *Service) Claim(a Actor, handle, rawName string, deviceID int64, note *s
 	return s.claimLocked(a, handle, rawName, deviceID, note, nil)
 }
 
-// ServerClaim is a server naming itself (what `hogman-join share` does). The
+// ServerClaim is a server naming itself (what `hogman share` does). The
 // checks run under s.mu together with the claim, so two servers can't race.
 func (s *Service) ServerClaim(a Actor, d *Device, rawName string, note *string) (string, error) {
 	s.mu.Lock()

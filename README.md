@@ -20,7 +20,7 @@ on Earth, there is no public IP address to scan.
 
 Hogman runs pen control planes hosted-only on `hogman.network` (no self-hosted pen server support),
 while your sites, folders, and bridged local devices run on your own machines via
-`hogman-join share`. The entire codebase is open source under [AGPL-3.0](LICENSE) with
+`hogman share`. The entire codebase is open source under [AGPL-3.0](LICENSE) with
 SLSA-attested release binaries.
 
 ---
@@ -45,9 +45,9 @@ Invited to a pen? Open the invite link and run the short command it shows:
 $ curl -fsSL https://store-north.gate.hogman.network/start | sh
 Paste your invite link: https://store-north.gate.hogman.network/join#t=(your invite)
 
-• Downloading hogman-join for Darwin arm64 from store-north.gate.hogman.network
+• Downloading hogman for Darwin arm64 from store-north.gate.hogman.network
   checked: SHA-256 matches
-  saved as ~/hogman-join (keep it: it updates, shares and leaves later)
+  saved as ~/hogman (keep it: it updates, shares and leaves later)
 
 • Redeeming the invite
   Choose your name on the network: alice
@@ -61,10 +61,13 @@ Paste your invite link: https://store-north.gate.hogman.network/join#t=(your inv
 - On macOS, it prompts for local-network access and asks once for your Mac password to configure the
   system automatic proxy (`networksetup`).
 - Add more devices from your pen's home page (*Add a device*), update anytime with
-  `~/hogman-join update`, or leave one pen with `~/hogman-join leave <pen>` (its short name, full name or link).
-  `~/hogman-join leave-all` leaves every pen and asks first.
-- To take Hogman off a computer entirely: `~/hogman-join uninstall` (asks first), then delete
-  `~/hogman-join` and remove the browser extension if you added it.
+  `~/hogman update`, or leave one pen with `~/hogman leave <pen>` (its short name, full name or link).
+  `~/hogman leave-all` leaves every pen and asks first.
+- Upgrading from an older `hogman-join` install: `hogman-join update` will fail with a checksum error
+  because the client was renamed to `hogman`; delete `~/hogman-join` and re-run the start command from
+  your pen's join page to install `~/hogman`.
+- To take Hogman off a computer entirely: `~/hogman uninstall` (asks first), then delete
+  `~/hogman` and remove the browser extension if you added it.
 - Owners have no account recovery, so `leave`, `leave-all` and `uninstall` refuse a pen you own.
   Make someone else an owner first. `--force` overrides this only after a warning and typing the
   pen's name exactly.
@@ -76,17 +79,19 @@ over HTTPS on port 443) — a local port, a static directory, or a local LAN con
 a small always-on computer on site (using a share link from your pen's home page):
 
 ```text
-$ ~/hogman-join share cooler-1 http://192.168.1.40 --background '<share-link>'
-$ ~/hogman-join share photos ~/holiday --note "Shared archive"
-$ ~/hogman-join share app 3000 --background
+$ ~/hogman share cooler-1 http://192.168.1.40 --background '<share-link>'
+$ ~/hogman share photos ~/holiday --note "Shared archive"
+$ ~/hogman share app 3000 --background
 
 ✓ https://app.store-north.pens.hogman.network is up.
   Everyone in the pen can open it.
 ```
 
 Each share joins as its own isolated server node (`tag:server`), so personal laptops accept zero
-inbound connections and zero inbound router ports are opened. Take a share down anytime with
-`~/hogman-join share stop app`.
+inbound connections and zero inbound router ports are opened. Share targets are limited to local
+and private LAN addresses (loopback, RFC 1918, ULA, and link-local); public internet IPs, cloud
+metadata endpoints, and CGNAT/Tailscale addresses (`100.64.0.0/10`) are refused after DNS
+resolution. Take a share down anytime with `~/hogman share stop app`.
 
 Full guides: [Quickstart](https://work.hogman.network/docs/) ·
 [Joining a pen](https://work.hogman.network/docs/join.html) ·
@@ -99,15 +104,15 @@ Full guides: [Quickstart](https://work.hogman.network/docs/) ·
 ## Using Hogman with a VPN
 
 On macOS, Network Extension VPNs (ProtonVPN, Mullvad, WireGuard, corporate VPNs) override the
-system automatic proxy while connected, so browsers stop seeing pen names even though `hogman-join`
+system automatic proxy while connected, so browsers stop seeing pen names even though `hogman`
 stays up.
 
 - **Firefox (works today):** point Firefox's built-in *Settings → Network Settings → Automatic
   proxy configuration URL* to the `http://127.0.0.1:<port>/proxy.pac` address printed by
-  `hogman-join`. Pen sites go to Hogman; ordinary browsing stays on your VPN.
+  `hogman`. Pen sites go to Hogman; ordinary browsing stays on your VPN.
 - **Browser extension ([`browser-ext/`](browser-ext/README.md)):** Manifest V3 extension for
   Chrome, Brave, Edge, and Firefox (128+) that routes only the pens you explicitly allow per
-  browser profile straight to `hogman-join` (fail-closed for everything else) while leaving regular
+  browser profile straight to `hogman` (fail-closed for everything else) while leaving regular
   traffic on your VPN. Chrome Web Store and Mozilla Add-ons listings are in review; developers can
   load unpacked builds from `browser-ext/` today.
 - **Safari:** Apple does not expose proxy APIs to Safari extensions, so pause your VPN while
@@ -138,15 +143,15 @@ A stranger looking up the same name publicly: NODATA from ns1. Zero A/AAAA recor
   Let's Encrypt primary with Google Trust Services fallback). Private keys stay on the serving host;
   no custom root CA is installed.
 - **HTTPS (`:443`) to servers only:** default-deny ACLs block SSH, raw TCP/UDP, exit nodes, and all
-  inbound connections to personal devices. `hogman-join`'s loopback proxy pins every dialed IP to a
+  inbound connections to personal devices. `hogman`'s loopback proxy pins every dialed IP to a
   verified mesh peer via `WhoIs`, never touching `127.0.0.1` or LAN hosts.
 - **Isolated hosted pens:** each pen runs in 4 non-root containers (`uid 65532`) on its own Docker
   bridge (~75 MB RAM) behind a shared `*.gate.hogman.network` front door, with nightly encrypted
   off-host backups and automated health checks.
-- **Verifiable releases:** every `hogman-join` release binary is built by GitHub Actions with SLSA
+- **Verifiable releases:** every `hogman` release binary is built by GitHub Actions with SLSA
   provenance:
   ```bash
-  gh attestation verify hogman-join --repo celtiberi/hogman
+  gh attestation verify hogman --repo celtiberi/hogman
   ```
 
 Read the full breakdown in [Architecture & security](https://work.hogman.network/docs/security.html).
@@ -190,7 +195,7 @@ Built on [Headscale](https://github.com/juanfont/headscale), [Tailscale `tsnet`]
 | Path | What it does |
 |---|---|
 | [`core/registrar`](core/registrar) | Membership ledger, invites, devices, names, kicking, ACL policy generation, mesh DNS, and ACME DNS-01 coordination. |
-| [`core/join`](core/join) | `hogman-join` client: enrolls devices, runs the loopback `:443` proxy, hosts `share` nodes, and provides `hogman-native-host` for the browser extension. |
+| [`core/join`](core/join) | `hogman` client: enrolls devices, runs the loopback `:443` proxy, hosts `share` nodes, and provides `hogman-native-host` for the browser extension. |
 | [`browser-ext`](browser-ext) | Manifest V3 extension for Chrome, Brave, Edge, and Firefox (VPN coexistence + per-profile pen allowlists). |
 | [`deploy/challenge-dns`](deploy/challenge-dns) | Authoritative DNS-01 challenge server (`_acme-challenge.*` TXT, `SOA`, `NS`, `CAA`; never `A`/`AAAA`). |
 | [`deploy/hogman-host`](deploy/hogman-host) & [`deploy/signup`](deploy/signup) | Isolated hosted pens, shared `*.gate.hogman.network` front door, backups, monitoring (`hogman-watch.sh`), and web sign-ups. |

@@ -19,6 +19,8 @@ func init() {
 	cobra.MousetrapHelpText = ""
 }
 
+func cliBinaryName() string { return "hogman" }
+
 var singleDashLongFlagRE = regexp.MustCompile(`^-([a-z][a-z0-9-]+)(=.*)?$`)
 
 // collectRegisteredLongFlags returns all registered long flag names across the
@@ -99,10 +101,11 @@ type cliHandlers struct {
 	leave        func(args []string, o options) error
 	leaveAll     func(args []string, o options) error
 	uninstall    func(args []string, o options) error
-	status       func() error
+	status       func(o options) error
+	doctor       func(o options) error
 	browserSetup func(args []string, o options) error
 	shareStart   func(name, target, rawLink string, o options) error
-	shareList    func(pen string) error
+	shareList    func(pen string, asJSON bool) error
 	shareStop    func(name string, o options) error
 	agent        func(dir string) error
 	agentLogout  func(dir string)
@@ -119,6 +122,7 @@ func defaultCLIHandlers() cliHandlers {
 		leaveAll:     leaveAllCmd,
 		uninstall:    uninstallCmd,
 		status:       statusCmd,
+		doctor:       doctorCmd,
 		browserSetup: browserSetupCmd,
 		shareStart:   shareStart,
 		shareList:    shareList,
@@ -142,7 +146,7 @@ func readJoinLinkInteractive(o options, stdin io.Reader) (string, error) {
 		return link, nil
 	}
 	if !isTerminalFn() {
-		return "", usageErrorf("provide a join link in single quotes (hogman-join join '<link>') or pass --link-stdin")
+		return "", usageErrorf("provide a join link in single quotes (hogman join '<link>') or pass --link-stdin")
 	}
 	link := strings.TrimSpace(askFn("  Paste your join link: "))
 	if link == "" {
@@ -183,12 +187,13 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 		cmd.Flags().BoolVar(&o.linkStdin, "link-stdin", false, "read the join link from standard input instead of an argument")
 	}
 
+	binName := cliBinaryName()
 	root := &cobra.Command{
-		Use:   "hogman-join [options] '<link>'",
+		Use:   binName + " [options] '<link>'",
 		Short: "Join this device to a Hogman private network",
-		Long: "hogman-join: join this device to a Hogman private network\n\n" +
+		Long: binName + ": join this device to a Hogman private network\n\n" +
 			"Quote the link when passing it as an argument: it contains '#' and '&'.\n" +
-			"Or run 'hogman-join join' with no arguments to paste it interactively.",
+			"Or run '" + binName + " join' with no arguments to paste it interactively.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.ArbitraryArgs,
@@ -197,7 +202,7 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if showVersion {
-				fmt.Fprintf(h.out, "hogman-join %s %s/%s\n", version, runtime.GOOS, runtime.GOARCH)
+				fmt.Fprintf(h.out, "%s %s %s/%s\n", binName, version, runtime.GOOS, runtime.GOARCH)
 				return nil
 			}
 			if len(args) == 0 {
@@ -219,9 +224,9 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 					}
 					return h.join(args[0], o)
 				}
-				return usageErrorf("unknown command %q (run 'hogman-join --help' for usage)", args[0])
+				return usageErrorf("unknown command %q (run 'hogman --help' for usage)", args[0])
 			}
-			return usageErrorf("unexpected arguments %q (run 'hogman-join --help' for usage)", strings.Join(args, " "))
+			return usageErrorf("unexpected arguments %q (run 'hogman --help' for usage)", strings.Join(args, " "))
 		},
 	}
 	root.SetOut(h.out)
@@ -266,7 +271,7 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 	// `update`
 	updateC := &cobra.Command{
 		Use:   "update ['<link|host>']",
-		Short: "Update hogman-join from GitHub Releases (or a pen's server)",
+		Short: "Update hogman from GitHub Releases (or a pen's server)",
 		Long:  updateUsage,
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -316,9 +321,21 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 		Short: "Show installed pens, browser extension host, and VPN proxy state",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return h.status()
+			return h.status(o)
 		},
 	}
+	statusC.Flags().BoolVar(&o.jsonOut, "json", false, "output status as JSON")
+
+	// `doctor`
+	doctorC := &cobra.Command{
+		Use:   "doctor",
+		Short: "Diagnose pens, shares, browser extension, and proxy health",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return h.doctor(o)
+		},
+	}
+	doctorC.Flags().BoolVar(&o.jsonOut, "json", false, "output diagnostics as JSON")
 
 	// `browser-setup`
 	browserSetupC := &cobra.Command{
@@ -340,7 +357,7 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 2 && len(args) != 3 {
-				return usageErrorf("usage: hogman-join share <name> <target> ['<server link>']\n  (run 'hogman-join share --help' for more)")
+				return usageErrorf("usage: hogman share <name> <target> ['<server link>']\n  (run 'hogman share --help' for more)")
 			}
 			o.noteSet = cmd.Flags().Changed("note")
 			link := ""
@@ -360,10 +377,11 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 		Short: "List what this computer shares",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return h.shareList(o.pen)
+			return h.shareList(o.pen, o.jsonOut)
 		},
 	}
 	shareListC.Flags().StringVar(&o.pen, "pen", "", "filter shares to one pen (short name or full zone; or set HOGMAN_PEN)")
+	shareListC.Flags().BoolVar(&o.jsonOut, "json", false, "output shares as JSON")
 
 	shareStopC := &cobra.Command{
 		Use:   "stop <name>",
@@ -384,7 +402,7 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 		Short: "Print version and platform",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(h.out, "hogman-join %s %s/%s\n", version, runtime.GOOS, runtime.GOARCH)
+			fmt.Fprintf(h.out, "hogman %s %s/%s\n", version, runtime.GOOS, runtime.GOARCH)
 			return nil
 		},
 	}
@@ -445,6 +463,7 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 		leaveAllC,
 		uninstallC,
 		statusC,
+		doctorC,
 		browserSetupC,
 		shareC,
 		versionC,
