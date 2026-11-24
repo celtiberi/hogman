@@ -14,9 +14,12 @@ on Earth, there is no public IP address to scan.
 
 - **For businesses & operations:** [work.hogman.network](https://work.hogman.network)
 - **Consumer site:** [hogman.network](https://hogman.network)
-- **Create a pen:** [get.hogman.network](https://get.hogman.network) (Personal, $50/year) ·
-  [get.work.hogman.network](https://get.work.hogman.network) (Work, $120/year) — invite-only while we test
-- **Documentation:** [work.hogman.network/docs](https://work.hogman.network/docs/)
+- **Create a pen:** [get.hogman.network](https://get.hogman.network) or
+  [get.work.hogman.network](https://get.work.hogman.network) — invite-only while we test. A free pen
+  with an invite code gets a name with a random ending; custom bare names are $50/year (Personal) or
+  $120/year (Work).
+- **Documentation:** [work.hogman.network/docs](https://work.hogman.network/docs/) ·
+  [Policies & billing](https://work.hogman.network/docs/policies.html)
 - **Architecture & threat model:** [Architecture & security](https://work.hogman.network/docs/security.html)
 
 Hogman runs pen control planes hosted-only on `hogman.network` (no self-hosted pen server support),
