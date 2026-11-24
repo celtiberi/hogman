@@ -1,1 +1,0 @@
-- `changelog.d/`, `deploy/changelog-fold.sh`, & `deploy/release.sh`: added per-PR changelog fragments (`changelog.d/<name>.<section>.md` for `security`, `added`, `changed`, `fixed`) folded into `CHANGELOG.md` at release time so parallel PRs no longer conflict on `CHANGELOG.md`.

@@ -1,1 +1,0 @@
-- `.github/workflows/e2e.yml`: split `core/test/run.sh`, `core/test/acme-pebble.sh`, and `core/test/sidecar-check.sh` into parallel GitHub Actions jobs behind the existing required `pen (core/test/run.sh)` aggregate check, and validate `changelog.d/` fragments in CI.
