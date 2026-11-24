@@ -1331,6 +1331,10 @@ cmd_ops_setup() {
   command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] || die "systemd is required for ops-setup"
   [ -x "$OPS_SNAPSHOT_BIN" ] || die "missing $OPS_SNAPSHOT_BIN: re-run install.sh from a release that includes ops-snapshot"
 
+  # Write both tmpfiles.d and RuntimeDirectory=: tmpfiles.d creates
+  # /run/hogman-ops with numeric GID 65532 at boot before Docker starts
+  # (preventing Docker from creating a root:root 0755 mount point), while
+  # RuntimeDirectory= guarantees the unit always sees the right directory.
   cat > /etc/tmpfiles.d/hogman-ops.conf <<TMP
 d $OPS_SNAPSHOT_DIR 0750 root 65532 -
 TMP
@@ -1350,6 +1354,28 @@ RuntimeDirectory=hogman-ops
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 ExecStart=$OPS_SNAPSHOT_BIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=$OPS_SNAPSHOT_DIR
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+UMask=0027
 UNIT
   cat > /etc/systemd/system/hogman-ops-snapshot.timer <<'UNIT'
 [Unit]

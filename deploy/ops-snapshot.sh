@@ -288,7 +288,9 @@ fi
 
 mkdir -p "$SNAPSHOT_DIR"
 if [ "$(id -u)" -eq 0 ]; then
-  chown 0:65532 "$SNAPSHOT_DIR"
+  if [ "$(stat -c '%u:%g' "$SNAPSHOT_DIR" 2>/dev/null || true)" != "0:65532" ]; then
+    chown 0:65532 "$SNAPSHOT_DIR"
+  fi
   chmod 0750 "$SNAPSHOT_DIR"
 fi
 tmp_file="$SNAPSHOT_DIR/.snapshot.json.tmp.$$"
@@ -362,7 +364,9 @@ jq -n \
 
 chmod 0640 "$tmp_file"
 if [ "$(id -u)" -eq 0 ]; then
-  chown 0:65532 "$tmp_file"
+  if [ "$(stat -c '%u:%g' "$tmp_file" 2>/dev/null || true)" != "0:65532" ]; then
+    chown 0:65532 "$tmp_file"
+  fi
 fi
 mv -f "$tmp_file" "$SNAPSHOT_DIR/snapshot.json"
 trap - EXIT
