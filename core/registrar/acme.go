@@ -426,6 +426,8 @@ type HomeCertManager struct {
 
 	syncMu          sync.Mutex
 	renewMu         sync.Mutex
+	certMu          sync.RWMutex
+	currentCert     *tls.Certificate
 	failoverCh      chan struct{}
 	lastCertPEM     []byte
 	lastKeyPEM      []byte
@@ -514,7 +516,40 @@ func NewHomeCertManager(cfg HomeConfig) (*HomeCertManager, error) {
 	if cfg.FallbackCA != "" {
 		m.fallbackCfg, m.fallbackIss = m.newManagedConfig(cfg.FallbackCA, cfg.Backend != nil)
 	}
+	if pair, err := tls.LoadX509KeyPair(
+		filepath.Join(cfg.HomeTLSDir, cfg.FileBase+".crt"),
+		filepath.Join(cfg.HomeTLSDir, cfg.FileBase+".key"),
+	); err == nil {
+		p := pair
+		m.currentCert = &p
+	}
 	return m, nil
+}
+
+// GetCertificate returns the currently active TLS certificate for home.<zone>,
+// updated in memory whenever HomeCertManager issues or renews a certificate.
+func (m *HomeCertManager) GetCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	m.certMu.RLock()
+	cert := m.currentCert
+	m.certMu.RUnlock()
+	if cert != nil {
+		return cert, nil
+	}
+	pair, err := tls.LoadX509KeyPair(
+		filepath.Join(m.cfg.HomeTLSDir, m.cfg.FileBase+".crt"),
+		filepath.Join(m.cfg.HomeTLSDir, m.cfg.FileBase+".key"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("home TLS certificate not ready yet: %w", err)
+	}
+	p := pair
+	m.certMu.Lock()
+	if m.currentCert == nil {
+		m.currentCert = &p
+	}
+	cert = m.currentCert
+	m.certMu.Unlock()
+	return cert, nil
 }
 
 // Close stops background CertMagic cache maintenance.
@@ -640,11 +675,21 @@ func (m *HomeCertManager) exportFromStorageKeys(ctx context.Context, certKey, pr
 	if bytes.Equal(certPEM, m.lastCertPEM) && bytes.Equal(keyPEM, m.lastKeyPEM) && VerifyTLSFiles(m.cfg.HomeTLSDir, m.cfg.FileBase) == nil {
 		return nil
 	}
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return fmt.Errorf("parse renewed keypair: %w", err)
+	}
 	if err := writeTLSFilesAtomic(m.cfg.HomeTLSDir, m.cfg.FileBase, certPEM, keyPEM); err != nil {
 		return err
 	}
-	if err := reloadCaddy(ctx, m.cfg.CaddyAdminSocket); err != nil {
-		return err
+	m.certMu.Lock()
+	p := pair
+	m.currentCert = &p
+	m.certMu.Unlock()
+	if m.cfg.CaddyAdminSocket != "" {
+		if err := reloadCaddy(ctx, m.cfg.CaddyAdminSocket); err != nil {
+			return err
+		}
 	}
 	m.lastCertPEM = certPEM
 	m.lastKeyPEM = keyPEM

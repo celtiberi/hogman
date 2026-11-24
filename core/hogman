@@ -136,7 +136,8 @@ wait_for() {    # wait_for <description> <seconds> <command...>
     sleep 1
   done
   case "$what" in
-    headscale|registrar) dc logs --tail 30 "$what" >&2 2>&1 || true ;;
+    headscale)  dc logs --tail 30 headscale >&2 2>&1 || true ;;
+    registrar*) dc logs --tail 30 registrar >&2 2>&1 || true ;;
   esac
   die "timed out waiting for $what"
 }
@@ -159,7 +160,7 @@ run_ids() {   # prints "UID GID"
 # Hand the runtime user what it reads and writes. When running as root (hosted
 # servers), chown directly. When a non-root docker-group operator upgrades an
 # older self-hosted pen whose headscale/lib was previously written as root, do a
-# one-time ownership migration via the already-pulled core-mesh image so
+# one-time ownership migration via an already-pulled Alpine/Caddy image so
 # non-root headscale can read its keys and database.
 own_runtime_files() {
   chmod 755 "$DATA/join-dl" 2>/dev/null || true
@@ -167,14 +168,19 @@ own_runtime_files() {
   [ -n "${HOGMAN_UID:-}" ] && [ "$HOGMAN_UID" != 0 ] || return 0
   if [ "$(id -u)" = 0 ]; then
     local d
-    for d in "$DATA/headscale/lib" "$DATA/registrar" "$DATA/api" "$DATA/edge" "$DATA/portal" "$DATA/secrets/registrar" "$DATA/home-tls" "$DATA/caddy-admin"; do
+    for d in "$DATA/headscale/lib" "$DATA/registrar" "$DATA/edge" "$DATA/secrets/registrar" "$DATA/home-tls"; do
       [ -e "$d" ] && chown -R "$HOGMAN_UID:$HOGMAN_GID" "$d"
     done
     return 0
   fi
   if [ -d "$DATA/headscale/lib" ] && [ -n "$(find "$DATA/headscale/lib" ! -user "$HOGMAN_UID" -print -quit 2>/dev/null)" ]; then
-    local helper_img
-    helper_img="$(awk '/^[[:space:]]*image:[[:space:]]*tailscale\// {print $2; exit}' compose.yaml)"
+    local helper_img=""
+    if [ -f registrar/Dockerfile.prebuilt ]; then
+      helper_img="$(awk '/^FROM[[:space:]]+alpine:/ {print $2; exit}' registrar/Dockerfile.prebuilt)"
+    fi
+    if [ -z "$helper_img" ]; then
+      helper_img="$(awk '/^[[:space:]]*image:[[:space:]]*caddy:/ {print $2; exit}' compose.yaml)"
+    fi
     [ -n "$helper_img" ] || die "cannot migrate $DATA/headscale/lib ownership automatically; run: sudo chown -R $HOGMAN_UID:$HOGMAN_GID $DATA/headscale/lib"
     docker run --rm --user 0:0 --entrypoint /bin/chown \
       -v "$DATA/headscale/lib:/hslib" "$helper_img" \
@@ -192,10 +198,10 @@ cmd_init() {
   load_env
   [ -n "${INITIALISED:-}" ] && die "already initialised ($INITIALISED)."
   info "Network $NETWORK, zone $ZONE, control host $PUBLIC_HOST (public certificates)"
-  mkdir -p "$DATA"/{headscale/config,headscale/lib,mesh/core} \
-           "$DATA"/{edge,edge-trust,portal,registrar,secrets/registrar,join-dl,tmp,api,home-tls,caddy-admin}
-  chmod 700 "$DATA/secrets/registrar" "$DATA/mesh" "$DATA/registrar" "$DATA/headscale/lib" \
-            "$DATA/api" "$DATA/home-tls" "$DATA/caddy-admin"
+  mkdir -p "$DATA"/{headscale/config,headscale/lib,registrar/tsnet} \
+           "$DATA"/{edge,edge-trust,secrets/registrar,join-dl,tmp,home-tls}
+  chmod 700 "$DATA/secrets/registrar" "$DATA/registrar" "$DATA/registrar/tsnet" "$DATA/headscale/lib" \
+            "$DATA/home-tls"
   local ids; ids="$(run_ids)"
   HOGMAN_UID="${ids% *}"; HOGMAN_GID="${ids#* }"
   set_state HOGMAN_UID "$HOGMAN_UID"
@@ -232,31 +238,41 @@ render_headscale() {
   render templates/headscale.yaml "$DATA/headscale/config/config.yaml"
 }
 
-mesh_env() {    # mesh_env <name> <authkey>
-  (
-    umask 077
-    {
-      echo "TS_AUTHKEY=$2"
-      echo "TS_HOSTNAME=$1"
-      echo "TS_STATE_DIR=/var/lib/tailscale"
-      echo "TS_USERSPACE=false"
-      echo "TS_ACCEPT_DNS=false"
-      echo "TS_AUTH_ONCE=true"
-      echo "TS_EXTRA_ARGS=--login-server=https://$PUBLIC_HOST"
-      # An if, not `[ ] && echo`: as the last command here, a false test would
-      # fail this subshell and stop ./hogman on every real (non-test) server.
-      if [ "$TEST_MODE" = true ]; then echo "SSL_CERT_FILE=/edge-trust/root.crt"; fi
-    } > "$DATA/mesh/$1.env"
-  )
-  chmod 600 "$DATA/mesh/$1.env"
-}
-
 infra_key() {
   hs preauthkeys create --tags tag:infra --expiration 15m --output json | json_field key
 }
 
-mesh_ip() { dc exec -T "$1" tailscale ip -4 2>/dev/null | head -1 | tr -d '\r'; }
-has_mesh_ip() { [ -n "$(mesh_ip "$1")" ]; }
+registrar_mesh_ip() {
+  [ -s "$DATA/registrar/tsnet/mesh-ip" ] && tr -d '\r\n' < "$DATA/registrar/tsnet/mesh-ip"
+}
+has_registrar_mesh_ip() { [ -n "$(registrar_mesh_ip)" ]; }
+
+# Ensure any legacy core-mesh container for this compose project is completely
+# stopped and removed before copying tailscaled.state into registrar/tsnet
+# (never run both nodes with the same key simultaneously).
+stop_legacy_core_mesh() {
+  local proj="${COMPOSE_PROJECT_NAME:-hogman}" cid
+  cid="$(docker ps -aq --filter "label=com.docker.compose.project=$proj" --filter "label=com.docker.compose.service=core-mesh" 2>/dev/null || true)"
+  if [ -n "$cid" ]; then
+    docker rm -f $cid >/dev/null 2>&1 || true
+  fi
+  cid="$(docker ps -q --filter "label=com.docker.compose.project=$proj" --filter "label=com.docker.compose.service=core-mesh" 2>/dev/null || true)"
+  [ -z "$cid" ] || die "legacy core-mesh container is still running; refusing to start registrar with copied state"
+}
+
+migrate_legacy_tailscale_state() {
+  # Copy (never move) legacy data/mesh/core/tailscaled.state into data/registrar/tsnet/
+  # so the pen preserves its exact Headscale node ID and CORE_MESH_IP, and keeps
+  # data/mesh/core/ intact for rollback.
+  if [ -f "$DATA/mesh/core/tailscaled.state" ] && [ ! -f "$DATA/registrar/tsnet/tailscaled.state" ]; then
+    stop_legacy_core_mesh
+    mkdir -p "$DATA/registrar/tsnet"
+    chmod 700 "$DATA/registrar/tsnet"
+    ( umask 077; cp "$DATA/mesh/core/tailscaled.state" "$DATA/registrar/tsnet/tailscaled.state" )
+    chmod 600 "$DATA/registrar/tsnet/tailscaled.state"
+    own_runtime_files
+  fi
+}
 
 # Releases ship the join tool and the registrar already compiled (prebuilt/,
 # checked by install.sh against the release's checksums), so a small server
@@ -296,8 +312,8 @@ cmd_up() {
   [ -n "${INITIALISED:-}" ] || die "run ./hogman init first."
   [ -s "$DATA/secrets/registrar/challenge_dns_token" ] \
     || die "no challenge DNS token in data/secrets/registrar/challenge_dns_token (hogman-host adds it)"
-  mkdir -p "$DATA"/{edge,portal,join-dl,tmp,api,home-tls,caddy-admin}
-  chmod 700 "$DATA/api" "$DATA/edge" "$DATA/portal" "$DATA/home-tls" "$DATA/caddy-admin"
+  mkdir -p "$DATA"/{edge,edge-trust,join-dl,tmp,home-tls,registrar/tsnet}
+  chmod 700 "$DATA/edge" "$DATA/home-tls" "$DATA/registrar" "$DATA/registrar/tsnet"
   # Pens raised as root before audit H3 ran the registrar as root too. Move it
   # to the unprivileged user on the next start.
   if [ "${HOGMAN_UID:-}" = 0 ] && [ "$(id -u)" = 0 ]; then
@@ -309,7 +325,7 @@ cmd_up() {
   fi
   if [ "$(id -u)" = 0 ] && [ -n "${HOGMAN_UID:-}" ] && [ "$HOGMAN_UID" != 0 ]; then
     local svc cid cur
-    for svc in headscale registrar portal edge; do
+    for svc in headscale registrar edge; do
       cid="$(dc ps -q "$svc" 2>/dev/null || true)"
       [ -n "$cid" ] || continue
       cur="$(docker inspect -f '{{.Config.User}}' "$cid" 2>/dev/null || true)"
@@ -319,6 +335,7 @@ cmd_up() {
     done
   fi
   own_runtime_files
+  use_prebuilt_or_build
 
   if [ -z "${CORE_MESH_IP:-}" ]; then
     info "First start: bootstrapping"
@@ -341,44 +358,46 @@ cmd_up() {
       cp "$root" "$DATA/edge-trust/root.crt"
     fi
 
-    info "Joining the core services to the mesh"
-    mesh_env core "$(infra_key)"
-    dc up -d core-mesh
-    wait_for "core mesh IP" 90 has_mesh_ip core-mesh
-    set_state CORE_MESH_IP "$(mesh_ip core-mesh)"
-    # The keys are spent. Remove them so they are not lying around.
-    (
-      umask 077
-      sed -i.bak '/^TS_AUTHKEY=/d' "$DATA/mesh/core.env"
-    )
-    chmod 600 "$DATA/mesh/core.env"
-    rm -f "$DATA"/mesh/*.bak
-    info "core = $CORE_MESH_IP"
-
     info "Creating the registrar's Headscale API key"
     (
       umask 077
       hs apikeys create --expiration 3650d | tail -1 | tr -d '\r\n' > "$DATA/secrets/registrar/headscale_api_key"
     )
     chmod 600 "$DATA/secrets/registrar/headscale_api_key"
+
+    info "Joining the registrar's embedded core node to the mesh"
+    rm -f "$DATA/registrar/tsnet/mesh-ip"
+    (
+      umask 077
+      printf '%s\n' "$(infra_key)" > "$DATA/registrar/tsnet/.authkey"
+    )
+    chmod 600 "$DATA/registrar/tsnet/.authkey"
     own_runtime_files
+
+    dc up -d --build registrar
+    wait_for "core mesh IP" 90 has_registrar_mesh_ip
+    set_state CORE_MESH_IP "$(registrar_mesh_ip)"
+    rm -f "$DATA/registrar/tsnet/.authkey"
+    info "core = $CORE_MESH_IP"
 
     render_headscale
     dc restart headscale
     wait_for "headscale" 60 hs health
   else
+    migrate_legacy_tailscale_state
     render_headscale
   fi
-
-  use_prebuilt_or_build
 
   if [ "$FRONT_DOOR" = true ]; then
     # Upgraded pens from before the front door took over edge's job may still
     # have an edge container; profiled services are not removed as orphans.
     dc --profile standalone rm -sf edge >/dev/null 2>&1 || true
   fi
+  stop_legacy_core_mesh
   dc up -d --build --remove-orphans
-  wait_for "registrar" 60 reg sync
+  local wait_secs="${REGISTRAR_WAIT_SECS:-90}"
+  wait_for "registrar" "$wait_secs" reg sync
+  wait_for "registrar health" "$wait_secs" reg health
   if [ -d "$DATA/coredns" ]; then
     rm -rf "$DATA/coredns"
   fi

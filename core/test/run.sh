@@ -430,7 +430,20 @@ page_ok() {
 net_ok()   { from_internet "https://$PUBLIC_HOST/hogman/v1/network" | jq -e --arg z "$ZONE" '.zone == $z and .cert_mode == "public" and (.root_ca // "") == "" and (.root_fingerprint // "") == ""'; }
 check "https://<host>/join serves the join page" page_ok
 check "edge runs non-root ($HOGMAN_UID:$HOGMAN_GID)" bash -c 'test "$1" != 0 && test "$2" = "$1:$3"' _ "$HOGMAN_UID" "$(docker inspect -f '{{.Config.User}}' "$(dc ps -q edge)")" "$HOGMAN_GID"
-check "portal runs non-root ($HOGMAN_UID:$HOGMAN_GID)" bash -c 'test "$1" != 0 && test "$2" = "$1:$3"' _ "$HOGMAN_UID" "$(docker inspect -f '{{.Config.User}}' "$(dc ps -q portal)")" "$HOGMAN_GID"
+check "registrar (portal + DNS + core mesh) runs non-root ($HOGMAN_UID:$HOGMAN_GID)" bash -c 'test "$1" != 0 && test "$2" = "$1:$3"' _ "$HOGMAN_UID" "$(docker inspect -f '{{.Config.User}}' "$(dc ps -q registrar)")" "$HOGMAN_GID"
+check "core-mesh and portal containers are gone (I-15)" bash -c 'test -z "$1" && test -z "$2"' _ "$(dc ps -q core-mesh 2>/dev/null || true)" "$(dc ps -q portal 2>/dev/null || true)"
+tcp_dns_ok() {
+  local out
+  out="$(run bob-tools dig +tcp +short "@$CORE_MESH_IP" "home.$ZONE" | tr -d '\r')" || return 1
+  grep -qx -- "$CORE_MESH_IP" <<<"$out"
+}
+check "TCP :53 DNS resolves home.$ZONE over tsnet" tcp_dns_ok
+xff_spoof_refused() {
+  local code
+  code="$(run bob-tools curl -s -m5 -o /dev/null -w '%{http_code}' --cacert "$ROOT" -H "X-Forwarded-For: $ALICE_LAPTOP_IP" "https://home.$ZONE/api/admin/members" | tr -d '\r')" || return 1
+  test "$code" = 403
+}
+check "direct tsnet identity ignores spoofed X-Forwarded-For on /api/admin/members" xff_spoof_refused
 join_hdrs="$(from_internet -sI "https://$PUBLIC_HOST/join" | tr -d '\r')"
 check "the join page sets anti-framing headers and Origin-Agent-Cluster" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\" && grep -iq '^origin-agent-cluster: ?1' <<<\"\$1\"" _ "$join_hdrs"
 portal_hdrs="$(run bob-tools curl -sfI --cacert $ROOT "https://home.$ZONE/" | tr -d '\r')"

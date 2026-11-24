@@ -72,7 +72,7 @@ http://{$PUBLIC_HOST} {
 		request_body {
 			max_size 16KB
 		}
-		reverse_proxy core-mesh:8081
+		reverse_proxy registrar:8081
 	}
 	# Expose only the Tailscale control/relay routes clients need and the
 	# health endpoint used by monitoring; keep Headscale's admin REST API,

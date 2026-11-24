@@ -90,15 +90,16 @@ members who join or update a public pen have legacy Hogman root certificates cle
 
 | Shared by all pens | Each pen's own (`pen-<name>-core` bridge) |
 |---|---|
-| Host, ports 80/443, `challenge-dns`, `*.<GATE_DOMAIN>` wildcard, shared Caddy front door (`/join`, `/join/dl`, strict path allowlist) | `headscale`, `registrar` (ledger, ACLs, mesh DNS, `home.<zone>` ACME), `portal` (Caddy), `core-mesh` Tailscale node, keys, SQLite DBs, relay UDP port |
+| Host, ports 80/443, `challenge-dns`, `*.<GATE_DOMAIN>` wildcard, shared Caddy front door (`/join`, `/join/dl`, strict path allowlist) | 2 unprivileged containers (`read_only`, `cap_drop: ALL`): `headscale` and `registrar` (embedded `tsnet` core node, authoritative DNS `:53`, `https://home.<zone>:443` portal + API with direct WireGuard `WhoIs` identity, `home.<zone>` ACME, ledger & ACLs), keys, SQLite DBs, relay UDP port |
 
 Each pen lives in `/opt/hogman/pens/<name>` and shares no container network with other pens.
 Every pen container carries memory (`mem_limit`), PID (`pids_limit`), and CPU (`cpus: 0.5` on
-`headscale`, `0.25` on `core-mesh`, `registrar`, and `portal`, all with `cpu_shares: 256`) limits
+`headscale`, `0.25` on `registrar`, both with `cpu_shares: 256`) limits
 so a single busy or spinning pen cannot starve other pens; host-level services (`hogman-front`,
 `challenge-dns`, `hogman-signup`, and `sshd`) stay uncapped at default higher CPU weight (`1024`).
 `deploy/test-host.sh` exercises two pens on one host, combined multi-pen PAC routing, backup/restore,
-name burning, and public sign-ups against `challenge-dns` and Pebble.
+legacy 4-container upgrade/rollback and mixed-fleet routing, name burning, and public sign-ups
+against `challenge-dns` and Pebble.
 
 ## Updating
 
@@ -130,7 +131,7 @@ devices reconnect automatically after a pen restarts (~20 s).
 ## Backups
 
 Nightly at 03:30 UTC the server takes SQLite online backups of each pen's `headscale` and
-`registrar` databases, pen runtime data (including `registrar/acme` and `home-tls`, omitting
+`registrar` databases, pen runtime data (including `registrar/tsnet`, `registrar/acme`, and `home-tls`, omitting
 reconstructible `join-dl/` and socket dirs), and `challenge-dns` state (credential hashes and
 used pen names), encrypted with `age` to a key the server cannot decrypt:
 

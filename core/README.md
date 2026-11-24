@@ -8,9 +8,7 @@ The backbone of a Hogman pen: control plane, registrar, portal, and the `hogman`
 |---|---|---|
 | `headscale` | Headscale 0.29.7 | Behind shared front door (or `edge` in local tests); STUN on udp/3478 |
 | `edge` | Caddy 2.11.9 | Standalone test harness only: `https://<PUBLIC_HOST>` (behind `hogman-host`, the shared front door serves these routes directly) |
-| `core-mesh` | Tailscale 1.104.7 | Mesh identity `core` (`tag:infra`) |
-| `portal` | Caddy 2.11.9 | `https://home.<ZONE>`, mesh only; fronts the registrar's API |
-| `registrar` | built from [registrar/](registrar/) | Owns members, invites, devices, names, policy, `home.<ZONE>` ACME TLS, `/api/acme/{txt,eab}` share challenge endpoints, and authoritative DNS (`core` mesh IP, port 53) |
+| `registrar` | built from [registrar/](registrar/) | Single unprivileged (`65532:65532`, `read_only`, `cap_drop: ALL`) container embedding the `core` (`tag:infra`) mesh node via `tsnet`: serves authoritative DNS (`:53` UDP/TCP), `https://home.<ZONE>:443` portal static files and `/api/*` (with direct WireGuard `WhoIs` caller identity, no `X-Forwarded-For`), `home.<ZONE>` ACME TLS, `/api/acme/{txt,eab}`, and public `/hogman/*` (`:8081`) |
 
 ## Test harness setup
 

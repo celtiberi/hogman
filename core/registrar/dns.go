@@ -31,11 +31,22 @@ type DNSServer struct {
 	nsName    dnsmessage.Name
 	ownerName dnsmessage.Name
 	coreV4    netip.Addr
+	coreV6    netip.Addr
 	serial    uint32
 }
 
 // NewDNSServer builds an authoritative DNS handler for s's configured zone.
 func NewDNSServer(s *Service) (*DNSServer, error) {
+	coreV4, err := netip.ParseAddr(strings.TrimSpace(s.cfg.CoreIP))
+	if err != nil || !coreV4.Is4() {
+		return nil, fmt.Errorf("dns: invalid CORE_MESH_IP %q", s.cfg.CoreIP)
+	}
+	return NewDNSServerWithIPs(s, coreV4, netip.Addr{})
+}
+
+// NewDNSServerWithIPs builds an authoritative DNS handler using explicit core
+// IPv4 (required) and optional IPv6 addresses (e.g. from an embedded tsnet node).
+func NewDNSServerWithIPs(s *Service, coreV4, coreV6 netip.Addr) (*DNSServer, error) {
 	zone := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s.cfg.Zone)), ".")
 	if zone == "" {
 		return nil, errors.New("dns: zone is empty")
@@ -53,9 +64,11 @@ func NewDNSServer(s *Service) (*DNSServer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dns: owner name: %w", err)
 	}
-	coreV4, err := netip.ParseAddr(strings.TrimSpace(s.cfg.CoreIP))
-	if err != nil || !coreV4.Is4() {
-		return nil, fmt.Errorf("dns: invalid CORE_MESH_IP %q", s.cfg.CoreIP)
+	if !coreV4.IsValid() || !coreV4.Is4() {
+		return nil, fmt.Errorf("dns: invalid core IPv4 %q", coreV4)
+	}
+	if coreV6.IsValid() && !coreV6.Is6() {
+		coreV6 = netip.Addr{}
 	}
 	return &DNSServer{
 		svc:       s,
@@ -64,6 +77,7 @@ func NewDNSServer(s *Service) (*DNSServer, error) {
 		nsName:    nsName,
 		ownerName: ownerName,
 		coreV4:    coreV4,
+		coreV6:    coreV6,
 		serial:    uint32(time.Now().Unix()),
 	}, nil
 }
@@ -79,14 +93,74 @@ func (d *DNSServer) Start(ctx context.Context, addr string) error {
 		_ = udpConn.Close()
 		return err
 	}
+	d.Serve(ctx, []net.PacketConn{udpConn}, tcpLn)
+	return nil
+}
+
+// Serve handles DNS over already-bound UDP PacketConns (IPv4 and optional IPv6)
+// and a TCP Listener until ctx cancels.
+func (d *DNSServer) Serve(ctx context.Context, udpConns []net.PacketConn, tcpLn net.Listener) {
 	go func() {
 		<-ctx.Done()
-		_ = udpConn.Close()
-		_ = tcpLn.Close()
+		for _, c := range udpConns {
+			_ = c.Close()
+		}
+		if tcpLn != nil {
+			_ = tcpLn.Close()
+		}
 	}()
-	go d.serveUDP(udpConn)
-	go d.serveTCP(tcpLn)
-	return nil
+	for _, c := range udpConns {
+		go d.serveUDP(c)
+	}
+	if tcpLn != nil {
+		go d.serveTCP(tcpLn)
+	}
+}
+
+// SelfCheck builds a wire-format A query for home.<zone> and verifies HandlePacket
+// answers with coreV4.
+func (d *DNSServer) SelfCheck() error {
+	qname, err := dnsmessage.NewName("home." + d.zoneFQDN)
+	if err != nil {
+		return err
+	}
+	b := dnsmessage.NewBuilder(make([]byte, 0, 128), dnsmessage.Header{ID: 0x1234, RecursionDesired: true})
+	_ = b.StartQuestions()
+	_ = b.Question(dnsmessage.Question{Name: qname, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET})
+	req, err := b.Finish()
+	if err != nil {
+		return err
+	}
+	resp, ok := d.HandlePacket(req, false)
+	if !ok {
+		return errors.New("dns self-check returned no packet")
+	}
+	var p dnsmessage.Parser
+	hdr, err := p.Start(resp)
+	if err != nil {
+		return err
+	}
+	if hdr.RCode != dnsmessage.RCodeSuccess {
+		return fmt.Errorf("dns self-check rcode=%v", hdr.RCode)
+	}
+	_ = p.SkipAllQuestions()
+	for {
+		ah, err := p.AnswerHeader()
+		if err != nil {
+			return fmt.Errorf("dns self-check missing A answer: %w", err)
+		}
+		if ah.Type == dnsmessage.TypeA {
+			a, err := p.AResource()
+			if err != nil {
+				return err
+			}
+			if netip.AddrFrom4(a.A) == d.coreV4 {
+				return nil
+			}
+			return fmt.Errorf("dns self-check got %s, want %s", netip.AddrFrom4(a.A), d.coreV4)
+		}
+		_ = p.SkipAnswer()
+	}
 }
 
 func (d *DNSServer) serveUDP(conn net.PacketConn) {
@@ -336,6 +410,9 @@ func (d *DNSServer) resolve(q dnsmessage.Question, qname string) (dnsmessage.RCo
 	if v4, ok := d.coreAddr(rel); ok {
 		if q.Type == dnsmessage.TypeA || q.Type == dnsmessage.TypeALL {
 			ans = append(ans, &dnsmessage.AResource{A: v4.As4()})
+		}
+		if (q.Type == dnsmessage.TypeAAAA || q.Type == dnsmessage.TypeALL) && d.coreV6.IsValid() {
+			ans = append(ans, &dnsmessage.AAAAResource{AAAA: d.coreV6.As16()})
 		}
 		return dnsmessage.RCodeSuccess, ans, len(ans) == 0
 	}

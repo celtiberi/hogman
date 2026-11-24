@@ -51,7 +51,7 @@ services:
       outside:
         aliases: ["${PUBLIC_HOST}"]
 
-  core-mesh:
+  registrar:
     networks: [core, acme]
 
   alice-laptop:
