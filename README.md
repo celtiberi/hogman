@@ -135,12 +135,12 @@ A stranger looking up the same name publicly: NODATA from ns1. Zero A/AAAA recor
 - **HTTPS (`:443`) to servers only:** default-deny ACLs block SSH, raw TCP/UDP, exit nodes, and all
   inbound connections to personal devices. `hogman-join`'s loopback proxy pins every dialed IP to a
   verified mesh peer via `WhoIs`, never touching `127.0.0.1` or LAN hosts.
-- **Isolated hosted pens:** each pen runs in 4 isolated containers on its own Docker bridge (~75 MB
-  idle RSS) — `headscale`, `registrar`, and `edge` run non-root (`uid 65532`) with read-only root
-  filesystems and dropped capabilities, while `core-mesh` holds only the minimal
-  `NET_ADMIN`/`NET_RAW`/`CHOWN`/`DAC_OVERRIDE` capabilities needed for WireGuard `/dev/net/tun` —
-  behind a shared `*.gate.hogman.network` front door, with nightly encrypted off-host backups and
-  automated health checks.
+- **Isolated hosted pens:** each hosted pen runs 4 isolated containers on its own Docker bridge
+  (~75 MB idle RSS; 5 in standalone `core/compose.yaml` with `edge`) — `headscale`, `registrar`, and
+  `portal` (plus `edge` / the shared `*.gate.hogman.network` front door) run non-root (`uid 65532`)
+  with read-only root filesystems, `cap_drop: [ALL]`, and `no-new-privileges`, while `core-mesh`
+  runs as root with `cap_drop: [ALL]` and only `NET_ADMIN`/`NET_RAW` for `/dev/net/tun` plus
+  `CHOWN`/`DAC_OVERRIDE` — with nightly encrypted off-host backups and automated health checks.
 - **Verifiable releases:** every `hogman-join` release binary is built by GitHub Actions with SLSA
   provenance:
   ```bash
