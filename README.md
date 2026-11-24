@@ -14,8 +14,12 @@ on Earth, there is no public IP address to scan.
 
 - **For businesses & operations:** [work.hogman.network](https://work.hogman.network)
 - **Consumer site:** [hogman.network](https://hogman.network)
-- **Create a pen:** [get.hogman.network](https://get.hogman.network) (invite-only testbed; free while testing)
-- **Documentation:** [work.hogman.network/docs](https://work.hogman.network/docs/)
+- **Create a pen:** [get.hogman.network](https://get.hogman.network) or
+  [get.work.hogman.network](https://get.work.hogman.network) — invite-only while we test. A free pen
+  with an invite code gets a name with a random ending; custom bare names are $50/year (Personal) or
+  $120/year (Work).
+- **Documentation:** [work.hogman.network/docs](https://work.hogman.network/docs/) ·
+  [Policies & billing](https://work.hogman.network/docs/policies.html)
 - **Architecture & threat model:** [Architecture & security](https://work.hogman.network/docs/security.html)
 
 Hogman runs pen control planes hosted-only on `hogman.network` (no self-hosted pen server support),
@@ -130,8 +134,8 @@ stays up.
 - **Browser extension ([`browser-ext/`](browser-ext/README.md)):** Manifest V3 extension for
   Chrome, Brave, Edge, and Firefox (128+) that routes only the pens you explicitly allow per
   browser profile straight to `hogman` (fail-closed for everything else) while leaving regular
-  traffic on your VPN. Chrome Web Store and Mozilla Add-ons listings are in review; developers can
-  load unpacked builds from `browser-ext/` today.
+  traffic on your VPN. It is not yet published on the Chrome Web Store or Mozilla Add-ons;
+  developers can load unpacked builds from `browser-ext/` today.
 - **Safari:** Apple does not expose proxy APIs to Safari extensions, so pause your VPN while
   visiting pen sites in Safari.
 
@@ -190,19 +194,25 @@ Read the full breakdown in [Architecture & security](https://work.hogman.network
   can see membership, devices, and mesh DNS lookups, and a compromised host could in principle add a
   rogue device or request a CT-logged certificate. Payloads stay end-to-end encrypted with
   WireGuard + TLS 1.3.
-- **Zero account recovery:** lose every device in a pen and that account is gone — no support
-  backdoor exists. **If you own a pen, appoint a second owner.**
+- **No account recovery:** lose every device in a pen and that account is gone; we don't offer
+  account recovery. Hosted pens run on our servers, so whoever operates the server could technically
+  act on a pen (for example, create a device key); we don't. **If you own a pen, appoint a second
+  owner.**
 - **Shared parent suffix (`pens.hogman.network`):** for multi-site operations, use separate pens per
   region or store group to limit blast radius. Until `pens.hogman.network` is listed on the Public
   Suffix List, use a separate browser profile for any pen you don't fully trust so cookies stay
   isolated.
 - **Current limits & platforms:** macOS and Linux work today; Windows is built but untested; a
-  mobile app is in the works. Pens default to 5 new certificate names per rolling hour and 20 per
-  rolling 7 days (`home.<pen>` uses one slot; attempts count, not issued certs, and renewals are
-  exempt). Pen names, member handles, and kicked site names are permanently retired.
+  mobile app is in the works. Each pen may get certificates for a limited number of distinct new
+  names: 5 per rolling hour and 20 per rolling 7 days on Free and Personal pens, 10 and 60 on Work
+  pens, under a shared limit across all pens (`home.<pen>` uses one; attempts count, not issued
+  certificates; a name already counted in the last 7 days doesn't count again). Pen names, member
+  handles, and kicked site names are permanently retired.
 
 **Found a security vulnerability?** Don't open a public issue — report it privately using GitHub's
 **Security → Report a vulnerability** button on this repository.
+
+**Anything else:** `hogman-support@proton.me`.
 
 ---
 
