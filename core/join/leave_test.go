@@ -89,21 +89,22 @@ func TestLocalLeaveTargetsFromDisk(t *testing.T) {
 // person owns it), "mem" (a plain member) and "shr" (only a share here), and
 // stubs the network check, the [y/N] answer and the leave steps.
 type leaveFixture struct {
-	home    string
-	left    []string          // zones leaveOne was called for, in order
-	asked   int               // how many times the [y/N] question was asked
-	answer  bool              // what the person answers
-	typed   map[string]string // what the person types when asked for a pen's name
-	prompts []string          // pens whose name was asked for (with a warning)
-	swept   int               // how many times the stale-proxy sweep ran
-	owners  map[string]bool
-	unknown map[string]bool // pens that can't be reached to ask
+	home     string
+	left     []string          // zones leaveOne was called for, in order
+	asked    int               // how many times the [y/N] question was asked
+	answer   bool              // what the person answers
+	typed    map[string]string // what the person types when asked for a pen's name
+	prompts  []string          // pens whose name was asked for (with a warning)
+	swept    int               // how many times the stale-proxy sweep ran
+	owners   map[string]bool   // pens where caller is sole owner on last personal device
+	unknown  map[string]bool   // pens that can't be reached to ask
+	terminal bool              // whether stdin is an interactive terminal
 }
 
 func newLeaveFixture(t *testing.T) *leaveFixture {
 	t.Helper()
 	f := &leaveFixture{home: t.TempDir(), owners: map[string]bool{"own.pens.example.network": true},
-		unknown: map[string]bool{}, typed: map[string]string{}}
+		unknown: map[string]bool{}, typed: map[string]string{}, terminal: true}
 	t.Setenv("HOME", f.home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(f.home, ".config"))
 	if runtime.GOOS == "windows" {
@@ -127,14 +128,20 @@ func newLeaveFixture(t *testing.T) *leaveFixture {
 	write(filepath.Join(shareDir("shr.pens.example.network", "cooler"), "share.json"),
 		shareConfig{Name: "cooler", Zone: "shr.pens.example.network", LoginServer: "https://shr.gate.example.network"})
 
-	oldOwns, oldConfirm, oldLeave, oldSweep := ownsPenFn, confirmFn, leaveOneFn, sweepStaleProxyFn
-	t.Cleanup(func() { ownsPenFn, confirmFn, leaveOneFn, sweepStaleProxyFn = oldOwns, oldConfirm, oldLeave, oldSweep })
+	oldRisk, oldConfirm, oldLeave, oldSweep, oldTTY := leaveRiskFn, confirmFn, leaveOneFn, sweepStaleProxyFn, isTerminalFn
+	t.Cleanup(func() {
+		leaveRiskFn, confirmFn, leaveOneFn, sweepStaleProxyFn, isTerminalFn = oldRisk, oldConfirm, oldLeave, oldSweep, oldTTY
+	})
 	sweepStaleProxyFn = func() { f.swept++ }
-	ownsPenFn = func(c *agentConfig) (bool, bool) {
+	isTerminalFn = func() bool { return f.terminal }
+	leaveRiskFn = func(c *agentConfig) leaveRisk {
 		if f.unknown[c.Zone] {
-			return false, false
+			return leaveRiskUnknown
 		}
-		return f.owners[c.Zone], true
+		if f.owners[c.Zone] {
+			return leaveRiskSoleOwnerLastDevice
+		}
+		return leaveRiskNone
 	}
 	confirmFn = func(string) bool { f.asked++; return f.answer }
 	oldTyped := typedConfirmFn
@@ -185,39 +192,46 @@ func TestLeaveOnePenOnly(t *testing.T) {
 	}
 }
 
-// An owner can't leave their own pen: no account recovery.
-func TestLeaveRefusesOwnedPen(t *testing.T) {
-	f := newLeaveFixture(t)
-	for _, arg := range []string{"own.pens.example.network", "https://own.gate.example.network/join#k=x"} {
-		err := leaveCmd([]string{arg}, options{})
-		if err == nil || !strings.Contains(err.Error(), "owner") {
-			t.Fatalf("leave %s: err = %v, want an owner refusal", arg, err)
-		}
-	}
-	if len(f.left) != 0 || len(f.prompts) != 0 {
-		t.Fatalf("left %v, prompted %v; without --force an owned pen is refused outright", f.left, f.prompts)
-	}
-}
-
-// --force lets an owner leave only after the warning and typing the exact pen
-// name; --yes never skips that.
-func TestLeaveForceOwnerNeedsTypedName(t *testing.T) {
+// A sole owner on their last personal device is prompted interactively right
+// away (no --force re-run needed), and refused without --force in non-interactive
+// scripts (I-25).
+func TestLeaveSoleOwnerInteractiveAndNonInteractive(t *testing.T) {
+	// Interactive: prompts right away; wrong name or Enter refuses; exact name leaves.
 	f := newLeaveFixture(t)
 	for _, typed := range []string{"", "own", "OWN.pens.example.network", "own.pens.example.network "} {
 		f.typed["own.pens.example.network"] = typed
-		if err := leaveCmd([]string{"own.pens.example.network"}, options{force: true, yes: true}); err == nil {
-			t.Fatalf("typed %q: owner leave went ahead; only the exact name may confirm", typed)
+		if err := leaveCmd([]string{"own.pens.example.network"}, options{yes: true}); err == nil {
+			t.Fatalf("interactive typed %q: sole-owner leave went ahead; only the exact name may confirm", typed)
 		}
 	}
-	if len(f.left) != 0 {
-		t.Fatalf("left %v after wrong names", f.left)
+	if len(f.left) != 0 || len(f.prompts) != 4 {
+		t.Fatalf("left=%v prompts=%d, want 0 left and 4 prompts", f.left, len(f.prompts))
 	}
 	f.typed["own.pens.example.network"] = "own.pens.example.network"
-	if err := leaveCmd([]string{"own.pens.example.network"}, options{force: true}); err != nil {
-		t.Fatal(err)
+	if err := leaveCmd([]string{"own.pens.example.network"}, options{}); err != nil {
+		t.Fatalf("interactive exact name without --force failed: %v", err)
 	}
 	if len(f.left) != 1 || f.left[0] != "own.pens.example.network" {
 		t.Fatalf("left %v, want own after typing its name", f.left)
+	}
+
+	// Non-interactive (scripts/no TTY): refused without --force, allowed with --force.
+	g := newLeaveFixture(t)
+	g.terminal = false
+	for _, arg := range []string{"own.pens.example.network", "https://own.gate.example.network/join#k=x"} {
+		err := leaveCmd([]string{arg}, options{})
+		if err == nil || !strings.Contains(err.Error(), "only owner") || !strings.Contains(err.Error(), "--force") {
+			t.Fatalf("headless leave %s without --force: err = %v", arg, err)
+		}
+	}
+	if len(g.left) != 0 || len(g.prompts) != 0 {
+		t.Fatalf("headless without --force left %v, prompted %v", g.left, g.prompts)
+	}
+	if err := leaveCmd([]string{"own.pens.example.network"}, options{force: true}); err != nil {
+		t.Fatalf("headless --force failed: %v", err)
+	}
+	if len(g.left) != 1 || g.left[0] != "own.pens.example.network" {
+		t.Fatalf("headless --force left %v, want own", g.left)
 	}
 }
 
@@ -308,17 +322,27 @@ func TestUninstallRefusesWhenOwner(t *testing.T) {
 	}
 }
 
-// uninstall --force goes ahead for an owner only after the warning and the
-// exact pen name, and still asks the [y/N] question for the whole removal.
+// Interactive uninstall asks for the exact pen name without requiring --force,
+// and still asks the [y/N] question for the whole removal (I-25).
 func TestUninstallForceOwnerWithTypedName(t *testing.T) {
 	f := newLeaveFixture(t)
 	f.typed["own.pens.example.network"] = "own.pens.example.network"
 	f.answer = true
-	if err := uninstallCmd(nil, options{force: true}); err != nil {
+	if err := uninstallCmd(nil, options{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.prompts) == 0 || f.asked != 1 || len(f.left) != 3 || f.settingsExist() {
-		t.Fatalf("prompts %v, asked %d, left %v, settings exist %v", f.prompts, f.asked, f.left, f.settingsExist())
+		t.Fatalf("interactive uninstall: prompts %v, asked %d, left %v, settings exist %v", f.prompts, f.asked, f.left, f.settingsExist())
+	}
+
+	g := newLeaveFixture(t)
+	g.typed["own.pens.example.network"] = "own.pens.example.network"
+	g.answer = true
+	if err := uninstallCmd(nil, options{force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.prompts) == 0 || g.asked != 1 || len(g.left) != 3 || g.settingsExist() {
+		t.Fatalf("force uninstall: prompts %v, asked %d, left %v, settings exist %v", g.prompts, g.asked, g.left, g.settingsExist())
 	}
 }
 
@@ -477,18 +501,52 @@ func TestUninstallWithNoPensAsksAndSweeps(t *testing.T) {
 	}
 }
 
-// A pen that doesn't say whether this person is an owner (an older registrar)
-// counts as unknown, never as "not an owner".
-func TestOwnerFromMeFailsClosed(t *testing.T) {
+// leaveRiskFromMe allows leaving whenever another owner or another personal
+// device exists, and fails closed on older registrars that omit is_owner (I-25).
+func TestLeaveRiskFromMe(t *testing.T) {
 	yes, no := true, false
-	if o, k := ownerFromMe(meView{}); o || k {
-		t.Fatalf("missing is_owner = (%v,%v), want unknown", o, k)
+	one, two := 1, 2
+	removedAt := int64(1700000000)
+
+	// Missing is_owner (older registrar) -> unknown (fail closed).
+	if got := leaveRiskFromMe(meView{}); got != leaveRiskUnknown {
+		t.Fatalf("missing is_owner = %v, want leaveRiskUnknown", got)
 	}
-	if o, k := ownerFromMe(meView{IsOwner: &yes}); !o || !k {
-		t.Fatalf("is_owner true = (%v,%v)", o, k)
+	// Non-owner -> safe.
+	if got := leaveRiskFromMe(meView{IsOwner: &no}); got != leaveRiskNone {
+		t.Fatalf("non-owner = %v, want leaveRiskNone", got)
 	}
-	if o, k := ownerFromMe(meView{IsOwner: &no}); o || !k {
-		t.Fatalf("is_owner false = (%v,%v)", o, k)
+	// Owner with a second owner -> safe (even with only one device).
+	meTwoOwners := meView{IsOwner: &yes, Owners: &two}
+	meTwoOwners.ThisDevice.ID = 1
+	meTwoOwners.Devices = []meDeviceView{{ID: 1, Kind: "personal"}}
+	if got := leaveRiskFromMe(meTwoOwners); got != leaveRiskNone {
+		t.Fatalf("owner with 2 owners = %v, want leaveRiskNone", got)
+	}
+	// Sole owner with another active personal device -> safe.
+	meTwoDevs := meView{IsOwner: &yes, Owners: &one}
+	meTwoDevs.ThisDevice.ID = 1
+	meTwoDevs.Devices = []meDeviceView{
+		{ID: 1, Kind: "personal"},
+		{ID: 2, Kind: "personal"},
+	}
+	if got := leaveRiskFromMe(meTwoDevs); got != leaveRiskNone {
+		t.Fatalf("sole owner with 2 personal devices = %v, want leaveRiskNone", got)
+	}
+	// Sole owner with only a server device or removed personal device -> risky!
+	meOnlyServerAndRemoved := meView{IsOwner: &yes, Owners: &one}
+	meOnlyServerAndRemoved.ThisDevice.ID = 1
+	meOnlyServerAndRemoved.Devices = []meDeviceView{
+		{ID: 1, Kind: "personal"},
+		{ID: 2, Kind: "server"},
+		{ID: 3, Kind: "personal", RemovedAt: &removedAt},
+	}
+	if got := leaveRiskFromMe(meOnlyServerAndRemoved); got != leaveRiskSoleOwnerLastDevice {
+		t.Fatalf("sole owner with only server/removed other devices = %v, want leaveRiskSoleOwnerLastDevice", got)
+	}
+	// Older registrar returning is_owner=true without owners/devices -> fail closed as sole owner.
+	if got := leaveRiskFromMe(meView{IsOwner: &yes}); got != leaveRiskSoleOwnerLastDevice {
+		t.Fatalf("is_owner=true without owners/devices = %v, want leaveRiskSoleOwnerLastDevice", got)
 	}
 }
 

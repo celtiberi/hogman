@@ -733,6 +733,12 @@ func (p *penConn) memberClient() (*http.Client, error) {
 	return &http.Client{Timeout: 20 * time.Second, Transport: tr}, nil
 }
 
+type meDeviceView struct {
+	ID        int64  `json:"id"`
+	Kind      string `json:"kind"`
+	RemovedAt *int64 `json:"removed_at"`
+}
+
 type meView struct {
 	Member struct {
 		Handle string `json:"handle"`
@@ -741,8 +747,10 @@ type meView struct {
 		ID   int64  `json:"id"`
 		Kind string `json:"kind"`
 	} `json:"this_device"`
-	Network *networkInfo `json:"network"`
-	IsOwner *bool        `json:"is_owner"`
+	Network *networkInfo   `json:"network"`
+	IsOwner *bool          `json:"is_owner"`
+	Owners  *int           `json:"owners"`
+	Devices []meDeviceView `json:"devices"`
 }
 
 func homeAPI(c *http.Client, zone, method, path string, in, out any) (int, error) {

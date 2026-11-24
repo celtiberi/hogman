@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -9,10 +10,18 @@ import (
 	"strings"
 )
 
+type leaveRisk int
+
+const (
+	leaveRiskNone leaveRisk = iota
+	leaveRiskSoleOwnerLastDevice
+	leaveRiskUnknown
+)
+
 // Seams for tests: the network check, the [y/N] question and the per-pen
 // leave steps.
 var (
-	ownsPenFn      = ownsPen
+	leaveRiskFn    = assessLeaveRisk
 	confirmFn      = confirm
 	typedConfirmFn = typedConfirm
 	leaveOneFn     = leaveOne
@@ -260,89 +269,114 @@ func firstZoneOr(ts []leaveTarget, def string) string {
 	return def
 }
 
-// checkCanLeave refuses to take this computer out of a pen its person owns,
-// or one that can't be reached to ask. Owners have no account recovery: if
-// this is their last device and there's no other owner, nobody could run the
-// pen again. --force overrides either refusal, but only after a warning and
-// typing the pen's name exactly (like deleting a repository); --yes never
-// skips that, and without a person at the keyboard it refuses.
+// checkCanLeave protects the one genuinely dangerous case: leaving when the
+// caller is the sole owner on their last personal device (or when the pen
+// cannot be reached to check). Another owner or another personal device lets
+// the leave proceed without blocking (I-25).
+//
+// In an interactive terminal, sole-owner/last-device asks for typed pen-name
+// confirmation right away without requiring --force. In non-interactive scripts
+// (no terminal), --force prints the warning and proceeds; without --force it
+// refuses.
 func checkCanLeave(t leaveTarget, o options) error {
-	var owner, known bool
+	var risk leaveRisk
 	switch {
 	case t.legacyTS:
 		// joined through the Tailscale app: Hogman can't ask the pen as this
-		// computer, so ownership is unknown and --force with the name is needed.
+		// computer, so ownership is unknown.
+		risk = leaveRiskUnknown
 	case t.cfg == nil:
 		return nil // only shares here: no device, no membership to lose
 	default:
-		owner, known = ownsPenFn(t.cfg)
+		risk = leaveRiskFn(t.cfg)
 	}
 	var warning string
-	switch {
-	case known && owner:
-		if !o.force {
-			return errorf("you're an owner of %s, so this computer won't leave it.\n"+
-				"  Owners have no account recovery: if this is your last device and there's no other owner,\n"+
-				"  nobody could run the pen again. Make someone else an owner first (home.%s, People).\n"+
-				"  If you're sure, run it with --force and type the pen's name to confirm.", t.zone, t.zone)
-		}
-		warning = "You are an OWNER of " + t.zone + ". Owners have no account recovery.\n" +
-			"  If this is your last device and there's no other owner, NOBODY can ever run this pen again:\n" +
-			"  no invites, no new devices, no removing anyone. This can't be undone."
-	case !known:
-		if !o.force {
-			return errorf("couldn't reach %s to check whether you own it, so this computer won't leave it yet.\n"+
-				"  Try again when it's reachable. If the pen is gone for good, run it with --force and type the\n"+
-				"  pen's name to confirm.", t.zone)
-		}
-		warning = "Couldn't reach " + t.zone + " to check whether you own it.\n" +
-			"  If you do and the pen comes back, you may have lost your last way to run it. This can't be undone."
-	default:
+	switch risk {
+	case leaveRiskNone:
 		return nil
-	}
-	if !typedConfirmFn(t.zone, warning) {
-		return errorf("the name didn't match, so %s was not left", t.zone)
+	case leaveRiskSoleOwnerLastDevice:
+		warning = fmt.Sprintf(
+			"This is your last device on %s and you're its only owner; nobody could manage it after this.\n"+
+				"  To hand off first, make someone else an owner under Members on home.%s.",
+			t.zone, t.zone)
+		if !isTerminalFn() {
+			if !o.force {
+				return errorf("this is your last device on %s and you're its only owner; nobody could manage it after this.\n"+
+					"  Make someone else an owner under Members on home.%s, run interactively to confirm, or pass --force.", t.zone, t.zone)
+			}
+			say("\n⚠ %s", warning)
+			return nil
+		}
+		if !typedConfirmFn(t.zone, warning) {
+			return errorf("the name didn't match, so %s was not left", t.zone)
+		}
+		return nil
+	case leaveRiskUnknown:
+		if !o.force {
+			return errorf("couldn't reach %s to check whether you're its only owner, so this computer won't leave it yet.\n"+
+				"  Try again when it's reachable. If the pen is gone for good, run it with --force.", t.zone)
+		}
+		warning = "Couldn't reach " + t.zone + " to check whether you're its only owner.\n" +
+			"  If you are and this is your last device, you may have lost your last way to manage it."
+		if !isTerminalFn() {
+			say("\n⚠ %s", warning)
+			return nil
+		}
+		if !typedConfirmFn(t.zone, warning) {
+			return errorf("the name didn't match, so %s was not left", t.zone)
+		}
+		return nil
 	}
 	return nil
 }
 
-// typedConfirm shows the warning and makes the person type the pen's name.
-// It refuses when nobody is at the keyboard.
+// typedConfirm shows the warning and asks the person to type the pen's name.
 func typedConfirm(zone, warning string) bool {
-	if fi, err := os.Stdin.Stat(); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
-		note("refusing: --force needs a person to type the pen's name (stdin is not a terminal)")
+	if !isTerminalFn() {
+		note("refusing: confirmation needs a terminal (pass --force in scripts)")
 		return false
 	}
 	say("\n⚠ %s", warning)
-	return ask("  To confirm, type the pen's name ("+zone+"): ") == zone
+	return askFn("  Type "+zone+" to leave anyway, or press Enter to cancel: ") == zone
 }
 
-// ownsPen asks the pen, as this computer, whether its person is an owner.
-// known is false when the pen can't be asked.
-func ownsPen(cfg *agentConfig) (owner, known bool) {
+// assessLeaveRisk asks the pen, as this computer, whether leaving would strand
+// the pen with no owner left.
+func assessLeaveRisk(cfg *agentConfig) leaveRisk {
 	// Already removed from the pen (the agent proves it and the pen says log
 	// in again): nothing left to protect.
 	if state, d := verifyAgentEndpointDetail(stateDir(cfg.Zone), cfg); state == agentEndpointDown && d.verified && d.needsLogin {
-		return false, true
+		return leaveRiskNone
 	}
 	c, err := penClient(cfg)
 	if err != nil {
-		return false, false
+		return leaveRiskUnknown
 	}
 	var me meView
 	if _, err := homeAPI(c, cfg.Zone, "GET", "/me", nil, &me); err != nil || me.Member.Handle == "" {
-		return false, false
+		return leaveRiskUnknown
 	}
-	return ownerFromMe(me)
+	return leaveRiskFromMe(me)
 }
 
-// ownerFromMe reads ownership from /api/me, failing closed: a pen that
-// doesn't say (an older registrar) counts as unknown, never as "not owner".
-func ownerFromMe(me meView) (owner, known bool) {
+// leaveRiskFromMe decides from /api/me whether leaving this device would leave
+// the pen without an owner. Fails closed on older registrars that omit is_owner.
+func leaveRiskFromMe(me meView) leaveRisk {
 	if me.IsOwner == nil {
-		return false, false
+		return leaveRiskUnknown
 	}
-	return *me.IsOwner, true
+	if !*me.IsOwner {
+		return leaveRiskNone
+	}
+	if me.Owners != nil && *me.Owners > 1 {
+		return leaveRiskNone
+	}
+	for _, d := range me.Devices {
+		if d.Kind == "personal" && d.RemovedAt == nil && d.ID != me.ThisDevice.ID {
+			return leaveRiskNone
+		}
+	}
+	return leaveRiskSoleOwnerLastDevice
 }
 
 // onTailscaleAppFn: is this computer on zone through its Tailscale app? A
@@ -439,7 +473,7 @@ func uninstallCmd(args []string, o options) error {
 			names[i] = k.t.zone
 		}
 		return errorf("Hogman can't be removed from this computer yet, so nothing was changed: %s stays.\n"+
-			"  Sort that out (make someone else an owner first), or run hogman uninstall --force and type each pen's name.",
+			"  Make someone else an owner under Members on the pen's home page, or re-run and type each pen's name to confirm.",
 			strings.Join(names, ", "))
 	}
 	question := "Leave these pens and remove Hogman from this computer?"
