@@ -127,9 +127,13 @@ func (wb *web) handler() http.Handler {
 			csp = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 		}
 		h.Set("Content-Security-Policy", csp)
+		h.Set("X-Frame-Options", "DENY")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Origin-Agent-Cluster", "?1")
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" || r.URL.Path == "/paid.html" {
+			h.Set("Cache-Control", "no-store")
+		}
 		mux.ServeHTTP(w, r)
 	})
 }
@@ -244,6 +248,9 @@ func (wb *web) check(w http.ResponseWriter, r *http.Request) {
 }
 
 func (wb *web) create(w http.ResponseWriter, r *http.Request) {
+	if !wb.requireSameOriginJSON(w, r) {
+		return
+	}
 	ip := wb.clientIP(r)
 	if !wb.creates.allow(rateLimitKey(ip), time.Now()) {
 		jsonOut(w, 429, map[string]string{"error": "too many tries from here; wait an hour"})
@@ -257,7 +264,9 @@ func (wb *web) create(w http.ResponseWriter, r *http.Request) {
 		TurnstileToken string `json:"turnstile_token"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
 		jsonOut(w, 400, map[string]string{"error": "bad request"})
 		return
 	}
@@ -680,6 +689,9 @@ func qrSVG(text string) (string, error) {
 func itoa(i int) string { return strconv.Itoa(i) }
 
 func (wb *web) waitlist(w http.ResponseWriter, r *http.Request) {
+	if !wb.requireSameOriginJSON(w, r) {
+		return
+	}
 	now := time.Now()
 	ip := wb.clientIP(r)
 	if !wb.waits.allow(rateLimitKey(ip), now) {
@@ -693,7 +705,9 @@ func (wb *web) waitlist(w http.ResponseWriter, r *http.Request) {
 		TurnstileToken string `json:"turnstile_token"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
 		jsonOut(w, 400, map[string]string{"error": "bad request"})
 		return
 	}
@@ -713,6 +727,11 @@ func (wb *web) waitlist(w http.ResponseWriter, r *http.Request) {
 	}
 	code, out := wb.ask(r.Context(), "POST", "/waitlist", map[string]string{
 		"email": in.Email, "pen": strings.ToLower(strings.TrimSpace(in.Pen)), "note": cleanField(in.Note, 280)})
+	// L2: strip the "already" membership oracle from the public response so
+	// callers cannot probe whether a third party's email is on the waiting list.
+	if code == 200 {
+		delete(out, "already")
+	}
 	jsonOut(w, code, out)
 }
 
@@ -720,21 +739,28 @@ func (wb *web) leaveWaitlist(w http.ResponseWriter, r *http.Request) {
 	if !wb.requireSameOriginJSON(w, r) {
 		return
 	}
-	if !wb.leaves.allow(rateLimitKey(wb.clientIP(r)), time.Now()) {
+	ip := wb.clientIP(r)
+	if !wb.leaves.allow(rateLimitKey(ip), time.Now()) {
 		jsonOut(w, 429, map[string]string{"error": "too many tries from here; wait an hour"})
 		return
 	}
 	var in struct {
-		Email string `json:"email"`
+		Email          string `json:"email"`
+		TurnstileToken string `json:"turnstile_token"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
 		jsonOut(w, 400, map[string]string{"error": "bad request"})
 		return
 	}
 	in.Email = strings.ToLower(strings.TrimSpace(in.Email))
 	if !validEmail(in.Email) {
 		jsonOut(w, 400, map[string]string{"error": "that doesn't look like an email address"})
+		return
+	}
+	if !wb.verifyTurnstile(w, r, in.TurnstileToken, ip) {
 		return
 	}
 	code, out := wb.ask(r.Context(), "POST", "/waitlist/leave", map[string]string{"email": in.Email})

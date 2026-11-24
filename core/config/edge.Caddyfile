@@ -19,9 +19,22 @@ http://{$PUBLIC_HOST} {
 
 {$PUBLIC_HOST} {
 	# HTTPS only, and browsers remember it for a year.
-	header Strict-Transport-Security "max-age=31536000"
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
 	handle /generate_204 {
 		respond 204
+	}
+	handle /start {
+		root * /srv/join-page
+		rewrite * /start.sh
+		header {
+			Content-Type "text/plain; charset=utf-8"
+			X-Content-Type-Options nosniff
+			Cache-Control no-store
+		}
+		file_server
 	}
 	# The page an invite link opens, and the join tool downloads.
 	handle /join {

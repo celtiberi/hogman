@@ -47,7 +47,7 @@ main() {
   dl="$base/download/$tag"
 
   tmp="$(mktemp -d)"
-  trap 'rm -rf "${tmp:-}"' EXIT   # tmp is global: the trap runs after main returns
+  trap 'rm -rf "${tmp:-}"' EXIT INT TERM   # tmp is global: the trap runs after main returns
 
   curl "${curl_opts[@]}" -o "$tmp/ALLSUMS" "$dl/SHA256SUMS" || die "could not download checksums for $tag from $dl"
 

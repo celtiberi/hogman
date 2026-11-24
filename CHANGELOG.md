@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- `deploy/signup`, `core/join-page`, `core/config/edge.Caddyfile`, & `deploy/install.sh`: public web security review hardening (M1, M3, M4, L1–L3, L5):
+  - Enforced `requireSameOriginJSON` (before rate limits) and `DisallowUnknownFields` on `POST /api/create` and `POST /api/waitlist`, added Turnstile verification on `POST /api/waitlist/leave`, removed the public `"already"` waitlist membership oracle, added `X-Frame-Options: DENY` and `Cache-Control: no-store` on `/paid.html` & `/`, and drove Work signup theme from `/api/status` / hostname rather than `?theme=work`.
+  - Added `--proto =https --proto-redir =https` and `HOGMAN_EXPECTED_HOST` pinning in `core/join-page/join.js` (routing share commands through `/start` for temp-dir SHA-256 verification), anchored `core/join-page/start.sh` strictly to `https://<host>/join#t=` or `#k=`, added `handle /start` and site-level `-Server` to standalone `core/config/edge.Caddyfile`, and trapped `INT TERM` on cleanup in `deploy/install.sh`.
 - `deploy/release.sh` & `deploy/install.sh`: release archives now record every file as owned by root (0:0), and `release.sh` refuses to publish one that doesn't or that contains the builder's account name. `install.sh` unpacks with `--no-same-owner` and sets root ownership before copying, which also corrects files left by earlier installs. Before this, the compiled-parts archive carried the builder's uid, so on a server with a local user of that uid the installed binaries were writable by that user.
 
 ### Added

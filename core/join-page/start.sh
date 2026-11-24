@@ -30,7 +30,7 @@ link="$(printf '%s' "$link" | tr -d ' \r\n\t')"
 
 # https://<host>/join#t=... (an invite) or #k=... (a device link).
 case "$link" in
-  https://*/join\#t=*|https://*/join\#k=*) ;;
+  https://*) ;;
   *) die "that doesn't look like a Hogman invite link (it starts https:// and contains /join#)" ;;
 esac
 host="${link#https://}"
@@ -38,6 +38,14 @@ host="${host%%/*}"
 case "$host" in
   ""|*[!a-zA-Z0-9.:-]*) die "the link's address looks wrong: $host" ;;
 esac
+# Anchor the path strictly to /join#t=... or /join#k=... on that exact host.
+case "$link" in
+  "https://$host/join#t="*|"https://$host/join#k="*) ;;
+  *) die "that doesn't look like a Hogman invite link (expected https://<host>/join#t=... or #k=...)" ;;
+esac
+if [ -n "${HOGMAN_EXPECTED_HOST:-}" ] && [ "$host" != "$HOGMAN_EXPECTED_HOST" ]; then
+  die "refusing link for $host (expected $HOGMAN_EXPECTED_HOST)"
+fi
 
 case "$(uname -s)" in
   Darwin|Linux) os="$(uname -s)" ;;
