@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -115,10 +116,54 @@ func newWeb(brokerURL, token, domain string) *web {
 	}
 }
 
+func webAssetTag(static fs.FS, name string) string {
+	b, err := fs.ReadFile(static, name)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:6])
+}
+
+func versionedHTML(static fs.FS, page string, assets map[string]string) []byte {
+	b, err := fs.ReadFile(static, page)
+	if err != nil {
+		return nil
+	}
+	s := string(b)
+	for path, tag := range assets {
+		if tag == "" {
+			continue
+		}
+		s = strings.ReplaceAll(s, `"`+path+`"`, `"`+path+`?v=`+tag+`"`)
+	}
+	return []byte(s)
+}
+
+func serveHTMLBytes(body []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		if r.Method != http.MethodHead {
+			_, _ = w.Write(body)
+		}
+	}
+}
+
 func (wb *web) handler() http.Handler {
 	mux := http.NewServeMux()
 	static, _ := fs.Sub(webFiles, "web")
+	assetTags := map[string]string{
+		"/signup.css": webAssetTag(static, "signup.css"),
+		"/signup.js":  webAssetTag(static, "signup.js"),
+		"/paid.js":    webAssetTag(static, "paid.js"),
+	}
+	indexHTML := versionedHTML(static, "index.html", assetTags)
+	paidHTML := versionedHTML(static, "paid.html", assetTags)
 	mux.Handle("GET /", http.FileServerFS(static))
+	mux.HandleFunc("GET /{$}", serveHTMLBytes(indexHTML))
+	mux.HandleFunc("GET /index.html", serveHTMLBytes(indexHTML))
+	mux.HandleFunc("GET /paid.html", serveHTMLBytes(paidHTML))
 	mux.HandleFunc("GET /api/status", wb.status)
 	mux.HandleFunc("GET /api/check", wb.check)
 	mux.HandleFunc("POST /api/create", wb.create)
@@ -142,7 +187,8 @@ func (wb *web) handler() http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Origin-Agent-Cluster", "?1")
-		if r.URL.Path == "/" || r.URL.Path == "/index.html" || r.URL.Path == "/paid.html" {
+		p := r.URL.Path
+		if p == "/" || strings.HasSuffix(p, ".html") || strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".css") {
 			h.Set("Cache-Control", "no-store")
 		}
 		mux.ServeHTTP(w, r)
