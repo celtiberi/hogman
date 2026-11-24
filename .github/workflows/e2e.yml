@@ -69,8 +69,8 @@ jobs:
         run: |
           docker build --progress=plain --target web -t hogman-signup-web-check deploy/signup
           docker build --progress=plain --target broker -t hogman-signup-broker-check deploy/signup
-      - name: Build join client image (isolated context + go test)
-        run: docker build --progress=plain -t hogman-join-check core/join
+      - name: Test join client in isolated Docker context
+        run: docker build --progress=plain --target test -t hogman-join-test core/join
 
   pen:
     name: pen (core/test/run.sh)
