@@ -149,8 +149,8 @@
     if (isWork) {
       applyWorkTheme(n.zone, forShare);
       if (forShare) {
-        longCmd = makeLongCmd('share cooler-1 http://192.168.1.40 ') + ' --background';
-        unixCmd = makeStartCmd('share cooler-1 http://192.168.1.40 --background');
+        longCmd = makeLongCmd('share cooler-1 http://192.168.1.40 ');
+        unixCmd = makeStartCmd('share cooler-1 http://192.168.1.40');
         $('cmd').textContent = unixCmd;
         $('cmd-manual').textContent = longCmd;
       }

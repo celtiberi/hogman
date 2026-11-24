@@ -587,7 +587,7 @@ check "... and adds no device" no_dave_server
 
 # A computer that isn't on the pen at all: one server link, one command.
 docker exec -d "$(dc ps -q dave-server)" sh -c 'mkdir -p /tmp/www && echo "app from a server link" > /tmp/www/index.html && caddy file-server --listen 127.0.0.1:8080 --root /tmp/www >/tmp/fs.log 2>&1'
-out="$(join_tool dave-server share app 8080 "$SHARE_LINK" --background 2>&1)"; rc=$?
+out="$(join_tool dave-server share app 8080 "$SHARE_LINK" 2>&1)"; rc=$?
 echo "$out" | sed 's/^/        | /'
 check "a server link plus one command shares a port (exit $rc)" grep -q "https://app.$ZONE is up" <<<"$out"
 check "members load https://app.$ZONE" retry 30 fetch app.$ZONE "app from a server link"

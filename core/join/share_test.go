@@ -502,3 +502,101 @@ func TestShareCertLogNotice(t *testing.T) {
 		t.Fatalf("shareUsage missing certificate logs warning")
 	}
 }
+
+func TestShareForegroundFlagAndConflict(t *testing.T) {
+	var gotO options
+	rc := runCLI([]string{"share", "blog", "3000", "--foreground"}, cliHandlers{
+		shareStart: func(_, _, _ string, o options) error { gotO = o; return nil },
+	})
+	if rc != 0 || !gotO.foreground || gotO.background {
+		t.Fatalf("share --foreground: rc=%d o=%+v", rc, gotO)
+	}
+	err := shareStart("blog", "3000", "", options{background: true, foreground: true})
+	if err == nil || !strings.Contains(err.Error(), "cannot combine --background and --foreground") {
+		t.Fatalf("expected conflict error, got %v", err)
+	}
+}
+
+func TestFormatShareListTable(t *testing.T) {
+	var sb strings.Builder
+	formatShareListTable(&sb, []shareListItemJSON{
+		{
+			Name:   "mxlulu",
+			Zone:   "alpha-k32x.pens.example.com",
+			URL:    "https://mxlulu.alpha-k32x.pens.example.com",
+			Target: "/tmp/site",
+			Folder: true,
+			State:  "running in the background, starts at login",
+		},
+	})
+	out := sb.String()
+	for _, want := range []string{"NAME", "PEN", "URL", "TARGET", "STATUS", "mxlulu", "alpha-k32x", "https://mxlulu.alpha-k32x.pens.example.com", "/tmp/site"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("table missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "NOTE") {
+		t.Fatalf("table should omit NOTE column when no shares have notes:\n%s", out)
+	}
+
+	sb.Reset()
+	formatShareListTable(&sb, []shareListItemJSON{
+		{
+			Name:   "media-hub",
+			Zone:   "ops.pens.example.com",
+			URL:    "https://media-hub.ops.pens.example.com",
+			Target: "http://127.0.0.1:8091",
+			Note:   "Media Hub",
+			State:  "running in the background, starts at login",
+		},
+	})
+	out = sb.String()
+	if !strings.Contains(out, "NOTE") || !strings.Contains(out, "Media Hub") {
+		t.Fatalf("table missing NOTE column/value:\n%s", out)
+	}
+}
+
+func TestFindShareFlexibleLookupAndStopZeroArgs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	shareDir := filepath.Join(sharesBase(), "alpha-k32x.pens.example.com", "mxlulu")
+	if err := os.MkdirAll(shareDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&shareConfig{
+		Name:   "mxlulu",
+		Zone:   "alpha-k32x.pens.example.com",
+		Target: "/tmp/site",
+		Folder: true,
+	}).save(shareDir); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, query := range []string{
+		"mxlulu",
+		"MXLULU",
+		"mxlulu.alpha-k32x",
+		"mxlulu.alpha-k32x.pens.example.com",
+		"https://mxlulu.alpha-k32x.pens.example.com",
+		"https://mxlulu.alpha-k32x.pens.example.com/",
+	} {
+		got, err := findShare(query, "")
+		if err != nil || got != shareDir {
+			t.Fatalf("findShare(%q) = (%q, %v), want %q", query, got, err, shareDir)
+		}
+	}
+
+	if _, err := findShare("mxlulu.alpha", ""); err == nil || !strings.Contains(err.Error(), "hogman share stop mxlulu") {
+		t.Fatalf("expected unknown share error to list active share stop command, got: %v", err)
+	}
+
+	var errBuf strings.Builder
+	rc := runCLI([]string{"share", "stop"}, cliHandlers{errOut: &errBuf})
+	if rc != 2 {
+		t.Fatalf("share stop with 0 args: rc=%d, want 2 (stderr=%q)", rc, errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "accepts 1 arg") || !strings.Contains(errBuf.String(), "hogman share stop mxlulu") {
+		t.Fatalf("share stop with 0 args should show friendly usage + active share, got: %q", errBuf.String())
+	}
+}
