@@ -172,12 +172,16 @@
     if (totalMembers !== null) {
       $('stat-members').textContent = String(totalMembers);
     }
-    const owners = me.owners || 0;
     const membersSub = $('stat-members-sub');
-    membersSub.textContent = owners === 1
-      ? '1 owner — appoint a backup'
-      : `${owners} owners`;
-    membersSub.classList.toggle('warn-text', owners === 1);
+    if (typeof me.owners === 'number' && me.owners > 0) {
+      membersSub.textContent = me.owners === 1
+        ? (me.is_owner ? '1 owner — appoint a backup' : '1 owner — no backup')
+        : `${me.owners} owners`;
+      membersSub.classList.toggle('warn-text', me.owners === 1);
+    } else {
+      membersSub.textContent = '';
+      membersSub.classList.remove('warn-text');
+    }
 
     const devs = cachedAdminDevices || [];
     const hasPresence = devs.some(d => typeof d.online === 'boolean');
