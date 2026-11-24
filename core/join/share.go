@@ -44,10 +44,11 @@ import (
 const shareUsage = `hogman share: put something on your pen under its own name
 
 usage:
-  hogman share <name> <target>                  share from this computer (it must be on the pen)
-  hogman share <name> <target> '<server link>'  share from a computer that isn't on the pen
-  hogman share list                             what this computer shares
-  hogman share stop <name>                      take a share down and give its name back
+  hogman share <name> <target>                         share from this computer (it must be on the pen)
+  hogman share <name> <target> '<server link>'         share from a computer that isn't on the pen
+  hogman share --private-name <target> [--note TEXT]   share under a random hostname (label stays inside the pen)
+  hogman share list                                    what this computer shares
+  hogman share stop <name>                             take a share down and give its name back
 
 <target> is a port on this computer (3000), a local web address
 (http://localhost:8080) or a folder (./site) to serve as a website.
@@ -56,6 +57,7 @@ Note: <name> is publicly visible in certificate logs (contents stay private);
 don't put anything sensitive in it.
 
 options:
+  --private-name      use a random hostname so the friendly name stays inside the pen (pair with --note "Label" for the portal directory). Does not hide the pen name, site count, or issuance/renewal timing in certificate logs, and does not change certificate caps.
   --note TEXT         short one-line description shown on the pen's home page (--note "" clears it)
   --background        keep running in the background and start automatically after a restart
   --no-service        with --background, don't register a login item, just run in the background
@@ -65,24 +67,33 @@ options:
 `
 
 type shareConfig struct {
-	Name            string `json:"name"`
-	Zone            string `json:"zone"`
-	LoginServer     string `json:"login_server"`
-	DNSServer       string `json:"dns_server"`
-	Target          string `json:"target"` // http://host:port, unix:///path/to.sock, or an absolute folder path
-	Folder          bool   `json:"folder,omitempty"`
-	Note            string `json:"note,omitempty"`
-	ControlCA       string `json:"control_ca,omitempty"`
-	UpstreamHost    string `json:"upstream_host,omitempty"`
-	IdentityHeaders bool   `json:"identity_headers,omitempty"`
+	Name              string `json:"name"`
+	PrivateName       bool   `json:"private_name,omitempty"`
+	BootstrapHostname string `json:"bootstrap_hostname,omitempty"`
+	Zone              string `json:"zone"`
+	LoginServer       string `json:"login_server"`
+	DNSServer         string `json:"dns_server"`
+	Target            string `json:"target"` // http://host:port, unix:///path/to.sock, or an absolute folder path
+	Folder            bool   `json:"folder,omitempty"`
+	Note              string `json:"note,omitempty"`
+	ControlCA         string `json:"control_ca,omitempty"`
+	UpstreamHost      string `json:"upstream_host,omitempty"`
+	IdentityHeaders   bool   `json:"identity_headers,omitempty"`
 }
 
 func (c *shareConfig) fqdn() string { return c.Name + "." + c.Zone }
 func (c *shareConfig) url() string  { return "https://" + c.fqdn() }
 
 func (c *shareConfig) agentConfig() *agentConfig {
+	host := c.Name
+	if host == "" {
+		host = c.BootstrapHostname
+	}
+	if host == "" {
+		host = "site"
+	}
 	return &agentConfig{Zone: c.Zone, LoginServer: c.LoginServer, DNSServer: c.DNSServer,
-		Hostname: c.Name, ControlCA: c.ControlCA}
+		Hostname: host, ControlCA: c.ControlCA}
 }
 
 func (c *shareConfig) showing() string {
@@ -130,7 +141,12 @@ func allSharesIn(base, zone string) []string {
 	sort.Strings(m)
 	out := make([]string, 0, len(m))
 	for _, f := range m {
-		out = append(out, filepath.Dir(f))
+		d := filepath.Dir(f)
+		// Skip transient staging directories (e.g. .pending-<hex> during --private-name claim).
+		if strings.HasPrefix(filepath.Base(d), ".") {
+			continue
+		}
+		out = append(out, d)
 	}
 	return out
 }
@@ -362,11 +378,17 @@ func resolveShareNote(old *shareConfig, note string, noteSet bool) string {
 
 func shareStart(name, what, rawLink string, o options) error {
 	name = strings.ToLower(strings.TrimSpace(name))
-	if !shareNameRE.MatchString(name) || name == "list" || name == "stop" {
-		return errorf("%q can't be a name: use lowercase letters, digits and dashes, like blog or my-notes", name)
-	}
-	if isReservedShareName(name) {
-		return errorf("%q is reserved by the network and can't be used as a share name", name)
+	if o.privateName {
+		if name != "" {
+			return errorf("cannot pass both a share name (%q) and --private-name", name)
+		}
+	} else {
+		if !shareNameRE.MatchString(name) || name == "list" || name == "stop" {
+			return errorf("%q can't be a name: use lowercase letters, digits and dashes, like blog or my-notes", name)
+		}
+		if isReservedShareName(name) {
+			return errorf("%q is reserved by the network and can't be used as a share name", name)
+		}
 	}
 	target, folder, err := shareTarget(what)
 	if err != nil {
@@ -390,18 +412,33 @@ func shareStart(name, what, rawLink string, o options) error {
 
 	if explicitDir != "" && rawLink == "" {
 		if old, err := loadShare(explicitDir); err == nil {
-			if old.Name != "" && old.Name != name {
-				return errorf("state directory %s is enrolled for share %q, not %q", explicitDir, old.Name, name)
+			if o.privateName {
+				if !old.PrivateName {
+					return errorf("state directory %s is enrolled for share %q (not --private-name)", explicitDir, old.Name)
+				}
+				if old.Name == "" {
+					return errorf("state directory %s has no assigned private name yet; re-enroll with a share link", explicitDir)
+				}
+				cfgCopy := *old
+				cfg = &cfgCopy
+				name = old.Name
+			} else {
+				if old.Name != "" && old.Name != name {
+					return errorf("state directory %s is enrolled for share %q, not %q", explicitDir, old.Name, name)
+				}
+				cfgCopy := *old
+				cfg = &cfgCopy
+				cfg.Name = name
 			}
-			cfgCopy := *old
-			cfg = &cfgCopy
-			cfg.Name = name
 		}
 	}
 	if cfg == nil {
 		if rawLink != "" {
 			cfg, key, err = shareFromLink(name, rawLink, o)
 		} else if explicitDir != "" {
+			if o.privateName {
+				return errorf("state directory %s is not enrolled yet. Enroll once with a share link:\n  hogman share --private-name %s --state-dir %s --enroll-only --link-stdin", explicitDir, what, explicitDir)
+			}
 			return errorf("state directory %s is not enrolled yet. Enroll once with a share link:\n  hogman share %s %s --state-dir %s --enroll-only --link-stdin", explicitDir, name, what, explicitDir)
 		} else {
 			cfg, key, err = shareFromMembership(name, o)
@@ -409,6 +446,9 @@ func shareStart(name, what, rawLink string, o options) error {
 		if err != nil {
 			return err
 		}
+	}
+	if o.privateName {
+		cfg.PrivateName = true
 	}
 	cfg.Target, cfg.Folder = target, folder
 	cfg.IdentityHeaders = o.identityHeaders
@@ -424,61 +464,123 @@ func shareStart(name, what, rawLink string, o options) error {
 		cfg.UpstreamHost = uh
 	}
 
-	dir := shareDir(cfg.Zone, name)
-	if explicitDir != "" {
-		dir = explicitDir
-	}
+	var dir string
 	var prev *shareConfig
 	fresh := true
-	if old, err := loadShare(dir); err == nil {
-		if explicitDir == "" {
-			if pid := sharePID(dir); pid != 0 && pid != os.Getpid() {
-				return errorf("%s is already being shared from this computer (process %d). Stop it first: hogman share stop %s", old.url(), pid, name)
-			}
+	if o.privateName && explicitDir == "" && cfg.Name == "" {
+		if key == "" {
+			return errorf("no way to add a device for this share")
 		}
-		_, hasUnspentKey := os.Stat(filepath.Join(dir, "authkey"))
-		st := readShareStatus(dir)
-		staleDevice := hasUnspentKey == nil || (st.State == "error" && st.Error != "" && isPermanentNodeError(false, "", errors.New(st.Error)))
-		if rawLink != "" && key != "" && staleDevice {
-			// Replacing a dead/aborted share with a fresh server link.
-			_ = os.RemoveAll(filepath.Join(dir, "node"))
-			_ = os.RemoveAll(filepath.Join(dir, "acme"))
-			_ = os.Remove(filepath.Join(dir, "authkey"))
-			if cfg.ControlCA == "" {
-				cfg.ControlCA = old.ControlCA
-			}
-			prev = old
-		} else {
-			key = "" // this share already has its device; reuse it
-			cfg.ControlCA = old.ControlCA
-			if cfg.UpstreamHost == "" {
-				cfg.UpstreamHost = old.UpstreamHost
-			}
-			prev = old
-			fresh = false
-		}
-	} else if key == "" {
-		return errorf("no way to add a device for this share")
-	}
-	cfg.Note = resolveShareNote(prev, o.note, o.noteSet)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if err := cfg.save(dir); err != nil {
-		return err
-	}
-	if key != "" {
-		if err := os.WriteFile(filepath.Join(dir, "authkey"), []byte(key), 0o600); err != nil {
+		randHex, err := generateHexToken(4)
+		if err != nil {
 			return err
 		}
-	}
-
-	if fresh {
-		say("%s", formatShareCertLogNotice(cfg.fqdn()))
+		cfg.BootstrapHostname = "site-" + randHex
+		cfg.Note = resolveShareNote(nil, o.note, o.noteSet)
+		stagingDir := filepath.Join(sharesBase(), cfg.Zone, ".pending-"+randHex)
+		if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+			return err
+		}
+		if err := cfg.save(stagingDir); err != nil {
+			_ = os.RemoveAll(stagingDir)
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(stagingDir, "authkey"), []byte(key), 0o600); err != nil {
+			_ = os.RemoveAll(stagingDir)
+			return err
+		}
+		if cfg.Note == "" {
+			say("%s", formatSharePrivateNoteTip())
+		}
+		step("Claiming a private hostname on %s", cfg.Zone)
+		bctx, bstop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err = claimPrivateNameBootstrap(bctx, stagingDir, cfg)
+		bstop()
+		if err != nil {
+			_ = os.RemoveAll(stagingDir)
+			return err
+		}
+		dir = shareDir(cfg.Zone, cfg.Name)
+		if err := os.Rename(stagingDir, dir); err != nil {
+			_ = os.RemoveAll(stagingDir)
+			return errorf("could not move private share state into %s: %v", dir, err)
+		}
+		say("%s", formatSharePrivateNameNotice(cfg.fqdn()))
+	} else {
+		dir = shareDir(cfg.Zone, cfg.Name)
+		if explicitDir != "" {
+			dir = explicitDir
+		}
+		if old, err := loadShare(dir); err == nil {
+			if explicitDir == "" {
+				if pid := sharePID(dir); pid != 0 && pid != os.Getpid() {
+					return errorf("%s is already being shared from this computer (process %d). Stop it first: hogman share stop %s", old.url(), pid, cfg.Name)
+				}
+			}
+			_, hasUnspentKey := os.Stat(filepath.Join(dir, "authkey"))
+			st := readShareStatus(dir)
+			staleDevice := hasUnspentKey == nil || (st.State == "error" && st.Error != "" && isPermanentNodeError(false, "", errors.New(st.Error)))
+			if rawLink != "" && key != "" && staleDevice {
+				// Replacing a dead/aborted share with a fresh server link.
+				_ = os.RemoveAll(filepath.Join(dir, "node"))
+				_ = os.RemoveAll(filepath.Join(dir, "acme"))
+				_ = os.RemoveAll(filepath.Join(dir, "authkey"))
+				if cfg.ControlCA == "" {
+					cfg.ControlCA = old.ControlCA
+				}
+				prev = old
+			} else {
+				key = "" // this share already has its device; reuse it
+				cfg.ControlCA = old.ControlCA
+				if cfg.UpstreamHost == "" {
+					cfg.UpstreamHost = old.UpstreamHost
+				}
+				if old.PrivateName {
+					cfg.PrivateName = true
+				}
+				if cfg.Name == "" {
+					cfg.Name = old.Name
+				}
+				prev = old
+				fresh = false
+			}
+		} else if key == "" {
+			return errorf("no way to add a device for this share")
+		}
+		if cfg.PrivateName && cfg.Name == "" && cfg.BootstrapHostname == "" {
+			if randHex, rerr := generateHexToken(4); rerr == nil {
+				cfg.BootstrapHostname = "site-" + randHex
+			}
+		}
+		cfg.Note = resolveShareNote(prev, o.note, o.noteSet)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		if err := cfg.save(dir); err != nil {
+			return err
+		}
+		if key != "" {
+			if err := os.WriteFile(filepath.Join(dir, "authkey"), []byte(key), 0o600); err != nil {
+				return err
+			}
+		}
+		if fresh {
+			if cfg.PrivateName {
+				if cfg.Note == "" {
+					say("%s", formatSharePrivateNoteTip())
+				}
+			} else {
+				say("%s", formatShareCertLogNotice(cfg.fqdn()))
+			}
+		}
 	}
 
 	if o.enrollOnly {
-		step("Enrolling %s into %s", cfg.url(), dir)
+		if cfg.Name != "" {
+			step("Enrolling %s into %s", cfg.url(), dir)
+		} else {
+			step("Enrolling a private-name share on %s into %s", cfg.Zone, dir)
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		ctx, cancelReady := context.WithCancel(ctx)
@@ -505,17 +607,33 @@ func shareStart(name, what, rawLink string, o options) error {
 	if explicitDir == "" {
 		stopShareService(cfg)
 	}
-	step("Sharing %s as %s", cfg.showing(), cfg.url())
+	if cfg.Name != "" {
+		step("Sharing %s as %s", cfg.showing(), cfg.url())
+	} else {
+		step("Sharing %s under a private hostname on %s", cfg.showing(), cfg.Zone)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return serveShare(ctx, dir, func(c *shareConfig) {
 		shareReady(c, false, false)
-		say("  Stop: Ctrl-C. The name stays yours: run the same command to bring it back.")
+		if c.PrivateName && explicitDir == "" {
+			say("  Stop: Ctrl-C. The name stays yours: run 'hogman share %s %s' to bring it back.", c.Name, what)
+		} else {
+			say("  Stop: Ctrl-C. The name stays yours: run the same command to bring it back.")
+		}
 	})
 }
 
 func formatShareCertLogNotice(fqdn string) string {
 	return fmt.Sprintf("• Note: %s will be publicly visible in certificate logs (contents stay private). Don't put anything sensitive in the name.", fqdn)
+}
+
+func formatSharePrivateNameNotice(fqdn string) string {
+	return fmt.Sprintf("• Private name: %s (only this random name appears in certificate logs; the pen name, site count, and certificate timing are still visible).", fqdn)
+}
+
+func formatSharePrivateNoteTip() string {
+	return `• Tip: pass --note "Label" so members see a readable name in the portal directory instead of the random hostname.`
 }
 
 func shareReady(c *shareConfig, background, managed bool) {
@@ -529,7 +647,11 @@ func shareReady(c *shareConfig, background, managed bool) {
 			say("  It runs in the background until this computer restarts.")
 		}
 	}
-	say("  Take it down and give the name back: hogman share stop %s", c.Name)
+	if c.PrivateName {
+		say("  Take it down and retire the private name: hogman share stop %s", c.Name)
+	} else {
+		say("  Take it down and give the name back: hogman share stop %s", c.Name)
+	}
 }
 
 // shareFromLink sets up a share on a computer that only has a server link.
@@ -681,13 +803,19 @@ func shareFromMembership(name string, o options) (*shareConfig, string, error) {
 	}
 	cfg := &shareConfig{Name: name, Zone: p.zone, LoginServer: me.Network.LoginServer,
 		DNSServer: me.Network.DNSServer, ControlCA: p.controlCA}
-	if old, err := loadShare(shareDir(p.zone, name)); err == nil && old.Zone == p.zone {
-		return cfg, "", nil // already has its device
+	if name != "" {
+		if old, err := loadShare(shareDir(p.zone, name)); err == nil && old.Zone == p.zone {
+			return cfg, "", nil // already has its device
+		}
 	}
 	if me.ThisDevice.Kind == "server" {
 		return nil, "", errorf("this computer is one of your servers, so it can't add devices.\n  Share from a personal device, or with a server link: hogman share NAME WHAT '<server link>'")
 	}
-	step("Adding a server for %s.%s to your devices (%s)", name, p.zone, me.Member.Handle)
+	if name == "" {
+		step("Adding a server for a private-name share on %s to your devices (%s)", p.zone, me.Member.Handle)
+	} else {
+		step("Adding a server for %s.%s to your devices (%s)", name, p.zone, me.Member.Handle)
+	}
 	var dk struct {
 		AuthKey string `json:"auth_key"`
 	}
@@ -816,6 +944,65 @@ func untilOK(ctx context.Context, d time.Duration, fn func() (retry bool, err er
 	}
 }
 
+// claimShareName registers c's name on the pen (allocating a random private
+// label via POST /api/names {"private": true} when c.PrivateName && c.Name == "").
+func claimShareName(ctx context.Context, hc *http.Client, c *shareConfig, dir string) (int, error) {
+	var lastCode int
+	err := untilOK(ctx, 90*time.Second, func() (bool, error) {
+		if c.PrivateName && c.Name == "" {
+			var resp struct {
+				Name string `json:"name"`
+			}
+			body := map[string]any{"private": true, "note": c.Note}
+			code, err := homeAPI(hc, c.Zone, "POST", "/names", body, &resp)
+			lastCode = code
+			if err != nil {
+				return code == 0 || strings.Contains(err.Error(), "not enrolled"), err
+			}
+			label := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(resp.Name)), "."+c.Zone)
+			if !shareNameRE.MatchString(label) || isReservedShareName(label) {
+				return false, fmt.Errorf("pen returned invalid private name %q", resp.Name)
+			}
+			c.Name = label
+			if saveErr := c.save(dir); saveErr != nil {
+				return false, saveErr
+			}
+			return false, nil
+		}
+		code, err := homeAPI(hc, c.Zone, "POST", "/names", map[string]string{"name": c.Name, "note": c.Note}, nil)
+		lastCode = code
+		if err == nil {
+			return false, nil
+		}
+		// Not through the pen's rules yet, or not recorded yet: wait.
+		return code == 0 || strings.Contains(err.Error(), "not enrolled"), err
+	})
+	return lastCode, err
+}
+
+// claimPrivateNameBootstrap enrolls a new --private-name server in a staging
+// directory, claims its random label, saves share.json, and closes tsnet cleanly
+// so the caller can move the directory to shareDir(zone, label) without renaming
+// open state files.
+func claimPrivateNameBootstrap(ctx context.Context, stagingDir string, c *shareConfig) error {
+	node, _, hc, err := shareNode(ctx, stagingDir, c)
+	if err != nil {
+		return err
+	}
+	lastCode, err := claimShareName(ctx, hc, c, stagingDir)
+	if err != nil {
+		_ = giveBackDevice(ctx, hc, c)
+		_ = node.Close()
+		out := errorf("could not claim a private name on %s: %v", c.Zone, err)
+		if ctx.Err() == nil && isPermanentNameStatus(lastCode) {
+			return permanentShare(out)
+		}
+		return out
+	}
+	_ = node.Close()
+	return nil
+}
+
 // serveShare runs a share until ctx ends. ready is called once its name and
 // certificate are in place.
 func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error {
@@ -853,17 +1040,9 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 	}
 	defer node.Close()
 
-	// Name ourselves.
-	var lastCode int
-	err = untilOK(ctx, 90*time.Second, func() (bool, error) {
-		code, err := homeAPI(hc, c.Zone, "POST", "/names", map[string]string{"name": c.Name, "note": c.Note}, nil)
-		lastCode = code
-		if err == nil {
-			return false, nil
-		}
-		// Not through the pen's rules yet, or not recorded yet: wait.
-		return code == 0 || strings.Contains(err.Error(), "not enrolled"), err
-	})
+	// Name ourselves (allocating a private random label if needed).
+	hadName := c.Name != ""
+	lastCode, err := claimShareName(ctx, hc, c, dir)
 	if err != nil {
 		if fresh {
 			// A brand-new share that can't have its name: take its device back
@@ -873,11 +1052,18 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 			_ = os.RemoveAll(filepath.Join(dir, "node"))
 			_ = os.Remove(filepath.Join(dir, "share.json"))
 		}
-		out := errorf("could not claim %s: %v", c.fqdn(), err)
+		targetName := c.fqdn()
+		if !hadName && c.Name == "" {
+			targetName = "a private name on " + c.Zone
+		}
+		out := errorf("could not claim %s: %v", targetName, err)
 		if ctx.Err() == nil && isPermanentNameStatus(lastCode) {
 			return fail(permanentShare(out))
 		}
 		return fail(out)
+	}
+	if !hadName && c.PrivateName {
+		say("%s", formatSharePrivateNameNotice(c.fqdn()))
 	}
 
 	h, closeH, err := shareHandlerWithResolver(c, tsnetPeerResolver(node))
@@ -1435,6 +1621,7 @@ type shareListItemJSON struct {
 	Target  string `json:"target"`
 	Folder  bool   `json:"folder"`
 	Note    string `json:"note,omitempty"`
+	Private bool   `json:"private,omitempty"`
 	Running bool   `json:"running"`
 	Managed bool   `json:"managed"`
 	State   string `json:"state"`
@@ -1465,6 +1652,7 @@ func collectShareListItems(dirs []string) []shareListItemJSON {
 			Target:  c.Target,
 			Folder:  c.Folder,
 			Note:    c.Note,
+			Private: c.PrivateName,
 			Running: running,
 			Managed: managed,
 			State:   state,
@@ -1497,7 +1685,11 @@ func shareList(zone string, asJSON bool) error {
 		if item.Folder {
 			showing = "the folder " + item.Target
 		}
-		say("%-40s %s  (%s)", item.URL, showing, item.State)
+		if item.Note != "" {
+			say("%-40s %s  %q  (%s)", item.URL, showing, item.Note, item.State)
+		} else {
+			say("%-40s %s  (%s)", item.URL, showing, item.State)
+		}
 	}
 	return nil
 }
@@ -1549,7 +1741,11 @@ func shareStop(name string, o options) error {
 	if err := removeShareWithOptions(dir, c, 30*time.Second, o.force); err != nil {
 		return err
 	}
-	say("\n✓ %s is down, and the name is free again.", c.url())
+	if c.PrivateName {
+		say("\n✓ %s is down, and its private name is retired.", c.url())
+	} else {
+		say("\n✓ %s is down, and the name is free again.", c.url())
+	}
 	return nil
 }
 

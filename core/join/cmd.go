@@ -358,10 +358,35 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 		Long:  shareUsage,
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			o.noteSet = cmd.Flags().Changed("note")
+			if o.privateName {
+				if len(args) == 3 {
+					return usageErrorf("cannot pass both a share name (%q) and --private-name; use: hogman share --private-name %s '<server link>' [--note %q]", args[0], args[1], args[0])
+				}
+				if len(args) != 1 && len(args) != 2 {
+					return usageErrorf("usage: hogman share --private-name <target> ['<server link>'] [--note \"Label\"]\n  (run 'hogman share --help' for more)")
+				}
+				if len(args) == 2 && !strings.Contains(trimMatchingQuotes(args[1]), "://") {
+					return usageErrorf("cannot pass both a share name (%q) and --private-name; use: hogman share --private-name %s [--note %q]", args[0], args[1], args[0])
+				}
+				link := ""
+				if len(args) == 2 {
+					if o.linkStdin {
+						return usageErrorf("cannot pass both a share link argument and --link-stdin")
+					}
+					link = args[1]
+				} else if o.linkStdin {
+					raw, err := readJoinLinkInteractive(o, os.Stdin)
+					if err != nil {
+						return err
+					}
+					link = raw
+				}
+				return h.shareStart("", args[0], link, o)
+			}
 			if len(args) != 2 && len(args) != 3 {
 				return usageErrorf("usage: hogman share <name> <target> ['<server link>']\n  (run 'hogman share --help' for more)")
 			}
-			o.noteSet = cmd.Flags().Changed("note")
 			link := ""
 			if len(args) == 3 {
 				if o.linkStdin {
@@ -378,6 +403,7 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 			return h.shareStart(args[0], args[1], link, o)
 		},
 	}
+	shareC.Flags().BoolVar(&o.privateName, "private-name", false, "use a random hostname so the friendly name stays inside the pen (pair with --note \"Label\" for the portal directory). Does not hide the pen name, site count, or issuance/renewal timing in certificate logs, and does not change certificate caps.")
 	shareC.Flags().StringVar(&o.note, "note", "", "short one-line description shown on the pen's home page (--note \"\" clears it)")
 	shareC.Flags().BoolVar(&o.background, "background", false, "keep running in the background and start automatically after a restart")
 	shareC.Flags().BoolVar(&o.noService, "no-service", false, "with --background, don't register a login item, just run in the background")

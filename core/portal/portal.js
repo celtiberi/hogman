@@ -93,8 +93,13 @@
       Object.assign(document.createElement('code'), { textContent: '~/hogman share stop cooler-1' }),
       document.createTextNode(' takes it down and frees the name.')
     );
-    $('host-hint-ctlog').textContent =
-      "Note: bridged site names are publicly visible in certificate logs (traffic and contents stay private). Don't put anything sensitive in a site name — use neutral labels like cooler-1 or panel-b2.";
+    $('host-hint-ctlog').replaceChildren(
+      document.createTextNode('Note: bridged site names are publicly visible in certificate logs (traffic and contents stay private). Use neutral labels like cooler-1 or panel-b2 — or pass '),
+      Object.assign(document.createElement('code'), { textContent: '--private-name' }),
+      document.createTextNode(' with '),
+      Object.assign(document.createElement('code'), { textContent: '--note "Label"' }),
+      document.createTextNode(' for a random hostname.')
+    );
     $('host-hint-2').replaceChildren(
       document.createTextNode('Running on a dedicated on-site bridge computer (Raspberry Pi or mini PC)? Press '),
       Object.assign(document.createElement('em'), { textContent: 'Get a share link' }),
@@ -268,15 +273,21 @@
       main.className = 'site-main';
       const head = el('div', 'site-head');
       const a = document.createElement('a');
-      a.className = 'site-link';
       a.href = 'https://' + s.name;
       a.rel = 'noopener';
-      a.textContent = s.name;
+      const hasPrivateLabel = Boolean(s.private && s.note);
+      a.className = hasPrivateLabel ? 'site-link site-link-label' : 'site-link';
+      a.textContent = hasPrivateLabel ? s.note : s.name;
       head.append(a);
       const badge = presenceBadge(s.online, s.last_seen);
       if (badge) head.append(badge);
       main.append(head);
-      if (s.note) {
+      if (hasPrivateLabel) {
+        const host = document.createElement('div');
+        host.className = 'muted small site-host';
+        host.textContent = s.name;
+        main.append(host);
+      } else if (s.note) {
         const note = document.createElement('div');
         note.className = 'muted small';
         note.textContent = s.note;
