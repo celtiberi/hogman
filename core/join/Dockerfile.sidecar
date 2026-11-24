@@ -14,17 +14,15 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} CGO_ENABLED=0 \
-    go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /out/hogman . && \
-    mkdir -p /dirs/var/lib/hogman /dirs/run/hogman-in /dirs/etc && \
-    printf 'nonroot:x:65532:65532:nonroot:/nonexistent:/sbin/nologin\n' > /dirs/etc/passwd && \
-    printf 'nonroot:x:65532:\n' > /dirs/etc/group
+    go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /rootfs/hogman . && \
+    mkdir -p /rootfs/var/lib/hogman /rootfs/run/hogman-in /rootfs/etc /rootfs/etc/ssl/certs && \
+    cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ca-certificates.crt && \
+    printf 'nonroot:x:65532:65532:nonroot:/nonexistent:/sbin/nologin\n' > /rootfs/etc/passwd && \
+    printf 'nonroot:x:65532:\n' > /rootfs/etc/group && \
+    chown 65532:65532 /rootfs/var/lib/hogman /rootfs/run/hogman-in && \
+    chmod 0700 /rootfs/var/lib/hogman /rootfs/run/hogman-in
 
 FROM scratch
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build /dirs/etc/passwd /etc/passwd
-COPY --from=build /dirs/etc/group /etc/group
-COPY --from=build /out/hogman /hogman
-COPY --from=build --chown=65532:65532 --chmod=0700 /dirs/var/lib/hogman /var/lib/hogman
-COPY --from=build --chown=65532:65532 --chmod=0700 /dirs/run/hogman-in /run/hogman-in
+COPY --from=build /rootfs/ /
 USER 65532:65532
 ENTRYPOINT ["/hogman"]
