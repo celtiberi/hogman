@@ -55,6 +55,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: core/test/compose-public-check.sh
 
+  images:
+    name: docker image builds
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build registrar image (isolated context + go test)
+        run: docker build --progress=plain -t hogman-registrar-check core/registrar
+      - name: Build signup images (isolated context + go test)
+        run: |
+          docker build --progress=plain --target web -t hogman-signup-web-check deploy/signup
+          docker build --progress=plain --target broker -t hogman-signup-broker-check deploy/signup
+      - name: Build join client image (isolated context + go test)
+        run: docker build --progress=plain -t hogman-join-check core/join
+
   pen:
     name: pen (core/test/run.sh)
     needs: changes
