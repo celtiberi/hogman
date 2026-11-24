@@ -4,6 +4,11 @@
 #
 #   deploy/release.sh [git-ref]      default: origin/main
 #
+# Normally run by .github/workflows/release.yml, in two steps so the packaged
+# files can be given GitHub build provenance before anything is published:
+#   NO_DEPLOY=1 OUT_DIR=<dir> deploy/release.sh <ref>    package only
+#   PUBLISH_FROM=<dir> deploy/release.sh <ref>           publish exactly those files
+#
 # Packages committed code only (never the working folder):
 #   hogman-<version>.tar.gz, hogman-bin-<version>.tar.gz (compiled client CLI,
 #   registrar, sign-up page and challenge DNS), standalone hogman-* client
@@ -42,6 +47,17 @@ trap 'rm -rf "$work"' EXIT
 out="${OUT_DIR:-$work/out}"
 mkdir -p "$out"
 
+repo="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+# Standalone attested hogman client binaries + checksums for `hogman update`.
+cli_bins=(
+  hogman-Darwin-arm64
+  hogman-Darwin-x86_64
+  hogman-Linux-x86_64
+  hogman-Linux-aarch64
+  hogman-windows-amd64.exe
+)
+
+package() {
 echo "using GitHub's build of $sha..."
 # Only push or manual runs: a pull-request run builds a merge commit, and its
 # artifact is named after that, not $full (and isn't attested).
@@ -66,7 +82,6 @@ if [ -n "$bad_entries" ]; then
 fi
 # Artifacts lose the executable bit.
 find "$work/prebuilt" -type f ! -name SHA256SUMS -exec chmod 0755 {} +
-repo="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
 checked=0
 while IFS= read -r -d '' f; do
   gh attestation verify "$f" --repo "$repo" --deny-self-hosted-runners \
@@ -115,14 +130,6 @@ for a in "$out/$tarball" "$out/$bins"; do
 done
 git show "$REF:deploy/install.sh" > "$out/install.sh"
 
-# Standalone attested hogman client binaries + checksums for `hogman update`.
-cli_bins=(
-  hogman-Darwin-arm64
-  hogman-Darwin-x86_64
-  hogman-Linux-x86_64
-  hogman-Linux-aarch64
-  hogman-windows-amd64.exe
-)
 [ -f "$work/prebuilt/join/SHA256SUMS" ] || { echo "missing prebuilt/join/SHA256SUMS: not releasing" >&2; exit 1; }
 for cb in "${cli_bins[@]}"; do
   [ -f "$work/prebuilt/join/$cb" ] || { echo "missing prebuilt/join/$cb: not releasing" >&2; exit 1; }
@@ -146,6 +153,31 @@ cp "$work/prebuilt/join/SHA256SUMS" "$out/hogman-SHA256SUMS"
 
 echo "compiled bundle $bins ($(du -h "$out/$bins" | cut -f1))"
 echo "release $ver ($(du -h "$out/$tarball" | cut -f1)) from $REF"
+
+}
+
+# PUBLISH_FROM=<dir>: publish files an earlier NO_DEPLOY=1 run packaged for this
+# same commit, without rebuilding them (a rebuilt archive has a different
+# digest, so provenance made for the first one would not match).
+if [ -n "${PUBLISH_FROM:-}" ]; then
+  [ "${NO_DEPLOY:-}" != 1 ] || { echo "PUBLISH_FROM and NO_DEPLOY=1 together make no sense" >&2; exit 2; }
+  out="$(cd "$PUBLISH_FROM" && pwd)"
+  [ "$(tr -d '\r\n' < "$out/latest" 2>/dev/null)" = "$ver" ] \
+    || { echo "$out was not packaged for $ver: not publishing" >&2; exit 1; }
+  for f in "$tarball" "$bins" install.sh SHA256SUMS hogman-SHA256SUMS "${cli_bins[@]}"; do
+    [ -f "$out/$f" ] && [ ! -L "$out/$f" ] || { echo "missing or not a regular file in $out: $f" >&2; exit 1; }
+  done
+  ( cd "$out"
+    if command -v sha256sum >/dev/null; then
+      sha256sum -c --quiet SHA256SUMS && sha256sum -c --quiet hogman-SHA256SUMS
+    else
+      shasum -a 256 -c --quiet SHA256SUMS && shasum -a 256 -c --quiet hogman-SHA256SUMS
+    fi ) || { echo "checksums in $out do not match its files: not publishing" >&2; exit 1; }
+  git show "$REF:deploy/install.sh" | cmp -s - "$out/install.sh" \
+    || { echo "$out/install.sh is not the committed installer for $sha: not publishing" >&2; exit 1; }
+else
+  package
+fi
 
 if [ "${NO_DEPLOY:-}" != 1 ]; then
   if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
