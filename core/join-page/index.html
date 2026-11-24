@@ -75,8 +75,10 @@
           <li><strong>&ldquo;Allow hogman to find devices on local networks?&rdquo;</strong> Either answer works.
             <strong>Allow</strong> lets your devices in the same home or office talk to each other directly, which is faster.
             <strong>Don't Allow</strong> sends that traffic the long way, over the internet. Nothing on your network is shared with the pen either way.</li>
-          <li id="pw-note"><strong>Your Mac's password</strong>, once, so your browsers can find the pen's sites. It changes only that proxy
-            setting. If you skip it, the tool prints the one setting to change by hand.</li>
+          <li id="pw-note"><strong>A macOS password prompt</strong>, once, so your browsers can find the pen's sites automatically.
+            Enter your Mac login password (or use Touch ID) — it goes to macOS, not to Hogman, and changes only that automatic proxy setting.
+            Over SSH or without a desktop session, Terminal asks instead (nothing shows as you type — that's normal; press Enter).
+            If you cancel it, the tool prints the one setting to change by hand.</li>
         </ul>
         <p class="note vpn-callout" id="vpn-note"><strong>Using a VPN (ProtonVPN, Mullvad, or a work VPN)?</strong> macOS VPN apps override the system proxy while connected.
           Pause your VPN while visiting pen sites, or set Firefox's built-in <em>Automatic proxy configuration URL</em> to the address printed by <code>hogman</code>.</p>
