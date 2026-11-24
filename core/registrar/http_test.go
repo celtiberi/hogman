@@ -652,7 +652,8 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 	close(resCh)
 	for res := range resCh {
 		if res.st != nil {
-			defer res.st.db.Close()
+			st := res.st
+			t.Cleanup(func() { _ = st.db.Close() })
 		}
 		if res.err != nil {
 			t.Fatalf("concurrent OpenStore legacy migrate: %v", res.err)

@@ -53,11 +53,6 @@ func pickPACHost(remaining []*agentConfig) *agentConfig {
 	return remaining[0]
 }
 
-func hasAlongside(zone string) bool {
-	_, err := os.Stat(filepath.Join(stateDir(zone), "config.json"))
-	return err == nil
-}
-
 // pickLocalAddr chooses a random port outside the OS ephemeral range
 // (17000-26999), scanning forward if that port is in use, so remote web pages
 // cannot predict a pen's loopback proxy port from its zone name.
@@ -434,12 +429,6 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	return nil
 }
 
-// checkPortalVia loads the portal through the agent's proxy, verifying with
-// system roots (or HOGMAN_ACME_CA_ROOT).
-func checkPortalVia(portal, proxy string) (string, error) {
-	return checkPortalViaCtx(context.Background(), portal, proxy)
-}
-
 func checkPortalViaCtx(ctx context.Context, portal, proxy string) (string, error) {
 	pool, err := testACMECAPool()
 	if err != nil {
@@ -454,10 +443,6 @@ func checkPortalViaCtx(ctx context.Context, portal, proxy string) (string, error
 		TLSClientConfig: &tls.Config{RootCAs: pool},
 	}}
 	return pollPortalCtx(ctx, c, portal, 45*time.Second)
-}
-
-func pollPortal(c *http.Client, portal string, d time.Duration) (string, error) {
-	return pollPortalCtx(context.Background(), c, portal, d)
 }
 
 func pollPortalCtx(ctx context.Context, c *http.Client, portal string, d time.Duration) (string, error) {

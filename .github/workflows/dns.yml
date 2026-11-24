@@ -38,6 +38,8 @@ jobs:
     environment: infra-preview          # read-only token
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install dnscontrol (checksum pinned)
         run: |
           f="dnscontrol_${DNSCONTROL_VERSION}_linux_amd64.tar.gz"
@@ -77,6 +79,8 @@ jobs:
     concurrency: { group: dns-apply, cancel-in-progress: false }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install dnscontrol (checksum pinned)
         run: |
           f="dnscontrol_${DNSCONTROL_VERSION}_linux_amd64.tar.gz"

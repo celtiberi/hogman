@@ -156,10 +156,6 @@ func (sc *stripeCheckout) params() *stripe.CheckoutSessionCreateParams {
 	return sc.paramsFor(sc.publicURL, planPersonal)
 }
 
-func (sc *stripeCheckout) paramsForOrigin(origin string) *stripe.CheckoutSessionCreateParams {
-	return sc.paramsFor(origin, planPersonal)
-}
-
 func (sc *stripeCheckout) paramsFor(origin, plan string) *stripe.CheckoutSessionCreateParams {
 	if origin == "" {
 		origin = sc.publicURL

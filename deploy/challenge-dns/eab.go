@@ -42,7 +42,7 @@ func newGCPMinter(ctx context.Context, keyFile string) (*gcpMinter, error) {
 	if err := json.Unmarshal(b, &meta); err != nil || meta.ProjectID == "" {
 		return nil, fmt.Errorf("%s: not a service-account key with a project_id", keyFile)
 	}
-	creds, err := google.CredentialsFromJSON(ctx, b, "https://www.googleapis.com/auth/cloud-platform")
+	creds, err := google.CredentialsFromJSONWithType(ctx, b, google.ServiceAccount, "https://www.googleapis.com/auth/cloud-platform")
 	if err != nil {
 		return nil, err
 	}

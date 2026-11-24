@@ -686,7 +686,8 @@ func TestParseEABDoubleEncoding(t *testing.T) {
 func TestWindowLimiter(t *testing.T) {
 	l := &windowLimiter{perMin: 2, perHour: 3}
 	now := time.Now()
-	if !l.allow(now) || !l.allow(now) || l.allow(now) {
+	first, second, third := l.allow(now), l.allow(now), l.allow(now)
+	if !first || !second || third {
 		t.Fatal("per-minute limit")
 	}
 	now = now.Add(2 * time.Minute)

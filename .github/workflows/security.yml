@@ -1,0 +1,108 @@
+# Repeatable security and correctness scanners. Same input, same answer, so
+# the blocking ones can be required checks on main.
+#
+#   staticcheck  Go correctness and deprecated/unsafe API use (blocking)
+#   gofmt        Go formatting (blocking)
+#   zizmor       GitHub Actions workflow security (blocking)
+#   gosec        Go security patterns (advisory: results go to the Security
+#                tab as code scanning alerts and new ones are shown on PRs;
+#                it does not fail the run while its existing findings, mostly
+#                path and URL taint false positives, are triaged)
+#
+# Tool versions are pinned; bump them deliberately.
+name: security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  staticcheck:
+    name: staticcheck (${{ matrix.module }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [core/join, core/registrar, deploy/signup, deploy/challenge-dns, deploy/ops]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache: false
+      - name: gofmt
+        working-directory: ${{ matrix.module }}
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt-formatted (run gofmt -w):" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+      - name: staticcheck
+        working-directory: ${{ matrix.module }}
+        env:
+          MODULE: ${{ matrix.module }}
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          # Check the same platforms the code is built for.
+          for goos in linux darwin windows; do
+            case "$MODULE" in core/join) ;; *) [ "$goos" = linux ] || continue ;; esac
+            echo "== GOOS=$goos"
+            GOOS="$goos" "$(go env GOPATH)/bin/staticcheck" ./...
+          done
+
+  zizmor:
+    name: zizmor (workflows)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: zizmor
+        run: |
+          pipx run 'zizmor==1.33.1' --offline --min-severity low .github/workflows
+
+  gosec:
+    name: gosec (advisory)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write   # upload results to code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: core/join/go.mod
+          cache: false
+      - name: gosec
+        run: |
+          set -euo pipefail
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+          mkdir -p "$RUNNER_TEMP/sarif"
+          for m in core/join core/registrar deploy/signup deploy/challenge-dns deploy/ops; do
+            out="$RUNNER_TEMP/sarif/$(echo "$m" | tr / -).sarif"
+            (cd "$m" && "$(go env GOPATH)/bin/gosec" -quiet -no-fail -tests=false -fmt sarif -out "$out" ./...)
+          done
+          ls -l "$RUNNER_TEMP/sarif"
+      - name: Upload to code scanning
+        # Pull requests from forks get a read-only token and can't upload.
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
+        with:
+          sarif_file: ${{ runner.temp }}/sarif
+          category: gosec
