@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- `deploy/release.sh` & `deploy/install.sh`: release archives now record every file as owned by root (0:0), and `release.sh` refuses to publish one that doesn't or that contains the builder's account name. `install.sh` unpacks with `--no-same-owner` and sets root ownership before copying, which also corrects files left by earlier installs. Before this, the compiled-parts archive carried the builder's uid, so on a server with a local user of that uid the installed binaries were writable by that user.
+
 ### Changed
 - `core/join`, `core/join-page`, `core/portal`, `deploy/release.sh`, `browser-ext`, `packaging/`, & tests: renamed the client CLI from `hogman-join` to **`hogman`** and completed Phase 2 consolidation, diagnostics, and packaging:
   - Renamed compiled client binaries, GitHub Release assets (`hogman-<OS>-<ARCH>` + `hogman-SHA256SUMS`), join page (`start.sh`, `index.html`, `join.js`), portal instructions, browser extension copy, E2E suites, and documentation from `hogman-join` to `hogman`.
