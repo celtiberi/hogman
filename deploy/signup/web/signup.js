@@ -23,9 +23,8 @@
   let sites = 'pens.hogman.network';
   const setSites = () => document.querySelectorAll('.sites').forEach(e => { e.textContent = sites; });
 
-  // Optional pen UI theme ("work" when on the work signup host or ?theme=work).
-  const queryTheme = new URLSearchParams(location.search).get('theme') === 'work';
-  let penTheme = (queryTheme || /^get\.work\./i.test(location.hostname)) ? 'work' : '';
+  // Optional pen UI theme ("work" when on the work signup host, confirmed by /api/status).
+  let penTheme = /^get\.work\./i.test(location.hostname) ? 'work' : '';
   let workApplied = false;
 
   const setFavicon = href => {
@@ -237,12 +236,17 @@
     $('w-err').hidden = true;
     const email = $('w-email').value.trim();
     if (!email.includes('@')) { $('w-err').textContent = 'Type the email you joined with, then press this again.'; $('w-err').hidden = false; return; }
+    if (tsSiteKey && !tsWaitToken) { $('w-err').textContent = 'Please complete the verification check first.'; $('w-err').hidden = false; return; }
+    $('w-leave').disabled = true;
     try {
-      await api('POST', '/waitlist/leave', { email });
+      const payload = { email };
+      if (tsSiteKey) payload.turnstile_token = tsWaitToken;
+      await api('POST', '/waitlist/leave', payload);
       $('waited-title').textContent = "You're off the list";
       $('waited-text').textContent = `If ${email} was on the waiting list, it isn't any more, and we've deleted it.`;
       show('waited');
     } catch (e) { $('w-err').textContent = e.message; $('w-err').hidden = false; }
+    finally { resetTurnstile('wait'); $('w-leave').disabled = false; }
   });
   $('wait').addEventListener('submit', async ev => {
     ev.preventDefault();
@@ -255,7 +259,7 @@
       const payload = { email, pen: $('w-pen').value.trim(), note: $('w-note').value.trim() };
       if (tsSiteKey) payload.turnstile_token = tsWaitToken;
       const r = await api('POST', '/waitlist', payload);
-      $('waited-title').textContent = r.already ? "You're already on the list" : "You're on the list";
+      $('waited-title').textContent = "You're on the list";
       $('waited-text').textContent = `You're number ${r.place}. We'll email ${email} a sign-up code when there's room.`;
       show('waited');
     } catch (e) { $('w-err').textContent = e.message; $('w-err').hidden = false; }

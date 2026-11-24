@@ -1086,7 +1086,7 @@ func TestBrokerHealthAndChallengeDNSOutage(t *testing.T) {
 	if code, out := call(wh, "GET", "/api/check?pen=fresh&vanity=1", "", nil); code != 503 || out["error"] != nameCheckUnavailableMsg {
 		t.Fatalf("web down /api/check: %d %v, want 503 %q", code, out, nameCheckUnavailableMsg)
 	}
-	if code, out := call(wh, "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"fresh","handle":"alice"}`, nil); code != 503 || out["error"] != nameCheckUnavailableMsg {
+	if code, out := call(wh, "POST", "/api/create", `{"code":"PIG-AAAA-BBBB","pen":"fresh","handle":"alice"}`, map[string]string{"Content-Type": "application/json"}); code != 503 || out["error"] != nameCheckUnavailableMsg {
 		t.Fatalf("web down /api/create: %d %v, want 503 %q", code, out, nameCheckUnavailableMsg)
 	}
 }

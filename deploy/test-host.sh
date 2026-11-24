@@ -419,7 +419,7 @@ check "a full server says so (503)" test "$full" = 503
 # The waiting list, now that the server is full.
 wl() { docker exec client-signup curl -s -H 'content-type: application/json' -d "$1" https://get.example/api/waitlist; }
 check "a full server's page takes you onto the waiting list" bash -c "jq -e '.place == 1' <<<'$(wl '{"email":"Wanda@Example.com","pen":"wanda","note":"for the band"}')'"
-check "joining twice keeps one place" bash -c "jq -e '.already and .place == 1' <<<'$(wl '{"email":"wanda@example.com"}')'"
+check "joining twice keeps one place" bash -c "jq -e '.place == 1 and (has(\"already\") | not)' <<<'$(wl '{"email":"wanda@example.com"}')'"
 bad_email() { wl '{"email":"nope"}' | jq -e '.error | test("email")'; }
 check "a bad email is refused" bad_email
 wl '{"email":"xavier@example.org"}' >/dev/null

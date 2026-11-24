@@ -69,8 +69,9 @@ func TestAuditWebStatusRateLimitAndSameOriginJSON(t *testing.T) {
 		t.Fatalf("status over limit = %d, want 429", code)
 	}
 
-	// Cross-origin POST to /api/checkout and /api/waitlist/leave must be rejected.
-	for _, path := range []string{"/api/checkout", "/api/waitlist/leave"} {
+	// Cross-origin and non-JSON POSTs to all mutating endpoints must be rejected
+	// before consuming rate-limit budgets (M1).
+	for _, path := range []string{"/api/create", "/api/waitlist", "/api/checkout", "/api/waitlist/leave"} {
 		req := httptest.NewRequest("POST", path, strings.NewReader(`{}`))
 		req.Host = "get.example.com"
 		req.Header.Set("Content-Type", "application/json")
@@ -89,6 +90,25 @@ func TestAuditWebStatusRateLimitAndSameOriginJSON(t *testing.T) {
 		if rec2.Code != 415 {
 			t.Fatalf("non-JSON %s = %d, want 415", path, rec2.Code)
 		}
+	}
+
+	// L1 & L5: /paid.html carries Cache-Control: no-store and X-Frame-Options: DENY.
+	paidReq := httptest.NewRequest("GET", "/paid.html", nil)
+	paidRec := httptest.NewRecorder()
+	h.ServeHTTP(paidRec, paidReq)
+	if paidRec.Code != 200 || paidRec.Header().Get("Cache-Control") != "no-store" || paidRec.Header().Get("X-Frame-Options") != "DENY" {
+		t.Fatalf("/paid.html headers: code=%d cc=%q xfo=%q", paidRec.Code, paidRec.Header().Get("Cache-Control"), paidRec.Header().Get("X-Frame-Options"))
+	}
+
+	// L2: public POST /api/waitlist must not expose the "already" membership oracle.
+	js := map[string]string{"Content-Type": "application/json", "X-Forwarded-For": "203.0.113.50"}
+	if code, out := call(h, "POST", "/api/waitlist", `{"email":"oracle@example.com"}`, js); code != 200 {
+		t.Fatalf("first waitlist join = %d %v", code, out)
+	}
+	if code, out := call(h, "POST", "/api/waitlist", `{"email":"oracle@example.com"}`, js); code != 200 {
+		t.Fatalf("second waitlist join = %d %v", code, out)
+	} else if _, leaked := out["already"]; leaked {
+		t.Fatalf("public /api/waitlist leaked 'already' oracle: %v", out)
 	}
 }
 

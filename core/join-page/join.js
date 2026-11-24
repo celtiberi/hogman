@@ -106,12 +106,16 @@
   }
   const cleanLink = `https://${host}/join#${t ? 't=' + t : 'k=' + k}${forShare ? '&for=share' : ''}`;
   const quoted = `'${cleanLink}'`;
-  const makeLongCmd = verb => `curl -fsSLo hogman "https://${host}/join/dl/hogman-$(uname -s)-$(uname -m)" && chmod +x hogman && ./hogman ${verb}${quoted}`;
+  const makeLongCmd = verb => `curl -fsSL --proto =https --proto-redir =https -o hogman "https://${host}/join/dl/hogman-$(uname -s)-$(uname -m)" && chmod +x hogman && ./hogman ${verb}${quoted}`;
+  const makeStartShareCmd = args => `curl -fsSL --proto =https --proto-redir =https https://${host}/start | HOGMAN_EXPECTED_HOST='${host}' sh -s -- ${quoted} ${args}`;
   const verb = forShare ? 'share blog 8080 ' : '';
   let longCmd = makeLongCmd(verb);
   // Joining: one short command that's the same for everyone; it asks for the
-  // link, so the secret never sits in the command. Sharing keeps the long form.
-  let unixCmd = forShare ? longCmd : `curl -fsSL https://${host}/start | sh`;
+  // link, so the secret never sits in the command. Sharing also uses /start so
+  // the download goes through a temp dir and SHA-256 verification.
+  let unixCmd = forShare
+    ? makeStartShareCmd('share blog 8080')
+    : `curl -fsSL --proto =https --proto-redir =https https://${host}/start | HOGMAN_EXPECTED_HOST='${host}' sh`;
   $('cmd').textContent = unixCmd;
   $('cmd-manual').textContent = longCmd;
   $('link-step').hidden = forShare;
@@ -153,7 +157,7 @@
       applyWorkTheme(n.zone, forShare);
       if (forShare) {
         longCmd = makeLongCmd('share cooler-1 http://192.168.1.40 ') + ' --background';
-        unixCmd = longCmd;
+        unixCmd = makeStartShareCmd('share cooler-1 http://192.168.1.40 --background');
         $('cmd').textContent = unixCmd;
         $('cmd-manual').textContent = longCmd;
       }
