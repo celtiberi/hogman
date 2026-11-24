@@ -19,6 +19,19 @@
   const vanityHint = /(?:^|[#&])vanity=1(?:&|$)/.test(location.hash);
   if (vanityHint && $('rand-suffix')) $('rand-suffix').hidden = true;
 
+  // Keep pen-creation fields collapsed until a syntactically complete code is
+  // entered (purely client-side format check — no server code-check oracle).
+  const codeFormatRE = /^PIG-[A-Z0-9]{4}-[A-Z0-9]{4}$/i;
+  const hasValidCodeFormat = () => codeFormatRE.test($('code').value.trim());
+  const syncCodeGate = () => {
+    const unlocked = hasValidCodeFormat();
+    if ($('code-fields')) $('code-fields').hidden = !unlocked;
+    if ($('form-actions')) $('form-actions').hidden = !unlocked;
+  };
+  $('code').addEventListener('input', syncCodeGate);
+  $('code').addEventListener('change', syncCodeGate);
+  syncCodeGate();
+
   // What pens' names end in (<pen>.pens.hogman.network), from the server.
   let sites = 'pens.hogman.network';
   const setSites = () => document.querySelectorAll('.sites').forEach(e => { e.textContent = sites; });
@@ -102,12 +115,7 @@
 
     $('go').textContent = 'Create pen';
     $('wait-title').textContent = 'Request early access';
-    $('wait-intro').textContent = 'Leave your work email and we\u2019ll send a sign-up code as capacity opens.';
-    $('w-pen-label').replaceChildren(
-      document.createTextNode('Preferred pen name '),
-      Object.assign(document.createElement('span'), { className: 'opt', textContent: '(optional)' })
-    );
-    $('w-pen').placeholder = 'store-north';
+    $('wait-intro').textContent = 'Leave your work email and we\u2019ll send a sign-up code for a free pen as capacity opens.';
     $('w-note-label').replaceChildren(
       document.createTextNode('What are you protecting? '),
       Object.assign(document.createElement('span'), { className: 'opt', textContent: '(optional)' })
@@ -358,7 +366,7 @@
     if (tsSiteKey && !tsWaitToken) { $('w-err').textContent = 'Please complete the verification check first.'; $('w-err').hidden = false; return; }
     $('w-go').disabled = true;
     try {
-      const payload = { email, pen: $('w-pen').value.trim(), note: $('w-note').value.trim() };
+      const payload = { email, note: $('w-note').value.trim() };
       if (tsSiteKey) payload.turnstile_token = tsWaitToken;
       const r = await api('POST', '/waitlist', payload);
       $('waited-title').textContent = "You're on the list";
@@ -432,8 +440,11 @@
     setNames();
     const body = { code: $('code').value, pen: $('pen').value, handle: $('handle').value };
     if (penTheme) body.theme = penTheme;
-    if (!body.code.trim() || !body.pen.trim() || !body.handle.trim()) {
-      $('err').textContent = 'Fill in all three.'; $('err').hidden = false; return;
+    if (!hasValidCodeFormat()) {
+      $('err').textContent = 'Enter a full sign-up code (like PIG-XXXX-XXXX) first.'; $('err').hidden = false; $('code').focus(); return;
+    }
+    if (!body.pen.trim() || !body.handle.trim()) {
+      $('err').textContent = 'Fill in both the network name and your name.'; $('err').hidden = false; return;
     }
     if (tsSiteKey && !tsFormToken) {
       $('err').textContent = 'Please complete the verification check first.'; $('err').hidden = false; return;
@@ -463,7 +474,7 @@
     if (/^[a-z0-9.-]+$/.test(s.sites_domain || '')) { sites = s.sites_domain; setSites(); }
     if (s.theme === 'work') { penTheme = 'work'; applyWorkTheme(); }
     if (s.turnstile_site_key) mountTurnstile(s.turnstile_site_key);
-    if (s.for_sale && s.open) {
+    if (s.for_sale && s.open && !vanityHint) {
       $('buy-line').hidden = false;
       $('buy').addEventListener('click', async () => {
         $('buy-err').hidden = true;

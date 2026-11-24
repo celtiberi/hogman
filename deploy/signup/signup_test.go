@@ -1147,8 +1147,11 @@ func TestWaitlistAckEmailPersonalWorkDedupAndNoNoteReflection(t *testing.T) {
 		if m.subject != "You're on the Hogman waiting list" {
 			t.Fatalf("personal ack subject = %q", m.subject)
 		}
-		if !strings.Contains(m.text, "spot #1") || !strings.Contains(m.text, "Requested pen name: lab") || !strings.Contains(m.text, "https://get.example.com/#wait") || !strings.Contains(m.text, `"Take me off the list"`) {
+		if !strings.Contains(m.text, "spot #1") || !strings.Contains(m.text, "https://get.example.com/#wait") || !strings.Contains(m.text, `"Take me off the list"`) {
 			t.Fatalf("personal ack body missing expected details:\n%s", m.text)
+		}
+		if strings.Contains(m.text, "Requested pen name") {
+			t.Fatalf("ack email must not imply bare pen-name reservation for free waitlist:\n%s", m.text)
 		}
 		if strings.Contains(m.text, "PHISH") || strings.Contains(m.text, "evil.example") {
 			t.Fatalf("ack email MUST NOT reflect untrusted note text:\n%s", m.text)
@@ -1219,9 +1222,9 @@ func TestWaitlistAckEmailPersonalWorkDedupAndNoNoteReflection(t *testing.T) {
 	b.waitAckMail = newLimiterWithCap(1, time.Hour, 4)
 	b.mailSem = make(chan struct{}, 1)
 	b.mailSem <- struct{}{} // occupy only slot
-	b.sendWaitlistAckAsync("dave@example.com", "", 4, false)
+	b.sendWaitlistAckAsync("dave@example.com", 4, false)
 	<-b.mailSem // free slot; dave's per-address + global budget must still be unspent
-	b.sendWaitlistAckAsync("dave@example.com", "", 4, false)
+	b.sendWaitlistAckAsync("dave@example.com", 4, false)
 	select {
 	case m := <-sentCh:
 		if len(m.to) != 1 || m.to[0] != "dave@example.com" {
@@ -1229,5 +1232,32 @@ func TestWaitlistAckEmailPersonalWorkDedupAndNoNoteReflection(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("full mailSem burned rate-limit budget for unsent email")
+	}
+}
+
+func TestSignupPageCodeGateAndWaitlistMarkup(t *testing.T) {
+	b, _ := newTestBroker(t, "")
+	bsrv := httptest.NewServer(b.handler())
+	t.Cleanup(bsrv.Close)
+
+	wb := newWeb(bsrv.URL, testToken, "pens.test")
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	wb.handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET / = %d, want 200", rec.Code)
+	}
+	html := rec.Body.String()
+	if strings.Contains(html, `id="w-pen"`) {
+		t.Fatal("waitlist form must not ask for a bare vanity pen name (id=\"w-pen\")")
+	}
+	codeFieldsIdx := strings.Index(html, `<div id="code-fields" hidden>`)
+	tsFormIdx := strings.Index(html, `<div class="turnstile" id="ts-form" hidden>`)
+	formActionsIdx := strings.Index(html, `<div class="actions" id="form-actions" hidden>`)
+	if codeFieldsIdx < 0 || tsFormIdx < 0 || formActionsIdx < 0 {
+		t.Fatalf("missing expected code-gate markup: code-fields=%d ts-form=%d form-actions=%d", codeFieldsIdx, tsFormIdx, formActionsIdx)
+	}
+	if !(codeFieldsIdx < tsFormIdx && tsFormIdx < formActionsIdx) {
+		t.Fatalf("expected #ts-form between #code-fields and #form-actions so Buy a pen works without a code")
 	}
 }

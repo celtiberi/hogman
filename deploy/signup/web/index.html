@@ -54,32 +54,34 @@
       </div>
     </div>
 
-    <div class="field">
-      <label for="pen" id="pen-label">Network name (your pen)</label>
-      <div class="suffix">
-        <input id="pen" name="pen" placeholder="your-network" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30" required>
-        <span><span id="rand-suffix">-xxxx</span>.<span class="sites">pens.hogman.network</span></span>
+    <div id="code-fields" hidden>
+      <div class="field">
+        <label for="pen" id="pen-label">Network name (your pen)</label>
+        <div class="suffix">
+          <input id="pen" name="pen" placeholder="your-network" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30" required>
+          <span><span id="rand-suffix">-xxxx</span>.<span class="sites">pens.hogman.network</span></span>
+        </div>
+        <p class="hint" id="pen-hint">We add a random 4-character ending so names stay available. Sites and addresses will end in <span class="nowrap">.<span class="penname">&lt;network&gt;-xxxx</span>.<span class="sites">pens.hogman.network</span></span></p>
+        <p class="hint" id="pen-ctlog-hint">Pen names are publicly visible in certificate logs (contents stay private) — don't put anything sensitive in yours.</p>
       </div>
-      <p class="hint" id="pen-hint">We add a random 4-character ending so names stay available. Sites and addresses will end in <span class="nowrap">.<span class="penname">&lt;network&gt;-xxxx</span>.<span class="sites">pens.hogman.network</span></span></p>
-      <p class="hint" id="pen-ctlog-hint">Pen names are publicly visible in certificate logs (contents stay private) — don't put anything sensitive in yours.</p>
-    </div>
 
-    <div class="field">
-      <label for="handle" id="handle-label">Your personal name in it</label>
-      <div class="suffix">
-        <input id="handle" name="handle" placeholder="your-name" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" required>
-        <span>.<span class="penname">&lt;network&gt;-xxxx</span>.<span class="sites">pens.hogman.network</span></span>
+      <div class="field">
+        <label for="handle" id="handle-label">Your personal name in it</label>
+        <div class="suffix">
+          <input id="handle" name="handle" placeholder="your-name" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" required>
+          <span>.<span class="penname">&lt;network&gt;-xxxx</span>.<span class="sites">pens.hogman.network</span></span>
+        </div>
+        <p class="hint" id="handle-hint">For you as the pen's keeper: you invite people and can remove anyone.</p>
       </div>
-      <p class="hint" id="handle-hint">For you as the pen's keeper: you invite people and can remove anyone.</p>
-    </div>
 
-    <div class="disclosure">
-      <p class="hint" id="disclosure-text"><strong>Before you pick a name:</strong> free sign-ups add a random 4-character ending (like <code>coffee-7k2m</code>) so common names aren't squatted or collided on; pen names are permanent (a used name is never given out again). Pen and site names appear in public Certificate Transparency logs (contents stay private), and hosted pens currently share <code>pens.hogman.network</code> so use a separate browser profile for any pen you don't fully trust.</p>
+      <div class="disclosure">
+        <p class="hint" id="disclosure-text"><strong>Before you pick a name:</strong> free sign-ups add a random 4-character ending (like <code>coffee-7k2m</code>) so common names aren't squatted or collided on; pen names are permanent (a used name is never given out again). Pen and site names appear in public Certificate Transparency logs (contents stay private), and hosted pens currently share <code>pens.hogman.network</code> so use a separate browser profile for any pen you don't fully trust.</p>
+      </div>
     </div>
 
     <div class="turnstile" id="ts-form" hidden></div>
 
-    <div class="actions">
+    <div class="actions" id="form-actions" hidden>
       <button class="btn" id="go" type="submit">Raise my pen</button>
     </div>
     <p class="error" id="err" role="alert" hidden></p>
@@ -87,19 +89,11 @@
 
   <form id="wait" class="panel" novalidate hidden>
     <h2 id="wait-title">The waiting list</h2>
-    <p class="panel-intro" id="wait-intro">Leave your email and we'll send you a sign-up code when there's room.</p>
+    <p class="panel-intro" id="wait-intro">Leave your email and we'll send you a sign-up code for a free pen when there's room.</p>
 
     <div class="field">
       <label for="w-email">Email</label>
       <input id="w-email" type="email" autocomplete="email" maxlength="254" required>
-    </div>
-
-    <div class="field">
-      <label for="w-pen" id="w-pen-label">The pen name you'd like <span class="opt">(optional)</span></label>
-      <div class="suffix">
-        <input id="w-pen" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="30">
-        <span>.<span class="sites">pens.hogman.network</span></span>
-      </div>
     </div>
 
     <div class="field">

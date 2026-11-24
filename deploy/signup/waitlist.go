@@ -176,7 +176,7 @@ func (b *broker) waitlist(w http.ResponseWriter, r *http.Request) {
 	if !already {
 		log.Printf("waitlist: someone joined (%d waiting)", place)
 		b.notifyKind("waitlist", fmt.Sprintf("Someone joined the waiting list. %d waiting. See: hogman-host waitlist", place))
-		b.sendWaitlistAckAsync(email, pen, place, theme == "work")
+		b.sendWaitlistAckAsync(email, place, theme == "work")
 	}
 	jsonOut(w, 200, map[string]any{"place": place, "already": already})
 }
@@ -184,7 +184,7 @@ func (b *broker) waitlist(w http.ResponseWriter, r *http.Request) {
 // waitlistAckEmail builds the plain-text confirmation email for a brand-new
 // waiting-list entry. It intentionally never reflects the caller's free-form
 // note so Hogman's mail domain cannot be abused to relay arbitrary text.
-func waitlistAckEmail(pen string, place int, isWork bool, origin string) (subject, body string) {
+func waitlistAckEmail(place int, isWork bool, origin string) (subject, body string) {
 	product := "Hogman"
 	leaveLabel := "Take me off the list"
 	if isWork {
@@ -194,10 +194,7 @@ func waitlistAckEmail(pen string, place int, isWork bool, origin string) (subjec
 	subject = fmt.Sprintf("You're on the %s waiting list", product)
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "You're on the %s waiting list (spot #%d).\n\n", product, place)
-	sb.WriteString("We'll email you a sign-up code as soon as capacity opens.\n")
-	if pen != "" {
-		fmt.Fprintf(&sb, "Requested pen name: %s (not reserved until you sign up).\n", pen)
-	}
+	sb.WriteString("We'll email you a sign-up code for a free pen as soon as capacity opens.\n")
 	if origin != "" {
 		fmt.Fprintf(&sb, "\nDidn't request this, or want to leave the list? Remove your email anytime at:\n%s/#wait\n(Enter this email address and choose \"%s\".)\n", strings.TrimRight(origin, "/"), leaveLabel)
 	}
@@ -207,7 +204,7 @@ func waitlistAckEmail(pen string, place int, isWork bool, origin string) (subjec
 // sendWaitlistAckAsync sends a one-time confirmation email via Resend for a
 // newly added waiting-list entry without blocking /waitlist (preserving
 // uniform response timing and preventing mail failures from failing sign-ups).
-func (b *broker) sendWaitlistAckAsync(email, pen string, place int, isWork bool) {
+func (b *broker) sendWaitlistAckAsync(email string, place int, isWork bool) {
 	if b.alertSendFn == nil && (b.resendAPIKey == "" || b.billingFrom == "") {
 		return
 	}
@@ -239,7 +236,7 @@ func (b *broker) sendWaitlistAckAsync(email, pen string, place int, isWork bool)
 		plan = planWork
 	}
 	origin := b.renewOriginForPen(plan)
-	subject, body := waitlistAckEmail(pen, place, isWork, origin)
+	subject, body := waitlistAckEmail(place, isWork, origin)
 	go func() {
 		defer func() { <-b.mailSem }()
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

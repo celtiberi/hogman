@@ -1,0 +1,1 @@
+- Waitlist sign-up form and emails no longer ask for or promise a bare vanity pen name (free waitlist codes always append a random 4-character suffix), and the pen-creation fields on the sign-up page stay collapsed until a complete sign-up code (`PIG-XXXX-XXXX`) is entered or pre-filled from a link.
