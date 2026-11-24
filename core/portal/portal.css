@@ -343,20 +343,32 @@ button:active:not(:disabled) {
   transform: translateY(1px);
 }
 
-button.primary {
+button.primary,
+a.btn.primary {
+  display: inline-block;
   font: 400 0.98rem var(--display);
   text-transform: uppercase;
   letter-spacing: 0.07em;
+  text-decoration: none;
   color: #1a0a04;
   border: 1.5px solid #000;
+  border-radius: 5px;
+  cursor: pointer;
   background: linear-gradient(180deg, var(--gold), var(--fire) 72%, var(--blood));
   box-shadow: 0 3px 0 #000, 0 0 18px rgba(255, 106, 26, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.45);
   padding: 0.5rem 1.1rem;
+  transition: border-color 0.14s, filter 0.14s, box-shadow 0.14s, transform 0.08s;
 }
 
-button.primary:hover:not(:disabled) {
+button.primary:hover:not(:disabled),
+a.btn.primary:hover {
   border-color: var(--gold);
   box-shadow: 0 3px 0 #000, 0 0 24px rgba(255, 106, 26, 0.55);
+  text-decoration: none;
+}
+
+a.btn.primary:active {
+  transform: translateY(1px);
 }
 
 button.link {
@@ -1100,7 +1112,8 @@ html[data-theme="work"] button:hover:not(:disabled) {
   filter: none;
 }
 
-html[data-theme="work"] button.primary {
+html[data-theme="work"] button.primary,
+html[data-theme="work"] a.btn.primary {
   font: 600 0.9rem var(--text);
   text-transform: none;
   letter-spacing: 0;
@@ -1111,10 +1124,12 @@ html[data-theme="work"] button.primary {
   box-shadow: none;
 }
 
-html[data-theme="work"] button.primary:hover:not(:disabled) {
+html[data-theme="work"] button.primary:hover:not(:disabled),
+html[data-theme="work"] a.btn.primary:hover {
   background: #27303f;
   border-color: #27303f;
   box-shadow: none;
+  text-decoration: none;
 }
 
 html[data-theme="work"] button.link {

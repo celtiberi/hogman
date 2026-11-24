@@ -72,8 +72,7 @@
       <h2>Sites in this pen</h2>
       <a class="section-link" id="sites-host-link" href="#host">Host a site &darr;</a>
     </div>
-    <p class="muted hint" id="sites-empty" hidden>No sites yet. Put a folder or a website here with
-      <code>~/hogman share NAME FOLDER-or-PORT</code> (see <a href="#host">Host something</a> below).</p>
+    <p class="muted hint" id="sites-empty" hidden>No sites yet. Follow the <a href="https://hogman.network/docs/share.html" target="_blank" rel="noopener noreferrer">Hosting guide</a> to put a folder or a web app you're already running into this pen.</p>
     <ul class="devices site-grid" id="directory"></ul>
     <p class="error" id="sites-err" hidden></p>
   </section>
@@ -198,22 +197,12 @@
   <section id="host" class="panel">
     <div class="section-head">
       <h2 id="host-title">Host something</h2>
-      <a class="section-link" id="host-guide-link" href="https://hogman.network/docs/share.html" target="_blank" rel="noopener noreferrer">Hosting guide &rarr;</a>
     </div>
-    <p class="host-intro" id="host-intro">One command puts a folder or a web server in the pen, with its own name and a real browser padlock.
-      Run it with the same <code>hogman</code> you joined with, on a computer that's in the pen:</p>
-    <pre><code id="host-code">~/hogman share photos ~/holiday --note "Summer trip photos"
-~/hogman share blog 3000            # a site you're building, by its port</code></pre>
-    <p class="muted hint" id="host-hint-1">Everyone in the pen can then open <code>https://blog.<span class="zone">&lt;network&gt;.pens.hogman.network</span></code>.
-      Add <code>--background</code> to keep it running after the window closes;
-      <code>~/hogman share stop blog</code> takes it down and frees the name.</p>
-    <p class="muted hint" id="host-hint-ctlog">Note: site names are publicly visible in certificate logs (contents stay private). Don't put anything sensitive in a site name — or pass <code>--private-name</code> with <code>--note "Label"</code> for a random hostname.</p>
-    <p class="muted hint" id="host-hint-2">Running from a spare computer that isn't in the pen? Click <em>Get a share link</em>
-      above and pass the link at the end: <code>~/hogman share blog 3000 '&lt;share link&gt;'</code>.
-      Already run Caddy or nginx? Share its port.</p>
-    <p class="muted hint" id="host-hint-upgrade">Upgrading from an older <code>hogman-join</code> binary? Download
-      <code>~/hogman</code> from <code>https://hogman.network/dl/hogman-$(uname -s)-$(uname -m)</code>,
-      run <code>chmod +x ~/hogman &amp;&amp; ~/hogman update</code>, then delete <code>~/hogman-join</code>.</p>
+    <p class="host-intro" id="host-intro">Put a folder of files or a web app you're already running into this pen under its own private HTTPS address. Read the hosting guide for step-by-step instructions (including running in the background, sharing from a spare computer, and private site names).</p>
+    <p class="btn-row">
+      <a class="btn primary" id="host-guide-link" href="https://hogman.network/docs/share.html" target="_blank" rel="noopener noreferrer">Read the hosting guide &rarr;</a>
+    </p>
+    <p class="muted hint" id="host-hint-ctlog">Site names appear in public certificate logs (contents stay private) — see the guide for <code>--private-name</code> if you want a random hostname.</p>
   </section>
 </main>
 
