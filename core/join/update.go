@@ -1282,6 +1282,9 @@ func updateCmd(args []string, o options) error {
 	anyUpdate := selfNeedsUpdate || canonicalNeedsUpdate || nhNeedsUpdate || anyLegacy || anyInterrupted || anyStaleAgent
 	if !anyUpdate {
 		say("\n✓ %s is already up to date (%s).", cliBinaryName(), wantHex[:12])
+		if !o.dryRun {
+			warnMissingSystemProxyServices(loadInstalledPenConfigs(configBase))
+		}
 		return nil
 	}
 
@@ -1476,7 +1479,24 @@ func updateCmd(args []string, o options) error {
 	} else {
 		say("\n✓ Updated hogman (SHA-256 %s).", wantHex[:12])
 	}
+	warnMissingSystemProxyServices(loadInstalledPenConfigs(configBase))
 	return nil
+}
+
+func warnMissingSystemProxyServices(configs []*agentConfig) {
+	if len(configs) == 0 {
+		return
+	}
+	sys := detectSystemProxyState(configs)
+	if len(sys.MissingProxyServices) == 0 {
+		return
+	}
+	if host := pickPACHost(configs); host != nil {
+		svcList := formatServiceList(sys.MissingProxyServices)
+		say("\n! Automatic proxy configuration is not set on: %s", svcList)
+		say("  In System Settings → Network → %s → Details… → Proxies, turn on \"Automatic proxy configuration\" and paste:", svcList)
+		say("    %s", host.pacURL())
+	}
 }
 
 func shortDigest(h string) string {
