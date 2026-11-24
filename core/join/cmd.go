@@ -386,6 +386,7 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 	shareC.Flags().BoolVar(&o.enrollOnly, "enroll-only", false, "enroll the share, claim its name and certificate, then exit 0 (for one-shot container setup)")
 	shareC.Flags().BoolVar(&o.linkStdin, "link-stdin", false, "read the server share link from standard input instead of an argument")
 	shareC.Flags().StringVar(&o.upstreamHost, "upstream-host", "", "optional Host header to send to a unix:// upstream (default: <name>.<zone>)")
+	shareC.Flags().BoolVar(&o.identityHeaders, "identity-headers", false, "pass verified X-Hogman-* caller identity headers to a local upstream target (off by default)")
 
 	shareListC := &cobra.Command{
 		Use:   "list",

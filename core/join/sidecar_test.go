@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +14,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"tailscale.com/client/tailscale/apitype"
+	"tailscale.com/tailcfg"
 )
 
 func TestUnixSocketShareTargetValidation(t *testing.T) {
@@ -227,5 +232,198 @@ func TestShareLockAndContainerCLIFlags(t *testing.T) {
 	rc = runCLI([]string{"bridge", "--listen-unix", "/run/hogman-in/app.sock", "--forward-tcp", "127.0.0.1:8080", "--max-conns", "64"}, h)
 	if rc != 0 || gotBridge.listenUnix != "/run/hogman-in/app.sock" || gotBridge.forwardTCP != "127.0.0.1:8080" || gotBridge.maxConns != 64 {
 		t.Fatalf("bridge flags: rc=%d bo=%+v err=%s", rc, gotBridge, errBuf.String())
+	}
+}
+
+func TestShareIdentityHeaders(t *testing.T) {
+	var gotHeaders http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	sendSpoofed := func(h http.Handler, remoteAddr string) {
+		t.Helper()
+		gotHeaders = nil
+		req := httptest.NewRequest(http.MethodGet, "https://fleet.ops.pens.example.com/api", nil)
+		req.RemoteAddr = remoteAddr
+		req.Header.Set("X-Hogman-Handle", "spoofed-owner")
+		// Underscore spellings collapse to HTTP_X_HOGMAN_HANDLE in CGI/PHP/WSGI/Rack.
+		req.Header["X_Hogman_Handle"] = []string{"spoofed-underscore"}
+		req.Header["X-Hogman_Handle"] = []string{"spoofed-mixed"}
+		req.Header.Set("X-Hogman-Role", "owner")
+		req.Header["X_Hogman_Role"] = []string{"owner"}
+		req.Header.Set("X-Hogman-IP", "100.64.0.1")
+		req.Header.Set("X-Hogman-Node", "spoofed-node")
+		req.Header.Set("X-Hogman-Tags", "tag:admin")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("upstream status = %d body=%s", rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. Default OFF: inbound X-Hogman-* headers (including underscore variants) are ALWAYS stripped and resolver is not called.
+	resolverCalls := 0
+	hOff, closeOff, err := shareHandlerWithResolver(&shareConfig{
+		Name:   "fleet",
+		Zone:   "ops.pens.example.com",
+		Target: upstream.URL,
+	}, func(ctx context.Context, remoteAddr string) (*sharePeerIdentity, error) {
+		resolverCalls++
+		return &sharePeerIdentity{Handle: "bob", Node: "bob-laptop", IP: "100.64.0.11"}, nil
+	})
+	if err != nil {
+		t.Fatalf("shareHandlerWithResolver(off): %v", err)
+	}
+	defer closeOff()
+	sendSpoofed(hOff, "100.64.0.11:51234")
+	if resolverCalls != 0 {
+		t.Fatalf("resolver called %d times when IdentityHeaders=false, want 0", resolverCalls)
+	}
+	for k := range gotHeaders {
+		if isHogmanHeaderName(k) {
+			t.Fatalf("client-supplied header %q leaked when IdentityHeaders=false: %v", k, gotHeaders)
+		}
+	}
+
+	// 2. Enabled ON with personal device (including Headscale trailing '@' on LoginName):
+	// spoofed hyphen/underscore/mixed headers are stripped and replaced with verified peer identity.
+	hOn, closeOn, err := shareHandlerWithResolver(&shareConfig{
+		Name:            "fleet",
+		Zone:            "ops.pens.example.com",
+		Target:          upstream.URL,
+		IdentityHeaders: true,
+	}, func(ctx context.Context, remoteAddr string) (*sharePeerIdentity, error) {
+		return peerIdentityFromWhoIs(remoteAddr, &apitype.WhoIsResponse{
+			Node: &tailcfg.Node{
+				Name:         "bob-laptop.ops.pens.example.com.",
+				ComputedName: "bob-laptop",
+			},
+			UserProfile: &tailcfg.UserProfile{LoginName: "bob@"},
+		}), nil
+	})
+	if err != nil {
+		t.Fatalf("shareHandlerWithResolver(on): %v", err)
+	}
+	defer closeOn()
+	sendSpoofed(hOn, "100.64.0.11:51234")
+	if got := gotHeaders.Get("X-Hogman-Handle"); got != "bob" {
+		t.Fatalf("X-Hogman-Handle = %q, want bob", got)
+	}
+	if got := gotHeaders.Get("X-Hogman-Node"); got != "bob-laptop" {
+		t.Fatalf("X-Hogman-Node = %q, want bob-laptop", got)
+	}
+	if got := gotHeaders.Get("X-Hogman-IP"); got != "100.64.0.11" {
+		t.Fatalf("X-Hogman-IP = %q, want 100.64.0.11", got)
+	}
+	if got := gotHeaders.Get("X-Hogman-Tags"); got != "" {
+		t.Fatalf("X-Hogman-Tags = %q, want empty for personal device", got)
+	}
+	for k := range gotHeaders {
+		if isHogmanHeaderName(k) && k != "X-Hogman-Handle" && k != "X-Hogman-Node" && k != "X-Hogman-Ip" {
+			t.Fatalf("unexpected or spoofed X-Hogman header %q leaked: %v", k, gotHeaders[k])
+		}
+	}
+
+	// 3. Tagged server node: emits X-Hogman-Tags, never X-Hogman-Handle (even if LoginName is set).
+	hSrv, closeSrv, err := shareHandlerWithResolver(&shareConfig{
+		Name:            "fleet",
+		Zone:            "ops.pens.example.com",
+		Target:          upstream.URL,
+		IdentityHeaders: true,
+	}, func(ctx context.Context, remoteAddr string) (*sharePeerIdentity, error) {
+		return peerIdentityFromWhoIs(remoteAddr, &apitype.WhoIsResponse{
+			Node: &tailcfg.Node{
+				Name:         "notes.ops.pens.example.com.",
+				ComputedName: "notes",
+				Tags:         []string{"tag:server"},
+			},
+			UserProfile: &tailcfg.UserProfile{LoginName: "alice"},
+		}), nil
+	})
+	if err != nil {
+		t.Fatalf("shareHandlerWithResolver(tagged): %v", err)
+	}
+	defer closeSrv()
+	sendSpoofed(hSrv, "100.64.0.20:44444")
+	if got := gotHeaders.Get("X-Hogman-Handle"); got != "" {
+		t.Fatalf("tagged server must not get X-Hogman-Handle, got %q", got)
+	}
+	if got := gotHeaders.Get("X-Hogman-Tags"); got != "tag:server" {
+		t.Fatalf("X-Hogman-Tags = %q, want tag:server", got)
+	}
+	if got := gotHeaders.Get("X-Hogman-Node"); got != "notes" || gotHeaders.Get("X-Hogman-IP") != "100.64.0.20" {
+		t.Fatalf("tagged server node/ip = %q / %q", gotHeaders.Get("X-Hogman-Node"), gotHeaders.Get("X-Hogman-IP"))
+	}
+
+	// 4. WhoIs lookup error: spoofed headers stay stripped and no X-Hogman-* header is sent.
+	hErr, closeErr, err := shareHandlerWithResolver(&shareConfig{
+		Name:            "fleet",
+		Zone:            "ops.pens.example.com",
+		Target:          upstream.URL,
+		IdentityHeaders: true,
+	}, func(ctx context.Context, remoteAddr string) (*sharePeerIdentity, error) {
+		return nil, errors.New("whois unavailable")
+	})
+	if err != nil {
+		t.Fatalf("shareHandlerWithResolver(err): %v", err)
+	}
+	defer closeErr()
+	sendSpoofed(hErr, "100.64.0.11:51234")
+	for k := range gotHeaders {
+		if isHogmanHeaderName(k) {
+			t.Fatalf("header %q leaked on WhoIs error: %v", k, gotHeaders)
+		}
+	}
+
+	// 5. Local-target restriction: refuses folder shares and non-loopback LAN targets.
+	if _, _, err := shareHandlerWithResolver(&shareConfig{
+		Name:            "docs",
+		Zone:            "ops.pens.example.com",
+		Target:          t.TempDir(),
+		Folder:          true,
+		IdentityHeaders: true,
+	}, nil); err == nil {
+		t.Fatal("expected IdentityHeaders=true on folder share to fail")
+	}
+	if _, _, err := shareHandlerWithResolver(&shareConfig{
+		Name:            "lan",
+		Zone:            "ops.pens.example.com",
+		Target:          "http://192.168.1.40:8080",
+		IdentityHeaders: true,
+	}, nil); err == nil {
+		t.Fatal("expected IdentityHeaders=true on LAN target to fail")
+	}
+	// Dial-time enforcement: localhost resolving to a LAN IP must be refused.
+	dialFn := loopbackOnlyDialContext(
+		func(ctx context.Context, host string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("192.168.1.40")}}, nil
+		},
+		func(ctx context.Context, network, addr string) (net.Conn, error) {
+			t.Fatalf("dial should not be called for LAN IP %s", addr)
+			return nil, errors.New("unexpected dial")
+		},
+	)
+	if _, err := dialFn(context.Background(), "tcp", "localhost:8080"); err == nil {
+		t.Fatal("expected loopbackOnlyDialContext to refuse localhost -> 192.168.1.40")
+	}
+
+	// 6. CLI flag wiring: off by default, enabled when --identity-headers is passed.
+	var gotO options
+	var errBuf bytes.Buffer
+	h := cliHandlers{
+		errOut: &errBuf,
+		shareStart: func(_, _, _ string, o options) error {
+			gotO = o
+			return nil
+		},
+	}
+	if rc := runCLI([]string{"share", "fleet", "8080"}, h); rc != 0 || gotO.identityHeaders {
+		t.Fatalf("default share --identity-headers: rc=%d flag=%v err=%s", rc, gotO.identityHeaders, errBuf.String())
+	}
+	if rc := runCLI([]string{"share", "fleet", "8080", "--identity-headers"}, h); rc != 0 || !gotO.identityHeaders {
+		t.Fatalf("share --identity-headers: rc=%d flag=%v err=%s", rc, gotO.identityHeaders, errBuf.String())
 	}
 }

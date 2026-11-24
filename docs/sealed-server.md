@@ -49,6 +49,8 @@ services:
       - --state-dir=/var/lib/hogman
       # Optional: override Host header sent to strict dev servers (default: <name>.<zone>)
       # - --upstream-host=localhost:8080
+      # Optional: pass verified X-Hogman-* caller identity headers to a local upstream app (off by default)
+      # - --identity-headers
     depends_on:
       hogman-bridge:
         condition: service_healthy
@@ -117,6 +119,19 @@ Paste the share link and press `Ctrl-D`. Hogman enrolls the server node, claims 
 ```sh
 docker compose up -d
 ```
+
+## Caller Identity Headers (`--identity-headers`)
+
+Apps behind `hogman share` (or `hogman-sidecar`) can identify who in the pen is calling without building passwords or session cookies.
+
+- **Off by default:** pass `--identity-headers` on `hogman share` to enable. Only allowed for local upstream targets (`unix://` socket, `localhost`, `127.0.0.1`, or `::1` — refused for static folders and LAN targets).
+- **Always stripped on ingress:** `hogman share` strips every inbound `X-Hogman-*` header (regardless of casing or suffix) before forwarding, **whether or not `--identity-headers` is enabled**, so a caller in the pen can never forge identity headers.
+- **Headers set on the local hop** (resolved from the authenticated WireGuard peer via `tsnet` `WhoIs`):
+  - `X-Hogman-Handle` — the member's Hogman handle (personal devices only; omitted for tagged server nodes).
+  - `X-Hogman-Node` — the peer's device name.
+  - `X-Hogman-IP` — the peer's mesh IP address.
+  - `X-Hogman-Tags` — comma-separated ACL tags (e.g. `tag:server`), omitted for personal devices.
+- **Fail closed in your app:** only accept traffic on the local socket or loopback interface reachable by the sidecar, and return `403 Forbidden` whenever `X-Hogman-Handle` is missing or not on your allowlist (and reject requests with `X-Hogman-Tags` if only personal devices should have access).
 
 ## Operational Notes
 

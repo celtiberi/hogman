@@ -50,6 +50,7 @@ type options struct {
 	stateDir                    string // share: explicit state directory (container/sidecar deployments)
 	enrollOnly                  bool   // share: enroll state into --state-dir and exit 0
 	upstreamHost                string // share: optional Host header override for unix:// upstreams
+	identityHeaders             bool   // share: pass verified X-Hogman-* caller identity headers to local upstreams
 	chromeID                    string // browser-setup: optional unpacked Chrome extension ID
 	firefoxID                   string // browser-setup: optional Firefox Gecko extension ID
 }
