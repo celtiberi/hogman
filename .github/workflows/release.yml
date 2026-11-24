@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       commit:
-        description: "Commit on main to release (full SHA). Empty = the tip of main."
+        description: "Commit on main to release (full SHA). Empty = main as it is when you start this run."
         required: false
         default: ""
 
@@ -58,7 +58,10 @@ jobs:
           set -euo pipefail
           want="${COMMIT_INPUT:-}"
           if [ -z "$want" ]; then
-            full="$(git rev-parse 'origin/main^{commit}')"
+            # The commit main pointed at when the run was started, which is the
+            # one shown on the approval screen. Not origin/main: with auto-merge
+            # a pull request can land between starting the run and approving it.
+            full="$(git rev-parse "${GITHUB_SHA}^{commit}")"
           else
             [[ "$want" =~ ^[0-9a-f]{40}$ ]] || { echo "commit must be a full 40-character SHA" >&2; exit 1; }
             full="$(git rev-parse --verify "$want^{commit}")"

@@ -331,7 +331,7 @@ using a host-pushed snapshot file and zero host RPC listeners:
 
 Releases are published by GitHub, not from anyone's machine: `.github/workflows/release.yml`.
 
-1. Start it: **Actions → release → Run workflow** (leave the commit empty for the tip of `main`), or
+1. Start it: **Actions → release → Run workflow** (leave the commit empty to release `main` as it is when you start the run), or
    `gh workflow run release.yml -f commit=<full sha>`.
 2. Approve it: the job waits in the `release` environment until a required reviewer approves. That
    approval is the decision to release.

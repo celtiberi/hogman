@@ -164,9 +164,16 @@ if [ -n "${PUBLISH_FROM:-}" ]; then
   out="$(cd "$PUBLISH_FROM" && pwd)"
   [ "$(tr -d '\r\n' < "$out/latest" 2>/dev/null)" = "$ver" ] \
     || { echo "$out was not packaged for $ver: not publishing" >&2; exit 1; }
-  for f in "$tarball" "$bins" install.sh SHA256SUMS hogman-SHA256SUMS "${cli_bins[@]}"; do
+  for f in "$tarball" "$bins" install.sh SHA256SUMS hogman-SHA256SUMS latest "${cli_bins[@]}"; do
     [ -f "$out/$f" ] && [ ! -L "$out/$f" ] || { echo "missing or not a regular file in $out: $f" >&2; exit 1; }
   done
+  # `sha256sum -c` only checks the lines a checksum file has, so a shortened
+  # file would leave an archive unchecked: each must list exactly its files.
+  sums_names() { awk '{ sub(/^\*/, "", $2); print $2 }' "$1" | sort; }
+  [ "$(sums_names "$out/SHA256SUMS")" = "$(printf '%s\n' "$tarball" "$bins" install.sh | sort)" ] \
+    || { echo "$out/SHA256SUMS does not list exactly the two archives and install.sh: not publishing" >&2; exit 1; }
+  [ "$(sums_names "$out/hogman-SHA256SUMS")" = "$(printf '%s\n' "${cli_bins[@]}" | sort)" ] \
+    || { echo "$out/hogman-SHA256SUMS does not list exactly the client binaries: not publishing" >&2; exit 1; }
   ( cd "$out"
     if command -v sha256sum >/dev/null; then
       sha256sum -c --quiet SHA256SUMS && sha256sum -c --quiet hogman-SHA256SUMS
