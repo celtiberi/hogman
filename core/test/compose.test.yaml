@@ -134,6 +134,30 @@ services:
       - ./data/join-dl:/dl:ro
       - ${ACME_DIR:?}:/acme:ro
 
+  # Fresh computers for the pasted join command: no /dl mount, so hogman
+  # comes from the front door exactly as /start fetches it for a person.
+  zsh-laptop: &paste-computer
+    image: nicolaka/netshoot:v0.14
+    hostname: zsh-laptop
+    networks: [outside, acme]
+    profiles: [clients]
+    environment:
+      <<: *acme-env
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        cp /edge-trust/root.crt /usr/local/share/ca-certificates/control-host.crt &&
+        cp /acme/issued-root.crt /usr/local/share/ca-certificates/acme-issued.crt &&
+        update-ca-certificates >/dev/null 2>&1;
+        exec sleep infinity
+    volumes:
+      - ./data/edge-trust:/edge-trust:ro
+      - ${ACME_DIR:?}:/acme:ro
+
+  bash-laptop:
+    <<: *paste-computer
+    hostname: bash-laptop
+
   # A computer that isn't in the pen: it shares an app with a server (share)
   # link, and must not be able to join as a whole computer with one.
   dave-server:

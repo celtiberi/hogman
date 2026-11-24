@@ -514,6 +514,34 @@ check "leave works (exit $rc)" grep -q "Left $ZONE" <<<"$out"
 conn_gone() { ! run carol-desktop test -e "/root/.config/hogman/$ZONE"; }
 check "leave removed the pen's connection and its settings" conn_gone
 
+step "The join page's own command, pasted into a terminal (zsh and bash)"
+# Run the exact text join.js shows people, the way they paste it: zsh is the
+# default shell in macOS Terminal, bash on most Linux. (Before #191, zsh
+# stopped at an unquoted --proto =https and nothing here noticed.) The only
+# additions are the flags a terminal without a keyboard needs.
+dc up -d zsh-laptop bash-laptop
+for c in zsh-laptop bash-laptop; do retry 20 run "$c" test -s /etc/ssl/certs/ca-certificates.crt; done
+paste_join() {  # paste_join <container> <shell> <handle>
+  local c="$1" shell="$2" handle="$3" link cmd
+  link="$($H invite create --note "$handle (pasted join command)" | awk '/^link:/ {print $2}')"
+  cmd="$("$SRC/test/render-join-cmd.sh" "$PUBLIC_HOST" "$link") --no-open --handle $handle --hostname $c"
+  run "$c" "$shell" -c "$cmd" 2>&1
+}
+pasted_portal_ok() {  # pasted_portal_ok <container> <handle>
+  run "$1" sh -c 'p="$(jq -r .proxy_addr "$HOME/.config/hogman/$2/config.json")" &&
+    curl -sf -m 10 -x "http://$p" "https://home.$2/api/me"' _ "$ZONE" | jq -e --arg h "$2" '.member.handle == $h' >/dev/null
+}
+for pair in "zsh-laptop zsh zara" "bash-laptop bash bart"; do
+  set -- $pair
+  out="$(paste_join "$1" "$2" "$3")"; rc=$?
+  [ $rc = 0 ] || echo "$out" | sed 's/^/        | /'
+  check "pasted join command works under $2 (exit $rc)" grep -q "You're in. You are $3 on $ZONE" <<<"$out"
+  check "... with no shell error (e.g. zsh's 'https not found')" bash -c '! grep -qE "not found|parse error|no matches found" <<<"$1"' _ "$out"
+  check "... installed ~/hogman from the front door" run "$1" sh -c 'test -x "$HOME/hogman" && "$HOME/hogman" --version'
+  check "... and $3 reaches the portal through the local proxy" retry 15 pasted_portal_ok "$1" "$3"
+done
+dc rm -sf zsh-laptop bash-laptop >/dev/null 2>&1 || true
+
 step "Side by side: a computer with no Tailscale at all"
 dc up -d dave-laptop
 retry 20 run dave-laptop test -s /etc/ssl/certs/ca-certificates.crt
