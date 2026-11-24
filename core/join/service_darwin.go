@@ -225,14 +225,9 @@ func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, error) {
 		}
 	}
 	if len(ops) > 0 {
-		err := applyDarwinProxyOps(
-			"Hogman needs to set this Mac's automatic proxy so your browsers can reach your pen.",
-			"to set this Mac's proxy for your pen",
-			ops,
-			defaultDarwinProxyRunner(),
-		)
+		err := applyDarwinProxyOps(darwinProxyCopyFor("set"), ops, defaultDarwinProxyRunner())
 		if err != nil {
-			return "", fmt.Errorf("%v. To do it by hand, %s", err, manual)
+			return "", fmt.Errorf("%v Re-run to try again, or set it by hand: %s", err, manual)
 		}
 		for _, op := range ops {
 			done = append(done, op.Service)
@@ -276,14 +271,12 @@ func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {
 	if len(ops) == 0 {
 		return ""
 	}
-	prompt := "Hogman needs to remove the pen from this Mac's automatic proxy setting"
-	why := "to remove the pen from this Mac's automatic proxy setting"
+	mode := "remove"
 	if hasSet {
-		prompt = "Hogman needs to update this Mac's automatic proxy setting"
-		why = "to update this Mac's automatic proxy setting"
+		mode = "update"
 	}
-	if err := applyDarwinProxyOps(prompt, why, ops, defaultDarwinProxyRunner()); err != nil {
-		note("could not update this Mac's automatic proxy setting automatically: %v", err)
+	if err := applyDarwinProxyOps(darwinProxyCopyFor(mode), ops, defaultDarwinProxyRunner()); err != nil {
+		note("%v", err)
 		return ""
 	}
 	if hasSet {

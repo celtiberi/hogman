@@ -104,14 +104,54 @@ func isDarwinDialogCanceled(out string, err error) bool {
 	return strings.Contains(low, "(-128)") || strings.Contains(low, "user canceled") || strings.Contains(low, "user cancelled")
 }
 
-func buildDarwinSudoPrompt(why string) string {
+func escapeSudoPrompt(p string) string {
 	// sudo -p expands %-escapes (%u, %h, etc.), so escape any literal %.
-	clean := strings.ReplaceAll(strings.TrimSpace(why), "%", "%%")
-	clean = strings.TrimPrefix(clean, "to ")
-	if clean == "" {
-		return "Mac login password (nothing shows as you type): "
+	return strings.ReplaceAll(p, "%", "%%")
+}
+
+type darwinProxyCopy struct {
+	PreDialog    string
+	DialogPrompt string
+	DialogDone   string
+	PreSudo      string
+	SudoPrompt   string
+	SudoAccepted string
+	CanceledMsg  string
+}
+
+func darwinProxyCopyFor(mode string) darwinProxyCopy {
+	switch mode {
+	case "update":
+		return darwinProxyCopy{
+			PreDialog:    "macOS is asking for your Mac login password to update your Mac's automatic proxy for your remaining pens.",
+			DialogPrompt: "Hogman needs to update your Mac's automatic proxy for your remaining pens.",
+			DialogDone:   "✓ Mac automatic proxy updated",
+			PreSudo:      "macOS needs your Mac login password to update your Mac's automatic proxy for your remaining pens (Hogman never sees your password). Nothing appears as you type — type your password and press Enter.",
+			SudoPrompt:   "Mac login password (updates proxy for your pens; nothing shows as you type): ",
+			SudoAccepted: "✓ Password accepted — updating Mac automatic proxy…",
+			CanceledMsg:  "Cancelled — Mac automatic proxy was not changed.",
+		}
+	case "remove":
+		return darwinProxyCopy{
+			PreDialog:    "macOS is asking for your Mac login password to remove your pen's automatic proxy.",
+			DialogPrompt: "Hogman needs to remove your pen's automatic proxy from this Mac's network settings.",
+			DialogDone:   "✓ Mac automatic proxy removed",
+			PreSudo:      "macOS needs your Mac login password to remove your pen's automatic proxy (Hogman never sees your password). Nothing appears as you type — type your password and press Enter.",
+			SudoPrompt:   "Mac login password (removes Hogman proxy; nothing shows as you type): ",
+			SudoAccepted: "✓ Password accepted — removing Mac automatic proxy…",
+			CanceledMsg:  "Cancelled — Mac automatic proxy was not changed.",
+		}
+	default: // "set"
+		return darwinProxyCopy{
+			PreDialog:    "macOS is asking for your Mac login password to set this Mac's automatic proxy for your pen (your normal browsing stays untouched).",
+			DialogPrompt: "Hogman needs to set your Mac's automatic proxy so your browser can open sites in your pen. Your normal internet browsing is not affected.",
+			DialogDone:   "✓ Mac automatic proxy set",
+			PreSudo:      "macOS needs your Mac login password to set this Mac's automatic proxy so your browser can open pen sites (your normal browsing stays untouched, and Hogman never sees your password). Nothing appears as you type — type your password and press Enter.",
+			SudoPrompt:   "Mac login password (sets proxy for your pen; nothing shows as you type): ",
+			SudoAccepted: "✓ Password accepted — updating Mac automatic proxy…",
+			CanceledMsg:  "Cancelled — Mac automatic proxy was not changed.",
+		}
 	}
-	return fmt.Sprintf("Mac login password (lets Hogman %s; nothing shows as you type): ", clean)
 }
 
 type darwinProxyRunner struct {
@@ -151,17 +191,19 @@ func runDarwinNetworksetupOps(ops []darwinProxyOp, useSudo bool, runNS func(useS
 // privileged step (D-40 / I-26):
 //  1. Already root or cached sudo timestamp -> runs directly with no prompt.
 //  2. Active macOS GUI session -> single native administrator dialog via
-//     /usr/bin/osascript with static AppleScript and explicit argv.
+//     /usr/bin/osascript with static AppleScript and explicit argv; prints
+//     DialogDone once the dialog and networksetup batch finish.
 //  3. No GUI session (SSH, headless) or non-cancel dialog error -> falls back
-//     to terminal `sudo -v` with explicit password/no-echo guidance and
-//     immediate confirmation once accepted.
+//     to terminal `sudo -v -p <prompt>` with explicit password/no-echo guidance,
+//     prints SudoAccepted immediately between password acceptance and running
+//     networksetup, then executes all batched ops with `sudo -n`.
 //  4. Explicit dialog cancel -> returns a clear error immediately (non-zero,
 //     never hangs).
-func applyDarwinProxyOps(prompt, why string, ops []darwinProxyOp, r darwinProxyRunner) error {
+func applyDarwinProxyOps(copy darwinProxyCopy, ops []darwinProxyOp, r darwinProxyRunner) error {
 	if len(ops) == 0 {
 		return nil
 	}
-	osascriptArgs, err := buildDarwinOsascriptArgs(prompt, ops)
+	osascriptArgs, err := buildDarwinOsascriptArgs(copy.DialogPrompt, ops)
 	if err != nil {
 		return err
 	}
@@ -178,14 +220,14 @@ func applyDarwinProxyOps(prompt, why string, ops []darwinProxyOp, r darwinProxyR
 	}
 
 	if r.hasGUI != nil && r.hasGUI() && r.runOsascript != nil {
-		logNote("A macOS password prompt will open %s. Enter your Mac login password (or use Touch ID) — it goes to macOS, not to Hogman.", why)
+		logNote("%s", copy.PreDialog)
 		out, oerr := r.runOsascript(osascriptArgs)
 		if oerr == nil {
-			logNote("Got it — updated this Mac's automatic proxy setting.")
+			logNote("%s", copy.DialogDone)
 			return nil
 		}
 		if isDarwinDialogCanceled(out, oerr) {
-			return errors.New("password prompt cancelled — automatic proxy was not changed")
+			return errors.New(copy.CanceledMsg)
 		}
 		// Non-cancel dialog error (e.g. headless / no user interaction allowed):
 		// fall back to terminal sudo with clear guidance.
@@ -193,15 +235,14 @@ func applyDarwinProxyOps(prompt, why string, ops []darwinProxyOp, r darwinProxyR
 	}
 
 	if r.stdinTTY != nil && !r.stdinTTY() {
-		return errors.New("no interactive terminal available for password prompt — automatic proxy was not changed")
+		return errors.New("no interactive terminal available for password prompt — Mac automatic proxy was not changed")
 	}
-	logNote("Your Mac login password is needed %s. It goes to macOS, not to Hogman.", why)
-	logNote("Nothing shows on screen as you type — that's normal in Terminal. Press Enter when done.")
+	logNote("%s", copy.PreSudo)
 	if r.runSudoAuth != nil {
-		if err := r.runSudoAuth(buildDarwinSudoPrompt(why)); err != nil {
-			return errors.New("password prompt cancelled or failed — automatic proxy was not changed")
+		if err := r.runSudoAuth(escapeSudoPrompt(copy.SudoPrompt)); err != nil {
+			return errors.New(copy.CanceledMsg)
 		}
 	}
-	logNote("Got it, updating this Mac's automatic proxy setting…")
+	logNote("%s", copy.SudoAccepted)
 	return runDarwinNetworksetupOps(ops, true, r.runNetworksetup)
 }
