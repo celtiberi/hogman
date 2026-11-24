@@ -554,6 +554,56 @@ EOF
   info "Then join your own laptop:      hogman-host pen $n device key <handle> personal  (open the link on it)"
 }
 
+# Mirror registrar's fail-closed isRenewOnlyMode() so `hogman-host list`
+# surfaces running pens that are locked in renew_only because of a stale
+# .renew-only marker or a corrupt/oversized/non-grace billing-status.json.
+pen_bad_renew_only() {  # pen_bad_renew_only <pen> -> prints state reason if locked
+  local n="$1"
+  local marker="$PENS/$n/data/registrar/.renew-only"
+  local status="$PENS/$n/data/registrar/billing-status.json"
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    printf '%s\n' "renew_only (marker)"
+    return 0
+  fi
+  if [ ! -e "$status" ] && [ ! -L "$status" ]; then
+    return 1
+  fi
+  if [ ! -f "$status" ] || [ ! -r "$status" ] || [ ! -s "$status" ]; then
+    printf '%s\n' "renew_only (bad status)"
+    return 0
+  fi
+  local sz
+  sz="$(wc -c < "$status" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$sz" ] || [ "$sz" -gt 4096 ]; then
+    printf '%s\n' "renew_only (bad status)"
+    return 0
+  fi
+  local st=""
+  if command -v jq >/dev/null 2>&1; then
+    local jq_out
+    if jq_out="$(jq -s -r 'if length == 1 and (.[0] | type == "object") and (.[0].state | type == "string") then .[0].state else "" end' "$status" 2>/dev/null)"; then
+      st="$jq_out"
+    fi
+  elif command -v python3 >/dev/null 2>&1; then
+    st="$(python3 -c 'import json,sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get("state", "") if isinstance(d, dict) and isinstance(d.get("state"), str) else "")
+except Exception:
+    print("")' "$status" 2>/dev/null || true)"
+  else
+    # Minimal POSIX fallback: require a single JSON object with "state": "grace".
+    if tr -d '\r\n' < "$status" | grep -qE '^[[:space:]]*\{.*"state"[[:space:]]*:[[:space:]]*"grace".*\}[[:space:]]*$'; then
+      st="grace"
+    fi
+  fi
+  if [ "$st" != "grace" ]; then
+    printf '%s\n' "renew_only (bad status)"
+    return 0
+  fi
+  return 1
+}
+
 cmd_list() {
   local running
   running="$(docker ps --format '{{.Names}}')"
@@ -566,6 +616,11 @@ cmd_list() {
     elif [ -f "$PENS/$n/.removed" ]; then state="stopped"
     fi
     if [ "$state" = running ] && ! grep -qx "pen-$n-headscale-1" <<<"$running"; then state="down"; fi
+    if [ "$state" = running ]; then
+      local ro_why
+      ro_why="$(pen_bad_renew_only "$n" || true)"
+      [ -n "$ro_why" ] && state="$ro_why"
+    fi
     printf "%-16s %-28s %-6s %s\n" "$n" "$(pen_env "$n" PUBLIC_HOST)" "$(pen_env "$n" STUN_PORT)" "$state"
   done
 }

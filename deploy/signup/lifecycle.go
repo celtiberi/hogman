@@ -1782,9 +1782,10 @@ func (b *broker) lifecycleWakeHandler(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 202, map[string]any{"ok": true})
 }
 
-// sweepExpiredRenewWakes handles ONLY expired renew_only deadlines (never
-// running active->grace, alerts, or purges for unrelated pens) so the 1-minute
-// watcher stays narrowly scoped to ephemeral wakes.
+// sweepExpiredRenewWakes handles ONLY expired renew_only deadlines and
+// pending_wake retries from paid renewals (never running active->grace,
+// billing alerts, or purges for unrelated pens) so the 1-minute watcher stays
+// narrowly scoped to ephemeral wakes and paid-renewal recovery.
 func (b *broker) sweepExpiredRenewWakes(ctx context.Context, now time.Time) ([]lifecycleTransition, error) {
 	b.lifecycleMu.Lock()
 	defer b.lifecycleMu.Unlock()
@@ -1810,7 +1811,41 @@ func (b *broker) sweepExpiredRenewWakes(ctx context.Context, now time.Time) ([]l
 	for _, pen := range names {
 		path := b.lifecyclePath(pen)
 		rec, err := loadPenLifecycle(path)
-		if err != nil || rec.State != stateRenewOnly {
+		if err != nil {
+			continue
+		}
+		if rec.State == stateActive && rec.PendingWake {
+			tr := lifecycleTransition{Pen: pen, From: stateSleeping, To: stateActive, Woken: true}
+			_, code, stderr := b.runUnbounded(ctx, "wake", pen)
+			b.invalidateCapacityCache()
+			if code != 0 {
+				log.Printf("renew-wake watcher %s: pending_wake retry failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
+				b.notifyKind("health", fmt.Sprintf("Pen %s paid renewal wake retry failed (exit %d): %s", pen, code, strings.TrimSpace(stderr)))
+				tr.Woken = false
+				tr.ActionNote = "wake retry failed"
+				out = append(out, tr)
+				continue
+			}
+			rec.PendingWake = false
+			rec.UpdatedAt = now.UTC().Unix()
+			if err := savePenLifecycle(path, rec); err != nil {
+				log.Printf("renew-wake watcher %s: save active after pending_wake: %v", pen, err)
+				continue
+			}
+			_ = syncRegistrarBillingBanner(pen, b.registrarBillingPath(pen), rec, b.renewOriginForPen(rec.Plan))
+			out = append(out, tr)
+			if rec.PendingOwner != "" {
+				if done, perr := b.applyPendingOwner(ctx, pen, rec.PendingOwner); perr != nil {
+					log.Printf("renew-wake watcher %s: retry pending_owner %s: %v", pen, rec.PendingOwner, perr)
+				} else if done {
+					rec.PendingOwner = ""
+					rec.UpdatedAt = now.UTC().Unix()
+					_ = savePenLifecycle(path, rec)
+				}
+			}
+			continue
+		}
+		if rec.State != stateRenewOnly {
 			continue
 		}
 		concurrent++
@@ -1838,8 +1873,9 @@ func (b *broker) sweepExpiredRenewWakes(ctx context.Context, now time.Time) ([]l
 	return out, nil
 }
 
-// runRenewWakeWatcher periodically enforces persisted renew_only deadlines
-// (even across broker restarts) and alerts if the global wake cap stays full.
+// runRenewWakeWatcher periodically enforces persisted renew_only deadlines,
+// retries failed paid-renewal wakes (pending_wake), and alerts if the global
+// wake cap stays full.
 func (b *broker) runRenewWakeWatcher() {
 	time.Sleep(15 * time.Second)
 	t := time.NewTicker(time.Minute)

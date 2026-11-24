@@ -495,4 +495,137 @@ func TestHogmanHostRenewOnlyWakeListAndPurgeRefusalI7(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(penDir, "data", "registrar", ".renew-only")); !os.IsNotExist(err) {
 		t.Fatal("data/registrar/.renew-only must be removed after full wake")
 	}
+
+	// 5. Running pen with valid grace status shows running; bad/corrupt/oversized/non-grace
+	//    billing-status.json or stale .renew-only marker is surfaced in `hogman-host list`.
+	_ = os.WriteFile(filepath.Join(binDir, "docker"), []byte("#!/bin/sh\nif [ \"$1\" = ps ] && [ \"$2\" = --format ]; then echo pen-lab-headscale-1; fi\nexit 0\n"), 0o755)
+	bsPath := filepath.Join(penDir, "data", "registrar", "billing-status.json")
+	markerPath := filepath.Join(penDir, "data", "registrar", ".renew-only")
+
+	if listOut, err := runHost("list"); err != nil || !strings.Contains(listOut, "running") || strings.Contains(listOut, "renew_only") {
+		t.Fatalf("clean running pen should show running: err=%v out=%s", err, listOut)
+	}
+
+	// Valid grace status -> still running.
+	_ = os.WriteFile(bsPath, []byte(`{"pen":"lab","state":"grace","grace_until":"2030-01-01T00:00:00Z"}`), 0o644)
+	if listOut, err := runHost("list"); err != nil || !strings.Contains(listOut, "running") || strings.Contains(listOut, "renew_only") {
+		t.Fatalf("valid grace pen should show running: err=%v out=%s", err, listOut)
+	}
+
+	// Corrupt JSON -> renew_only (bad status).
+	_ = os.WriteFile(bsPath, []byte(`{"state":"grace"`), 0o644)
+	if listOut, err := runHost("list"); err != nil || !strings.Contains(listOut, "renew_only (bad status)") {
+		t.Fatalf("corrupt billing-status.json should show renew_only (bad status): err=%v out=%s", err, listOut)
+	}
+
+	// Trailing garbage after valid JSON -> renew_only (bad status).
+	_ = os.WriteFile(bsPath, []byte(`{"state":"grace"} garbage`), 0o644)
+	if listOut, err := runHost("list"); err != nil || !strings.Contains(listOut, "renew_only (bad status)") {
+		t.Fatalf("trailing garbage billing-status.json should show renew_only (bad status): err=%v out=%s", err, listOut)
+	}
+
+	// Oversized (>4096B) -> renew_only (bad status).
+	_ = os.WriteFile(bsPath, []byte(`{"state":"grace","pad":"`+strings.Repeat("a", 4100)+`"}`), 0o644)
+	if listOut, err := runHost("list"); err != nil || !strings.Contains(listOut, "renew_only (bad status)") {
+		t.Fatalf("oversized billing-status.json should show renew_only (bad status): err=%v out=%s", err, listOut)
+	}
+
+	// Non-grace state -> renew_only (bad status).
+	_ = os.WriteFile(bsPath, []byte(`{"pen":"lab","state":"bogus"}`), 0o644)
+	if listOut, err := runHost("list"); err != nil || !strings.Contains(listOut, "renew_only (bad status)") {
+		t.Fatalf("non-grace billing-status.json should show renew_only (bad status): err=%v out=%s", err, listOut)
+	}
+
+	// Stale .renew-only marker without .renew-wake -> renew_only (marker).
+	_ = os.Remove(bsPath)
+	_ = os.WriteFile(markerPath, []byte("renew_only\n"), 0o644)
+	if listOut, err := runHost("list"); err != nil || !strings.Contains(listOut, "renew_only (marker)") {
+		t.Fatalf("stale .renew-only marker should show renew_only (marker): err=%v out=%s", err, listOut)
+	}
+}
+
+func TestRenewWakeWatcherRetriesPendingWakeAndPromotesOwnerI7(t *testing.T) {
+	b, home := newTestBroker(t, "")
+	now := time.Date(2026, 12, 1, 12, 0, 0, 0, time.UTC)
+	b.nowFn = func() time.Time { return now }
+	b.publicURL = "https://get.example.com"
+
+	// Pen 1: paid renewal whose full wake transiently failed (state=active, pending_wake=true, pending_owner=alice).
+	penDir := filepath.Join(home, "pens", "paidpen")
+	_ = os.MkdirAll(filepath.Join(penDir, "data", "registrar"), 0o700)
+	_ = os.WriteFile(filepath.Join(penDir, "data", "registrar", ".renew-only"), []byte("renew_only\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(penDir, "data", "registrar", "billing-status.json"), []byte(`{"pen":"paidpen","state":"renew_only"}`), 0o644)
+	_ = savePenLifecycle(filepath.Join(penDir, "lifecycle.json"), &penLifecycle{
+		Plan:         planPersonal,
+		State:        stateActive,
+		PaidUntil:    now.Add(365 * 24 * time.Hour).Unix(),
+		PendingWake:  true,
+		PendingOwner: "alice",
+	})
+
+	// Pen 2: unrelated active pen past PaidUntil — the 1-minute watcher MUST NOT move it to grace.
+	otherDir := filepath.Join(home, "pens", "unrelated")
+	_ = os.MkdirAll(filepath.Join(otherDir, "data", "registrar"), 0o700)
+	_ = savePenLifecycle(filepath.Join(otherDir, "lifecycle.json"), &penLifecycle{
+		Plan:      planPersonal,
+		State:     stateActive,
+		PaidUntil: now.Add(-10 * 24 * time.Hour).Unix(),
+	})
+
+	failFlag := filepath.Join(home, "fail-wake")
+	_ = os.WriteFile(failFlag, []byte("1"), 0o600)
+	logFile := filepath.Join(home, "calls.log")
+	script := "#!/bin/sh\necho \"$*\" >> \"" + logFile + "\"\n" +
+		"if [ \"$1\" = wake ] && [ -f \"" + failFlag + "\" ]; then echo 'transient error' >&2; exit 1; fi\n" +
+		"exit 0\n"
+	b.tool = filepath.Join(t.TempDir(), "hogman-host")
+	_ = os.WriteFile(b.tool, []byte(script), 0o755)
+	b.memberRoleFn = func(_ context.Context, _, handle string) (string, string, bool) {
+		if handle == "alice" {
+			return "admin", "active", true
+		}
+		return "", "", false
+	}
+
+	// First tick: wake fails transiently -> PendingWake stays true, PendingOwner untouched.
+	trs, err := b.sweepExpiredRenewWakes(context.Background(), now)
+	if err != nil {
+		t.Fatalf("first sweepExpiredRenewWakes: %v", err)
+	}
+	if len(trs) != 1 || trs[0].Pen != "paidpen" || trs[0].Woken {
+		t.Fatalf("expected failed pending_wake transition for paidpen, got %+v", trs)
+	}
+	rec, _ := loadPenLifecycle(filepath.Join(penDir, "lifecycle.json"))
+	if !rec.PendingWake || rec.PendingOwner != "alice" {
+		t.Fatalf("failed wake retry must keep PendingWake and PendingOwner: %+v", rec)
+	}
+	// Unrelated pen must NOT have been touched by the 1-minute watcher.
+	otherRec, _ := loadPenLifecycle(filepath.Join(otherDir, "lifecycle.json"))
+	if otherRec.State != stateActive {
+		t.Fatalf("1-minute watcher must not transition unrelated active pen to grace: %+v", otherRec)
+	}
+
+	// Second tick: transient failure clears -> PendingWake clears, marker/status removed, alice promoted.
+	_ = os.Remove(failFlag)
+	trs, err = b.sweepExpiredRenewWakes(context.Background(), now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("second sweepExpiredRenewWakes: %v", err)
+	}
+	if len(trs) != 1 || trs[0].Pen != "paidpen" || !trs[0].Woken {
+		t.Fatalf("expected successful pending_wake transition for paidpen, got %+v", trs)
+	}
+	rec, _ = loadPenLifecycle(filepath.Join(penDir, "lifecycle.json"))
+	if rec.PendingWake || rec.PendingOwner != "" {
+		t.Fatalf("successful wake retry should clear PendingWake and PendingOwner: %+v", rec)
+	}
+	if _, err := os.Stat(filepath.Join(penDir, "data", "registrar", ".renew-only")); !os.IsNotExist(err) {
+		t.Fatal(".renew-only must be cleared after successful pending_wake retry")
+	}
+	if _, err := os.Stat(filepath.Join(penDir, "data", "registrar", "billing-status.json")); !os.IsNotExist(err) {
+		t.Fatal("billing-status.json must be cleared after successful pending_wake retry")
+	}
+	calls, _ := os.ReadFile(logFile)
+	if !strings.Contains(string(calls), "pen paidpen member role alice owner") {
+		t.Fatalf("expected pending_owner promotion after pending_wake retry, calls=%s", string(calls))
+	}
 }
