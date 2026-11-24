@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -152,6 +153,21 @@ func TestPrivateNameHTTPFlowRetryAndD21Retirement(t *testing.T) {
 	alice, _ := e.st.MemberByHandle("alice")
 	if cnt, err := e.st.CountMemberNames(alice.ID); err != nil || cnt != 2 {
 		t.Fatalf("CountMemberNames = %d (err=%v), want 2", cnt, err)
+	}
+
+	// Non-private claim ordering: another member trying to claim an active or
+	// retired name with a personal device must still get 409 Conflict (not 400).
+	if _, err := e.svc.AddMember(ctx, cli, "bob", "member"); err != nil {
+		t.Fatal(err)
+	}
+	_, bobLaptop := e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.20", "")
+	rec = doMeshReq(h, "POST", "/api/names", "100.64.0.20", `{"name":"blog","device_id":`+strconv.FormatInt(bobLaptop.ID, 10)+`}`, jsonHdr)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("bob claim taken name: status=%d want 409 body=%s", rec.Code, rec.Body.String())
+	}
+	rec = doMeshReq(h, "POST", "/api/names", "100.64.0.20", `{"name":"`+label1+`","device_id":`+strconv.FormatInt(bobLaptop.ID, 10)+`}`, jsonHdr)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("bob claim retired name: status=%d want 409 body=%s", rec.Code, rec.Body.String())
 	}
 }
 

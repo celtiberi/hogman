@@ -1125,18 +1125,19 @@ func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, r
 	if allocatePrivate && strings.TrimSpace(rawName) != "" {
 		return "", bad("cannot pass both a name and private: true")
 	}
-	d, err := s.st.DeviceByID(deviceID)
-	if err != nil || d.RemovedAt != nil || d.MemberID != m.ID {
-		return "", bad("device %d is not one of %s's devices", deviceID, handle)
-	}
-	if d.Kind != "server" {
-		return "", bad("device %d is a personal device; names point at servers (personal devices accept no connections)", deviceID)
-	}
 
 	var name string
 	var existing *Name
+	var d *Device
 	if allocatePrivate {
-		// Enforce cap before allocating a random label.
+		// Validate device and cap before allocating a random label.
+		d, err = s.st.DeviceByID(deviceID)
+		if err != nil || d.RemovedAt != nil || d.MemberID != m.ID {
+			return "", bad("device %d is not one of %s's devices", deviceID, handle)
+		}
+		if d.Kind != "server" {
+			return "", bad("device %d is a personal device; names point at servers (personal devices accept no connections)", deviceID)
+		}
 		if !a.IsOwner() || server != nil {
 			count, err := s.st.CountMemberNames(m.ID)
 			if err != nil {
@@ -1206,6 +1207,13 @@ func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, r
 			if err != nil || parent.MemberID != m.ID {
 				return "", forbidden("claim %s first; names under it belong to whoever owns it", top)
 			}
+		}
+		d, err = s.st.DeviceByID(deviceID)
+		if err != nil || d.RemovedAt != nil || d.MemberID != m.ID {
+			return "", bad("device %d is not one of %s's devices", deviceID, handle)
+		}
+		if d.Kind != "server" {
+			return "", bad("device %d is a personal device; names point at servers (personal devices accept no connections)", deviceID)
 		}
 		if existing != nil && existing.MemberID != m.ID && topLabel(name) == name {
 			all, err := s.st.Names()

@@ -95,6 +95,7 @@ docker run -d --name hogman-run-cdns --network hogman-test-acme \
   -v "$ACME/cdns:/cdns" -v "$ACME/sock:/run/hogman-acme" \
   -e CDNS_LISTEN=0.0.0.0:53 -e CDNS_PENS_ZONE=pens.hogman.test -e CDNS_GATE_NAME=_acme-challenge.gate.hogman.test \
   -e CDNS_STATE=/cdns/state.json -e CDNS_API_SOCK=/run/hogman-acme/api.sock -e CDNS_ADMIN_SOCK=/cdns/admin.sock \
+  -e CDNS_HOURLY_CAP=10 \
   alpine:3.22 /cdns/challenge-dns serve >/dev/null
 retry 20 env CDNS_ADMIN_SOCK="$ACME/cdns/admin.sock" "$ACME/cdns/challenge-dns" cred list || exit 1
 
