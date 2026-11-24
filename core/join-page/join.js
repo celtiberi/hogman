@@ -107,24 +107,17 @@
   const cleanLink = `https://${host}/join#${t ? 't=' + t : 'k=' + k}${forShare ? '&for=share' : ''}`;
   const quoted = `'${cleanLink}'`;
   const makeLongCmd = verb => `curl -fsSL --proto =https --proto-redir =https -o hogman "https://${host}/join/dl/hogman-$(uname -s)-$(uname -m)" && chmod +x hogman && ./hogman ${verb}${quoted}`;
-  const makeStartShareCmd = args => `curl -fsSL --proto =https --proto-redir =https https://${host}/start | HOGMAN_EXPECTED_HOST='${host}' sh -s -- ${quoted} ${args}`;
+  const makeStartCmd = args => `curl -fsSL --proto =https --proto-redir =https https://${host}/start | HOGMAN_EXPECTED_HOST='${host}' sh -s -- ${quoted}${args ? ' ' + args : ''}`;
   const verb = forShare ? 'share blog 8080 ' : '';
   let longCmd = makeLongCmd(verb);
-  // Joining: one short command that's the same for everyone; it asks for the
-  // link, so the secret never sits in the command. Sharing also uses /start so
-  // the download goes through a temp dir and SHA-256 verification.
+  // Single copy-paste command through /start so the download goes through a
+  // temp dir and SHA-256 verification without a second prompt step.
   let unixCmd = forShare
-    ? makeStartShareCmd('share blog 8080')
-    : `curl -fsSL --proto =https --proto-redir =https https://${host}/start | HOGMAN_EXPECTED_HOST='${host}' sh`;
+    ? makeStartCmd('share blog 8080')
+    : makeStartCmd('');
   $('cmd').textContent = unixCmd;
   $('cmd-manual').textContent = longCmd;
-  $('link-step').hidden = forShare;
   $('manual').hidden = forShare;
-  $('key-warn').hidden = !forShare;
-  $('copy-link').onclick = async () => {
-    await navigator.clipboard.writeText(cleanLink);
-    $('copied-link').textContent = 'Copied. Paste it into Terminal when it asks.';
-  };
   // Sharing doesn't touch the browser proxy, so no password or VPN proxy note there.
   $('pw-note').hidden = forShare;
   $('vpn-note').hidden = forShare;
@@ -157,7 +150,7 @@
       applyWorkTheme(n.zone, forShare);
       if (forShare) {
         longCmd = makeLongCmd('share cooler-1 http://192.168.1.40 ') + ' --background';
-        unixCmd = makeStartShareCmd('share cooler-1 http://192.168.1.40 --background');
+        unixCmd = makeStartCmd('share cooler-1 http://192.168.1.40 --background');
         $('cmd').textContent = unixCmd;
         $('cmd-manual').textContent = longCmd;
       }

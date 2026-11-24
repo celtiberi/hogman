@@ -270,22 +270,6 @@ h1 {
   margin-bottom: 0.7rem;
 }
 
-#unix-panel:has(#link-step[hidden]) .step-num { display: none; }
-
-.step-num {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font: 400 0.92rem/1 var(--display);
-  color: #1a0a04;
-  background: linear-gradient(180deg, var(--gold), var(--fire));
-  box-shadow: 0 2px 0 #000;
-  flex: none;
-}
-
 .step-title {
   font-weight: 700;
   font-size: 0.98rem;
@@ -623,13 +607,6 @@ html[data-theme="work"] .manual-box,
 html[data-theme="work"] .expect-box {
   background: var(--surface-alt);
   border-color: var(--line);
-}
-
-html[data-theme="work"] .step-num {
-  font: 700 0.82rem/1 var(--text);
-  color: #ffffff;
-  background: var(--ink);
-  box-shadow: none;
 }
 
 html[data-theme="work"] button.primary {

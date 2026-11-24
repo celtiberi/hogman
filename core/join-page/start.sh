@@ -119,7 +119,7 @@ fi
 
 if [ -z "$link" ]; then
   have_tty || die "no terminal to ask for your invite link on; pass it: curl -fsSL <address>/start | sh -s -- '<link>'"
-  printf 'Paste your invite link (the page you opened has a button to copy it): ' >/dev/tty
+  printf 'Paste your invite link (the full link you were sent, including everything after the #): ' >/dev/tty
   IFS= read -r link </dev/tty || die "no link given"
 fi
 link="$(printf '%s' "$link" | tr -d ' \r\n\t')"
