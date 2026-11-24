@@ -1,0 +1,1 @@
+- macOS per-connection proxy checks & `--verbose` redaction: `hogman join`, `hogman update`, `hogman status`, and `hogman doctor` now list each enabled macOS hardware network service (such as `Wi-Fi` and a USB Ethernet dock) that is still missing the automatic proxy URL, and `--verbose` now redacts `--authkey` values when logging commands.

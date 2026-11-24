@@ -20,12 +20,30 @@ func detectSystemProxyState(known []*agentConfig) systemProxyState {
 	primaryIface := parseScutilPrimaryInterface(string(ipv4Out))
 
 	serviceHasHogmanPAC := false
-	for _, svc := range networkServices() {
+	var missing []string
+	seen := map[string]bool{}
+	for _, svc := range hardwareNetworkServices() {
+		seen[svc] = true
 		cur, enabled := autoProxyState(svc)
 		if enabled && isHogmanPACURL(cur, known) {
 			serviceHasHogmanPAC = true
-			break
+		} else if len(known) > 0 && !shouldLeaveAutoProxy(cur, enabled, known) {
+			missing = append(missing, svc)
 		}
 	}
-	return evaluateDarwinProxyState(proxy, primaryIface, serviceHasHogmanPAC, known)
+	if !serviceHasHogmanPAC {
+		for _, svc := range networkServices() {
+			if seen[svc] {
+				continue
+			}
+			cur, enabled := autoProxyState(svc)
+			if enabled && isHogmanPACURL(cur, known) {
+				serviceHasHogmanPAC = true
+				break
+			}
+		}
+	}
+	st := evaluateDarwinProxyState(proxy, primaryIface, serviceHasHogmanPAC, known)
+	st.MissingProxyServices = missing
+	return st
 }

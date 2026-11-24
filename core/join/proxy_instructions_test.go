@@ -1,34 +1,87 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
 
+func TestParseNetworkServiceOrderHardwareFilter(t *testing.T) {
+	raw := `An asterisk (*) denotes that a network service is disabled.
+(1) Thunderbolt Bridge
+(Hardware Port: Thunderbolt Bridge, Device: bridge0)
+
+(2) Wi-Fi
+(Hardware Port: Wi-Fi, Device: en0)
+
+(3) USB 10/100/1000 LAN
+(Hardware Port: USB 10/100/1000 LAN, Device: en5)
+
+(4) ProtonVPN
+(Hardware Port: ch.protonvpn.mac, Device: )
+
+(*) Disabled Ethernet
+(Hardware Port: Ethernet, Device: en1)
+
+(5) Corporate Tunnel
+(Hardware Port: VPN, Device: utun4)
+`
+	got := hardwareServiceNamesFromOrder(raw)
+	want := []string{"Wi-Fi", "USB 10/100/1000 LAN"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("hardwareServiceNamesFromOrder = %v, want %v", got, want)
+	}
+}
+
+func TestFormatServiceList(t *testing.T) {
+	if got := formatServiceList(nil); got != "Wi-Fi (or Ethernet)" {
+		t.Fatalf("0 services = %q", got)
+	}
+	if got := formatServiceList([]string{"Wi-Fi"}); got != "Wi-Fi" {
+		t.Fatalf("1 service = %q", got)
+	}
+	if got := formatServiceList([]string{"Wi-Fi", "USB 10/100/1000 LAN"}); got != "Wi-Fi and USB 10/100/1000 LAN" {
+		t.Fatalf("2 services = %q", got)
+	}
+	if got := formatServiceList([]string{"Wi-Fi", "USB 10/100/1000 LAN", "iPhone USB"}); got != "Wi-Fi, USB 10/100/1000 LAN, and iPhone USB" {
+		t.Fatalf("3 services = %q", got)
+	}
+}
+
 func TestFormatBrowserProxyInstructionsByOS(t *testing.T) {
 	pac := "http://127.0.0.1:18123/proxy.pac"
 
-	mac := formatBrowserProxyInstructions("darwin", pac, "acme.pens.example", []string{"acme.pens.example"})
+	macMulti := formatBrowserProxyInstructions("darwin", pac, "acme.pens.example", []string{"acme.pens.example"}, []string{"Wi-Fi", "USB 10/100/1000 LAN"})
 	for _, want := range []string{
 		"never asks for your Mac password",
-		"System Settings → Network → Wi-Fi (or Ethernet) → Details… → Proxies",
+		"System Settings → Network → Wi-Fi and USB 10/100/1000 LAN → Details… → Proxies (set it on each one)",
 		"Automatic proxy configuration",
 		pac,
 		"https://home.acme.pens.example",
 		"signed Mac app",
 	} {
-		if !strings.Contains(mac, want) {
-			t.Fatalf("darwin instructions missing %q:\n%s", want, mac)
+		if !strings.Contains(macMulti, want) {
+			t.Fatalf("darwin multi-service instructions missing %q:\n%s", want, macMulti)
 		}
 	}
-	if strings.Contains(mac, "even with a VPN on") {
-		t.Fatalf("darwin instructions should not make untested VPN claims:\n%s", mac)
+	if strings.Contains(macMulti, "even with a VPN on") {
+		t.Fatalf("darwin instructions should not make untested VPN claims:\n%s", macMulti)
 	}
-	if strings.Contains(mac, "?v=") {
-		t.Fatalf("manual PAC URL must stay stable without ?v=: %s", mac)
+	if strings.Contains(macMulti, "?v=") {
+		t.Fatalf("manual PAC URL must stay stable without ?v=: %s", macMulti)
 	}
 
-	lin := formatBrowserProxyInstructions("linux", pac, "acme.pens.example", []string{"acme.pens.example", "ops.pens.example"})
+	macSingle := formatBrowserProxyInstructions("darwin", pac, "acme.pens.example", []string{"acme.pens.example"}, []string{"Wi-Fi"})
+	if !strings.Contains(macSingle, "System Settings → Network → Wi-Fi → Details… → Proxies\n") {
+		t.Fatalf("darwin single-service instructions should name Wi-Fi cleanly:\n%s", macSingle)
+	}
+
+	macFallback := formatBrowserProxyInstructions("darwin", pac, "acme.pens.example", []string{"acme.pens.example"}, nil)
+	if !strings.Contains(macFallback, "System Settings → Network → Wi-Fi (or Ethernet) → Details… → Proxies\n") {
+		t.Fatalf("darwin fallback instructions unexpected:\n%s", macFallback)
+	}
+
+	lin := formatBrowserProxyInstructions("linux", pac, "acme.pens.example", []string{"acme.pens.example", "ops.pens.example"}, nil)
 	for _, want := range []string{
 		"Firefox: Settings → Network Settings",
 		"GNOME",
@@ -40,7 +93,7 @@ func TestFormatBrowserProxyInstructionsByOS(t *testing.T) {
 		}
 	}
 
-	win := formatBrowserProxyInstructions("windows", pac, "acme.pens.example", []string{"acme.pens.example"})
+	win := formatBrowserProxyInstructions("windows", pac, "acme.pens.example", []string{"acme.pens.example"}, nil)
 	for _, want := range []string{
 		"Settings → Network & Internet → Proxy",
 		"Use setup script",
@@ -48,6 +101,27 @@ func TestFormatBrowserProxyInstructionsByOS(t *testing.T) {
 	} {
 		if !strings.Contains(win, want) {
 			t.Fatalf("windows instructions missing %q:\n%s", want, win)
+		}
+	}
+}
+
+func TestFormatDarwinProxySummaryFlagsMissingServices(t *testing.T) {
+	pac := "http://127.0.0.1:18123/proxy.pac"
+
+	allSet := formatDarwinProxySummary([]string{"Wi-Fi"}, nil, pac, pac, "acme.pens.example", []string{"acme.pens.example"})
+	if strings.Contains(allSet, "not set on") {
+		t.Fatalf("unexpected missing-service warning when all set:\n%s", allSet)
+	}
+
+	partial := formatDarwinProxySummary([]string{"Wi-Fi"}, []string{"USB 10/100/1000 LAN"}, pac, pac, "acme.pens.example", []string{"acme.pens.example"})
+	for _, want := range []string{
+		"already configured on Wi-Fi",
+		"Automatic proxy configuration is not set on USB 10/100/1000 LAN yet",
+		"System Settings → Network → USB 10/100/1000 LAN → Details… → Proxies",
+		pac,
+	} {
+		if !strings.Contains(partial, want) {
+			t.Fatalf("partial summary missing %q:\n%s", want, partial)
 		}
 	}
 }

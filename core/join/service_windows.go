@@ -60,7 +60,7 @@ func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, bool, error) {
 	if host := pickPACHost(pens); host != nil {
 		stableURL = host.pacURL()
 	}
-	return formatBrowserProxyInstructions("windows", stableURL, c.Zone, penZoneNames(pens)), false, nil
+	return formatBrowserProxyInstructions("windows", stableURL, c.Zone, penZoneNames(pens), nil), false, nil
 }
 
 func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {

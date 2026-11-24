@@ -15,6 +15,10 @@ type systemProxyState struct {
 	// (nothing answers there, or a Hogman agent does). It's ours to clear,
 	// not someone else's proxy, so it's reported apart from conflicts.
 	StalePAC string
+	// MissingProxyServices lists enabled macOS hardware network services (e.g.
+	// Wi-Fi, USB 10/100/1000 LAN) that do not yet have Hogman's automatic proxy
+	// URL set (excluding services with a non-Hogman proxy already configured).
+	MissingProxyServices []string
 }
 
 type scutilProxyInfo struct {

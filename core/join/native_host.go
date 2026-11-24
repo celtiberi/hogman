@@ -787,11 +787,12 @@ type statusNativeHostJSON struct {
 }
 
 type statusSystemProxyJSON struct {
-	VPNOverride     bool   `json:"vpn_override"`
-	VPNInterface    string `json:"vpn_interface,omitempty"`
-	OSProxyConflict bool   `json:"os_proxy_conflict"`
-	OSProxyDetail   string `json:"os_proxy_detail,omitempty"`
-	StalePAC        string `json:"stale_pac,omitempty"`
+	VPNOverride          bool     `json:"vpn_override"`
+	VPNInterface         string   `json:"vpn_interface,omitempty"`
+	OSProxyConflict      bool     `json:"os_proxy_conflict"`
+	OSProxyDetail        string   `json:"os_proxy_detail,omitempty"`
+	StalePAC             string   `json:"stale_pac,omitempty"`
+	MissingProxyServices []string `json:"missing_proxy_services,omitempty"`
 }
 
 type statusOutputJSON struct {
@@ -851,11 +852,12 @@ func buildStatusOutput(base, sharesDir string) statusOutputJSON {
 			Path:      hostPath,
 		},
 		SystemProxy: statusSystemProxyJSON{
-			VPNOverride:     sys.VPNOverride,
-			VPNInterface:    sys.VPNInterface,
-			OSProxyConflict: sys.OSProxyConflict,
-			OSProxyDetail:   sys.OSProxyDetail,
-			StalePAC:        sys.StalePAC,
+			VPNOverride:          sys.VPNOverride,
+			VPNInterface:         sys.VPNInterface,
+			OSProxyConflict:      sys.OSProxyConflict,
+			OSProxyDetail:        sys.OSProxyDetail,
+			StalePAC:             sys.StalePAC,
+			MissingProxyServices: sys.MissingProxyServices,
 		},
 		CorruptPenConfigs: bad,
 	}
@@ -907,6 +909,14 @@ func statusCmd(o options) error {
 	}
 	if sys.OSProxyConflict {
 		say("\n! Non-Hogman system proxy active: %s", sys.OSProxyDetail)
+	}
+	if len(sys.MissingProxyServices) > 0 {
+		if host := pickPACHost(configs); host != nil {
+			svcList := formatServiceList(sys.MissingProxyServices)
+			say("\n! Automatic proxy configuration is not set on: %s", svcList)
+			say("  In System Settings → Network → %s → Details… → Proxies, turn on \"Automatic proxy configuration\" and paste:", svcList)
+			say("    %s", host.pacURL())
+		}
 	}
 	return nil
 }

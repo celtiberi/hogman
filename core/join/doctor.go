@@ -202,6 +202,18 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 			Status: "warn",
 			Detail: "non-Hogman system proxy active: " + sys.OSProxyDetail,
 		})
+	} else if len(sys.MissingProxyServices) > 0 {
+		svcList := formatServiceList(sys.MissingProxyServices)
+		fix := "turn on \"Automatic proxy configuration\" in System Settings → Network → " + svcList + " → Details… → Proxies"
+		if host := pickPACHost(configs); host != nil {
+			fix += " and paste " + host.pacURL()
+		}
+		add(doctorCheck{
+			Name:   "system-proxy",
+			Status: "warn",
+			Detail: "automatic proxy configuration not set on: " + svcList,
+			Fix:    fix,
+		})
 	} else {
 		add(doctorCheck{
 			Name:   "system-proxy",

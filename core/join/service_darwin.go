@@ -197,15 +197,27 @@ func networkServices() []string {
 	return svcs
 }
 
+// hardwareNetworkServices lists enabled macOS hardware network services (e.g.
+// Wi-Fi, USB 10/100/1000 LAN), excluding disabled services, VPN apps, and
+// virtual bridges like Thunderbolt Bridge.
+func hardwareNetworkServices() []string {
+	out, err := run("/usr/sbin/networksetup", "-listnetworkserviceorder")
+	if err != nil {
+		return nil
+	}
+	return hardwareServiceNamesFromOrder(out)
+}
+
 func autoProxyState(svc string) (string, bool) {
 	out, _ := run("/usr/sbin/networksetup", "-getautoproxyurl", svc)
 	return parseAutoProxyOutput(out)
 }
 
 // setSystemProxy checks (read-only, no password) whether macOS already points
-// at a Hogman automatic proxy URL. If not, it returns step-by-step macOS
-// System Settings instructions using the stable local PAC URL so Hogman never
-// asks for the user's Mac password or administrator privileges (D-41).
+// at a Hogman automatic proxy URL. If any enabled hardware service is missing
+// it, it names those exact services and gives step-by-step System Settings
+// instructions using the stable local PAC URL so Hogman never asks for the
+// user's Mac password or administrator privileges (D-41).
 func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, bool, error) {
 	known := normalizePenConfigs(pens, c)
 	stableURL := c.pacURL()
@@ -213,35 +225,46 @@ func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, bool, error) {
 		stableURL = host.pacURL()
 	}
 
-	var configured, left []string
+	var configured, missing, left []string
 	configuredURL := ""
-	for _, svc := range networkServices() {
+	seen := map[string]bool{}
+	for _, svc := range hardwareNetworkServices() {
+		seen[svc] = true
 		cur, enabled := autoProxyState(svc)
-		if !enabled || cur == "" {
-			continue
-		}
-		if isHogmanPACURL(cur, known) {
+		if enabled && cur != "" && isHogmanPACURL(cur, known) {
 			configured = append(configured, svc)
 			if configuredURL == "" {
 				configuredURL = cur
 			}
-		} else {
+		} else if shouldLeaveAutoProxy(cur, enabled, known) {
 			left = append(left, svc+" ("+cur+")")
+		} else {
+			missing = append(missing, svc)
+		}
+	}
+	// If the user configured a non-hardware service with Hogman's PAC, recognize it.
+	if len(configured) == 0 {
+		for _, svc := range networkServices() {
+			if seen[svc] {
+				continue
+			}
+			cur, enabled := autoProxyState(svc)
+			if enabled && cur != "" && isHogmanPACURL(cur, known) {
+				configured = append(configured, svc)
+				if configuredURL == "" {
+					configuredURL = cur
+				}
+			}
 		}
 	}
 
-	if len(configured) > 0 {
-		if len(known) > 1 {
-			return fmt.Sprintf("already configured on %s (%s), which covers all %d pens (%s). If your browser doesn't see %s right away, toggle \"Automatic proxy configuration\" off and back on in System Settings (or restart your browser).",
-				strings.Join(configured, ", "), configuredURL, len(known), strings.Join(penZoneNames(known), ", "), c.Zone), true, nil
-		}
-		return fmt.Sprintf("already configured on %s (%s) — Safari, Chrome and others find the pen automatically.",
-			strings.Join(configured, ", "), configuredURL), true, nil
-	}
 	if len(left) > 0 {
 		note("another automatic proxy is already set on %s (left untouched)", strings.Join(left, ", "))
 	}
-	return formatBrowserProxyInstructions("darwin", stableURL, c.Zone, penZoneNames(known)), false, nil
+	if len(configured) > 0 {
+		return formatDarwinProxySummary(configured, missing, configuredURL, stableURL, c.Zone, penZoneNames(known)), true, nil
+	}
+	return formatBrowserProxyInstructions("darwin", stableURL, c.Zone, penZoneNames(known), missing), false, nil
 }
 
 // clearSystemProxy checks (read-only, no password) whether macOS still points
