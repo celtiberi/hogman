@@ -159,11 +159,10 @@ func TestPortalHandlerHeadersHostAndNoDirListing(t *testing.T) {
 	}
 }
 
-func TestDNSServerSelfCheckAndCoreIPv6(t *testing.T) {
+func TestDNSServerSelfCheckAndCoreIPv4Only(t *testing.T) {
 	e := newTestEnv(t)
 	v4 := netip.MustParseAddr("100.64.0.1")
-	v6 := netip.MustParseAddr("fd7a:115c:a1e0::1")
-	d, err := NewDNSServerWithIPs(e.svc, v4, v6)
+	d, err := NewDNSServerWithIP(e.svc, v4)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -754,12 +754,16 @@ type meView struct {
 }
 
 func homeAPI(c *http.Client, zone, method, path string, in, out any) (int, error) {
+	return homeAPICtx(context.Background(), c, zone, method, path, in, out)
+}
+
+func homeAPICtx(ctx context.Context, c *http.Client, zone, method, path string, in, out any) (int, error) {
 	var body io.Reader
 	if in != nil {
 		b, _ := json.Marshal(in)
 		body = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, "https://home."+zone+"/api"+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, "https://home."+zone+"/api"+path, body)
 	if err != nil {
 		return 0, err
 	}
@@ -1003,7 +1007,11 @@ func claimPrivateNameBootstrap(ctx context.Context, stagingDir string, c *shareC
 	}
 	lastCode, err := claimShareName(ctx, hc, c, stagingDir)
 	if err != nil {
-		_ = giveBackDevice(ctx, hc, c)
+		cleanCtx, cleanCancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		if derr := giveBackDeviceWith(cleanCtx, hc, c, 0, tsnetNeedsLogin(node)); derr != nil {
+			log.Printf("share bootstrap cleanup: %v", derr)
+		}
+		cleanCancel()
 		_ = node.Close()
 		out := errorf("could not claim a private name on %s: %v", c.Zone, err)
 		if ctx.Err() == nil && isPermanentNameStatus(lastCode) {
@@ -1059,7 +1067,11 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 		if fresh {
 			// A brand-new share that can't have its name: take its device back
 			// out, so nothing is left behind on the pen or here.
-			_ = giveBackDevice(ctx, hc, c)
+			cleanCtx, cleanCancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			if derr := giveBackDeviceWith(cleanCtx, hc, c, 0, tsnetNeedsLogin(node)); derr != nil {
+				log.Printf("share %s: cleanup failed: %v", c.fqdn(), derr)
+			}
+			cleanCancel()
 			node.Close()
 			_ = os.RemoveAll(filepath.Join(dir, "node"))
 			_ = os.Remove(filepath.Join(dir, "share.json"))
@@ -1116,8 +1128,8 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 		// retrying with the persistent backoff instead.
 		if fresh {
 			cm.Close()
-			undoFreshShare(hc, node, dir, c)
-			out = formatFreshShareCertError(c.fqdn(), c.Name, err)
+			clean := undoFreshShare(hc, node, dir, c)
+			out = formatFreshShareCertError(c.fqdn(), c.Name, c.Zone, err, clean)
 			return fail(permanentShare(out))
 		}
 		if permanent {
@@ -1167,15 +1179,19 @@ func retryAfterHint(d time.Duration) string {
 	return fmt.Sprintf("try again in about %d days", days)
 }
 
-func formatFreshShareCertError(fqdn, name string, err error) error {
+func formatFreshShareCertError(fqdn, name, zone string, err error, cleanRollback bool) error {
 	var me *meshAPIError
+	rollbackNote := fmt.Sprintf("Nothing was left behind: the name %s is free again.", name)
+	if !cleanRollback {
+		rollbackNote = fmt.Sprintf("Cleanup could not be fully confirmed; check Sites and Devices on home.%s before sharing again.", zone)
+	}
 	if errors.As(err, &me) && me.Status == http.StatusTooManyRequests {
 		if hint := retryAfterHint(me.RetryAfter); hint != "" {
-			return errorf("no certificate for %s: %s (%s)\n  Nothing was left behind: the name %s is free again. Wait and share again\n  (if you used a one-time server link, get a fresh one).", fqdn, me.Msg, hint, name)
+			return errorf("no certificate for %s: %s (%s)\n  %s Wait and share again\n  (if you used a one-time server link, get a fresh one).", fqdn, me.Msg, hint, rollbackNote)
 		}
-		return errorf("no certificate for %s: %s\n  Nothing was left behind: the name %s is free again. Wait and share again\n  (if you used a one-time server link, get a fresh one).", fqdn, me.Msg, name)
+		return errorf("no certificate for %s: %s\n  %s Wait and share again\n  (if you used a one-time server link, get a fresh one).", fqdn, me.Msg, rollbackNote)
 	}
-	return errorf("no certificate for %s: %v\n  Nothing was left behind: the name %s is free again. Fix the problem above,\n  then share again with a fresh share link (this one is used up).", fqdn, err, name)
+	return errorf("no certificate for %s: %v\n  %s Fix the problem above,\n  then share again with a fresh share link (this one is used up).", fqdn, err, rollbackNote)
 }
 
 // noDotfilesFS wraps a folder share's fs.FS to deny hidden dotfiles/directories
@@ -1885,32 +1901,32 @@ func removeShareWithOptions(dir string, c *shareConfig, timeout time.Duration, c
 		}
 		return errorf("could not reach the pen (%v).\n  Remove the server on your home page instead, then delete %s", err, dir)
 	}
-	err = giveBack(ctx, hc, c)
+	err = giveBackWith(ctx, hc, c, tsnetNeedsLogin(node))
 	node.Close()
 	if err != nil {
 		if cleanupOnUnreachable {
 			note("could not give back %s (%v); cleaned up local files", c.url(), firstLine(err.Error()))
 			return os.RemoveAll(dir)
 		}
-		return err
+		return errorf("%v\n  Local files remain in %s; run 'hogman share stop %s --force' to remove them.", err, dir, c.Name)
 	}
 	return os.RemoveAll(dir)
 }
 
-func giveBack(ctx context.Context, hc *http.Client, c *shareConfig) error {
+func giveBackWith(ctx context.Context, hc *http.Client, c *shareConfig, checkNeedsLogin func(context.Context) bool) error {
 	var me meView
 	err := untilOK(ctx, 60*time.Second, func() (bool, error) {
-		code, err := homeAPI(hc, c.Zone, "GET", "/me", nil, &me)
+		code, err := homeAPICtx(ctx, hc, c.Zone, "GET", "/me", nil, &me)
 		return code == 0, err
 	})
 	if err != nil {
 		return errorf("could not reach home.%s from the share: %v", c.Zone, err)
 	}
-	if code, err := homeAPI(hc, c.Zone, "DELETE", "/names/"+url.PathEscape(c.Name), nil, nil); err != nil && code != 404 {
+	if code, err := homeAPICtx(ctx, hc, c.Zone, "DELETE", "/names/"+url.PathEscape(c.Name), nil, nil); err != nil && code != 404 {
 		return errorf("could not give back %s: %v", c.fqdn(), err)
 	}
 	note("gave back the name %s", c.fqdn())
-	if err := giveBackDevice(ctx, hc, c); err != nil {
+	if err := giveBackDeviceWith(ctx, hc, c, me.ThisDevice.ID, checkNeedsLogin); err != nil {
 		return err
 	}
 	note("removed its server from your devices")
@@ -1919,43 +1935,144 @@ func giveBack(ctx context.Context, hc *http.Client, c *shareConfig) error {
 
 // undoFreshShare gives a brand-new share's name back and takes its server out
 // of the pen, then forgets it here. Best effort, on its own short clock: it
-// also runs after Ctrl-C.
-func undoFreshShare(hc *http.Client, node io.Closer, dir string, c *shareConfig) {
+// also runs after Ctrl-C. Reports whether both server-side cleanup steps were
+// confirmed so callers do not claim "nothing was left behind" on partial failure.
+func undoFreshShare(hc *http.Client, node io.Closer, dir string, c *shareConfig) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if code, err := homeAPI(hc, c.Zone, "DELETE", "/names/"+url.PathEscape(c.Name), nil, nil); err != nil && code != 404 {
+	var checkNL func(context.Context) bool
+	if ts, ok := node.(*tsnet.Server); ok {
+		checkNL = tsnetNeedsLogin(ts)
+	}
+	nameOK := true
+	if code, err := homeAPICtx(ctx, hc, c.Zone, "DELETE", "/names/"+url.PathEscape(c.Name), nil, nil); err != nil && code != 404 {
+		nameOK = false
 		log.Printf("share %s: could not give the name back: %v", c.fqdn(), err)
 	}
-	if err := giveBackDevice(ctx, hc, c); err != nil {
+	devOK := true
+	if err := giveBackDeviceWith(ctx, hc, c, 0, checkNL); err != nil {
+		devOK = false
 		log.Printf("share %s: %v", c.fqdn(), err)
 	}
 	_ = node.Close()
 	for _, f := range []string{"node", "acme", "share.json", "authkey"} {
 		_ = os.RemoveAll(filepath.Join(dir, f))
 	}
+	return nameOK && devOK
 }
 
-// selfDeleteTimeout bounds DELETE /api/devices/<self> calls: the registrar
-// removes this device from Headscale before answering, so the reply packet is
-// routinely dropped mid-air over WireGuard. Real HTTP errors (4xx/5xx) still
+// selfDeleteTimeout bounds DELETE /api/devices/<self> calls: current registrars
+// return 202 Accepted immediately before deleting the peer, while older ones
+// may tear down WireGuard before answering. Real HTTP errors (4xx/5xx) still
 // arrive in milliseconds; waiting 30s for a dropped packet only stalls shutdown.
-const selfDeleteTimeout = 3 * time.Second
+var selfDeleteTimeout = 3 * time.Second
+
+// confirmDeleteTimeout bounds the follow-up removal check used when a
+// self-delete gets no HTTP response (code 0), so we never treat an unconfirmed
+// timeout as silent success (I-34).
+var confirmDeleteTimeout = 2 * time.Second
+
+var confirmPollInterval = 150 * time.Millisecond
+
+func isNotEnrolledError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "not enrolled")
+}
+
+func tsnetNeedsLogin(node *tsnet.Server) func(context.Context) bool {
+	if node == nil {
+		return nil
+	}
+	return func(ctx context.Context) bool {
+		lc, err := node.LocalClient()
+		if err != nil {
+			return false
+		}
+		st, err := lc.StatusWithoutPeers(ctx)
+		return err == nil && st != nil && st.BackendState == "NeedsLogin"
+	}
+}
+
+// confirmDeviceRemoved verifies an ambiguous code-0 self-delete using two
+// signals:
+//  1. A single GET /api/me probe: confirms only when the registrar explicitly
+//     returns HTTP 403 "not enrolled" (rejecting 200, 404, suspended, and
+//     renew_only responses).
+//  2. When GET /api/me also fails with transport code 0 (WireGuard already torn
+//     down, e.g. against an older synchronous registrar during rolling upgrade),
+//     polls checkNeedsLogin over the Headscale HTTPS control channel for
+//     BackendState == "NeedsLogin".
+func confirmDeviceRemoved(ctx context.Context, hc *http.Client, zone string, checkNeedsLogin func(context.Context) bool) bool {
+	probeCtx, cancel := context.WithTimeout(ctx, confirmDeleteTimeout)
+	defer cancel()
+	probe := *hc
+	if probe.Timeout == 0 || probe.Timeout > confirmDeleteTimeout {
+		probe.Timeout = confirmDeleteTimeout
+	}
+	code, err := homeAPICtx(probeCtx, &probe, zone, "GET", "/me", nil, nil)
+	if code == http.StatusForbidden && isNotEnrolledError(err) {
+		return true
+	}
+	if code != 0 || checkNeedsLogin == nil {
+		return false
+	}
+	// Transport error (WireGuard may already have dropped this peer): check
+	// whether Headscale's control plane reports NeedsLogin.
+	nlCtx, nlCancel := context.WithTimeout(ctx, confirmDeleteTimeout)
+	defer nlCancel()
+	if checkNeedsLogin(nlCtx) {
+		return true
+	}
+	t := time.NewTicker(confirmPollInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-nlCtx.Done():
+			return false
+		case <-t.C:
+			if checkNeedsLogin(nlCtx) {
+				return true
+			}
+		}
+	}
+}
 
 // giveBackDevice removes the share's own device from the pen.
 func giveBackDevice(ctx context.Context, hc *http.Client, c *shareConfig) error {
-	var me meView
-	if _, err := homeAPI(hc, c.Zone, "GET", "/me", nil, &me); err != nil {
-		return errorf("could not reach home.%s from the share: %v", c.Zone, err)
+	return giveBackDeviceWith(ctx, hc, c, 0, nil)
+}
+
+func giveBackDeviceWith(ctx context.Context, hc *http.Client, c *shareConfig, deviceID int64, checkNeedsLogin func(context.Context) bool) error {
+	if deviceID == 0 {
+		var me meView
+		if _, err := homeAPICtx(ctx, hc, c.Zone, "GET", "/me", nil, &me); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return errorf("could not reach home.%s from the share: %v", c.Zone, err)
+		}
+		if me.ThisDevice.ID == 0 {
+			return errorf("home.%s did not report this share's device ID", c.Zone)
+		}
+		deviceID = me.ThisDevice.ID
 	}
+	delCtx, delCancel := context.WithTimeout(ctx, selfDeleteTimeout)
+	defer delCancel()
 	delClient := *hc
 	if delClient.Timeout == 0 || delClient.Timeout > selfDeleteTimeout {
 		delClient.Timeout = selfDeleteTimeout
 	}
-	code, err := homeAPI(&delClient, c.Zone, "DELETE", "/devices/"+strconv.FormatInt(me.ThisDevice.ID, 10), nil, nil)
-	// The pen drops this device as it answers, so the answer may never
-	// arrive (code 0); a 404 means it is already gone. Anything else is real.
-	if err != nil && code != 0 && code != 404 {
-		return errorf("the pen would not remove the share's server: %v", err)
+	code, err := homeAPICtx(delCtx, &delClient, c.Zone, "DELETE", "/devices/"+strconv.FormatInt(deviceID, 10), nil, nil)
+	if err == nil || code == http.StatusNotFound {
+		return nil
 	}
-	return nil
+	if code == 0 && ctx.Err() == nil {
+		if confirmDeviceRemoved(ctx, hc, c.Zone, checkNeedsLogin) {
+			return nil
+		}
+		return errorf("could not confirm removal of the share's server on %s; check Devices on home.%s", c.Zone, c.Zone)
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return errorf("the pen would not remove the share's server: %v", err)
 }

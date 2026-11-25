@@ -162,7 +162,13 @@ func TestMeshServerNamesItself(t *testing.T) {
 	want(200, "DELETE", "/api/names/x.blog", "100.64.0.11", "")
 	want(403, "DELETE", "/api/devices/"+id(srvB), "100.64.0.11", "")   // not another server
 	want(403, "DELETE", "/api/devices/"+id(laptop), "100.64.0.11", "") // nor the laptop
-	want(200, "DELETE", "/api/devices/"+id(srvA), "100.64.0.11", "")   // itself: yes
+	want(202, "DELETE", "/api/devices/"+id(srvA), "100.64.0.11", "")   // itself: accepted async (I-34)
+	waitCtx, cancelWait := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelWait()
+	e.svc.WaitBackground(waitCtx)
+	if got, err := e.st.DeviceByID(srvA.ID); err != nil || got.RemovedAt == nil {
+		t.Fatalf("expected self-deleted server %d to be marked removed, got=%+v err=%v", srvA.ID, got, err)
+	}
 }
 
 // The owner's server still counts against the names cap: a leaked server

@@ -31,7 +31,6 @@ type DNSServer struct {
 	nsName    dnsmessage.Name
 	ownerName dnsmessage.Name
 	coreV4    netip.Addr
-	coreV6    netip.Addr
 	serial    uint32
 }
 
@@ -41,12 +40,12 @@ func NewDNSServer(s *Service) (*DNSServer, error) {
 	if err != nil || !coreV4.Is4() {
 		return nil, fmt.Errorf("dns: invalid CORE_MESH_IP %q", s.cfg.CoreIP)
 	}
-	return NewDNSServerWithIPs(s, coreV4, netip.Addr{})
+	return NewDNSServerWithIP(s, coreV4)
 }
 
-// NewDNSServerWithIPs builds an authoritative DNS handler using explicit core
-// IPv4 (required) and optional IPv6 addresses (e.g. from an embedded tsnet node).
-func NewDNSServerWithIPs(s *Service, coreV4, coreV6 netip.Addr) (*DNSServer, error) {
+// NewDNSServerWithIP builds an authoritative IPv4-only DNS handler using an
+// explicit core IPv4 address (e.g. from an embedded tsnet node).
+func NewDNSServerWithIP(s *Service, coreV4 netip.Addr) (*DNSServer, error) {
 	zone := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s.cfg.Zone)), ".")
 	if zone == "" {
 		return nil, errors.New("dns: zone is empty")
@@ -67,9 +66,6 @@ func NewDNSServerWithIPs(s *Service, coreV4, coreV6 netip.Addr) (*DNSServer, err
 	if !coreV4.IsValid() || !coreV4.Is4() {
 		return nil, fmt.Errorf("dns: invalid core IPv4 %q", coreV4)
 	}
-	if coreV6.IsValid() && !coreV6.Is6() {
-		coreV6 = netip.Addr{}
-	}
 	return &DNSServer{
 		svc:       s,
 		zoneFQDN:  fqdn,
@@ -77,7 +73,6 @@ func NewDNSServerWithIPs(s *Service, coreV4, coreV6 netip.Addr) (*DNSServer, err
 		nsName:    nsName,
 		ownerName: ownerName,
 		coreV4:    coreV4,
-		coreV6:    coreV6,
 		serial:    uint32(time.Now().Unix()),
 	}, nil
 }
@@ -408,11 +403,10 @@ func (d *DNSServer) resolve(q dnsmessage.Question, qname string) (dnsmessage.RCo
 
 	rel := strings.TrimSuffix(qname, "."+d.zoneFQDN)
 	if v4, ok := d.coreAddr(rel); ok {
+		// Mesh policy is IPv4-only; AAAA intentionally returns NOERROR / NODATA
+		// so clients always dial over IPv4 and mesh IPv6 stays default-denied.
 		if q.Type == dnsmessage.TypeA || q.Type == dnsmessage.TypeALL {
 			ans = append(ans, &dnsmessage.AResource{A: v4.As4()})
-		}
-		if (q.Type == dnsmessage.TypeAAAA || q.Type == dnsmessage.TypeALL) && d.coreV6.IsValid() {
-			ans = append(ans, &dnsmessage.AAAAResource{AAAA: d.coreV6.As16()})
 		}
 		return dnsmessage.RCodeSuccess, ans, len(ans) == 0
 	}
@@ -435,11 +429,6 @@ func (d *DNSServer) resolve(q dnsmessage.Question, qname string) (dnsmessage.RCo
 	if q.Type == dnsmessage.TypeA || q.Type == dnsmessage.TypeALL {
 		if v4, perr := netip.ParseAddr(n.IPv4); perr == nil && v4.Is4() {
 			ans = append(ans, &dnsmessage.AResource{A: v4.As4()})
-		}
-	}
-	if q.Type == dnsmessage.TypeAAAA || q.Type == dnsmessage.TypeALL {
-		if v6, perr := netip.ParseAddr(n.IPv6); perr == nil && v6.Is6() {
-			ans = append(ans, &dnsmessage.AAAAResource{AAAA: v6.As16()})
 		}
 	}
 	return dnsmessage.RCodeSuccess, ans, len(ans) == 0

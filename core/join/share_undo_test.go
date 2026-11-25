@@ -46,7 +46,9 @@ func TestUndoFreshShare(t *testing.T) {
 		}
 	}
 	node := &closeCounter{}
-	undoFreshShare(hc, node, dir, &shareConfig{Name: "hello", Zone: zone})
+	if !undoFreshShare(hc, node, dir, &shareConfig{Name: "hello", Zone: zone}) {
+		t.Fatal("expected undoFreshShare to report clean rollback")
+	}
 
 	want := map[string]bool{"DELETE /api/names/hello": false, "GET /api/me": false, "DELETE /api/devices/7": false}
 	for _, c := range calls {

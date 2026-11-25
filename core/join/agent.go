@@ -106,7 +106,7 @@ func (c *agentConfig) inZone(host string) bool {
 	return host == c.Zone || strings.HasSuffix(host, "."+c.Zone)
 }
 
-var meshRanges = []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("fd7a:115c:a1e0::/48")}
+var meshRanges = []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10")}
 
 func inMeshRanges(ip netip.Addr) bool {
 	for _, r := range meshRanges {
@@ -237,10 +237,10 @@ func peerHasTag(p *ipnstate.PeerStatus, want string) bool {
 	return false
 }
 
-// resolvePenDNSIP returns the mesh IP of the pen's DNS server from st.
-// It prefers the configured DNSServer when that peer is still in the tailnet,
-// and falls back to an active tag:infra peer (preferring online IPv4, then any
-// IPv4, then IPv6, sorted deterministically) if the pen's core node moved IP.
+// resolvePenDNSIP returns the IPv4 mesh IP of the pen's DNS server from st.
+// It prefers the configured IPv4 DNSServer when that peer is still in the
+// tailnet, and falls back to an active tag:infra peer (preferring online IPv4,
+// then any IPv4, sorted deterministically) if the pen's core node moved IP.
 // Only tag:infra peers are eligible as fallback — members and tag:server nodes
 // can never claim tag:infra.
 func resolvePenDNSIP(st *ipnstate.Status, configured string) (netip.Addr, bool) {
@@ -248,26 +248,27 @@ func resolvePenDNSIP(st *ipnstate.Status, configured string) (netip.Addr, bool) 
 		return netip.Addr{}, false
 	}
 	if configured != "" {
-		if ip, err := netip.ParseAddr(configured); err == nil && statusHasPeerIP(st, ip) {
-			return ip.Unmap(), true
+		if ip, err := netip.ParseAddr(configured); err == nil {
+			ip = ip.Unmap()
+			if ip.Is4() && statusHasPeerIP(st, ip) {
+				return ip, true
+			}
 		}
 	}
-	var onlineV4, anyV4, onlineV6, anyV6 []netip.Addr
+	var onlineV4, anyV4 []netip.Addr
 	for _, p := range st.Peer {
 		if !peerHasTag(p, "tag:infra") {
 			continue
 		}
 		for _, raw := range p.TailscaleIPs {
 			ip := raw.Unmap()
-			switch {
-			case ip.Is4() && p.Online:
+			if !ip.Is4() {
+				continue
+			}
+			if p.Online {
 				onlineV4 = append(onlineV4, ip)
-			case ip.Is4():
+			} else {
 				anyV4 = append(anyV4, ip)
-			case ip.Is6() && p.Online:
-				onlineV6 = append(onlineV6, ip)
-			case ip.Is6():
-				anyV6 = append(anyV6, ip)
 			}
 		}
 	}
@@ -283,7 +284,7 @@ func resolvePenDNSIP(st *ipnstate.Status, configured string) (netip.Addr, bool) 
 		}
 		return best, true
 	}
-	for _, bucket := range [][]netip.Addr{onlineV4, anyV4, onlineV6, anyV6} {
+	for _, bucket := range [][]netip.Addr{onlineV4, anyV4} {
 		if ip, ok := pick(bucket); ok {
 			return ip, true
 		}
@@ -494,7 +495,22 @@ func newAgent(c *agentConfig, node *tsnet.Server) *agent {
 			return node.Dial(ctx, network, addr)
 		}
 		a.lookupDNS = func(ctx context.Context, host string) ([]string, error) {
-			return a.resolver.LookupHost(ctx, host)
+			// Mesh policy and authoritative pen DNS are IPv4-only; request A
+			// records directly so every dial does not send a wasted AAAA query.
+			ips, err := a.resolver.LookupIP(ctx, "ip4", host)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]string, 0, len(ips))
+			for _, ip := range ips {
+				if addr, ok := netip.AddrFromSlice(ip); ok {
+					addr = addr.Unmap()
+					if addr.Is4() {
+						out = append(out, addr.String())
+					}
+				}
+			}
+			return out, nil
 		}
 		a.isPeer = func(ctx context.Context, ip netip.Addr) bool {
 			lc, err := node.LocalClient()
@@ -541,8 +557,11 @@ func peerIPsForHost(st *ipnstate.Status, host string) []string {
 			return nil
 		}
 		out := make([]string, 0, len(p.TailscaleIPs))
-		for _, ip := range p.TailscaleIPs {
-			out = append(out, ip.String())
+		for _, raw := range p.TailscaleIPs {
+			ip := raw.Unmap()
+			if ip.Is4() {
+				out = append(out, ip.String())
+			}
 		}
 		return out
 	}

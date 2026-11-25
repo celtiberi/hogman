@@ -798,22 +798,33 @@ func TestPolicyGenTriggersNeedsFastSyncAndSetRoleRenewOnly(t *testing.T) {
 			t.Fatalf("%s did not bump policy_gen (before=%d after=%d)", label, before, after)
 		}
 	}
+	assertUnchanged := func(label string, fn func()) {
+		t.Helper()
+		before := genOf()
+		fn()
+		after := genOf()
+		if after != before {
+			t.Fatalf("%s unexpectedly bumped policy_gen (before=%d after=%d)", label, before, after)
+		}
+	}
 
-	// Verify EVERY mutator on members and devices bumps policy_gen via SQLite triggers.
+	// Verify policy-relevant mutators on members and devices bump policy_gen via
+	// SQLite triggers, while inserting a device-less member leaves it unchanged
+	// (a newly inserted member has 0 devices and cannot affect buildPolicy).
 	var owner1, owner2, bob *Member
-	assertBumped("InsertMember(owner1)", func() {
+	assertUnchanged("InsertMember(owner1)", func() {
 		owner1 = &Member{Handle: "owner1", Role: "owner", Status: "active", HSUserID: "u1"}
 		if err := e.st.InsertMember(owner1); err != nil {
 			t.Fatal(err)
 		}
 	})
-	assertBumped("InsertMember(owner2)", func() {
+	assertUnchanged("InsertMember(owner2)", func() {
 		owner2 = &Member{Handle: "owner2", Role: "owner", Status: "active", HSUserID: "u2"}
 		if err := e.st.InsertMember(owner2); err != nil {
 			t.Fatal(err)
 		}
 	})
-	assertBumped("InsertMember(bob)", func() {
+	assertUnchanged("InsertMember(bob)", func() {
 		bob = &Member{Handle: "bob", Role: "member", Status: "active", HSUserID: "u3"}
 		if err := e.st.InsertMember(bob); err != nil {
 			t.Fatal(err)
@@ -854,15 +865,6 @@ func TestPolicyGenTriggersNeedsFastSyncAndSetRoleRenewOnly(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	assertUnchanged := func(label string, fn func()) {
-		t.Helper()
-		before := genOf()
-		fn()
-		after := genOf()
-		if after != before {
-			t.Fatalf("%s unexpectedly bumped policy_gen (before=%d after=%d)", label, before, after)
-		}
-	}
 	assertBumped("UpdateDevice(ip change)", func() {
 		if err := e.st.UpdateDevice(dev.ID, "lap2", "100.64.0.99", "", testNodeKey("1"), testMachineKey("1")); err != nil {
 			t.Fatal(err)

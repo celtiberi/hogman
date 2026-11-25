@@ -118,4 +118,26 @@ func TestResolvePenDNSIPAndLiveStatusFollowsInfraPeer(t *testing.T) {
 			t.Fatalf("evaluateLiveNodeStatus = (%v, %v, %q), want (false, false, \"not connected to pen\")", up, needsLogin, reason)
 		}
 	})
+
+	t.Run("rejects IPv6-only tag:infra and configured IPv6 DNSServer (IPv4-only mesh)", func(t *testing.T) {
+		st := &ipnstate.Status{
+			BackendState: "Running",
+			Peer: map[key.NodePublic]*ipnstate.PeerStatus{
+				k1: {
+					TailscaleIPs: []netip.Addr{netip.MustParseAddr("fd7a:115c:a1e0::1")},
+					Tags:         tagsPtr("tag:infra"),
+					Online:       true,
+				},
+			},
+		}
+		if got, ok := resolvePenDNSIP(st, "fd7a:115c:a1e0::1"); ok {
+			t.Fatalf("expected IPv6-only DNS peer to fail closed, got (%v, true)", got)
+		}
+		if inMeshRanges(netip.MustParseAddr("fd7a:115c:a1e0::1")) {
+			t.Fatal("inMeshRanges must reject mesh IPv6 addresses")
+		}
+		if !inMeshRanges(netip.MustParseAddr("100.64.0.1")) {
+			t.Fatal("inMeshRanges must accept mesh IPv4 addresses")
+		}
+	})
 }

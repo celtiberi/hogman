@@ -39,6 +39,7 @@ type fakeHeadscale struct {
 	setPolicyCalls  int
 	onListNodes     func(context.Context)
 	onGetNode       func(context.Context, string)
+	onDeleteNode    func(http.ResponseWriter, string) bool
 	srv             *httptest.Server
 }
 
@@ -148,6 +149,9 @@ func newFakeHeadscale(t *testing.T) *fakeHeadscale {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		id := r.PathValue("id")
+		if f.onDeleteNode != nil && f.onDeleteNode(w, id) {
+			return
+		}
 		kept := f.nodes[:0]
 		for _, n := range f.nodes {
 			if n.ID != id {
