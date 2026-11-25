@@ -130,9 +130,11 @@ type Service struct {
 	orphans          map[string]bool
 	missingMKAlerted map[string]bool
 
-	baseCtxMu sync.RWMutex
-	baseCtx   context.Context
-	bgWG      sync.WaitGroup
+	baseCtxMu    sync.RWMutex
+	baseCtx      context.Context
+	bgMu         sync.Mutex
+	shuttingDown bool
+	bgWG         sync.WaitGroup
 
 	syncMu            sync.Mutex
 	syncFlight        *syncCall
@@ -140,6 +142,11 @@ type Service struct {
 	lastSyncAttemptAt time.Time
 	lastRenewOnly     bool
 	syncedOnce        bool
+
+	// Deduplicates in-flight asynchronous self-delete jobs (DELETE /api/devices/<self>)
+	// so repeated client retries cannot amplify goroutines while s.mu is busy.
+	selfDeleteMu sync.Mutex
+	selfDeleting map[int64]bool
 
 	// Per-device single-flight, cooldown, and bounded concurrency for
 	// single-node Headscale verification on WireGuard node key rotation.
@@ -184,8 +191,31 @@ func (s *Service) baseContext() context.Context {
 	return ctx
 }
 
-// WaitBackground waits for detached Sync, PresenceSnapshot, and key-rotation
-// workers to finish (or until ctx expires) before closing the SQLite store.
+// BeginShutdown prevents new detached background workers from spawning so
+// WaitBackground can drain in-flight jobs without racing bgWG.Add against Wait.
+func (s *Service) BeginShutdown() {
+	s.bgMu.Lock()
+	s.shuttingDown = true
+	s.bgMu.Unlock()
+}
+
+func (s *Service) startBackground(fn func()) bool {
+	s.bgMu.Lock()
+	if s.shuttingDown {
+		s.bgMu.Unlock()
+		return false
+	}
+	s.bgWG.Add(1)
+	s.bgMu.Unlock()
+	go func() {
+		defer s.bgWG.Done()
+		fn()
+	}()
+	return true
+}
+
+// WaitBackground waits for detached Sync, PresenceSnapshot, key-rotation, and
+// self-delete workers to finish (or until ctx expires) before closing SQLite.
 func (s *Service) WaitBackground(ctx context.Context) {
 	done := make(chan struct{})
 	go func() {
@@ -948,16 +978,41 @@ func (s *Service) issueKey(ctx context.Context, m *Member, kind string) (string,
 	return k.Key, dk.ExpiresAt, nil
 }
 
+const (
+	removeDeviceTimeout        = 30 * time.Second
+	removeDeviceCleanupTimeout = 15 * time.Second
+)
+
 func (s *Service) RemoveDevice(ctx context.Context, a Actor, id int64) error {
-	// A server removing itself loses its connection as its node goes, and the
-	// request's context is cancelled with it: finish the job regardless.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
-	defer cancel()
+	return s.removeDevice(ctx, a, id, false)
+}
+
+func (s *Service) removeDevice(ctx context.Context, a Actor, id int64, allowSuspendedSelf bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var err error
-	if a, err = s.refreshActorLocked(a); err != nil {
+	// Bail immediately if the caller already disconnected or timed out while
+	// waiting on s.mu (prevents cancelled non-self delete bursts from piling up
+	// Headscale calls under s.mu; ScheduleSelfDelete passes s.baseContext()).
+	if err := ctx.Err(); err != nil {
 		return err
+	}
+	var err error
+	if allowSuspendedSelf && !a.CLI && a.Member != nil {
+		m, merr := s.st.MemberByID(a.Member.ID)
+		if merr != nil {
+			return merr
+		}
+		// Honor an already-accepted 202 self-delete even if the member was
+		// concurrently suspended (removing one's own device strictly reduces
+		// privilege). Kicked/removed members already have all devices removed.
+		if m.Status != "active" && m.Status != "suspended" {
+			return forbidden("membership %s", m.Status)
+		}
+		a = Actor{Member: m}
+	} else {
+		if a, err = s.refreshActorLocked(a); err != nil {
+			return err
+		}
 	}
 	d, err := s.st.DeviceByID(id)
 	if errors.Is(err, ErrNotFound) || (err == nil && d.RemovedAt != nil) {
@@ -970,16 +1025,26 @@ func (s *Service) RemoveDevice(ctx context.Context, a Actor, id int64) error {
 		return err
 	}
 	if !a.Is(owner) {
-		if !a.IsAdmin() {
+		if allowSuspendedSelf || !a.IsAdmin() {
 			return forbidden("not your device")
 		}
 		if (owner.Role == "owner" || owner.Role == "admin") && !a.IsOwner() {
 			return forbidden("only the owner can remove devices of an owner or admin")
 		}
 	}
-	if err := s.hs.DeleteNode(ctx, d.HSNodeID); err != nil {
+	// Derive the Headscale DeleteNode timeout AFTER acquiring s.mu so waiting
+	// behind a long Sync() does not starve Headscale, while still honoring caller
+	// ctx cancellation for synchronous non-self deletes.
+	opCtx, cancel := context.WithTimeout(ctx, removeDeviceTimeout)
+	defer cancel()
+	if err := s.hs.DeleteNode(opCtx, d.HSNodeID); err != nil {
 		return err
 	}
+	// Once Headscale deleted the node, finish SQLite cleanup and policy push on
+	// a detached lifecycle context so a late caller disconnect cannot split-brain
+	// SQLite/Headscale state or leak leaf DNS names.
+	cleanupCtx, cleanupCancel := context.WithTimeout(s.baseContext(), removeDeviceCleanupTimeout)
+	defer cleanupCancel()
 	// Removing a device on purpose gives back the leaf names it served (a share's
 	// name, say), so they aren't stuck, while preserving parent names that still
 	// have subdomains on other devices. A kick holds names instead (Kick).
@@ -990,7 +1055,86 @@ func (s *Service) RemoveDevice(ctx context.Context, a Actor, id int64) error {
 		return err
 	}
 	s.st.Audit(a.String(), "device.remove", fmt.Sprintf("%s/%s#%d", owner.Handle, d.Name, d.ID), "")
-	return s.applyPolicy(ctx)
+	return s.applyPolicy(cleanupCtx)
+}
+
+func (s *Service) isSelfDeleting(id int64) bool {
+	s.selfDeleteMu.Lock()
+	ok := s.selfDeleting[id]
+	s.selfDeleteMu.Unlock()
+	return ok
+}
+
+// ScheduleSelfDelete queues an authenticated device's own removal in a tracked
+// detached goroutine so the HTTP handler can answer 202 Accepted before
+// Headscale deletes the caller's WireGuard peer, and so a busy s.mu or client
+// disconnect can never abort the cleanup. Repeated calls for the same device
+// ID coalesce while a removal is already in flight. Returns false only if the
+// service is already shutting down.
+func (s *Service) ScheduleSelfDelete(a Actor, id int64) bool {
+	s.selfDeleteMu.Lock()
+	if s.selfDeleting == nil {
+		s.selfDeleting = map[int64]bool{}
+	}
+	if s.selfDeleting[id] {
+		s.selfDeleteMu.Unlock()
+		return true
+	}
+	s.selfDeleting[id] = true
+	s.selfDeleteMu.Unlock()
+
+	started := s.startBackground(func() {
+		defer func() {
+			s.selfDeleteMu.Lock()
+			delete(s.selfDeleting, id)
+			s.selfDeleteMu.Unlock()
+		}()
+		backoffs := []time.Duration{time.Second, 2 * time.Second}
+		for attempt := 0; ; attempt++ {
+			err := s.removeDevice(s.baseContext(), a, id, true)
+			if err == nil {
+				return
+			}
+			var p *Problem
+			if errors.Is(err, ErrNotFound) || (errors.As(err, &p) && p.Status == 404) {
+				// If a prior attempt committed MarkDeviceRemoved and failed only
+				// during applyPolicy, push the dirty policy now instead of bailing.
+				if attempt > 0 && s.NeedsFastSync() {
+					s.mu.Lock()
+					polCtx, polCancel := context.WithTimeout(s.baseContext(), removeDeviceCleanupTimeout)
+					polErr := s.applyPolicy(polCtx)
+					polCancel()
+					s.mu.Unlock()
+					if polErr == nil {
+						return
+					}
+					err = polErr
+				} else {
+					return
+				}
+			} else if errors.As(err, &p) && p.Status == 403 {
+				log.Printf("self-delete device #%d aborted: %v", id, err)
+				return
+			}
+			if attempt >= len(backoffs) || s.baseContext().Err() != nil {
+				log.Printf("self-delete device #%d failed after %d attempt(s): %v", id, attempt+1, err)
+				return
+			}
+			log.Printf("self-delete device #%d attempt %d failed (%v); retrying in %s", id, attempt+1, err, backoffs[attempt])
+			select {
+			case <-time.After(backoffs[attempt]):
+			case <-s.baseContext().Done():
+				return
+			}
+		}
+	})
+	if !started {
+		s.selfDeleteMu.Lock()
+		delete(s.selfDeleting, id)
+		s.selfDeleteMu.Unlock()
+		return false
+	}
+	return true
 }
 
 // WhoIs maps a mesh source address to the device and member behind it.
@@ -1129,6 +1273,9 @@ func (s *Service) VerifyDirectPeer(ctx context.Context, peer *PeerIdentity) (*Me
 		return nil, nil, ErrNotFound
 	}
 	addr = addr.Unmap()
+	if !addr.Is4() {
+		return nil, nil, ErrNotFound
+	}
 	canon := addr.String()
 
 	d, err := s.st.DeviceByHSNodeID(peer.HSNodeID)
@@ -1146,7 +1293,7 @@ func (s *Service) VerifyDirectPeer(ctx context.Context, peer *PeerIdentity) (*Me
 	if err != nil {
 		return nil, nil, err
 	}
-	if d.RemovedAt != nil {
+	if d.RemovedAt != nil || s.isSelfDeleting(d.ID) {
 		return nil, nil, ErrNotFound
 	}
 	m, err := s.st.MemberByID(d.MemberID)
@@ -1158,7 +1305,7 @@ func (s *Service) VerifyDirectPeer(ctx context.Context, peer *PeerIdentity) (*Me
 	}
 	// Keep key rotation narrow (node key only): if the mesh IP does not match
 	// what SQLite holds, refuse immediately and leave IP shifts to syncOnce().
-	if d.IPv4 != canon && d.IPv6 != canon {
+	if d.IPv4 != canon {
 		return nil, nil, ErrNotFound
 	}
 	storedNodeKey, okNK := canonicalNodeKey(d.NodeKey)
@@ -1207,9 +1354,7 @@ func (s *Service) verifyAndRotateNodeKey(ctx context.Context, hsNodeID, peerNode
 		s.rotateCooldown[hsNodeID] = nowT
 		call = &rotateCall{done: make(chan struct{})}
 		s.rotateFlight[hsNodeID] = call
-		s.bgWG.Add(1)
-		go func() {
-			defer s.bgWG.Done()
+		started := s.startBackground(func() {
 			workCtx, cancel := context.WithTimeout(s.baseContext(), 15*time.Second)
 			n, hsErr := s.hs.Node(workCtx, hsNodeID)
 			cancel()
@@ -1228,7 +1373,13 @@ func (s *Service) verifyAndRotateNodeKey(ctx context.Context, hsNodeID, peerNode
 			close(call.done)
 			delete(s.rotateFlight, hsNodeID)
 			s.rotateMu.Unlock()
-		}()
+		})
+		if !started {
+			<-s.rotateSem
+			delete(s.rotateFlight, hsNodeID)
+			s.rotateMu.Unlock()
+			return nil, nil, ErrNotFound
+		}
 	}
 	s.rotateMu.Unlock()
 
@@ -1245,7 +1396,7 @@ func (s *Service) verifyAndRotateNodeKey(ctx context.Context, hsNodeID, peerNode
 	// coalesced caller verifies its own presented NodeKey against the committed
 	// row and receives up-to-date status/role.
 	d, err := s.st.DeviceByHSNodeID(hsNodeID)
-	if err != nil || d.RemovedAt != nil {
+	if err != nil || d.RemovedAt != nil || s.isSelfDeleting(d.ID) {
 		return nil, nil, ErrNotFound
 	}
 	m, err := s.st.MemberByID(d.MemberID)
@@ -1255,7 +1406,7 @@ func (s *Service) verifyAndRotateNodeKey(ctx context.Context, hsNodeID, peerNode
 	if m.Status != "active" {
 		return nil, nil, forbidden("membership %s", m.Status)
 	}
-	if d.IPv4 != canon && d.IPv6 != canon {
+	if d.IPv4 != canon {
 		return nil, nil, ErrNotFound
 	}
 	curNodeKey, okNK := canonicalNodeKey(d.NodeKey)
@@ -1270,7 +1421,7 @@ func (s *Service) commitNodeKeyRotation(hsNodeID string, n *HSNode, addr netip.A
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d, err := s.st.DeviceByHSNodeID(hsNodeID)
-	if err != nil || d.RemovedAt != nil {
+	if err != nil || d.RemovedAt != nil || s.isSelfDeleting(d.ID) {
 		return ErrNotFound
 	}
 	m, err := s.st.MemberByID(d.MemberID)
@@ -1280,7 +1431,7 @@ func (s *Service) commitNodeKeyRotation(hsNodeID string, n *HSNode, addr netip.A
 	if m.Status != "active" {
 		return forbidden("membership %s", m.Status)
 	}
-	if d.IPv4 != canon && d.IPv6 != canon {
+	if d.IPv4 != canon {
 		return ErrNotFound
 	}
 	storedNodeKey, okNK := canonicalNodeKey(d.NodeKey)
@@ -1333,10 +1484,16 @@ func (s *Service) VerifyLiveCaller(ctx context.Context, src string) (*Member, *D
 		return nil, nil, ErrNotFound
 	}
 	addr = addr.Unmap()
+	if !addr.Is4() {
+		return nil, nil, ErrNotFound
+	}
 	canon := addr.String()
 	m, d, err := s.WhoIs(canon)
 	if err != nil {
 		return nil, nil, err
+	}
+	if s.isSelfDeleting(d.ID) {
+		return nil, nil, ErrNotFound
 	}
 	if m.Status != "active" {
 		return nil, nil, forbidden("membership %s", m.Status)
@@ -1354,6 +1511,9 @@ func (s *Service) VerifyLiveCaller(ctx context.Context, src string) (*Member, *D
 	m, d, err = s.WhoIs(canon)
 	if err != nil {
 		return nil, nil, err
+	}
+	if s.isSelfDeleting(d.ID) {
+		return nil, nil, ErrNotFound
 	}
 	if m.Status != "active" {
 		return nil, nil, forbidden("membership %s", m.Status)
@@ -1407,9 +1567,7 @@ func (s *Service) PresenceSnapshot(ctx context.Context) map[string]HSNode {
 	if call == nil {
 		call = &presenceCall{done: make(chan struct{})}
 		s.presenceFlight = call
-		s.bgWG.Add(1)
-		go func() {
-			defer s.bgWG.Done()
+		started := s.startBackground(func() {
 			workCtx, cancel := context.WithTimeout(s.baseContext(), presenceTimeout)
 			defer cancel()
 			nodes, err := s.hs.Nodes(workCtx)
@@ -1430,7 +1588,12 @@ func (s *Service) PresenceSnapshot(ctx context.Context) map[string]HSNode {
 			close(call.done)
 			s.presenceFlight = nil
 			s.presenceMu.Unlock()
-		}()
+		})
+		if !started {
+			s.presenceFlight = nil
+			s.presenceMu.Unlock()
+			return stale
+		}
 	}
 	s.presenceMu.Unlock()
 
@@ -2059,9 +2222,7 @@ func (s *Service) Sync(ctx context.Context) error {
 	if call == nil {
 		call = &syncCall{done: make(chan struct{})}
 		s.syncFlight = call
-		s.bgWG.Add(1)
-		go func() {
-			defer s.bgWG.Done()
+		started := s.startBackground(func() {
 			workCtx, cancel := context.WithTimeout(s.baseContext(), syncFlightTimeout)
 			defer cancel()
 			renewOnly, err := s.syncOnce(workCtx)
@@ -2077,7 +2238,12 @@ func (s *Service) Sync(ctx context.Context) error {
 			close(call.done)
 			s.syncFlight = nil
 			s.syncMu.Unlock()
-		}()
+		})
+		if !started {
+			s.syncFlight = nil
+			s.syncMu.Unlock()
+			return context.Canceled
+		}
 	}
 	s.syncMu.Unlock()
 
@@ -2138,14 +2304,16 @@ func (s *Service) syncOnce(ctx context.Context) (bool, error) {
 	for _, d := range live {
 		byNode[d.HSNodeID] = d
 	}
-	members := map[int64]*Member{}
+	allMembers, err := s.st.Members()
+	if err != nil {
+		return false, err
+	}
+	members := make(map[int64]*Member, len(allMembers))
+	for _, m := range allMembers {
+		members[m.ID] = m
+	}
 	memberOf := func(id int64) *Member {
-		if m, ok := members[id]; ok {
-			return m
-		}
-		m, _ := s.st.MemberByID(id)
-		members[id] = m
-		return m
+		return members[id]
 	}
 
 	// Pre-check drift across all existing live nodes BEFORE making any DB writes.
@@ -2281,17 +2449,23 @@ func (s *Service) syncOnce(ctx context.Context) (bool, error) {
 		}
 	}
 	// Retry Headscale user deletion for removed members once all their nodes are gone.
-	if allMembers, err := s.st.Members(); err == nil {
+	var removedWithHS []*Member
+	for _, m := range allMembers {
+		if m.Status == "removed" && m.HSUserID != "" {
+			removedWithHS = append(removedWithHS, m)
+		}
+	}
+	if len(removedWithHS) > 0 {
 		liveByMember := map[int64]bool{}
 		if curLive, err := s.st.LiveDevices(); err == nil {
 			for _, d := range curLive {
 				liveByMember[d.MemberID] = true
 			}
-		}
-		for _, m := range allMembers {
-			if m.Status == "removed" && m.HSUserID != "" && !liveByMember[m.ID] {
-				if err := s.hs.DeleteUser(ctx, m.HSUserID); err == nil || isHSNotFound(err) {
-					_ = s.st.ClearMemberHSUserID(m.ID)
+			for _, m := range removedWithHS {
+				if !liveByMember[m.ID] {
+					if err := s.hs.DeleteUser(ctx, m.HSUserID); err == nil || isHSNotFound(err) {
+						_ = s.st.ClearMemberHSUserID(m.ID)
+					}
 				}
 			}
 		}
@@ -2331,8 +2505,11 @@ func (s *Service) isRenewOnly() bool {
 }
 
 // buildPolicy is the default-deny policy of DESIGN.md section 8, expressed
-// over the addresses of devices whose members are active. Suspended and
-// removed members' devices appear nowhere, so they can reach nothing.
+// over the IPv4 mesh addresses of devices whose members are active. Suspended
+// and removed members' devices appear nowhere, so they can reach nothing.
+// Mesh policy is intentionally IPv4-only (100.64.0.0/10 holds 4.19M addresses
+// per pen): omitting IPv6 shrinks the policy JSON ~4x, halves every peer's
+// WireGuard packet-filter entries, and leaves mesh IPv6 default-denied (D-11).
 // During a renew_only wake (I-7 Part 2), only active owner/admin personal
 // devices can reach tag:infra (DNS 53 + portal 443); regular members, server
 // devices, and all shares are excluded from the Headscale netmap.
@@ -2363,17 +2540,15 @@ func (s *Service) buildPolicy() (string, bool, error) {
 				continue
 			}
 		}
-		for _, ip := range []string{d.IPv4, d.IPv6} {
-			if ip == "" {
-				continue
-			}
-			infraSrc = append(infraSrc, ip)
-			if !renewOnly {
-				if d.Kind == "server" {
-					servers = append(servers, ip)
-				} else {
-					serverSrc = append(serverSrc, ip)
-				}
+		if d.IPv4 == "" {
+			continue
+		}
+		infraSrc = append(infraSrc, d.IPv4)
+		if !renewOnly {
+			if d.Kind == "server" {
+				servers = append(servers, d.IPv4)
+			} else {
+				serverSrc = append(serverSrc, d.IPv4)
 			}
 		}
 	}
@@ -2399,7 +2574,7 @@ func (s *Service) buildPolicy() (string, bool, error) {
 		"tagOwners": map[string][]string{"tag:infra": {}, "tag:server": {}},
 		"grants":    grants,
 	}
-	b, err := json.MarshalIndent(pol, "", "  ")
+	b, err := json.Marshal(pol)
 	return string(b), renewOnly, err
 }
 
@@ -2432,13 +2607,21 @@ func (s *Service) applyPolicyTracked(ctx context.Context) (bool, error) {
 			return false, err
 		}
 		renewOnly = curRenewOnly
+		// Rule: "dirty always pushes" even when pol == s.lastPolicy. lastPolicy
+		// is process-local memory and can go stale across CLI SQLite mutations
+		// (e.g. serve pushed P2, CLI resumed to P1, then CLI suspended back to P2
+		// and its push failed: skipping would leave a suspended member on the
+		// mesh). Note: .renew-only is file-driven (not a SQLite trigger), so its
+		// transitions rely on pol != s.lastPolicy on the fast-sync loop.
 		dirty := genErr != nil || gen > appliedGen
 		if pol == s.lastPolicy && !dirty {
 			return renewOnly, nil
 		}
+		t0 := time.Now()
 		if err := s.hs.SetPolicy(ctx, pol); err != nil {
 			return false, fmt.Errorf("set policy: %w", err)
 		}
+		log.Printf("policy: applied gen=%d bytes=%d dur=%s", gen, len(pol), time.Since(t0).Round(time.Millisecond))
 		s.lastPolicy = pol
 		if genErr == nil {
 			_ = s.st.MarkPolicyApplied(gen)

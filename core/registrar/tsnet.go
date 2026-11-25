@@ -30,8 +30,8 @@ type embeddedMesh struct {
 	homeMgr   *HomeCertManager
 	portal    *http.Server
 	health    *http.Server
+	reqCancel context.CancelFunc
 	coreV4    netip.Addr
-	coreV6    netip.Addr
 	stateDir  string
 	zone      string
 	portalDir string
@@ -80,6 +80,9 @@ func (e *embeddedMesh) Shutdown(ctx context.Context) {
 		if e.portalOn.Load() && e.portal != nil {
 			_ = e.portal.Shutdown(ctx)
 		}
+		if e.reqCancel != nil {
+			e.reqCancel()
+		}
 		if e.srv != nil {
 			_ = e.srv.Close()
 		}
@@ -120,6 +123,9 @@ func whoIsPeer(lc *local.Client) func(ctx context.Context, remoteAddr string) (*
 			return nil, err
 		}
 		want = want.Unmap()
+		if !want.Is4() {
+			return nil, fmt.Errorf("whois rejected non-IPv4 peer %s", want)
+		}
 		who, err := lc.WhoIs(ctx, remoteAddr)
 		if err != nil {
 			return nil, err
@@ -172,9 +178,8 @@ func configureTestCA() {
 }
 
 // startEmbeddedMesh brings up the pen's core Tailscale node inside the
-// registrar process via tsnet, binds authoritative DNS (:53 UDP on the node's
-// own IPv4 and optional IPv6 + :53 TCP), and serves the portal + direct API
-// on :443 over TLS.
+// registrar process via tsnet, binds IPv4-only authoritative DNS (:53 UDP on
+// coreV4 + :53 TCP), and serves the portal + direct API on :443 over TLS.
 func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager, stateDir, controlURL, hostname, authKeyFile, portalDir string) (*embeddedMesh, error) {
 	if strings.TrimSpace(stateDir) == "" {
 		return nil, nil
@@ -233,13 +238,12 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 		_ = os.Remove(authKeyFile)
 	}
 
-	var coreV4, coreV6 netip.Addr
+	var coreV4 netip.Addr
 	for _, ip := range st.TailscaleIPs {
 		ip = ip.Unmap()
 		if ip.Is4() && !coreV4.IsValid() {
 			coreV4 = ip
-		} else if ip.Is6() && !coreV6.IsValid() {
-			coreV6 = ip
+			break
 		}
 	}
 	if !coreV4.IsValid() {
@@ -265,12 +269,13 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 		return nil, fmt.Errorf("tsnet: rename mesh-ip: %w", err)
 	}
 
-	dnsSrv, err := NewDNSServerWithIPs(s, coreV4, coreV6)
+	dnsSrv, err := NewDNSServerWithIP(s, coreV4)
 	if err != nil {
 		_ = srv.Close()
 		return nil, err
 	}
 	// tsnet.ListenPacket requires an explicit IP address (":53" is rejected).
+	// Mesh policy and split-DNS are IPv4-only, so bind UDP :53 on coreV4 only.
 	udp4Addr := net.JoinHostPort(coreV4.String(), "53")
 	udp4, err := srv.ListenPacket("udp", udp4Addr)
 	if err != nil {
@@ -278,14 +283,6 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 		return nil, fmt.Errorf("tsnet ListenPacket(udp, %s): %w", udp4Addr, err)
 	}
 	udpConns := []net.PacketConn{udp4}
-	if coreV6.IsValid() {
-		udp6Addr := net.JoinHostPort(coreV6.String(), "53")
-		if udp6, err := srv.ListenPacket("udp", udp6Addr); err != nil {
-			log.Printf("tsnet: IPv6 DNS listen on %s skipped: %v", udp6Addr, err)
-		} else {
-			udpConns = append(udpConns, udp6)
-		}
-	}
 	tcp53, err := srv.Listen("tcp", ":53")
 	if err != nil {
 		for _, c := range udpConns {
@@ -295,7 +292,7 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 		return nil, fmt.Errorf("tsnet Listen(tcp, :53): %w", err)
 	}
 	dnsSrv.Serve(ctx, udpConns, tcp53)
-	log.Printf("tsnet: core=%s (v6=%v) dns listening on :53 (udp/tcp) for %s", coreV4, coreV6, s.cfg.Zone)
+	log.Printf("tsnet: core=%s dns listening on :53 (udp/tcp) for %s", coreV4, s.cfg.Zone)
 
 	lc, err := srv.LocalClient()
 	if err != nil {
@@ -307,8 +304,10 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 		return nil, errors.New("tsnet: HOME_TLS_DIR is required to serve https://home.<zone>:443")
 	}
 	apiHandler := MeshHandlerDirect(s, whoIsPeer(lc))
+	reqCtx, reqCancel := context.WithCancel(context.Background())
 	portalSrv := &http.Server{
 		Handler:           PortalHandler(s.cfg.Zone, portalDir, apiHandler),
+		BaseContext:       func(net.Listener) context.Context { return reqCtx },
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -320,8 +319,8 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 		dns:       dnsSrv,
 		homeMgr:   homeMgr,
 		portal:    portalSrv,
+		reqCancel: reqCancel,
 		coreV4:    coreV4,
-		coreV6:    coreV6,
 		stateDir:  stateDir,
 		zone:      s.cfg.Zone,
 		portalDir: portalDir,

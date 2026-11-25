@@ -222,7 +222,7 @@ func (h *Headscale) Node(ctx context.Context, id string) (*HSNode, error) {
 
 func (h *Headscale) DeleteNode(ctx context.Context, id string) error {
 	err := h.do(ctx, http.MethodDelete, "/node/"+url.PathEscape(id), nil, nil)
-	if e, ok := err.(*HSError); ok && e.Status == http.StatusNotFound {
+	if isHSNotFound(err) {
 		return nil // already gone
 	}
 	return err

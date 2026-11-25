@@ -310,7 +310,7 @@ func TestFormatFreshShareCertErrorRateLimit(t *testing.T) {
 			RetryAfter: 45 * time.Minute,
 		},
 	})
-	got := formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", wrappedHourly).Error()
+	got := formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", "bobo.pens.hogman.network", wrappedHourly, true).Error()
 	if !strings.Contains(got, "too many new certificate names for this pen in the last hour") {
 		t.Fatalf("missing verbatim message: %s", got)
 	}
@@ -327,7 +327,7 @@ func TestFormatFreshShareCertErrorRateLimit(t *testing.T) {
 		Msg:        "the network is busy; too many new certificate names in the last hour",
 		RetryAfter: 30 * time.Second,
 	}
-	got = formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", wrappedGlobal).Error()
+	got = formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", "bobo.pens.hogman.network", wrappedGlobal, true).Error()
 	if !strings.Contains(got, "try again in about 1 minute") {
 		t.Fatalf("short retry hint wrong: %s", got)
 	}
@@ -338,15 +338,21 @@ func TestFormatFreshShareCertErrorRateLimit(t *testing.T) {
 		Msg:        "this pen's weekly limit on new certificate names is reached",
 		RetryAfter: 6 * 24 * time.Hour,
 	}
-	got = formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", wrappedWeekly).Error()
+	got = formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", "bobo.pens.hogman.network", wrappedWeekly, true).Error()
 	if !strings.Contains(got, "try again in about 6 days") {
 		t.Fatalf("weekly retry hint wrong: %s", got)
 	}
 
-	// Non-429 error keeps original format.
-	got = formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", errors.New("dns timeout")).Error()
-	if !strings.Contains(got, "Fix the problem above") {
+	// Non-429 error keeps original format when rollback succeeded.
+	got = formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", "bobo.pens.hogman.network", errors.New("dns timeout"), true).Error()
+	if !strings.Contains(got, "Fix the problem above") || !strings.Contains(got, "Nothing was left behind") {
 		t.Fatalf("non-429 error changed unexpectedly: %s", got)
+	}
+
+	// When rollback was unconfirmed, do not falsely claim nothing was left behind.
+	got = formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", "bobo.pens.hogman.network", errors.New("dns timeout"), false).Error()
+	if strings.Contains(got, "Nothing was left behind") || !strings.Contains(got, "Cleanup could not be fully confirmed") {
+		t.Fatalf("unconfirmed rollback message wrong: %s", got)
 	}
 }
 

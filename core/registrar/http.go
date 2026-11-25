@@ -236,7 +236,13 @@ func meshMux(s *Service) http.Handler {
 			})
 			return
 		}
-		devs, _ := s.st.MemberDevices(c.member.ID)
+		rawDevs, _ := s.st.MemberDevices(c.member.ID)
+		devs := make([]*Device, 0, len(rawDevs))
+		for _, d := range rawDevs {
+			if !s.isSelfDeleting(d.ID) {
+				devs = append(devs, d)
+			}
+		}
 		names, _ := s.st.Names()
 		mine := []*Name{}
 		for _, n := range names {
@@ -379,7 +385,9 @@ func meshMux(s *Service) http.Handler {
 	})
 
 	// A server may remove itself (how `hogman share stop` cleans up), and
-	// nothing else.
+	// nothing else. Self-removal (personal or server) runs asynchronously on a
+	// detached context and answers 202 Accepted before Headscale tears down the
+	// caller's WireGuard link (I-34).
 	h("DELETE /api/devices/{id}", false, true, func(w http.ResponseWriter, r *http.Request, c caller) {
 		id, ok := pathID(w, r)
 		if !ok {
@@ -387,6 +395,14 @@ func meshMux(s *Service) http.Handler {
 		}
 		if c.device.Kind == "server" && id != c.device.ID {
 			fail(w, forbidden("a server can only remove itself"))
+			return
+		}
+		if id == c.device.ID {
+			if !s.ScheduleSelfDelete(c.actor(), id) {
+				fail(w, &Problem{Status: http.StatusServiceUnavailable, Msg: "registrar is shutting down; retry shortly"})
+				return
+			}
+			writeJSON(w, http.StatusAccepted, map[string]bool{"ok": true})
 			return
 		}
 		done(w, s.RemoveDevice(r.Context(), c.actor(), id))

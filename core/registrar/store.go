@@ -79,11 +79,14 @@ CREATE TABLE IF NOT EXISTS sync_state (
 	applied_gen INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO sync_state (id, policy_gen, applied_gen) VALUES (1, 0, 0);
-CREATE TRIGGER IF NOT EXISTS members_policy_gen_ai AFTER INSERT ON members BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
+-- A brand-new member has 0 devices and cannot change buildPolicy() output;
+-- upgraded databases drop legacy members_policy_gen_ai and update
+-- devices_policy_gen_au via migratePolicyTriggers so read-only CLI opens do
+-- not rewrite sqlite_master.
 CREATE TRIGGER IF NOT EXISTS members_policy_gen_au AFTER UPDATE OF role, status ON members WHEN OLD.role IS NOT NEW.role OR OLD.status IS NOT NEW.status BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
 CREATE TRIGGER IF NOT EXISTS members_policy_gen_ad AFTER DELETE ON members BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
 CREATE TRIGGER IF NOT EXISTS devices_policy_gen_ai AFTER INSERT ON devices BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
-CREATE TRIGGER IF NOT EXISTS devices_policy_gen_au AFTER UPDATE OF member_id, kind, ipv4, ipv6, removed_at ON devices WHEN OLD.member_id IS NOT NEW.member_id OR OLD.kind IS NOT NEW.kind OR OLD.ipv4 IS NOT NEW.ipv4 OR OLD.ipv6 IS NOT NEW.ipv6 OR OLD.removed_at IS NOT NEW.removed_at BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
+CREATE TRIGGER IF NOT EXISTS devices_policy_gen_au AFTER UPDATE OF member_id, kind, ipv4, removed_at ON devices WHEN OLD.member_id IS NOT NEW.member_id OR OLD.kind IS NOT NEW.kind OR OLD.ipv4 IS NOT NEW.ipv4 OR OLD.removed_at IS NOT NEW.removed_at BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
 CREATE TRIGGER IF NOT EXISTS devices_policy_gen_ad AFTER DELETE ON devices BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
 CREATE TABLE IF NOT EXISTS names (
 	name        TEXT PRIMARY KEY,        -- relative to the zone: "alice", "blog.alice"
@@ -129,6 +132,10 @@ func OpenStore(path string) (*Store, error) {
 	if err := migrateDevicesMachineKey(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate devices.machine_key: %w", err)
+	}
+	if err := migratePolicyTriggers(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate policy triggers: %w", err)
 	}
 	return &Store{db: db, path: path}, nil
 }
@@ -224,6 +231,42 @@ func migrateDevicesMachineKey(db *sql.DB) error {
 			return nil
 		}
 		return err
+	}
+	return nil
+}
+
+// migratePolicyTriggers performs one-time trigger cleanups on upgraded DBs
+// without acquiring write locks on steady-state read-only CLI opens:
+//  1. Drops legacy members_policy_gen_ai (a new member has 0 devices).
+//  2. Recreates devices_policy_gen_au without ipv6 (policy is IPv4-only).
+func migratePolicyTriggers(db *sql.DB) error {
+	var legacyMemberTrig int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'members_policy_gen_ai'`).Scan(&legacyMemberTrig); err != nil {
+		return err
+	}
+	if legacyMemberTrig > 0 {
+		if _, err := db.Exec(`DROP TRIGGER IF EXISTS members_policy_gen_ai`); err != nil {
+			return err
+		}
+	}
+	var devTrigSQL sql.NullString
+	err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'devices_policy_gen_au'`).Scan(&devTrigSQL)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if devTrigSQL.Valid && strings.Contains(strings.ToLower(devTrigSQL.String), "ipv6") {
+		if _, err := db.Exec(`
+			DROP TRIGGER IF EXISTS devices_policy_gen_au;
+			CREATE TRIGGER IF NOT EXISTS devices_policy_gen_au
+			AFTER UPDATE OF member_id, kind, ipv4, removed_at ON devices
+			WHEN OLD.member_id IS NOT NEW.member_id
+			  OR OLD.kind IS NOT NEW.kind
+			  OR OLD.ipv4 IS NOT NEW.ipv4
+			  OR OLD.removed_at IS NOT NEW.removed_at
+			BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
+		`); err != nil {
+			return err
+		}
 	}
 	return nil
 }

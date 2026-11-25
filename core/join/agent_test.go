@@ -265,6 +265,9 @@ func TestAgentDialNodesMagicDNSFallback(t *testing.T) {
 	if dialed != "100.64.0.12:8080" {
 		t.Fatalf("dialed %q, want IPv4 peer 100.64.0.12:8080", dialed)
 	}
+	if ips := peerIPsForHost(st, "alice-server.nodes.bobo.hogman"); len(ips) != 1 || ips[0] != "100.64.0.12" {
+		t.Fatalf("peerIPsForHost returned %v, want IPv4-only [100.64.0.12]", ips)
+	}
 }
 
 func TestParseAutoProxyOutput(t *testing.T) {

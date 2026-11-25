@@ -151,21 +151,24 @@ func TestDNSAuthoritativeAndRefused(t *testing.T) {
 		}
 	}
 
-	// Mixed-case member A, subdomain A, and dual-stack AAAA.
+	// Mixed-case member A, subdomain A, and IPv4-only AAAA NODATA even when devices.ipv6 is stored.
 	if got := mustResolveA(t, dnsSrv, "AlIcE.BoBo.HoGmAn."); got != "100.64.0.20" {
 		t.Fatalf("alice mixed case = %s want 100.64.0.20", got)
 	}
 	if got := mustResolveA(t, dnsSrv, "blog.alice.bobo.hogman."); got != "100.64.0.20" {
 		t.Fatalf("blog.alice = %s want 100.64.0.20", got)
 	}
-	resp, _ := dnsSrv.HandlePacket(buildDNSQuery(t, 4, "alice.bobo.hogman.", dnsmessage.TypeAAAA, true, 0), false)
-	hdr, ans, _, _ := parseDNSResp(t, resp)
-	if hdr.RCode != dnsmessage.RCodeSuccess || len(ans) != 1 {
-		t.Fatalf("alice AAAA: rcode=%v len=%d", hdr.RCode, len(ans))
+	for _, qn := range []string{"alice.bobo.hogman.", "blog.alice.bobo.hogman."} {
+		resp, _ := dnsSrv.HandlePacket(buildDNSQuery(t, 4, qn, dnsmessage.TypeAAAA, true, 0), false)
+		hdr, ans, auth, _ := parseDNSResp(t, resp)
+		if hdr.RCode != dnsmessage.RCodeSuccess || !hdr.Authoritative || len(ans) != 0 || len(auth) != 1 {
+			t.Fatalf("%s AAAA: want NOERROR NODATA+SOA, got rcode=%v aa=%v ans=%d auth=%d", qn, hdr.RCode, hdr.Authoritative, len(ans), len(auth))
+		}
 	}
-	aaaa := ans[0].Body.(*dnsmessage.AAAAResource)
-	if netip.AddrFrom16(aaaa.AAAA).String() != "fd7a:115c:a1e0::20" {
-		t.Fatalf("alice AAAA = %s", netip.AddrFrom16(aaaa.AAAA))
+	resp, _ := dnsSrv.HandlePacket(buildDNSQuery(t, 41, "alice.bobo.hogman.", dnsmessage.TypeALL, true, 0), false)
+	hdr, ans, _, _ := parseDNSResp(t, resp)
+	if hdr.RCode != dnsmessage.RCodeSuccess || len(ans) != 1 || ans[0].Header.Type != dnsmessage.TypeA {
+		t.Fatalf("alice ANY: want only A record, got rcode=%v ans=%v", hdr.RCode, ans)
 	}
 
 	// Empty non-terminal returns NODATA when only child exists.

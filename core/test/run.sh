@@ -353,6 +353,23 @@ check "bob resolves srv.$ZONE to alice's server" retry 30 resolves_to srv.$ZONE 
 check "bob resolves alice.$ZONE to alice's share" retry 30 resolves_any alice.$ZONE
 check "bob resolves home.$ZONE to the core node"   resolves_to home.$ZONE "$CORE_MESH_IP"
 check "ca.$ZONE has no DNS record"                 resolves_none ca.$ZONE
+dns_aaaa_nodata() {
+  local name="$1" out
+  out="$(run bob-tools dig "@$CORE_MESH_IP" AAAA "$name" | tr -d '\r')" || return 1
+  grep -q 'status: NOERROR' <<<"$out" &&
+    grep -q 'flags:.*aa' <<<"$out" &&
+    grep -q 'ANSWER: 0,' <<<"$out" &&
+    grep -q 'AUTHORITY: 1,' <<<"$out"
+}
+check "IPv4-only DNS: AAAA for home.$ZONE returns NOERROR NODATA" dns_aaaa_nodata "home.$ZONE"
+check "IPv4-only DNS: AAAA for srv.$ZONE returns NOERROR NODATA"  dns_aaaa_nodata "srv.$ZONE"
+check "IPv4-only DNS: AAAA for alice.$ZONE returns NOERROR NODATA" dns_aaaa_nodata "alice.$ZONE"
+split_dns_v4_only() {
+  local ns
+  ns="$(awk '/split:/{flag=1; next} flag && /^  [^ ]/{exit} flag && /- /{print $2}' "$WORK/data/headscale/config/config.yaml")"
+  [ "$ns" = "$CORE_MESH_IP" ] && ! grep -q ':' <<<"$ns"
+}
+check "Headscale split-DNS hands clients only core's IPv4 resolver" split_dns_v4_only
 check "device names work (alice-server.nodes.$ZONE)" resolves_to alice-server.nodes.$ZONE "$ALICE_SERVER_IP"
 check "ordinary names still resolve (example.com)" resolves_any example.com
 check "the network's DNS refuses outside names (not an open resolver)" refused example.com
@@ -374,12 +391,44 @@ check "bob's laptop can reach alice's server on 443"     retry 20 port_open bob-
 # Run independent read-only negative connectivity probes in parallel so we keep
 # full 3s nc timeouts without burning 18s serially.
 _pd="$WORK/.probes"; rm -rf "$_pd"; mkdir -p "$_pd"
+CORE_MESH_IPV6="$($H headscale nodes list --output json | jq -r --arg ip "$CORE_MESH_IP" '.[] | (.ip_addresses // .ipAddresses // []) | select(index($ip) != null) | .[] | select(contains(":"))' | tr -d '\r' | head -n1)"
+ALICE_SHARE_IP=""
+for _ in $(seq 10); do
+  ALICE_SHARE_IP="$(run bob-tools dig +short "alice.$ZONE" | tr -d '\r' | grep -E '^[0-9.]+$' | head -n1)"
+  [ -n "$ALICE_SHARE_IP" ] && break
+  sleep 1
+done
+ALICE_SHARE_IPV6="$($H headscale nodes list --output json | jq -r --arg ip "$ALICE_SHARE_IP" '.[] | (.ip_addresses // .ipAddresses // []) | select(index($ip) != null) | .[] | select(contains(":"))' | tr -d '\r' | head -n1)"
+port_blocked_v6() {
+  local c="$1" ip="$2" port="$3" route out rc
+  if [ -z "$ip" ]; then
+    echo "missing target IPv6 address"
+    return 1
+  fi
+  route="$(run "$c" ip -6 route get "$ip" 2>&1)" || { echo "no IPv6 route to $ip: $route"; return 1; }
+  if ! grep -q 'tailscale0' <<<"$route"; then
+    echo "IPv6 route for $ip does not use tailscale0: $route"
+    return 1
+  fi
+  out="$(run "$c" nc -6 -v -z -w3 "$ip" "$port" 2>&1)"; rc=$?
+  if [ "$rc" = 0 ]; then
+    echo "unexpected IPv6 connection succeeded to [$ip]:$port: $out"
+    return 1
+  fi
+  if grep -iqE 'unreachable|not supported|cannot assign|invalid' <<<"$out"; then
+    echo "IPv6 probe failed before WireGuard ACLs: $out"
+    return 1
+  fi
+  return 0
+}
 ( not port_open bob-tools "$ALICE_SERVER_IP" 80   >"$_pd/p1.out" 2>&1; echo $? >"$_pd/p1.rc" ) &
 ( not port_open bob-tools "$ALICE_SERVER_IP" 2222 >"$_pd/p2.out" 2>&1; echo $? >"$_pd/p2.rc" ) &
 ( not port_open bob-tools "$CORE_MESH_IP" 9000    >"$_pd/p3.out" 2>&1; echo $? >"$_pd/p3.rc" ) &
 ( not port_open bob-tools "$ALICE_LAPTOP_IP" 443  >"$_pd/p4.out" 2>&1; echo $? >"$_pd/p4.rc" ) &
 ( not port_open alice-tools "$BOB_LAPTOP_IP" 443  >"$_pd/p5.out" 2>&1; echo $? >"$_pd/p5.rc" ) &
 ( not port_open bob-tools "$CORE_MESH_IP" 22      >"$_pd/p6.out" 2>&1; echo $? >"$_pd/p6.rc" ) &
+( port_blocked_v6 bob-tools "$CORE_MESH_IPV6" 443   >"$_pd/p7.out" 2>&1; echo $? >"$_pd/p7.rc" ) &
+( port_blocked_v6 bob-tools "$ALICE_SHARE_IPV6" 443 >"$_pd/p8.out" 2>&1; echo $? >"$_pd/p8.rc" ) &
 wait
 probe_ok() { local rc; rc="$(cat "$_pd/$1.rc" 2>/dev/null || echo 1)"; [ "$rc" = 0 ] || { cat "$_pd/$1.out" 2>/dev/null; return 1; }; }
 check "... but not on 80"                                 probe_ok p1
@@ -391,6 +440,9 @@ check "bob's laptop cannot reach retired CA port 9000"     probe_ok p3
 check "bob's laptop cannot reach alice's laptop"         probe_ok p4
 check "alice's server cannot reach bob's laptop"         probe_ok p5
 check "members cannot reach other ports on the core (22)" probe_ok p6
+check "active Headscale policy contains no IPv6 addresses" no_match 'fd7a:' $H headscale policy get
+check "mesh IPv6 is default-deny: bob cannot reach core over IPv6 :443"         probe_ok p7
+check "mesh IPv6 is default-deny: bob cannot reach alice's share over IPv6 :443" probe_ok p8
 check "bob can't use the admin API"   expect 403 bob-tools GET /api/admin/members
 check "alice (admin) can"             expect 200 alice-laptop-tools GET /api/admin/members
 page_invite() {  # an invite made from the home page comes with its link and QR code

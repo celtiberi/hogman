@@ -525,22 +525,42 @@ func removeOwnDevice(zone string) bool {
 		note("could not reach the pen while leaving: %v", err)
 		return false
 	}
+	checkNeedsLogin := func(_ context.Context) bool {
+		state, detail := verifyAgentEndpointDetail(dir, cfg)
+		return state == agentEndpointDown && detail.verified && detail.needsLogin
+	}
+	return removeOwnDeviceWith(context.Background(), c, zone, checkNeedsLogin)
+}
+
+func removeOwnDeviceWith(ctx context.Context, c *http.Client, zone string, checkNeedsLogin func(context.Context) bool) bool {
 	var me meView
-	if _, err := homeAPI(c, zone, "GET", "/me", nil, &me); err != nil || me.ThisDevice.ID == 0 {
+	if _, err := homeAPICtx(ctx, c, zone, "GET", "/me", nil, &me); err != nil || me.ThisDevice.ID == 0 {
 		note("could not remove this computer from your devices (the keeper can, on the home page)")
 		return false
 	}
-	// The pen drops this device as it answers, so the answer may not arrive.
+	delCtx, delCancel := context.WithTimeout(ctx, selfDeleteTimeout)
+	defer delCancel()
 	delClient := *c
 	if delClient.Timeout == 0 || delClient.Timeout > selfDeleteTimeout {
 		delClient.Timeout = selfDeleteTimeout
 	}
-	if code, err := homeAPI(&delClient, zone, "DELETE", "/devices/"+strconv.FormatInt(me.ThisDevice.ID, 10), nil, nil); err != nil && code != 0 && code != 404 {
-		note("could not remove this computer from your devices: %v", firstLine(err.Error()))
+	code, err := homeAPICtx(delCtx, &delClient, zone, "DELETE", "/devices/"+strconv.FormatInt(me.ThisDevice.ID, 10), nil, nil)
+	if err == nil || code == http.StatusNotFound {
+		note("removed this computer from your devices")
+		return true
+	}
+	if code == 0 && ctx.Err() == nil {
+		if confirmDeviceRemoved(ctx, c, zone, checkNeedsLogin) {
+			note("removed this computer from your devices")
+			return true
+		}
+		note("could not confirm removal from your devices; check Devices on home.%s", zone)
 		return false
 	}
-	note("removed this computer from your devices")
-	return true
+	if err != nil {
+		note("could not remove this computer from your devices: %v", firstLine(err.Error()))
+	}
+	return false
 }
 
 // penClient talks to the pen's home page as this computer, through its own

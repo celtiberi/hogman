@@ -62,6 +62,11 @@ services:
   bob-laptop:
     <<: *device
     hostname: bob-laptop
+    # Enable IPv6 on tailscale0 so IPv6 default-deny E2E probes actually traverse
+    # WireGuard rather than failing locally with ENETUNREACH.
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv6.conf.default.disable_ipv6=0
     environment:
       <<: *device-env
       TS_AUTHKEY: ${BOB_LAPTOP_KEY:-}

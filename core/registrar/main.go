@@ -256,10 +256,17 @@ func validateServeMode(tsnetStateDir, legacyFlag, meshAddr string) (legacy bool,
 func serve(s *Service) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	s.SetBaseContext(ctx)
-	// Always drain detached background workers before main() closes SQLite,
-	// including if ctx cancels early during the initial Headscale sync loop.
+	// Keep detached background workers (especially already-accepted 202
+	// ScheduleSelfDelete jobs) alive during graceful HTTP shutdown so SIGTERM
+	// does not abort committed self-removals mid-flight.
+	workerCtx, cancelWorkers := context.WithCancel(context.Background())
+	defer cancelWorkers()
+	s.SetBaseContext(workerCtx)
+	// Always stop accepting new background workers and drain in-flight ones
+	// before main() closes SQLite, including on early exit during initial sync.
 	defer func() {
+		s.BeginShutdown()
+		cancelWorkers()
 		shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		s.WaitBackground(shut)
@@ -443,16 +450,26 @@ func serve(s *Service) {
 	}
 
 	<-ctx.Done()
-	shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = pub.Shutdown(shut)
+	// Phase 1: stop accepting new HTTP requests and drain active handlers while
+	// workerCtx is still alive.
+	httpShut, httpCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = pub.Shutdown(httpShut)
 	if mesh != nil {
-		_ = mesh.Shutdown(shut)
+		_ = mesh.Shutdown(httpShut)
 	}
 	if em != nil {
-		em.Shutdown(shut)
+		em.Shutdown(httpShut)
 	}
-	s.WaitBackground(shut)
+	httpCancel()
+
+	// Phase 2: freeze new background spawns, then give already-accepted workers
+	// (such as queued 202 self-deletes) a dedicated drain window to finish
+	// Headscale + SQLite + policy cleanup before cancelling workerCtx.
+	s.BeginShutdown()
+	drainShut, drainCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	s.WaitBackground(drainShut)
+	drainCancel()
+	cancelWorkers()
 }
 
 // -------------------------------------------------------------------- cli --
