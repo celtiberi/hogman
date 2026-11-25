@@ -94,7 +94,7 @@
     $('code-hint-lead').textContent = 'Sign-ups are invite-only during the testbed. Opened a link? Your code is already filled in. Need access?';
     $('buy-copy').replaceChildren(
       document.createTextNode('Need a custom bare pen name without waiting? '),
-      Object.assign(document.createElement('strong'), { textContent: '$120/year' }),
+      Object.assign(document.createElement('strong'), { textContent: '$250/year' }),
       document.createTextNode(', renews yearly.')
     );
     $('pen-label').textContent = 'Network name (pen)';

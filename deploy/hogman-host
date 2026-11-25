@@ -37,7 +37,7 @@ usage: hogman-host <command>
   list                           pens on this host
   pen <network> <args...>        run ./hogman in a pen, e.g.  pen bobo member list
   theme <network> work|default   switch a pen's UI theme (updates .env and reloads registrar)
-  plan <network> personal|work   switch a pen's certificate cap plan (updates .env and challenge-dns)
+  plan <network> personal|work   switch a pen's cap plan (cert + member/device caps; not billing tier)
   upgrade <network>              update a pen's code from src/ and restart it
   routes                         rewrite the front door's routes and reload it
   remove <network>               stop a pen (its folder is kept; delete it yourself to destroy it)
@@ -98,7 +98,7 @@ load_host() {
   set -a; . "$HOSTENV"; set +a
 }
 
-pen_env() { grep -h "^$2=" "$PENS/$1/.env" 2>/dev/null | head -1 | cut -d= -f2-; }
+pen_env() { grep -h "^$2=" "$PENS/$1/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r'; }
 
 pen_names() { [ -d "$PENS" ] && find "$PENS" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort; }
 
@@ -502,6 +502,14 @@ next_stun_port() {
   die "no free relay port in $STUN_BASE-$((STUN_BASE + 99))"
 }
 
+# plan_default_caps <personal|work> -> prints "<max_members> <max_devices>" (D-50).
+plan_default_caps() {
+  case "${1:-}" in
+    work) printf '500 500\n' ;;
+    *)    printf '25 50\n' ;;
+  esac
+}
+
 cmd_add() {
   load_host
   # add <pen> [--theme work|default] [--plan personal|work]: a pen with public
@@ -568,6 +576,9 @@ EOF
   if [ -n "$plan" ]; then
     echo "PLAN=$plan" >> "$PENS/$n/.env"
   fi
+  local def_members def_devices
+  read -r def_members def_devices < <(plan_default_caps "$plan")
+  printf 'MAX_MEMBERS=%s\nMAX_DEVICES=%s\n' "$def_members" "$def_devices" >> "$PENS/$n/.env"
   # This pen's challenge DNS credential: it can write only this pen's
   # challenge records. The token goes straight into the registrar's secrets.
   install -d -m 0700 "$PENS/$n/data/secrets/registrar"
@@ -704,6 +715,7 @@ cmd_plan() {
   valid_name "$n" || die "invalid network name: $n"
   [ -d "$PENS/$n" ] || die "no pen $n"
   [ ! -f "$PENS/$n/.removed" ] || die "pen $n is stopped"
+  [ ! -f "$PENS/$n/.renew-wake" ] || die "pen $n is woken for renewal; wait for renewal or sleep to finish before changing its plan"
   [ -f "$PENS/$n/.env" ] || die "pen $n has no .env"
   [ -s "$PENS/$n/.challenge-dns-id" ] || die "pen $n has no challenge DNS credential id"
   [ -x "$CDNS_BIN" ] || die "challenge DNS server not installed"
@@ -715,13 +727,75 @@ cmd_plan() {
   esac
   local cid; cid="$(cat "$PENS/$n/.challenge-dns-id")"
   cdns cred plan "$cid" "$want" >/dev/null || die "could not update challenge-dns plan for $n"
-  local tmp; tmp="$(mktemp)"
-  grep -v '^PLAN=' "$PENS/$n/.env" > "$tmp" || true
+  local cur_plan old_plan old_m old_d cur_m cur_d want_m want_d new_m new_d
+  cur_plan="$(pen_env "$n" PLAN || true)"
+  old_plan="${cur_plan:-personal}"
+  cur_m="$(pen_env "$n" MAX_MEMBERS || true)"
+  cur_d="$(pen_env "$n" MAX_DEVICES || true)"
+  read -r old_m old_d < <(plan_default_caps "$old_plan")
+  read -r want_m want_d < <(plan_default_caps "$want")
+  # Update a cap only when it matches the pen's current plan default, or when
+  # unset and the plan is actually changing; leave grandfathered unset caps
+  # untouched on a no-op plan call and preserve custom overrides (even if an
+  # override matches the other plan's default).
+  if [ "$cur_m" = "$old_m" ] || { [ -z "$cur_m" ] && [ "$old_plan" != "$want" ]; }; then
+    new_m="$want_m"
+  else
+    new_m="$cur_m"
+  fi
+  if [ "$cur_d" = "$old_d" ] || { [ -z "$cur_d" ] && [ "$old_plan" != "$want" ]; }; then
+    new_d="$want_d"
+  else
+    new_d="$cur_d"
+  fi
+  local eff_cur_m="${cur_m:-500}" eff_cur_d="${cur_d:-500}"
+  local eff_new_m="${new_m:-500}" eff_new_d="${new_d:-500}"
+  local caps_changed=0
+  if [ "$eff_new_m" != "$eff_cur_m" ] || [ "$eff_new_d" != "$eff_cur_d" ]; then
+    caps_changed=1
+  fi
+  local tmp rc=0
+  tmp="$(mktemp "$PENS/$n/.env.XXXXXX")"
+  grep -Ev '^(PLAN|MAX_MEMBERS|MAX_DEVICES)=' "$PENS/$n/.env" > "$tmp" || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    rm -f "$tmp"
+    die "could not read $PENS/$n/.env"
+  fi
   if [ -n "$val" ]; then
     printf 'PLAN=%s\n' "$val" >> "$tmp"
   fi
-  install -m 0600 "$tmp" "$PENS/$n/.env"; rm -f "$tmp"
-  info "Pen $n plan set to $want (challenge-dns caps updated live)"
+  if [ -n "$new_m" ]; then
+    printf 'MAX_MEMBERS=%s\n' "$new_m" >> "$tmp"
+  fi
+  if [ -n "$new_d" ]; then
+    printf 'MAX_DEVICES=%s\n' "$new_d" >> "$tmp"
+  fi
+  chmod 0600 "$tmp" && mv -f "$tmp" "$PENS/$n/.env" || { rm -f "$tmp"; die "could not update $PENS/$n/.env"; }
+  # If a previous ./hogman up failed after updating .env, compare against the
+  # running registrar container's env so re-running `plan` converges live caps.
+  local need_up="$caps_changed"
+  if [ "$need_up" -eq 0 ] && [ ! -f "$PENS/$n/.sleeping" ] && [ -x "$PENS/$n/hogman" ]; then
+    local live_env live_m live_d
+    if live_env="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "pen-$n-registrar-1" 2>/dev/null)" && [ -n "$live_env" ]; then
+      live_m="$(awk -F= '$1=="MAX_MEMBERS"{v=$2} END{print v}' <<<"$live_env" | tr -d '\r')"
+      live_d="$(awk -F= '$1=="MAX_DEVICES"{v=$2} END{print v}' <<<"$live_env" | tr -d '\r')"
+      if [ "${live_m:-500}" != "$eff_new_m" ] || [ "${live_d:-500}" != "$eff_new_d" ]; then
+        need_up=1
+      fi
+    fi
+  fi
+  if [ "$need_up" -eq 1 ] && [ ! -f "$PENS/$n/.sleeping" ] && [ -x "$PENS/$n/hogman" ]; then
+    local front_ca=""
+    [ -n "${FRONT_TLS_MODE:-}" ] && front_ca="$FRONT/data/caddy/pki/authorities/local/root.crt"
+    if ! (cd "$PENS/$n" && FRONT_CA="$front_ca" FRONT_JOIN_DL="$FRONT/join-dl" ./hogman up); then
+      die "challenge-dns and .env were updated for $n, but ./hogman up failed; re-run 'hogman-host plan $n $want' to apply live caps"
+    fi
+    info "Pen $n plan set to $want (challenge-dns caps updated live; MAX_MEMBERS=$eff_new_m MAX_DEVICES=$eff_new_d applied)"
+  elif [ "$caps_changed" -eq 1 ] && [ -f "$PENS/$n/.sleeping" ]; then
+    info "Pen $n plan set to $want (challenge-dns caps updated live; MAX_MEMBERS=$eff_new_m MAX_DEVICES=$eff_new_d take effect on wake)"
+  else
+    info "Pen $n plan set to $want (challenge-dns caps updated live; MAX_MEMBERS=$eff_new_m MAX_DEVICES=$eff_new_d)"
+  fi
 }
 
 stop_pen_container_and_confirm() {  # stop_pen_container_and_confirm <container-name>
@@ -2042,8 +2116,8 @@ cmd_signup_setup() {
     case "$(cat "$SIGNUP/stripe_key" 2>/dev/null)" in *_live_*) expect_live="1" ;; esac
     broker_stripe="      STRIPE_WEBHOOK_SECRET_FILE: $SIGNUP/stripe_webhook_secret
       STRIPE_EXPECT_LIVEMODE: \"$expect_live\"
-      STRIPE_MIN_PERSONAL_CENTS: \"${SIGNUP_STRIPE_MIN_PERSONAL_CENTS:-5000}\"
-      STRIPE_MIN_WORK_CENTS: \"${SIGNUP_STRIPE_MIN_WORK_CENTS:-12000}\"
+      STRIPE_MIN_PERSONAL_CENTS: \"${SIGNUP_STRIPE_MIN_PERSONAL_CENTS:-2500}\"
+      STRIPE_MIN_WORK_CENTS: \"${SIGNUP_STRIPE_MIN_WORK_CENTS:-25000}\"
       STRIPE_CURRENCY: \"${SIGNUP_STRIPE_CURRENCY:-usd}\""
   fi
   local cf_env=""
@@ -2366,7 +2440,7 @@ cmd_signup_notify() {
 # then the webhook signing secret (whsec_...), one per line. "tax" turns on
 # Stripe Tax. "work-price <price-id>|off" updates the optional Work price
 # without re-piping keys. "floor <personal-cents> <work-cents> [currency]"
-# overrides the broker webhook price/currency floor (default 5000 12000 usd, M2).
+# overrides the broker webhook price/currency floor (default 2500 25000 usd, M2 / D-50).
 # "off" stops selling.
 # Webhook endpoint (in Stripe): https://<signup-host>/api/stripe/webhook, events
 # checkout.session.completed, checkout.session.async_payment_succeeded,

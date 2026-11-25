@@ -24,7 +24,7 @@ import (
 
 // Pen lifecycle state machine (D-35):
 //
-//   Paid pen (personal $50/yr, work $120/yr):
+//   Paid pen (personal $25/yr, work $250/yr; D-50):
 //     active   --(now >= paid_until [+ 3d auto-renew buffer if sub active])-->
 //       grace  (30 full days from the moment grace becomes visible; all-member banner in /api/me)
 //     grace    --(now >= grace_until)-->
