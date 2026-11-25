@@ -1,4 +1,0 @@
-- Security hardening (`I-27`):
-  - `hogman` and `registrar` now build with Tailscale's `-tags ts_omit_peerapiserver` (enforced by a compile-time guard), eliminating `tsnet`'s wildcard host TCP listener (`0.0.0.0:<32768-65535>`) on macOS and removing PeerAPI's packet-filter bypass.
-  - Pen ACL policy now isolates `server` devices from reaching other `server` devices on `:443` by default (only active personal devices and `tag:infra` can reach shared servers; servers can still reach `tag:infra` on `53`/`443`).
-  - `hogman share --identity-headers` now fails closed with HTTP `503` if caller `WhoIs` verification fails instead of forwarding an unidentified request upstream.
