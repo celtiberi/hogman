@@ -629,6 +629,7 @@ services:
       PUBLIC_HOST: ${PUBLIC_HOST}
       CORE_MESH_IP: ${CORE_MESH_IP:-}
       MESH_ADDR: unix:/run/hogman-api/mesh.sock
+      REGISTRAR_LEGACY_MESH_SOCKET: "1"
       CHALLENGE_DNS_URL: unix:///run/hogman-acme/api.sock
       CHALLENGE_DNS_TOKEN_FILE: /secrets/challenge_dns_token
       HOME_TLS_DIR: /home-tls

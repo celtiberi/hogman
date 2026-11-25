@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,7 +31,14 @@ type fakeHeadscale struct {
 	nodes           []HSNode
 	policy          string
 	failCreateKey   bool
+	failSetPolicy   bool
+	failListNodes   bool
 	deleteUserCalls int
+	listNodesCalls  int
+	getNodeCalls    int
+	setPolicyCalls  int
+	onListNodes     func(context.Context)
+	onGetNode       func(context.Context, string)
 	srv             *httptest.Server
 }
 
@@ -96,8 +105,44 @@ func newFakeHeadscale(t *testing.T) *fakeHeadscale {
 	})
 	mux.HandleFunc("GET /api/v1/node", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
+		f.listNodesCalls++
+		hook := f.onListNodes
+		f.mu.Unlock()
+		if hook != nil {
+			hook(r.Context())
+			if r.Context().Err() != nil {
+				return
+			}
+		}
+		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.failListNodes {
+			http.Error(w, "headscale nodes error", http.StatusBadGateway)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"nodes": f.nodes})
+	})
+	mux.HandleFunc("GET /api/v1/node/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		f.mu.Lock()
+		f.getNodeCalls++
+		hook := f.onGetNode
+		f.mu.Unlock()
+		if hook != nil {
+			hook(r.Context(), id)
+			if r.Context().Err() != nil {
+				return
+			}
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, n := range f.nodes {
+			if n.ID == id {
+				_ = json.NewEncoder(w).Encode(map[string]any{"node": n})
+				return
+			}
+		}
+		http.Error(w, "node not found", http.StatusNotFound)
 	})
 	mux.HandleFunc("DELETE /api/v1/node/{id}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -121,8 +166,13 @@ func newFakeHeadscale(t *testing.T) *fakeHeadscale {
 		var in struct{ Policy string }
 		_ = json.NewDecoder(r.Body).Decode(&in)
 		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.setPolicyCalls++
+		if f.failSetPolicy {
+			http.Error(w, "policy error", http.StatusServiceUnavailable)
+			return
+		}
 		f.policy = in.Policy
-		f.mu.Unlock()
 		w.WriteHeader(200)
 	})
 	f.srv = httptest.NewServer(mux)
@@ -167,19 +217,32 @@ func newTestEnv(t *testing.T) *testEnv {
 	return &testEnv{svc: svc, st: st, hs: hs, dir: dir}
 }
 
+func testNodeKey(seed string) string {
+	sum := sha256.Sum256([]byte("nodekey:" + seed))
+	return "nodekey:" + hex.EncodeToString(sum[:])
+}
+
+func testMachineKey(seed string) string {
+	sum := sha256.Sum256([]byte("mkey:" + seed))
+	return "mkey:" + hex.EncodeToString(sum[:])
+}
+
 func (e *testEnv) addDevice(t *testing.T, handle, kind, name, ipv4, ipv6 string) (*Member, *Device) {
 	t.Helper()
 	m, err := e.st.MemberByHandle(handle)
 	if err != nil {
 		t.Fatal(err)
 	}
+	seed := fmt.Sprintf("%d-%s", m.ID, name)
 	d := &Device{
-		MemberID: m.ID,
-		Kind:     kind,
-		HSNodeID: fmt.Sprintf("node-%d-%s", m.ID, name),
-		Name:     name,
-		IPv4:     ipv4,
-		IPv6:     ipv6,
+		MemberID:   m.ID,
+		Kind:       kind,
+		HSNodeID:   fmt.Sprintf("node-%d-%s", m.ID, name),
+		NodeKey:    testNodeKey(seed),
+		MachineKey: testMachineKey(seed),
+		Name:       name,
+		IPv4:       ipv4,
+		IPv6:       ipv6,
 	}
 	if err := e.st.InsertDevice(d); err != nil {
 		t.Fatal(err)
@@ -191,13 +254,21 @@ func (e *testEnv) addDevice(t *testing.T, handle, kind, name, ipv4, ipv6 string)
 	if ipv6 != "" {
 		ips = append(ips, ipv6)
 	}
-	e.hs.mu.Lock()
-	e.hs.nodes = append(e.hs.nodes, HSNode{
+	hsNode := HSNode{
 		ID:          d.HSNodeID,
+		MachineKey:  d.MachineKey,
+		NodeKey:     d.NodeKey,
 		Name:        name,
 		GivenName:   name,
 		IPAddresses: ips,
-	})
+	}
+	if kind == "server" {
+		hsNode.Tags = []string{"tag:server"}
+	} else {
+		hsNode.User = &HSUser{ID: m.HSUserID, Name: m.Handle}
+	}
+	e.hs.mu.Lock()
+	e.hs.nodes = append(e.hs.nodes, hsNode)
 	e.hs.mu.Unlock()
 	return m, d
 }
@@ -659,7 +730,7 @@ func TestNoCARecordOrPort9000(t *testing.T) {
 	if _, err := svc.normaliseName("ca"); err != nil {
 		t.Fatalf("expected label ca to be unreserved: %v", err)
 	}
-	pol, err := svc.buildPolicy()
+	pol, _, err := svc.buildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +751,7 @@ func TestBuildPolicyIsolatesServersFromEachOther(t *testing.T) {
 	e.addDevice(t, "alice", "server", "alice-srv1", "100.64.0.11", "")
 	e.addDevice(t, "alice", "server", "alice-srv2", "100.64.0.12", "")
 
-	pol, err := e.svc.buildPolicy()
+	pol, _, err := e.svc.buildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -918,8 +989,8 @@ func TestOwnersCannotAllBeDemoted(t *testing.T) {
 		}
 		var wg sync.WaitGroup
 		wg.Add(2)
-		go func() { defer wg.Done(); _ = e.svc.SetRole(Actor{Member: a}, "bea", "admin") }()
-		go func() { defer wg.Done(); _ = e.svc.SetRole(Actor{Member: b}, "ann", "admin") }()
+		go func() { defer wg.Done(); _ = e.svc.SetRole(ctx, Actor{Member: a}, "bea", "admin") }()
+		go func() { defer wg.Done(); _ = e.svc.SetRole(ctx, Actor{Member: b}, "ann", "admin") }()
 		wg.Wait()
 		if n, _ := e.st.CountOwners(); n < 1 {
 			t.Fatalf("round %d: pen left with %d owners", round, n)
@@ -954,7 +1025,7 @@ func TestInvitesFollowTheirMakersRole(t *testing.T) {
 	}
 
 	// Carol is demoted: her open invites are revoked straight away.
-	if err := e.svc.SetRole(cli, "carol", "member"); err != nil {
+	if err := e.svc.SetRole(ctx, cli, "carol", "member"); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := e.st.InviteByID(adminInv.ID); got.State() != "revoked" {

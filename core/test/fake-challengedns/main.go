@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -44,13 +45,13 @@ var (
 
 // challengeServer implements the Step 1 challenge-dns contract backed by pebble-challtestsrv.
 type challengeServer struct {
-	penName   string
-	pensZone  string
-	token     string
-	mgmtURL   string
-	eabKID    string
-	eabHMAC   string
-	httpCli   *http.Client
+	penName  string
+	pensZone string
+	token    string
+	mgmtURL  string
+	eabKID   string
+	eabHMAC  string
+	httpCli  *http.Client
 
 	mu         sync.Mutex
 	live       map[string][]string
@@ -458,11 +459,11 @@ func buildSOAResponse(req []byte, qEnd int, zone string, inAnswer bool) []byte {
 	encodeDNSName(&rdata, "ns1."+zone)
 	encodeDNSName(&rdata, "hostmaster."+zone)
 	var nums [20]byte
-	binary.BigEndian.PutUint32(nums[0:4], 1)     // serial
-	binary.BigEndian.PutUint32(nums[4:8], 3600)  // refresh
-	binary.BigEndian.PutUint32(nums[8:12], 600)  // retry
+	binary.BigEndian.PutUint32(nums[0:4], 1)       // serial
+	binary.BigEndian.PutUint32(nums[4:8], 3600)    // refresh
+	binary.BigEndian.PutUint32(nums[8:12], 600)    // retry
 	binary.BigEndian.PutUint32(nums[12:16], 86400) // expire
-	binary.BigEndian.PutUint32(nums[16:20], 60)  // minimum
+	binary.BigEndian.PutUint32(nums[16:20], 60)    // minimum
 	rdata.Write(nums[:])
 
 	encodeDNSName(&out, zone)
@@ -608,6 +609,8 @@ type hsPreAuthKey struct {
 
 type hsNode struct {
 	ID          string        `json:"id"`
+	MachineKey  string        `json:"machineKey"`
+	NodeKey     string        `json:"nodeKey"`
 	Name        string        `json:"name"`
 	GivenName   string        `json:"givenName"`
 	IPAddresses []string      `json:"ipAddresses"`
@@ -618,12 +621,12 @@ type hsNode struct {
 }
 
 type fakeHeadscale struct {
-	mu      sync.Mutex
-	nextID  int
-	users   map[string]hsUser
-	keys    map[string]hsPreAuthKey
-	nodes   []hsNode
-	policy  string
+	mu     sync.Mutex
+	nextID int
+	users  map[string]hsUser
+	keys   map[string]hsPreAuthKey
+	nodes  []hsNode
+	policy string
 }
 
 func newFakeHeadscale() *fakeHeadscale {
@@ -725,6 +728,18 @@ func (f *fakeHeadscale) handler() http.Handler {
 		copy(out, f.nodes)
 		writeJSON(w, http.StatusOK, map[string]any{"nodes": out})
 	})
+	mux.HandleFunc("GET /api/v1/node/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, n := range f.nodes {
+			if n.ID == id {
+				writeJSON(w, http.StatusOK, map[string]any{"node": n})
+				return
+			}
+		}
+		writeJSONErr(w, http.StatusNotFound, "node not found")
+	})
 	mux.HandleFunc("DELETE /api/v1/node/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		f.mu.Lock()
@@ -780,8 +795,13 @@ func (f *fakeHeadscale) handler() http.Handler {
 		if name == "" {
 			name = "node-" + strconv.Itoa(f.nextID)
 		}
+		idStr := strconv.Itoa(f.nextID)
+		mkSum := sha256.Sum256([]byte("fake-mkey:" + idStr))
+		nkSum := sha256.Sum256([]byte("fake-nodekey:" + idStr))
 		node := hsNode{
-			ID:          strconv.Itoa(f.nextID),
+			ID:          idStr,
+			MachineKey:  "mkey:" + hex.EncodeToString(mkSum[:]),
+			NodeKey:     "nodekey:" + hex.EncodeToString(nkSum[:]),
 			Name:        name,
 			GivenName:   name,
 			IPAddresses: []string{in.IP},

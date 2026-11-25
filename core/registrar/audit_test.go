@@ -131,7 +131,7 @@ func TestAuditLifecycleLockOrderAndNoResurrection(t *testing.T) {
 
 	// 2. Stale admin Actor snapshot is rejected after demotion in SQLite.
 	staleAdminActor := Actor{Member: &Member{ID: adm.ID, Handle: adm.Handle, Role: "admin", Status: "active"}}
-	if err := e.svc.SetRole(cli, "adm1", "member"); err != nil {
+	if err := e.svc.SetRole(ctx, cli, "adm1", "member"); err != nil {
 		t.Fatal(err)
 	}
 	carol, err := e.svc.AddMember(ctx, cli, "carol", "member")

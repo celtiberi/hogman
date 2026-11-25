@@ -40,7 +40,7 @@ func TestRenewOnlyPolicyAndHTTPEnforcementI7(t *testing.T) {
 	e.svc.cfg.BillingStatusPath = billingPath
 
 	// Normal mode: everyone + servers grant present.
-	normalPol, err := e.svc.buildPolicy()
+	normalPol, _, err := e.svc.buildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestRenewOnlyPolicyAndHTTPEnforcementI7(t *testing.T) {
 	if err := os.WriteFile(billingPath, []byte(`{"pen":"bobo","state":"renew_only","wake_until":"2027-12-25T00:10:00Z","renew_url":"https://get.example.com"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	renewPol, err := e.svc.buildPolicy()
+	renewPol, _, err := e.svc.buildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestRenewOnlyPolicyAndHTTPEnforcementI7(t *testing.T) {
 	if err := os.Remove(billingPath); err != nil {
 		t.Fatal(err)
 	}
-	restoredPol, err := e.svc.buildPolicy()
+	restoredPol, _, err := e.svc.buildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestRenewOnlyPolicyAndHTTPEnforcementI7(t *testing.T) {
 	if !e.svc.isRenewOnly() {
 		t.Fatal("marker alone must force isRenewOnly() = true")
 	}
-	markerPol, err := e.svc.buildPolicy()
+	markerPol, _, err := e.svc.buildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}

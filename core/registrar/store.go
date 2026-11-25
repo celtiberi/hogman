@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -13,7 +15,10 @@ import (
 
 // Store is the registrar's ledger: the source of truth for who is a member,
 // which devices belong to whom, invites, names and the audit log.
-type Store struct{ db *sql.DB }
+type Store struct {
+	db   *sql.DB
+	path string
+}
 
 const schema = `
 CREATE TABLE IF NOT EXISTS members (
@@ -50,11 +55,14 @@ CREATE TABLE IF NOT EXISTS device_keys (
 	used_at     INTEGER,
 	revoked_at  INTEGER
 );
+CREATE INDEX IF NOT EXISTS device_keys_open ON device_keys(expires_at) WHERE used_at IS NULL AND revoked_at IS NULL;
 CREATE TABLE IF NOT EXISTS devices (
 	id          INTEGER PRIMARY KEY,
 	member_id   INTEGER NOT NULL REFERENCES members(id),
 	kind        TEXT NOT NULL,
 	hs_node_id  TEXT NOT NULL,
+	node_key    TEXT NOT NULL DEFAULT '',
+	machine_key TEXT NOT NULL DEFAULT '',
 	name        TEXT NOT NULL,
 	ipv4        TEXT NOT NULL DEFAULT '',
 	ipv6        TEXT NOT NULL DEFAULT '',
@@ -62,6 +70,21 @@ CREATE TABLE IF NOT EXISTS devices (
 	removed_at  INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS devices_live_node ON devices(hs_node_id) WHERE removed_at IS NULL;
+-- Monotonic policy generation counter bumped automatically by SQLite triggers
+-- on every table read by buildPolicy() (members and devices), so concurrent
+-- registrar serve and CLI mutations can never lose a pending policy push.
+CREATE TABLE IF NOT EXISTS sync_state (
+	id          INTEGER PRIMARY KEY CHECK (id = 1),
+	policy_gen  INTEGER NOT NULL DEFAULT 0,
+	applied_gen INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO sync_state (id, policy_gen, applied_gen) VALUES (1, 0, 0);
+CREATE TRIGGER IF NOT EXISTS members_policy_gen_ai AFTER INSERT ON members BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
+CREATE TRIGGER IF NOT EXISTS members_policy_gen_au AFTER UPDATE OF role, status ON members WHEN OLD.role IS NOT NEW.role OR OLD.status IS NOT NEW.status BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
+CREATE TRIGGER IF NOT EXISTS members_policy_gen_ad AFTER DELETE ON members BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
+CREATE TRIGGER IF NOT EXISTS devices_policy_gen_ai AFTER INSERT ON devices BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
+CREATE TRIGGER IF NOT EXISTS devices_policy_gen_au AFTER UPDATE OF member_id, kind, ipv4, ipv6, removed_at ON devices WHEN OLD.member_id IS NOT NEW.member_id OR OLD.kind IS NOT NEW.kind OR OLD.ipv4 IS NOT NEW.ipv4 OR OLD.ipv6 IS NOT NEW.ipv6 OR OLD.removed_at IS NOT NEW.removed_at BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
+CREATE TRIGGER IF NOT EXISTS devices_policy_gen_ad AFTER DELETE ON devices BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
 CREATE TABLE IF NOT EXISTS names (
 	name        TEXT PRIMARY KEY,        -- relative to the zone: "alice", "blog.alice"
 	member_id   INTEGER NOT NULL REFERENCES members(id),
@@ -99,7 +122,35 @@ func OpenStore(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate names.private: %w", err)
 	}
-	return &Store{db: db}, nil
+	if err := migrateDevicesNodeKey(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate devices.node_key: %w", err)
+	}
+	if err := migrateDevicesMachineKey(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate devices.machine_key: %w", err)
+	}
+	return &Store{db: db, path: path}, nil
+}
+
+// lockPolicyFile serializes Headscale policy builds and pushes across
+// concurrent registrar serve and CLI processes using an advisory file lock.
+func (s *Store) lockPolicyFile() (func(), error) {
+	if s.path == "" || s.path == ":memory:" || strings.HasPrefix(s.path, "file::memory:") {
+		return func() {}, nil
+	}
+	f, err := os.OpenFile(s.path+".policy.lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
 }
 
 // Close closes the underlying SQLite database handle.
@@ -144,6 +195,32 @@ func migrateNamesPrivate(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`ALTER TABLE names ADD COLUMN private INTEGER NOT NULL DEFAULT 0`); err != nil {
 		if has, checkErr := hasColumn(db, "names", "private"); checkErr == nil && has {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func migrateDevicesNodeKey(db *sql.DB) error {
+	if has, err := hasColumn(db, "devices", "node_key"); err != nil || has {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE devices ADD COLUMN node_key TEXT NOT NULL DEFAULT ''`); err != nil {
+		if has, checkErr := hasColumn(db, "devices", "node_key"); checkErr == nil && has {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func migrateDevicesMachineKey(db *sql.DB) error {
+	if has, err := hasColumn(db, "devices", "machine_key"); err != nil || has {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE devices ADD COLUMN machine_key TEXT NOT NULL DEFAULT ''`); err != nil {
+		if has, checkErr := hasColumn(db, "devices", "machine_key"); checkErr == nil && has {
 			return nil
 		}
 		return err
@@ -485,6 +562,43 @@ func (s *Store) CountOpenDeviceKeys(memberID int64) (int, error) {
 	return n, err
 }
 
+// HasOpenDeviceKeys reports whether any member has an unused, unrevoked,
+// unexpired device key awaiting enrolment.
+func (s *Store) HasOpenDeviceKeys() (bool, error) {
+	var exists int
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM device_keys
+		WHERE used_at IS NULL AND revoked_at IS NULL AND expires_at > ?)`, now()).Scan(&exists)
+	return exists != 0, err
+}
+
+// HasPendingMemberCleanup reports whether any removed member still has a
+// Headscale user ID pending deletion OR any live device row (including
+// tag:server nodes, which carry no Headscale user).
+func (s *Store) HasPendingMemberCleanup() (bool, error) {
+	var exists int
+	err := s.db.QueryRow(`SELECT EXISTS(
+		SELECT 1 FROM members WHERE status = 'removed' AND hs_user_id != ''
+		UNION ALL
+		SELECT 1 FROM devices d JOIN members m ON m.id = d.member_id
+		WHERE d.removed_at IS NULL AND m.status = 'removed'
+	)`).Scan(&exists)
+	return exists != 0, err
+}
+
+// PolicyGenerations returns the monotonic policy_gen bumped by SQLite triggers
+// on every members/devices change and the highest generation confirmed applied
+// to Headscale.
+func (s *Store) PolicyGenerations() (policyGen, appliedGen int64, err error) {
+	err = s.db.QueryRow(`SELECT policy_gen, applied_gen FROM sync_state WHERE id = 1`).Scan(&policyGen, &appliedGen)
+	return policyGen, appliedGen, err
+}
+
+// MarkPolicyApplied records that Headscale has accepted policy state up through gen.
+func (s *Store) MarkPolicyApplied(gen int64) error {
+	_, err := s.db.Exec(`UPDATE sync_state SET applied_gen = MAX(applied_gen, ?) WHERE id = 1`, gen)
+	return err
+}
+
 func (s *Store) CountOpenInvites(memberID int64) (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT count(*) FROM invites
@@ -540,24 +654,26 @@ func (s *Store) RevokeDeviceKey(id int64) error {
 // ---------------------------------------------------------------- devices --
 
 type Device struct {
-	ID        int64  `json:"id"`
-	MemberID  int64  `json:"member_id"`
-	Member    string `json:"member"`
-	Kind      string `json:"kind"`
-	HSNodeID  string `json:"-"`
-	Name      string `json:"name"`
-	IPv4      string `json:"ipv4"`
-	IPv6      string `json:"ipv6,omitempty"`
-	CreatedAt int64  `json:"created_at"`
-	RemovedAt *int64 `json:"removed_at,omitempty"`
+	ID         int64  `json:"id"`
+	MemberID   int64  `json:"member_id"`
+	Member     string `json:"member"`
+	Kind       string `json:"kind"`
+	HSNodeID   string `json:"-"`
+	NodeKey    string `json:"-"`
+	MachineKey string `json:"-"`
+	Name       string `json:"name"`
+	IPv4       string `json:"ipv4"`
+	IPv6       string `json:"ipv6,omitempty"`
+	CreatedAt  int64  `json:"created_at"`
+	RemovedAt  *int64 `json:"removed_at,omitempty"`
 }
 
-const deviceCols = `d.id, d.member_id, m.handle, d.kind, d.hs_node_id, d.name, d.ipv4, d.ipv6, d.created_at, d.removed_at`
+const deviceCols = `d.id, d.member_id, m.handle, d.kind, d.hs_node_id, d.node_key, d.machine_key, d.name, d.ipv4, d.ipv6, d.created_at, d.removed_at`
 const deviceFrom = ` FROM devices d JOIN members m ON m.id = d.member_id `
 
 func scanDevice(r interface{ Scan(...any) error }) (*Device, error) {
 	var d Device
-	err := r.Scan(&d.ID, &d.MemberID, &d.Member, &d.Kind, &d.HSNodeID, &d.Name, &d.IPv4, &d.IPv6, &d.CreatedAt, &d.RemovedAt)
+	err := r.Scan(&d.ID, &d.MemberID, &d.Member, &d.Kind, &d.HSNodeID, &d.NodeKey, &d.MachineKey, &d.Name, &d.IPv4, &d.IPv6, &d.CreatedAt, &d.RemovedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -602,9 +718,17 @@ func (s *Store) DeviceByIP(ip string) (*Device, error) {
 		`WHERE d.removed_at IS NULL AND ((d.ipv4 != '' AND d.ipv4 = ?) OR (d.ipv6 != '' AND d.ipv6 = ?))`, ip, ip))
 }
 
+func (s *Store) DeviceByHSNodeID(nodeID string) (*Device, error) {
+	if nodeID == "" {
+		return nil, ErrNotFound
+	}
+	return scanDevice(s.db.QueryRow(`SELECT `+deviceCols+deviceFrom+
+		`WHERE d.removed_at IS NULL AND d.hs_node_id = ?`, nodeID))
+}
+
 func (s *Store) InsertDevice(d *Device) error {
-	res, err := s.db.Exec(`INSERT INTO devices (member_id, kind, hs_node_id, name, ipv4, ipv6, created_at) VALUES (?,?,?,?,?,?,?)`,
-		d.MemberID, d.Kind, d.HSNodeID, d.Name, d.IPv4, d.IPv6, now())
+	res, err := s.db.Exec(`INSERT INTO devices (member_id, kind, hs_node_id, node_key, machine_key, name, ipv4, ipv6, created_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+		d.MemberID, d.Kind, d.HSNodeID, d.NodeKey, d.MachineKey, d.Name, d.IPv4, d.IPv6, now())
 	if err != nil {
 		return err
 	}
@@ -612,9 +736,25 @@ func (s *Store) InsertDevice(d *Device) error {
 	return nil
 }
 
-func (s *Store) UpdateDevice(id int64, name, v4, v6 string) error {
-	_, err := s.db.Exec(`UPDATE devices SET name = ?, ipv4 = ?, ipv6 = ? WHERE id = ?`, name, v4, v6, id)
+func (s *Store) UpdateDevice(id int64, name, v4, v6, nodeKey, machineKey string) error {
+	_, err := s.db.Exec(`UPDATE devices SET name = ?, ipv4 = ?, ipv6 = ?, node_key = ?, machine_key = ? WHERE id = ?`,
+		name, v4, v6, nodeKey, machineKey, id)
 	return err
+}
+
+// RotateDeviceNodeKey conditionally updates a live device's WireGuard node key
+// only if its previous node_key and pinned machine_key still match, the row
+// has not been removed concurrently, and the owning member is still active.
+func (s *Store) RotateDeviceNodeKey(id int64, oldNodeKey, machineKey, newNodeKey string) (bool, error) {
+	res, err := s.db.Exec(`UPDATE devices SET node_key = ?
+		WHERE id = ? AND node_key = ? AND machine_key = ? AND removed_at IS NULL
+		  AND EXISTS (SELECT 1 FROM members WHERE id = devices.member_id AND status = 'active')`,
+		newNodeKey, id, oldNodeKey, machineKey)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 // DeleteNamesOfDevice frees active leaf names pointing at a device. If a name

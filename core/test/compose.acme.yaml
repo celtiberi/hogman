@@ -102,6 +102,7 @@ services:
       CHALLENGE_DNS_TOKEN_FILE: "/secrets/challenge_dns_token"
       DNS_ADDR: "off"
       MESH_ADDR: "unix:/run/hogman-api/mesh.sock"
+      REGISTRAR_LEGACY_MESH_SOCKET: "1"
       SYNC_INTERVAL: "1s"
       HOME_TLS_DIR: "/home-tls"
       CADDY_ADMIN_SOCKET: "/run/caddy-admin/admin.sock"

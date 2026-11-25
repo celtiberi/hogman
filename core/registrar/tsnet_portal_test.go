@@ -24,18 +24,28 @@ func TestMeshHandlerDirectIgnoresXFFAndUsesVerifiedPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.addDevice(t, "alice", "personal", "alice-laptop", "100.64.0.10", "")
-	e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.20", "")
+	_, bobDev := e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.20", "")
 
-	resolve := func(_ context.Context, remoteAddr string) (string, error) {
+	resolve := func(_ context.Context, remoteAddr string) (*PeerIdentity, error) {
 		if strings.HasPrefix(remoteAddr, "100.64.0.20:") {
-			return "100.64.0.20", nil
+			return &PeerIdentity{
+				IP:       "100.64.0.20",
+				HSNodeID: bobDev.HSNodeID,
+				NodeKey:  bobDev.NodeKey,
+			}, nil
 		}
-		return "", errors.New("unknown peer")
+		return nil, errors.New("unknown peer")
 	}
 	h := MeshHandlerDirect(e.svc, resolve)
 
+	// Reset Headscale counters before testing steady-state WhoIs auth.
+	e.hs.mu.Lock()
+	e.hs.listNodesCalls = 0
+	e.hs.getNodeCalls = 0
+	e.hs.mu.Unlock()
+
 	// Bob connects from 100.64.0.20 but spoofs X-Forwarded-For: 100.64.0.10 (alice/owner).
-	// Direct identity must identify him as bob and refuse admin endpoints.
+	// Direct identity must identify him as bob, refuse admin endpoints, and make 0 Headscale calls.
 	req := httptest.NewRequest("GET", "/api/me", nil)
 	req.RemoteAddr = "100.64.0.20:54321"
 	req.Header.Set("X-Forwarded-For", "100.64.0.10")
@@ -43,6 +53,12 @@ func TestMeshHandlerDirectIgnoresXFFAndUsesVerifiedPeer(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/me status=%d want 200 body=%s", rec.Code, rec.Body.String())
+	}
+	e.hs.mu.Lock()
+	listCalls, getCalls := e.hs.listNodesCalls, e.hs.getNodeCalls
+	e.hs.mu.Unlock()
+	if listCalls != 0 || getCalls != 0 {
+		t.Fatalf("steady-state GET /api/me hit Headscale (list=%d get=%d), want 0", listCalls, getCalls)
 	}
 	var me struct {
 		Member struct {
