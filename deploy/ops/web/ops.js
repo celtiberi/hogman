@@ -48,6 +48,12 @@
     b.className = "banner" + (isError ? " error" : "");
   }
 
+  function fmtMs(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return "—";
+    if (ms >= 1000) return (ms / 1000).toFixed(2) + "s";
+    return Math.round(ms) + "ms";
+  }
+
   function statePillClass(state) {
     if (state === "running" || state === "active") return "pill pill-ok";
     if (state === "sleeping" || state === "renew_only") return "pill pill-warn";
@@ -73,7 +79,7 @@
     if (filtered.length === 0) {
       const tr = document.createElement("tr");
       const td = document.createElement("td");
-      td.colSpan = 6;
+      td.colSpan = 7;
       td.className = "muted";
       td.textContent = pens && pens.length > 0 ? "No pens match this filter." : "No pens on this host.";
       tr.appendChild(td);
@@ -111,6 +117,29 @@
       tdRam.className = "mono";
       tdRam.textContent = p.ram_bytes ? fmtBytes(p.ram_bytes) : "—";
       tr.appendChild(tdRam);
+
+      const tdPolicy = document.createElement("td");
+      tdPolicy.className = "mono";
+      if (p.setpolicy_samples > 0) {
+        const label = fmtMs(p.setpolicy_last_ms || 0) + " / " + fmtMs(p.setpolicy_p95_ms || 0);
+        if ((p.setpolicy_p95_ms || 0) > 5000) {
+          const sp = document.createElement("span");
+          sp.className = "pill pill-bad";
+          sp.textContent = label;
+          tdPolicy.appendChild(sp);
+        } else if ((p.setpolicy_p95_ms || 0) >= 2000) {
+          const sp = document.createElement("span");
+          sp.className = "pill pill-warn";
+          sp.textContent = label;
+          tdPolicy.appendChild(sp);
+        } else {
+          tdPolicy.textContent = label;
+        }
+      } else {
+        tdPolicy.className = "muted mono";
+        tdPolicy.textContent = "—";
+      }
+      tr.appendChild(tdPolicy);
 
       const tdBill = document.createElement("td");
       tdBill.className = "muted mono";

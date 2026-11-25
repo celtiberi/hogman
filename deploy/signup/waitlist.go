@@ -250,23 +250,25 @@ func (b *broker) sendWaitlistAckAsync(email string, place int, isWork bool) {
 
 // notifyKind pushes a capped note to the operator's ntfy topic without growing
 // unbounded background requests. Never personal details: just that something happened.
-func (b *broker) notifyKind(kind, msg string) {
+// Returns true if the notification was accepted (or ntfy is disabled), and false
+// if dropped by the rate limiter or in-flight semaphore.
+func (b *broker) notifyKind(kind, msg string) bool {
 	if b.ntfy == "" {
-		return
+		return true
 	}
 	u, err := url.Parse(b.ntfy)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
-		return
+		return false
 	}
-	if !b.notifyLimiter(kind).allow("*", time.Now()) {
+	if !b.notifyLimiter(kind).allow("*", b.now()) {
 		log.Printf("ntfy: rate cap hit for %s", kind)
-		return
+		return false
 	}
 	select {
 	case b.ntfySem <- struct{}{}:
 	default:
 		log.Printf("ntfy: skipping %s push (too many in flight)", kind)
-		return
+		return false
 	}
 	b.goBackground(func(bg context.Context) {
 		defer func() { <-b.ntfySem }()
@@ -281,6 +283,7 @@ func (b *broker) notifyKind(kind, msg string) {
 			resp.Body.Close()
 		}
 	})
+	return true
 }
 
 // dropInvited deletes the waiting-list entry that was sent this code, if any:

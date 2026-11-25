@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS device_keys (
 	created_at  INTEGER NOT NULL,
 	expires_at  INTEGER NOT NULL,
 	used_at     INTEGER,
-	revoked_at  INTEGER
+	revoked_at  INTEGER,
+	bypass_cap  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS device_keys_open ON device_keys(expires_at) WHERE used_at IS NULL AND revoked_at IS NULL;
 CREATE TABLE IF NOT EXISTS devices (
@@ -139,6 +140,10 @@ func OpenStore(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate devices.hs_delete_pending: %w", err)
 	}
+	if err := migrateDeviceKeysBypassCap(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate device_keys.bypass_cap: %w", err)
+	}
 	if err := migratePolicyTriggers(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate policy triggers: %w", err)
@@ -146,13 +151,11 @@ func OpenStore(path string) (*Store, error) {
 	return &Store{db: db, path: path}, nil
 }
 
-// lockPolicyFile serializes Headscale policy builds and pushes across
-// concurrent registrar serve and CLI processes using an advisory file lock.
-func (s *Store) lockPolicyFile() (func(), error) {
+func (s *Store) lockAdvisoryFile(suffix string) (func(), error) {
 	if s.path == "" || s.path == ":memory:" || strings.HasPrefix(s.path, "file::memory:") {
 		return func() {}, nil
 	}
-	f, err := os.OpenFile(s.path+".policy.lock", os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(s.path+suffix, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -164,6 +167,19 @@ func (s *Store) lockPolicyFile() (func(), error) {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
 	}, nil
+}
+
+// lockPolicyFile serializes Headscale policy builds and pushes across
+// concurrent registrar serve and CLI processes using an advisory file lock.
+func (s *Store) lockPolicyFile() (func(), error) {
+	return s.lockAdvisoryFile(".policy.lock")
+}
+
+// lockMemberFile serializes Headscale user creation and rollback across
+// concurrent registrar serve and CLI processes so a cap-rollback DeleteUser
+// can never delete a Headscale user adopted by a concurrent member add.
+func (s *Store) lockMemberFile() (func(), error) {
+	return s.lockAdvisoryFile(".member.lock")
 }
 
 // Close closes the underlying SQLite database handle.
@@ -268,6 +284,19 @@ func migrateDevicesHSDeletePending(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`ALTER TABLE devices ADD COLUMN hs_delete_pending INTEGER NOT NULL DEFAULT 0`); err != nil {
 		if has, checkErr := hasColumn(db, "devices", "hs_delete_pending"); checkErr == nil && has {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func migrateDeviceKeysBypassCap(db *sql.DB) error {
+	if has, err := hasColumn(db, "device_keys", "bypass_cap"); err != nil || has {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE device_keys ADD COLUMN bypass_cap INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if has, checkErr := hasColumn(db, "device_keys", "bypass_cap"); checkErr == nil && has {
 			return nil
 		}
 		return err
@@ -428,14 +457,66 @@ func (s *Store) Herd(q string, limit, offset int) ([]*HerdMember, int, error) {
 	return out, total, rows.Err()
 }
 
+var (
+	ErrMemberCapReached      = errors.New("member limit reached")
+	ErrDeviceCapReached      = errors.New("device limit reached")
+	ErrOpenKeyCapReached     = errors.New("open device key limit reached")
+	ErrDeviceAlreadyEnrolled = errors.New("device already enrolled")
+)
+
+func (s *Store) CountActiveMembers() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM members WHERE status != 'removed'`).Scan(&n)
+	return n, err
+}
+
 func (s *Store) InsertMember(m *Member) error {
-	res, err := s.db.Exec(`INSERT INTO members (handle, role, status, invited_by, hs_user_id, created_at) VALUES (?,?,?,?,?,?)`,
-		m.Handle, m.Role, m.Status, m.InvitedBy, m.HSUserID, now())
-	if err != nil {
+	return s.InsertMemberCapped(m, 0)
+}
+
+// InsertMemberCapped inserts a member, atomically checking handle uniqueness
+// first and then enforcing maxMembers (when > 0) against non-removed members
+// (active + suspended) inside a BEGIN IMMEDIATE transaction.
+func (s *Store) InsertMemberCapped(m *Member, maxMembers int) error {
+	return withImmediateTx(s.db, func(c *sql.Conn) error {
+		ctx := context.Background()
+		var exists int
+		if err := c.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM members WHERE handle = ?)`, m.Handle).Scan(&exists); err != nil {
+			return err
+		}
+		if exists != 0 {
+			return conflict("handle %q is taken", m.Handle)
+		}
+		if maxMembers > 0 {
+			var count int
+			if err := c.QueryRowContext(ctx, `SELECT COUNT(*) FROM members WHERE status != 'removed'`).Scan(&count); err != nil {
+				return err
+			}
+			if count >= maxMembers {
+				return ErrMemberCapReached
+			}
+		}
+		res, err := c.ExecContext(ctx, `INSERT INTO members (handle, role, status, invited_by, hs_user_id, created_at) VALUES (?,?,?,?,?,?)`,
+			m.Handle, m.Role, m.Status, m.InvitedBy, m.HSUserID, now())
+		if err != nil {
+			return err
+		}
+		m.ID, _ = res.LastInsertId()
+		return nil
+	})
+}
+
+// RollbackRedeem atomically unclaims an invite and deletes the newly created
+// member row in a single BEGIN IMMEDIATE transaction after a failed redeem.
+func (s *Store) RollbackRedeem(inviteID, memberID int64) error {
+	return withImmediateTx(s.db, func(c *sql.Conn) error {
+		ctx := context.Background()
+		if _, err := c.ExecContext(ctx, `UPDATE invites SET redeemed_by = NULL, redeemed_at = NULL WHERE id = ? AND redeemed_by = ?`, inviteID, memberID); err != nil {
+			return err
+		}
+		_, err := c.ExecContext(ctx, `DELETE FROM members WHERE id = ?`, memberID)
 		return err
-	}
-	m.ID, _ = res.LastInsertId()
-	return nil
+	})
 }
 
 func (s *Store) ClearMemberHSUserID(id int64) error {
@@ -623,20 +704,96 @@ type DeviceKey struct {
 	ExpiresAt int64
 	UsedAt    *int64
 	RevokedAt *int64
+	BypassCap bool
 }
 
 func (s *Store) InsertDeviceKey(k *DeviceKey) error {
-	res, err := s.db.Exec(`INSERT INTO device_keys (member_id, kind, hs_key_id, created_at, expires_at) VALUES (?,?,?,?,?)`,
-		k.MemberID, k.Kind, k.HSKeyID, now(), k.ExpiresAt)
-	if err != nil {
-		return err
-	}
-	k.ID, _ = res.LastInsertId()
-	return nil
+	return s.InsertDeviceKeyCapped(k, 0, 0, 0)
+}
+
+// CountDeviceSlots returns the current count of live devices and open
+// (unused, unrevoked, unexpired) device keys across the pen.
+func (s *Store) CountDeviceSlots() (live int, openKeys int, err error) {
+	err = s.db.QueryRow(`SELECT
+		(SELECT COUNT(*) FROM devices WHERE removed_at IS NULL),
+		(SELECT COUNT(*) FROM device_keys WHERE used_at IS NULL AND revoked_at IS NULL AND expires_at > ?)`,
+		now()).Scan(&live, &openKeys)
+	return live, openKeys, err
+}
+
+// CountMemberPersonalSlots returns a member's live personal devices plus open
+// personal device keys (used for D-16 per-owner personal lockout headroom).
+func (s *Store) CountMemberPersonalSlots(memberID int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT
+		(SELECT COUNT(*) FROM devices WHERE removed_at IS NULL AND member_id = ? AND kind = 'personal') +
+		(SELECT COUNT(*) FROM device_keys WHERE member_id = ? AND kind = 'personal' AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?)`,
+		memberID, memberID, now()).Scan(&n)
+	return n, err
+}
+
+// InsertDeviceKeyCapped inserts a device key inside BEGIN IMMEDIATE, atomically
+// enforcing per-member open-key limits (maxOpenForMember > 0) and pen-wide
+// live_devices + open_device_keys limits (maxDevices > 0). When ownerPersonalFloor
+// > 0, an active owner's personal key is also allowed whenever that owner holds
+// fewer than ownerPersonalFloor live+open personal slots (D-16 lockout protection
+// on grandfathered over-cap pens).
+func (s *Store) InsertDeviceKeyCapped(k *DeviceKey, maxDevices, maxOpenForMember, ownerPersonalFloor int) error {
+	return withImmediateTx(s.db, func(c *sql.Conn) error {
+		ctx := context.Background()
+		ts := now()
+		if maxOpenForMember > 0 {
+			var open int
+			if err := c.QueryRowContext(ctx, `SELECT COUNT(*) FROM device_keys
+				WHERE member_id = ? AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?`,
+				k.MemberID, ts).Scan(&open); err != nil {
+				return err
+			}
+			if open >= maxOpenForMember {
+				return ErrOpenKeyCapReached
+			}
+		}
+		if maxDevices > 0 {
+			var usedSlots int
+			if err := c.QueryRowContext(ctx, `SELECT
+				(SELECT COUNT(*) FROM devices WHERE removed_at IS NULL) +
+				(SELECT COUNT(*) FROM device_keys WHERE used_at IS NULL AND revoked_at IS NULL AND expires_at > ?)`,
+				ts).Scan(&usedSlots); err != nil {
+				return err
+			}
+			if usedSlots >= maxDevices {
+				allowedByFloor := false
+				if ownerPersonalFloor > 0 && k.Kind == "personal" {
+					var ownerSlots int
+					if err := c.QueryRowContext(ctx, `SELECT
+						(SELECT COUNT(*) FROM devices WHERE removed_at IS NULL AND member_id = ? AND kind = 'personal') +
+						(SELECT COUNT(*) FROM device_keys WHERE member_id = ? AND kind = 'personal' AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?)`,
+						k.MemberID, k.MemberID, ts).Scan(&ownerSlots); err != nil {
+						return err
+					}
+					allowedByFloor = ownerSlots < ownerPersonalFloor
+				}
+				if !allowedByFloor {
+					return ErrDeviceCapReached
+				}
+			}
+		}
+		bypass := 0
+		if k.BypassCap {
+			bypass = 1
+		}
+		res, err := c.ExecContext(ctx, `INSERT INTO device_keys (member_id, kind, hs_key_id, created_at, expires_at, bypass_cap) VALUES (?,?,?,?,?,?)`,
+			k.MemberID, k.Kind, k.HSKeyID, ts, k.ExpiresAt, bypass)
+		if err != nil {
+			return err
+		}
+		k.ID, _ = res.LastInsertId()
+		return nil
+	})
 }
 
 func (s *Store) PendingDeviceKeys(cutoff int64) (map[string]*DeviceKey, error) {
-	rows, err := s.db.Query(`SELECT id, member_id, kind, hs_key_id, expires_at, used_at, revoked_at FROM device_keys
+	rows, err := s.db.Query(`SELECT id, member_id, kind, hs_key_id, expires_at, used_at, revoked_at, bypass_cap FROM device_keys
 		WHERE used_at IS NULL AND expires_at > ?`, cutoff)
 	if err != nil {
 		return nil, err
@@ -645,9 +802,11 @@ func (s *Store) PendingDeviceKeys(cutoff int64) (map[string]*DeviceKey, error) {
 	out := map[string]*DeviceKey{}
 	for rows.Next() {
 		var k DeviceKey
-		if err := rows.Scan(&k.ID, &k.MemberID, &k.Kind, &k.HSKeyID, &k.ExpiresAt, &k.UsedAt, &k.RevokedAt); err != nil {
+		var bypass int
+		if err := rows.Scan(&k.ID, &k.MemberID, &k.Kind, &k.HSKeyID, &k.ExpiresAt, &k.UsedAt, &k.RevokedAt, &bypass); err != nil {
 			return nil, err
 		}
+		k.BypassCap = bypass != 0
 		out[k.HSKeyID] = &k
 	}
 	return out, rows.Err()
@@ -825,13 +984,60 @@ func (s *Store) DeviceByHSNodeID(nodeID string) (*Device, error) {
 }
 
 func (s *Store) InsertDevice(d *Device) error {
-	res, err := s.db.Exec(`INSERT INTO devices (member_id, kind, hs_node_id, node_key, machine_key, name, ipv4, ipv6, created_at) VALUES (?,?,?,?,?,?,?,?,?)`,
-		d.MemberID, d.Kind, d.HSNodeID, d.NodeKey, d.MachineKey, d.Name, d.IPv4, d.IPv6, now())
-	if err != nil {
-		return err
-	}
-	d.ID, _ = res.LastInsertId()
-	return nil
+	return s.EnrollDeviceCapped(d, 0, 0, 0)
+}
+
+// EnrollDeviceCapped atomically enrolls a newly synced live device and marks
+// its device key used (when keyID > 0) inside BEGIN IMMEDIATE. It checks
+// whether hs_node_id is already live FIRST (returning ErrDeviceAlreadyEnrolled
+// so overlapping serve + CLI syncs never mistake an already-enrolled device
+// for an over-cap stray), then enforces maxDevices (when > 0) with optional
+// per-owner personal-device floor (D-16).
+func (s *Store) EnrollDeviceCapped(d *Device, keyID int64, maxDevices, ownerPersonalFloor int) error {
+	return withImmediateTx(s.db, func(c *sql.Conn) error {
+		ctx := context.Background()
+		if d.HSNodeID != "" {
+			var exists int
+			if err := c.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM devices WHERE removed_at IS NULL AND hs_node_id = ?)`, d.HSNodeID).Scan(&exists); err != nil {
+				return err
+			}
+			if exists != 0 {
+				return ErrDeviceAlreadyEnrolled
+			}
+		}
+		if maxDevices > 0 {
+			var live int
+			if err := c.QueryRowContext(ctx, `SELECT COUNT(*) FROM devices WHERE removed_at IS NULL`).Scan(&live); err != nil {
+				return err
+			}
+			if live >= maxDevices {
+				allowedByFloor := false
+				if ownerPersonalFloor > 0 && d.Kind == "personal" {
+					var ownerLive int
+					if err := c.QueryRowContext(ctx, `SELECT COUNT(*) FROM devices WHERE removed_at IS NULL AND member_id = ? AND kind = 'personal'`, d.MemberID).Scan(&ownerLive); err != nil {
+						return err
+					}
+					allowedByFloor = ownerLive < ownerPersonalFloor
+				}
+				if !allowedByFloor {
+					return ErrDeviceCapReached
+				}
+			}
+		}
+		ts := now()
+		res, err := c.ExecContext(ctx, `INSERT INTO devices (member_id, kind, hs_node_id, node_key, machine_key, name, ipv4, ipv6, created_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+			d.MemberID, d.Kind, d.HSNodeID, d.NodeKey, d.MachineKey, d.Name, d.IPv4, d.IPv6, ts)
+		if err != nil {
+			return err
+		}
+		d.ID, _ = res.LastInsertId()
+		if keyID > 0 {
+			if _, err := c.ExecContext(ctx, `UPDATE device_keys SET used_at = ? WHERE id = ? AND used_at IS NULL`, ts, keyID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *Store) UpdateDevice(id int64, name, v4, v6, nodeKey, machineKey string) error {
@@ -855,30 +1061,43 @@ func (s *Store) RotateDeviceNodeKey(id int64, oldNodeKey, machineKey, newNodeKey
 	return n == 1, err
 }
 
+type sqlExecContexter interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// releaseLeafNamesOfDevice frees active leaf names pointing at a device while
+// unpointing (instead of deleting) any parent name that still has child
+// subdomains elsewhere, and permanently retiring private random labels (D-21).
+// Shared by DeleteNamesOfDevice and CommitSelfDelete.
+func releaseLeafNamesOfDevice(ctx context.Context, ex sqlExecContexter, deviceID int64) error {
+	if _, err := ex.ExecContext(ctx, `UPDATE names SET device_id = NULL
+		WHERE device_id = ? AND held_until IS NULL
+		AND EXISTS (
+			SELECT 1 FROM names c
+			WHERE length(c.name) > length(names.name) + 1
+			AND substr(c.name, length(c.name) - length(names.name)) = '.' || names.name
+			AND (c.held_until IS NOT NULL OR c.device_id IS NULL OR c.device_id != ?)
+		)`, deviceID, deviceID); err != nil {
+		return err
+	}
+	// Private random site names are permanently retired on release (D-21), never deleted for reuse.
+	if _, err := ex.ExecContext(ctx, `UPDATE names SET device_id = NULL, held_until = ?, note = ''
+		WHERE device_id = ? AND held_until IS NULL AND private != 0`, now(), deviceID); err != nil {
+		return err
+	}
+	_, err := ex.ExecContext(ctx, `DELETE FROM names WHERE device_id = ? AND held_until IS NULL AND private = 0`, deviceID)
+	return err
+}
+
 // DeleteNamesOfDevice frees active leaf names pointing at a device. If a name
 // on the removed device still has child subdomains (active on other devices,
 // unpointed, or retired), it is unpointed (device_id = NULL) rather than
 // deleted so another member cannot hijack the orphaned parent and release or
 // take over the child subdomains.
 func (s *Store) DeleteNamesOfDevice(deviceID int64) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE names SET device_id = NULL
-		WHERE device_id = ? AND held_until IS NULL
-		AND EXISTS (
-			SELECT 1 FROM names c
-			WHERE c.name LIKE '%.' || names.name
-			AND (c.held_until IS NOT NULL OR c.device_id IS NULL OR c.device_id != ?)
-		)`, deviceID, deviceID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM names WHERE device_id = ? AND held_until IS NULL`, deviceID); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return withImmediateTx(s.db, func(c *sql.Conn) error {
+		return releaseLeafNamesOfDevice(context.Background(), c, deviceID)
+	})
 }
 
 // MarkDeviceRemoved retires a device and unpoints any names aimed at it.
@@ -926,17 +1145,8 @@ func (s *Store) CommitSelfDelete(memberID, deviceID int64, actor string) (*Devic
 			return forbidden("not your device")
 		}
 		// Release leaf names served by this device (preserving parent names that
-		// still have child subdomains elsewhere), matching DeleteNamesOfDevice.
-		if _, err := c.ExecContext(ctx, `UPDATE names SET device_id = NULL
-			WHERE device_id = ? AND held_until IS NULL
-			AND EXISTS (
-				SELECT 1 FROM names c
-				WHERE c.name LIKE '%.' || names.name
-				AND (c.held_until IS NOT NULL OR c.device_id IS NULL OR c.device_id != ?)
-			)`, d.ID, d.ID); err != nil {
-			return err
-		}
-		if _, err := c.ExecContext(ctx, `DELETE FROM names WHERE device_id = ? AND held_until IS NULL`, d.ID); err != nil {
+		// still have child subdomains elsewhere), shared with DeleteNamesOfDevice.
+		if err := releaseLeafNamesOfDevice(ctx, c, d.ID); err != nil {
 			return err
 		}
 		ts := now()
@@ -965,6 +1175,36 @@ func (s *Store) CommitSelfDelete(memberID, deviceID int64, actor string) (*Devic
 // to be deleted asynchronously by finishSelfDelete or syncOnce.
 func (s *Store) PendingDeviceDeletes() ([]*Device, error) {
 	return s.queryDevices(`WHERE d.hs_delete_pending != 0`)
+}
+
+// PendingDeviceDeleteIDs returns the IDs of removed devices whose Headscale
+// node deletion is still pending.
+func (s *Store) PendingDeviceDeleteIDs() ([]int64, error) {
+	rows, err := s.db.Query(`SELECT id FROM devices WHERE hs_delete_pending != 0 ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// DeviceHSDeletePending reports whether the given device row still has
+// hs_delete_pending set.
+func (s *Store) DeviceHSDeletePending(id int64) (bool, error) {
+	var pending int
+	err := s.db.QueryRow(`SELECT hs_delete_pending FROM devices WHERE id = ?`, id).Scan(&pending)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return pending != 0, err
 }
 
 // HasPendingDeviceDeletes reports whether any removed device still has a

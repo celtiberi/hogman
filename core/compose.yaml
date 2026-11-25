@@ -103,6 +103,8 @@ services:
       THEME: ${THEME:-}
       TEST_MODE: ${TEST_MODE:-false}
       MEMBERS_CAN_INVITE: ${MEMBERS_CAN_INVITE:-false}
+      MAX_MEMBERS: ${MAX_MEMBERS:-500}
+      MAX_DEVICES: ${MAX_DEVICES:-500}
       TSNET_STATE_DIR: /var/lib/registrar/tsnet
       TSNET_CONTROL_URL: ${TSNET_CONTROL_URL:-https://${PUBLIC_HOST}}
       TSNET_HOSTNAME: core
