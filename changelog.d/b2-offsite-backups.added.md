@@ -1,0 +1,1 @@
+- Backups: nightly pen backups can now also go off-site to Backblaze B2 (`hogman-host backup-b2-install`). The bucket and its keys are created by the `backup-b2` workflow from the locked infra environment. The server can only add backups, never read or delete them, and every copy is deleted automatically within 30 days of upload.

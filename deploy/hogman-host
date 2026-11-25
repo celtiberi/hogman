@@ -51,6 +51,7 @@ usage: hogman-host <command>
                                  manage opt-in billing alert email addresses for a pen
 
   backup-setup <age-public-key>  nightly encrypted backups of every pen (age, https://age-encryption.org)
+  backup-b2-install <file.age>   turn on off-site copies to Backblaze B2 (key from the backup-b2 workflow)
   backup-allow '<ssh-public-key>'  let another machine download the encrypted backups, and nothing else
   backup                         back up every pen now
   backup-prune [--dry-run]       prune backups of deleted pens older than 30 days (D-37; also runs in lifecycle)
@@ -1514,6 +1515,14 @@ BACKUPS="${HOGMAN_BACKUPS:-/var/backups/hogman}"
 RECIPIENT="$HOGMAN_HOME/backup-recipient.txt"
 SERVE=/usr/local/lib/hogman/backup-serve
 KEEP_LOCAL=7
+# Off-site copies on Backblaze B2 (D-48). The server holds a write-only key
+# (it can't list, read or delete); the bucket's Object Lock keeps each backup
+# ~30 days and then deletes it. b2.env is decrypted from the key the infra
+# workflow encrypted to this server's own age key (b2-host.key).
+B2_TOOL="/usr/local/lib/hogman/b2.py"
+B2_ENV="/etc/hogman/b2.env"
+B2_HOST_KEY="/etc/hogman/b2-host.key"
+B2_LAST="/var/lib/hogman/b2-last-upload"
 BACKUP_RETENTION_DAYS=30
 
 parse_backup_utc_epoch() {
@@ -1739,7 +1748,9 @@ backup_pen() {  # backup_pen <name>
 
 cmd_backup() {
   [ -f "$RECIPIENT" ] || die "run hogman-host backup-setup <age public key> first"
-  local n ok=0
+  local n ok=0 before
+  # Which backups exist before this run, so exactly the new ones go off-site.
+  before="$(ls -1 "$BACKUPS"/*.tar.gz.age 2>/dev/null | sort || true)"
   for n in $(pen_names); do
     [ -f "$PENS/$n/.removed" ] && continue
     backup_pen "$n"; ok=$((ok + 1))
@@ -1753,6 +1764,58 @@ cmd_backup() {
       && chown root:hogman-backup "$out.part" && chmod 0640 "$out.part" && mv "$out.part" "$out"
     ls -1t "$BACKUPS"/challenge-dns-[0-9]*.tar.gz.age 2>/dev/null | tail -n +$((KEEP_LOCAL + 1)) | xargs -r rm -f
   fi
+  backup_offsite "$(comm -13 <(printf '%s\n' "$before") <(ls -1 "$BACKUPS"/*.tar.gz.age 2>/dev/null | sort) | sed '/^$/d')"
+}
+
+# backup_offsite "<newline-separated paths>": copy exactly those new backups
+# to B2. Off until `hogman-host backup-b2-install` has run. A failed upload
+# doesn't stop the local backup. The last-upload stamp (watched; alert >36h)
+# moves only when at least one file went up and none failed.
+backup_offsite() {
+  [ -f "$B2_ENV" ] && [ -x "$B2_TOOL" ] || return 0
+  local f uploaded=0 failed=0
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -f "$f" ] || continue
+    if python3 -I "$B2_TOOL" upload "$f" --env "$B2_ENV" --host "$(hostname -s)"; then
+      uploaded=$((uploaded + 1))
+    else
+      failed=$((failed + 1))
+    fi
+  done <<<"$1"
+  if [ "$failed" -gt 0 ]; then
+    info "off-site upload to B2 failed for $failed backup(s); local backups are fine"
+  elif [ "$uploaded" -gt 0 ]; then
+    install -d -m 0755 "$(dirname "$B2_LAST")"; date -u +%s > "$B2_LAST"
+  else
+    info "no new backups to send off-site"
+  fi
+}
+
+# backup-b2-install <server-b2.env.age>: install the write-only B2 key that the
+# infra workflow (backup-b2, "new_keys") encrypted to this server. Only this
+# server's own age key can decrypt it, and nothing prints it.
+cmd_backup_b2_install() {
+  local enc="${1:-}"
+  [ -f "$enc" ] || die "usage: hogman-host backup-b2-install <server-b2.env.age>"
+  [ -f "$RECIPIENT" ] || die "run hogman-host backup-setup <age public key> first"
+  [ -f "$B2_HOST_KEY" ] || die "no $B2_HOST_KEY (create it: age-keygen -o $B2_HOST_KEY; put its public key in the infra environment's B2_SERVER_RECIPIENT)"
+  [ -x "$B2_TOOL" ] || die "no $B2_TOOL; reinstall hogman (install.sh ships it)"
+  local work; work="$(mktemp -d)"; chmod 0700 "$work"
+  # Everything temporary lives in $work. die() exits the script, so clean up
+  # on EXIT (no other EXIT trap exists in hogman-host); cleared on success.
+  trap 'rm -rf "$work"' EXIT
+  age -d -i "$B2_HOST_KEY" -o "$work/b2.env" "$enc" || die "could not decrypt $enc with this server's key"
+  grep -qE '^B2_KEY_ID=.+' "$work/b2.env" && grep -qE '^B2_KEY=.+' "$work/b2.env" \
+    && grep -qE '^B2_BUCKET_ID=.+' "$work/b2.env" || die "$enc is not a server B2 key file"
+  # Prove the key works BEFORE installing it: a small encrypted probe
+  # (it ages out with everything else).
+  local probe="$work/b2-install-probe-$(date -u +%Y%m%dT%H%M%SZ).tar.gz.age"
+  printf 'hogman b2 install probe\n' | age -r "$(cat "$RECIPIENT")" > "$probe"
+  python3 -I "$B2_TOOL" upload "$probe" --env "$work/b2.env" --host "$(hostname -s)" \
+    || die "test upload with this key failed; nothing installed"
+  install -m 0600 -o root -g root "$work/b2.env" "$B2_ENV"
+  rm -rf "$work"; trap - EXIT
+  info "B2 off-site backups on: tonight's backups go to the bucket too"
 }
 
 # --------------------------------------------------------------- hosting ----
@@ -2938,6 +3001,7 @@ case "${1:-}" in
   backup-setup) shift; cmd_backup_setup "$@" ;;
   backup-allow) shift; cmd_backup_allow "$@" ;;
   backup)  cmd_backup ;;
+  backup-b2-install) shift; cmd_backup_b2_install "$@" ;;
   backup-prune) shift; cmd_backup_prune "$@" ;;
   *)       usage; [ -z "${1:-}" ] || exit 1 ;;
 esac

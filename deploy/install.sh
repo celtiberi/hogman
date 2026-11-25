@@ -103,6 +103,10 @@ main() {
     install -d -m 0755 /usr/local/lib/hogman
     install -m 0755 "$tmp/x/deploy/ops-snapshot.sh" /usr/local/lib/hogman/ops-snapshot
   fi
+  if [ -f "$tmp/x/deploy/backup-b2/b2.py" ]; then
+    install -d -m 0755 /usr/local/lib/hogman
+    install -m 0755 "$tmp/x/deploy/backup-b2/b2.py" /usr/local/lib/hogman/b2.py
+  fi
   echo "$ver" > "$home/VERSION"
 
   if [ "$first" = true ]; then
