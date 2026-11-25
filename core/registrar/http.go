@@ -177,7 +177,6 @@ type ctxKey struct{}
 type caller struct {
 	member *Member
 	device *Device
-	nodes  []HSNode
 }
 
 func (c caller) actor() Actor { return Actor{Member: c.member} }
@@ -190,9 +189,10 @@ func MeshHandler(s *Service) http.Handler {
 
 // MeshHandlerDirect is the member and admin API served directly on the
 // embedded tsnet listener (https://home.<zone>/api/). Caller identity comes
-// strictly from the WireGuard connection's RemoteAddr verified via tsnet WhoIs;
-// X-Forwarded-For and all other HTTP headers are ignored.
-func MeshHandlerDirect(s *Service, resolvePeer func(ctx context.Context, remoteAddr string) (string, error)) http.Handler {
+// strictly from the WireGuard connection's RemoteAddr verified via tsnet WhoIs
+// (node ID + node public key + IP, checked against SQLite); X-Forwarded-For
+// and all other HTTP headers are ignored.
+func MeshHandlerDirect(s *Service, resolvePeer func(ctx context.Context, remoteAddr string) (*PeerIdentity, error)) http.Handler {
 	return requireSameOriginAndJSON(s.cfg.Zone, identifyDirect(s, resolvePeer, meshMux(s)))
 }
 
@@ -496,7 +496,7 @@ func meshMux(s *Service) http.Handler {
 			fail(w, err)
 			return
 		}
-		byID := indexNodesByID(c.nodes)
+		byID := s.PresenceSnapshot(r.Context())
 		out := make([]directoryEntry, 0, len(names))
 		for _, n := range names {
 			entry := directoryEntry{
@@ -619,7 +619,7 @@ func meshMux(s *Service) http.Handler {
 			fail(w, err)
 			return
 		}
-		byID := indexNodesByID(c.nodes)
+		byID := s.PresenceSnapshot(r.Context())
 		out := make([]deviceView, 0, len(ds))
 		for _, d := range ds {
 			online, lastSeen := nodePresence(byID, d.HSNodeID)
@@ -663,25 +663,26 @@ func meshMux(s *Service) http.Handler {
 }
 
 // identifyDirect resolves the calling device strictly from the authenticated
-// WireGuard peer address (RemoteAddr verified via tsnet WhoIs). X-Forwarded-For
-// is never consulted.
-func identifyDirect(s *Service, resolvePeer func(ctx context.Context, remoteAddr string) (string, error), next http.Handler) http.Handler {
+// WireGuard peer identity returned by tsnet WhoIs (node ID, node public key,
+// key expiry, and IP) matched against SQLite. X-Forwarded-For is never consulted
+// and no Headscale REST call is made on steady-state requests.
+func identifyDirect(s *Service, resolvePeer func(ctx context.Context, remoteAddr string) (*PeerIdentity, error), next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if resolvePeer == nil {
+			fail(w, forbidden("this device is not enrolled in the network"))
+			return
+		}
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil || net.ParseIP(host) == nil {
 			fail(w, forbidden("this device is not enrolled in the network"))
 			return
 		}
-		src := host
-		if resolvePeer != nil {
-			peerIP, err := resolvePeer(r.Context(), r.RemoteAddr)
-			if err != nil || peerIP == "" || net.ParseIP(peerIP) == nil {
-				fail(w, forbidden("this device is not enrolled in the network"))
-				return
-			}
-			src = peerIP
+		peer, err := resolvePeer(r.Context(), r.RemoteAddr)
+		if err != nil || peer == nil || peer.IP == "" || net.ParseIP(peer.IP) == nil {
+			fail(w, forbidden("this device is not enrolled in the network"))
+			return
 		}
-		m, d, nodes, err := s.verifyLiveCallerWithNodes(r.Context(), src)
+		m, d, err := s.VerifyDirectPeer(r.Context(), peer)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
 				fail(w, forbidden("this device is not enrolled in the network"))
@@ -694,7 +695,7 @@ func identifyDirect(s *Service, resolvePeer func(ctx context.Context, remoteAddr
 			fail(w, forbidden("membership %s", m.Status))
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, caller{member: m, device: d, nodes: nodes})))
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, caller{member: m, device: d})))
 	})
 }
 
@@ -803,7 +804,7 @@ func identify(s *Service, next http.Handler) http.Handler {
 			fail(w, forbidden("this device is not enrolled in the network"))
 			return
 		}
-		m, d, nodes, err := s.verifyLiveCallerWithNodes(r.Context(), src)
+		m, d, err := s.VerifyLiveCaller(r.Context(), src)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
 				fail(w, forbidden("this device is not enrolled in the network"))
@@ -816,7 +817,7 @@ func identify(s *Service, next http.Handler) http.Handler {
 			fail(w, forbidden("membership %s", m.Status))
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, caller{member: m, device: d, nodes: nodes})))
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, caller{member: m, device: d})))
 	})
 }
 

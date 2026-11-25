@@ -310,13 +310,25 @@ func serve(s *Service) {
 	log.Printf("registrar for %s: in sync with headscale", s.cfg.Zone)
 
 	go func() {
-		t := time.NewTicker(durEnv("SYNC_INTERVAL", 3*time.Second))
+		fastInterval := durEnv("SYNC_INTERVAL", 3*time.Second)
+		idleInterval := durEnv("SYNC_IDLE_INTERVAL", 30*time.Second)
+		if idleInterval < fastInterval {
+			idleInterval = fastInterval
+		}
+		t := time.NewTicker(fastInterval)
 		defer t.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-s.SyncWake():
+				if err := s.Sync(ctx); err != nil {
+					log.Printf("sync: %v", err)
+				}
 			case <-t.C:
+				if !s.NeedsFastSync() && time.Since(s.LastSyncAt()) < idleInterval {
+					continue
+				}
 				if err := s.Sync(ctx); err != nil {
 					log.Printf("sync: %v", err)
 				}

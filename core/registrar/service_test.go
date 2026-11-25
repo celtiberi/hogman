@@ -30,6 +30,8 @@ type fakeHeadscale struct {
 	policy          string
 	failCreateKey   bool
 	deleteUserCalls int
+	listNodesCalls  int
+	getNodeCalls    int
 	srv             *httptest.Server
 }
 
@@ -97,7 +99,21 @@ func newFakeHeadscale(t *testing.T) *fakeHeadscale {
 	mux.HandleFunc("GET /api/v1/node", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.listNodesCalls++
 		_ = json.NewEncoder(w).Encode(map[string]any{"nodes": f.nodes})
+	})
+	mux.HandleFunc("GET /api/v1/node/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.getNodeCalls++
+		id := r.PathValue("id")
+		for _, n := range f.nodes {
+			if n.ID == id {
+				_ = json.NewEncoder(w).Encode(map[string]any{"node": n})
+				return
+			}
+		}
+		http.Error(w, "node not found", http.StatusNotFound)
 	})
 	mux.HandleFunc("DELETE /api/v1/node/{id}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -177,6 +193,7 @@ func (e *testEnv) addDevice(t *testing.T, handle, kind, name, ipv4, ipv6 string)
 		MemberID: m.ID,
 		Kind:     kind,
 		HSNodeID: fmt.Sprintf("node-%d-%s", m.ID, name),
+		NodeKey:  fmt.Sprintf("nodekey:%d-%s", m.ID, name),
 		Name:     name,
 		IPv4:     ipv4,
 		IPv6:     ipv6,
@@ -194,6 +211,7 @@ func (e *testEnv) addDevice(t *testing.T, handle, kind, name, ipv4, ipv6 string)
 	e.hs.mu.Lock()
 	e.hs.nodes = append(e.hs.nodes, HSNode{
 		ID:          d.HSNodeID,
+		NodeKey:     d.NodeKey,
 		Name:        name,
 		GivenName:   name,
 		IPAddresses: ips,

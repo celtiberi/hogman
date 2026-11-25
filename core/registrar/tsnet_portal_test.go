@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestMeshHandlerDirectIgnoresXFFAndUsesVerifiedPeer(t *testing.T) {
@@ -24,15 +26,25 @@ func TestMeshHandlerDirectIgnoresXFFAndUsesVerifiedPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.addDevice(t, "alice", "personal", "alice-laptop", "100.64.0.10", "")
-	e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.20", "")
+	_, bobDev := e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.20", "")
 
-	resolve := func(_ context.Context, remoteAddr string) (string, error) {
+	resolve := func(_ context.Context, remoteAddr string) (*PeerIdentity, error) {
 		if strings.HasPrefix(remoteAddr, "100.64.0.20:") {
-			return "100.64.0.20", nil
+			return &PeerIdentity{
+				IP:       "100.64.0.20",
+				HSNodeID: bobDev.HSNodeID,
+				NodeKey:  bobDev.NodeKey,
+			}, nil
 		}
-		return "", errors.New("unknown peer")
+		return nil, errors.New("unknown peer")
 	}
 	h := MeshHandlerDirect(e.svc, resolve)
+
+	// Reset Headscale counters: steady-state direct auth must make ZERO Headscale calls.
+	e.hs.mu.Lock()
+	e.hs.listNodesCalls = 0
+	e.hs.getNodeCalls = 0
+	e.hs.mu.Unlock()
 
 	// Bob connects from 100.64.0.20 but spoofs X-Forwarded-For: 100.64.0.10 (alice/owner).
 	// Direct identity must identify him as bob and refuse admin endpoints.
@@ -43,6 +55,12 @@ func TestMeshHandlerDirectIgnoresXFFAndUsesVerifiedPeer(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/me status=%d want 200 body=%s", rec.Code, rec.Body.String())
+	}
+	e.hs.mu.Lock()
+	listCalls, getCalls := e.hs.listNodesCalls, e.hs.getNodeCalls
+	e.hs.mu.Unlock()
+	if listCalls != 0 || getCalls != 0 {
+		t.Fatalf("steady-state GET /api/me hit Headscale (list=%d, get=%d); want 0", listCalls, getCalls)
 	}
 	var me struct {
 		Member struct {
@@ -73,6 +91,178 @@ func TestMeshHandlerDirectIgnoresXFFAndUsesVerifiedPeer(t *testing.T) {
 	h.ServeHTTP(recBad, reqBad)
 	if recBad.Code != http.StatusForbidden {
 		t.Fatalf("unknown peer: status=%d want 403", recBad.Code)
+	}
+}
+
+func TestVerifyDirectPeerSecurityAndBackfill(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+	nowTime := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	e.svc.nowFn = func() time.Time { return nowTime }
+
+	if _, err := e.svc.AddMember(ctx, cli, "alice", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.AddMember(ctx, cli, "bob", "member"); err != nil {
+		t.Fatal(err)
+	}
+	_, d := e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.10", "")
+
+	// 1. Wrong node key must fail closed even when HSNodeID and IP match.
+	if _, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
+		IP: "100.64.0.10", HSNodeID: d.HSNodeID, NodeKey: "nodekey:wrong",
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("mismatched node key: err=%v want ErrNotFound", err)
+	}
+
+	// 2. Expired key must fail closed.
+	if _, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
+		IP: "100.64.0.10", HSNodeID: d.HSNodeID, NodeKey: d.NodeKey,
+		KeyExpiry: nowTime.Add(-time.Second),
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired key: err=%v want ErrNotFound", err)
+	}
+
+	// 3. Valid non-expired key succeeds even if display-only presence snapshot is empty or poisoned.
+	e.svc.presenceMu.Lock()
+	e.svc.presenceByID = map[string]HSNode{} // empty/missing device in presence snapshot
+	e.svc.presenceAt = nowTime
+	e.svc.presenceMu.Unlock()
+	m, gotD, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
+		IP: "100.64.0.10", HSNodeID: d.HSNodeID, NodeKey: d.NodeKey,
+		KeyExpiry: nowTime.Add(time.Hour),
+	})
+	if err != nil || m.Handle != "bob" || gotD.ID != d.ID {
+		t.Fatalf("valid peer with empty presence snapshot failed: m=%v d=%v err=%v", m, gotD, err)
+	}
+
+	// 4. Suspending in SQLite immediately blocks direct handler even if WhoIs still resolves the peer.
+	if err := e.svc.Suspend(ctx, cli, "bob", "test"); err != nil {
+		t.Fatal(err)
+	}
+	h := MeshHandlerDirect(e.svc, func(_ context.Context, _ string) (*PeerIdentity, error) {
+		return &PeerIdentity{IP: "100.64.0.10", HSNodeID: d.HSNodeID, NodeKey: d.NodeKey}, nil
+	})
+	req := httptest.NewRequest("GET", "/api/me", nil)
+	req.RemoteAddr = "100.64.0.10:12345"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("suspended member status=%d want 403", rec.Code)
+	}
+	if err := e.svc.Resume(ctx, cli, "bob"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 5. Legacy device row with empty node_key is backfilled on first auth via Sync, then needs 0 Headscale calls.
+	if err := e.st.UpdateDevice(d.ID, d.Name, d.IPv4, d.IPv6, ""); err != nil {
+		t.Fatal(err)
+	}
+	e.hs.mu.Lock()
+	e.hs.listNodesCalls = 0
+	e.hs.mu.Unlock()
+	if _, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
+		IP: "100.64.0.10", HSNodeID: d.HSNodeID, NodeKey: d.NodeKey,
+	}); err != nil {
+		t.Fatalf("legacy node_key backfill failed: %v", err)
+	}
+	e.hs.mu.Lock()
+	backfillCalls := e.hs.listNodesCalls
+	e.hs.mu.Unlock()
+	if backfillCalls != 1 {
+		t.Fatalf("expected 1 Sync call to backfill node_key, got %d", backfillCalls)
+	}
+	if _, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
+		IP: "100.64.0.10", HSNodeID: d.HSNodeID, NodeKey: d.NodeKey,
+	}); err != nil {
+		t.Fatalf("second auth after backfill failed: %v", err)
+	}
+	e.hs.mu.Lock()
+	afterCalls := e.hs.listNodesCalls
+	e.hs.mu.Unlock()
+	if afterCalls != 1 {
+		t.Fatalf("expected 0 extra Headscale calls after backfill, got %d", afterCalls-1)
+	}
+}
+
+func TestPresenceSnapshotCachedAndSyncSingleFlightAdaptive(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+	nowTime := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	e.svc.nowFn = func() time.Time { return nowTime }
+
+	if _, err := e.svc.AddMember(ctx, cli, "alice", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	e.addDevice(t, "alice", "personal", "alice-laptop", "100.64.0.10", "")
+
+	// Before first sync, NeedsFastSync is true; after idle sync with no open keys, it becomes false.
+	if !e.svc.NeedsFastSync() {
+		t.Fatal("expected NeedsFastSync=true before initial Sync")
+	}
+	if err := e.svc.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if e.svc.NeedsFastSync() {
+		t.Fatal("expected NeedsFastSync=false when idle with no open device keys")
+	}
+
+	// PresenceSnapshot reuses Sync's snapshot within TTL (0 extra Headscale calls).
+	e.hs.mu.Lock()
+	e.hs.listNodesCalls = 0
+	e.hs.mu.Unlock()
+	snap := e.svc.PresenceSnapshot(ctx)
+	if len(snap) != 1 {
+		t.Fatalf("snapshot len=%d want 1", len(snap))
+	}
+	e.hs.mu.Lock()
+	calls := e.hs.listNodesCalls
+	e.hs.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("PresenceSnapshot hit Headscale within TTL (%d calls), want 0", calls)
+	}
+
+	// Advancing past TTL triggers one refresh.
+	nowTime = nowTime.Add(10 * time.Second)
+	_ = e.svc.PresenceSnapshot(ctx)
+	e.hs.mu.Lock()
+	calls = e.hs.listNodesCalls
+	e.hs.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("PresenceSnapshot after TTL made %d calls, want 1", calls)
+	}
+
+	// Issuing a device key immediately flips NeedsFastSync back to true and wakes the sync loop.
+	if _, _, err := e.svc.IssueDeviceKey(ctx, cli, "alice", "server"); err != nil {
+		t.Fatal(err)
+	}
+	if !e.svc.NeedsFastSync() {
+		t.Fatal("expected NeedsFastSync=true while an open device key exists")
+	}
+	select {
+	case <-e.svc.SyncWake():
+	default:
+		t.Fatal("expected IssueDeviceKey to signal SyncWake")
+	}
+
+	// Single-flight Sync: concurrent callers share one in-flight pass.
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- e.svc.Sync(ctx)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Sync err: %v", err)
+		}
 	}
 }
 

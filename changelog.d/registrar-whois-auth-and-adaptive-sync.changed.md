@@ -1,0 +1,2 @@
+- `core/registrar`: authenticate embedded mesh portal requests directly from `tsnet.WhoIs()` (verifying Headscale node ID, WireGuard node public key, and key expiry against SQLite with zero Headscale REST calls per request), serve directory/admin presence badges from a display-only cached snapshot, and make background Headscale `Sync()` single-flight with 30 s idle back-off when no device keys or cleanups are pending.
+- `core/test/bench-scale`: add repeatable single-pen scale and capacity benchmark harness (`bench.sh` + `driver.go`).

@@ -36,6 +36,7 @@ type Config struct {
 	MaxServerEABPerDay      int
 	MaxMemberEABPerDay      int
 	MaxMemberACMETXTPerHour int
+	PresenceTTL             time.Duration
 	ACMEBackend             ACMEBackend
 }
 
@@ -93,6 +94,16 @@ func forbidden(f string, a ...any) error { return &Problem{Status: 403, Msg: fmt
 func missing(f string, a ...any) error   { return &Problem{Status: 404, Msg: fmt.Sprintf(f, a...)} }
 func conflict(f string, a ...any) error  { return &Problem{Status: 409, Msg: fmt.Sprintf(f, a...)} }
 
+type syncCall struct {
+	done chan struct{}
+	err  error
+}
+
+type presenceCall struct {
+	done  chan struct{}
+	nodes map[string]HSNode
+}
+
 type Service struct {
 	cfg  Config
 	st   *Store
@@ -102,6 +113,21 @@ type Service struct {
 	mu         sync.Mutex // serialises changes that touch Headscale or policy
 	lastPolicy string
 	orphans    map[string]bool
+
+	syncMu        sync.Mutex
+	syncFlight    *syncCall
+	syncWake      chan struct{}
+	lastSyncAt    time.Time
+	lastRenewOnly bool
+	syncedOnce    bool
+
+	// Display-only node presence snapshot (GET /api/directory and
+	// GET /api/admin/devices). No authorization, identity, or ACL policy
+	// decision may ever read this snapshot.
+	presenceMu     sync.RWMutex
+	presenceByID   map[string]HSNode
+	presenceAt     time.Time
+	presenceFlight *presenceCall
 
 	acmeMu         sync.Mutex
 	serverEABHits  map[int64][]time.Time
@@ -174,12 +200,16 @@ func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
 	if cfg.MaxMemberACMETXTPerHour <= 0 {
 		cfg.MaxMemberACMETXTPerHour = 60
 	}
+	if cfg.PresenceTTL <= 0 {
+		cfg.PresenceTTL = 5 * time.Second
+	}
 	return &Service{
 		cfg:           cfg,
 		st:            st,
 		hs:            hs,
 		acme:          cfg.ACMEBackend,
 		orphans:       map[string]bool{},
+		syncWake:      make(chan struct{}, 1),
 		serverEABHits: map[int64][]time.Time{},
 		memberEABHits: map[int64][]time.Time{},
 		memberTXTHits: map[int64][]time.Time{},
@@ -837,6 +867,7 @@ func (s *Service) issueKey(ctx context.Context, m *Member, kind string) (string,
 		_ = s.hs.ExpireKey(ctx, k.ID)
 		return "", 0, err
 	}
+	s.notifySyncLoop()
 	return k.Key, dk.ExpiresAt, nil
 }
 
@@ -895,61 +926,193 @@ func (s *Service) WhoIs(ip string) (*Member, *Device, error) {
 	return m, d, err
 }
 
-func nodeMatchesDevice(nodes []HSNode, nodeID string, addr netip.Addr) bool {
-	for _, n := range nodes {
-		if n.ID != nodeID {
-			continue
-		}
-		for _, raw := range n.IPAddresses {
-			if parsed, err := netip.ParseAddr(raw); err == nil && parsed == addr {
-				return true
-			}
+// PeerIdentity is the cryptographic peer identity returned by the embedded
+// tsnet server's local WhoIs(remoteAddr) lookup. Role, device kind, and member
+// status are NEVER taken from WhoIs — they come strictly from SQLite.
+type PeerIdentity struct {
+	IP        string
+	HSNodeID  string
+	NodeKey   string
+	KeyExpiry time.Time
+}
+
+func nodeMatchesAddr(n *HSNode, addr netip.Addr) bool {
+	if n == nil {
+		return false
+	}
+	for _, raw := range n.IPAddresses {
+		if parsed, err := netip.ParseAddr(raw); err == nil && parsed == addr {
+			return true
 		}
 	}
 	return false
 }
 
-// VerifyLiveCaller maps a mesh source IP to an enrolled device and verifies
-// against Headscale that the exact Headscale node still owns that IP. If a
-// node left and Headscale reassigned its IP before the periodic Sync tick,
-// VerifyLiveCaller refreshes the ledger once and re-checks.
-func (s *Service) VerifyLiveCaller(ctx context.Context, src string) (*Member, *Device, error) {
-	m, d, _, err := s.verifyLiveCallerWithNodes(ctx, src)
-	return m, d, err
+// VerifyDirectPeer authenticates a caller over the embedded tsnet listener
+// using the WireGuard peer's Headscale node ID and node public key from
+// local WhoIs, matched against SQLite with zero Headscale REST calls in
+// steady state.
+//
+// Revocations performed through the registrar (kick, suspend, device remove)
+// update SQLite immediately so the next request is refused regardless of
+// Headscale netmap lag. Deleting a node out-of-band with the headscale CLI
+// leaves a brief window until Headscale drops the peer from core's netmap;
+// operators should always delete devices through the registrar.
+func (s *Service) VerifyDirectPeer(ctx context.Context, peer *PeerIdentity) (*Member, *Device, error) {
+	if peer == nil || peer.HSNodeID == "" || peer.NodeKey == "" || peer.IP == "" {
+		return nil, nil, ErrNotFound
+	}
+	if !peer.KeyExpiry.IsZero() && !peer.KeyExpiry.After(s.clock()) {
+		return nil, nil, ErrNotFound
+	}
+	addr, err := netip.ParseAddr(peer.IP)
+	if err != nil {
+		return nil, nil, ErrNotFound
+	}
+	canon := addr.Unmap().String()
+
+	d, err := s.st.DeviceByHSNodeID(peer.HSNodeID)
+	if errors.Is(err, ErrNotFound) {
+		// Only trigger an on-demand Sync when an open device key could explain
+		// a brand-new device racing ahead of the background poll.
+		if open, kerr := s.st.HasOpenDeviceKeys(); kerr == nil && open {
+			if serr := s.Sync(ctx); serr != nil {
+				return nil, nil, serr
+			}
+			d, err = s.st.DeviceByHSNodeID(peer.HSNodeID)
+		}
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Backfill missing node_key on legacy device rows created before this
+	// column existed, or refresh once if the node's mesh IP shifted.
+	if d.NodeKey == "" || (d.IPv4 != canon && d.IPv6 != canon) {
+		if serr := s.Sync(ctx); serr != nil {
+			return nil, nil, serr
+		}
+		d, err = s.st.DeviceByHSNodeID(peer.HSNodeID)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	if d.NodeKey == "" || d.NodeKey != peer.NodeKey {
+		log.Printf("auth: node %s (%s) WhoIs node key mismatch (stored=%q peer=%q)", d.HSNodeID, d.Name, d.NodeKey, peer.NodeKey)
+		return nil, nil, ErrNotFound
+	}
+	if d.IPv4 != canon && d.IPv6 != canon {
+		return nil, nil, ErrNotFound
+	}
+	m, err := s.st.MemberByID(d.MemberID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return m, d, nil
 }
 
-func (s *Service) verifyLiveCallerWithNodes(ctx context.Context, src string) (*Member, *Device, []HSNode, error) {
+// VerifyLiveCaller maps a mesh source IP to an enrolled device and verifies
+// against Headscale (single-node GET /api/v1/node/{id}) that the exact
+// Headscale node still owns that IP. Used only by the legacy IP-only
+// MeshHandler path; production embedded tsnet uses VerifyDirectPeer.
+func (s *Service) VerifyLiveCaller(ctx context.Context, src string) (*Member, *Device, error) {
 	addr, err := netip.ParseAddr(src)
 	if err != nil {
-		return nil, nil, nil, ErrNotFound
+		return nil, nil, ErrNotFound
 	}
 	canon := addr.String()
 	m, d, err := s.WhoIs(canon)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-	nodes, err := s.hs.Nodes(ctx)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("verify caller: %w", err)
+	node, err := s.hs.Node(ctx, d.HSNodeID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, nil, fmt.Errorf("verify caller: %w", err)
 	}
-	if nodeMatchesDevice(nodes, d.HSNodeID, addr) {
-		return m, d, nodes, nil
+	if nodeMatchesAddr(node, addr) {
+		return m, d, nil
 	}
 	if err := s.Sync(ctx); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	m, d, err = s.WhoIs(canon)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-	nodes, err = s.hs.Nodes(ctx)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("verify caller: %w", err)
+	node, err = s.hs.Node(ctx, d.HSNodeID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, nil, fmt.Errorf("verify caller: %w", err)
 	}
-	if !nodeMatchesDevice(nodes, d.HSNodeID, addr) {
-		return nil, nil, nil, ErrNotFound
+	if !nodeMatchesAddr(node, addr) {
+		return nil, nil, ErrNotFound
 	}
-	return m, d, nodes, nil
+	return m, d, nil
+}
+
+// PresenceSnapshot returns a display-only map of Headscale nodes indexed by
+// node ID for UI online/last-seen badges (GET /api/directory and
+// GET /api/admin/devices). No authorization, identity, or ACL policy decision
+// may ever read this snapshot.
+func (s *Service) PresenceSnapshot(ctx context.Context) map[string]HSNode {
+	s.presenceMu.RLock()
+	if s.presenceByID != nil && !s.presenceAt.IsZero() && s.clock().Sub(s.presenceAt) < s.cfg.PresenceTTL {
+		snap := s.presenceByID
+		s.presenceMu.RUnlock()
+		return snap
+	}
+	stale := s.presenceByID
+	s.presenceMu.RUnlock()
+
+	s.presenceMu.Lock()
+	if s.presenceByID != nil && !s.presenceAt.IsZero() && s.clock().Sub(s.presenceAt) < s.cfg.PresenceTTL {
+		snap := s.presenceByID
+		s.presenceMu.Unlock()
+		return snap
+	}
+	if call := s.presenceFlight; call != nil {
+		s.presenceMu.Unlock()
+		select {
+		case <-call.done:
+			if call.nodes != nil {
+				return call.nodes
+			}
+			return stale
+		case <-ctx.Done():
+			return stale
+		}
+	}
+	call := &presenceCall{done: make(chan struct{})}
+	s.presenceFlight = call
+	s.presenceMu.Unlock()
+
+	nodes, err := s.hs.Nodes(ctx)
+	var snap map[string]HSNode
+	if err == nil {
+		snap = indexNodesByID(nodes)
+	}
+
+	s.presenceMu.Lock()
+	if err == nil {
+		s.presenceByID = snap
+		s.presenceAt = s.clock()
+		call.nodes = snap
+	} else {
+		call.nodes = s.presenceByID
+	}
+	close(call.done)
+	s.presenceFlight = nil
+	out := call.nodes
+	s.presenceMu.Unlock()
+	return out
+}
+
+func (s *Service) setPresence(nodes []HSNode) {
+	snap := indexNodesByID(nodes)
+	s.presenceMu.Lock()
+	s.presenceByID = snap
+	s.presenceAt = s.clock()
+	s.presenceMu.Unlock()
 }
 
 // ----------------------------------------------------------------- names --
@@ -1529,16 +1692,99 @@ func (s *Service) releaseLocked(a Actor, rawName string) error {
 
 // ---------------------------------------------------------- sync, policy --
 
-// Sync reconciles Headscale with the ledger: records devices that joined with
-// keys we issued, notices devices that disappeared, finishes interrupted
-// removals, then rewrites the access policy and DNS zone if they changed.
+// Sync reconciles Headscale with the ledger and is single-flight (overlapping
+// callers share the in-flight pass instead of queuing duplicate Headscale API
+// calls). Responsibilities and timing:
+//   - Enrol newly joined devices (recording HSNodeID + WireGuard NodeKey),
+//     mark their one-time device key used, and push the updated ACL policy:
+//     runs on the fast interval (SYNC_INTERVAL, default 3 s) whenever an open
+//     device key exists, plus on-demand if a new peer hits VerifyDirectPeer.
+//   - Retry interrupted Headscale user/node deletions for removed members:
+//     runs on the fast interval whenever removed members still hold hs_user_id.
+//   - Reflect renew_only billing transitions in ACL policy: checked locally
+//     every fast tick and synced immediately on transition.
+//   - Backfill missing node_key on upgraded rows, update renamed/re-IPed nodes,
+//     notice out-of-band headscale CLI deletions, and refresh the display-only
+//     presence snapshot: safe on the idle interval (SYNC_IDLE_INTERVAL,
+//     default 30 s). Security mutations initiated by the registrar (Suspend,
+//     Resume, Kick, RemoveDevice) apply policy synchronously and do not wait
+//     for background Sync.
 func (s *Service) Sync(ctx context.Context) error {
+	s.syncMu.Lock()
+	if call := s.syncFlight; call != nil {
+		s.syncMu.Unlock()
+		select {
+		case <-call.done:
+			return call.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	call := &syncCall{done: make(chan struct{})}
+	s.syncFlight = call
+	s.syncMu.Unlock()
+
+	err := s.syncOnce(ctx)
+
+	s.syncMu.Lock()
+	call.err = err
+	if err == nil {
+		s.lastSyncAt = s.clock()
+		s.lastRenewOnly = s.isRenewOnly()
+		s.syncedOnce = true
+	}
+	close(call.done)
+	s.syncFlight = nil
+	s.syncMu.Unlock()
+	return err
+}
+
+func (s *Service) notifySyncLoop() {
+	if s.syncWake == nil {
+		return
+	}
+	select {
+	case s.syncWake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Service) SyncWake() <-chan struct{} { return s.syncWake }
+
+func (s *Service) LastSyncAt() time.Time {
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	return s.lastSyncAt
+}
+
+// NeedsFastSync reports (using only local SQLite and billing file state, zero
+// Headscale calls) whether background reconciliation should run on the fast
+// polling interval rather than backing off to the idle interval.
+func (s *Service) NeedsFastSync() bool {
+	s.syncMu.Lock()
+	synced := s.syncedOnce
+	prevRenew := s.lastRenewOnly
+	s.syncMu.Unlock()
+	if !synced || s.isRenewOnly() != prevRenew {
+		return true
+	}
+	if open, err := s.st.HasOpenDeviceKeys(); err == nil && open {
+		return true
+	}
+	if pending, err := s.st.HasPendingMemberCleanup(); err == nil && pending {
+		return true
+	}
+	return false
+}
+
+func (s *Service) syncOnce(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	nodes, err := s.hs.Nodes(ctx)
 	if err != nil {
 		return err
 	}
+	s.setPresence(nodes)
 	keys, err := s.st.PendingDeviceKeys(now() - 86400)
 	if err != nil {
 		return err
@@ -1577,8 +1823,15 @@ func (s *Service) Sync(ctx context.Context) error {
 				s.deleteStray(ctx, n, d, "member removed")
 				continue
 			}
-			if d.IPv4 != v4 || d.IPv6 != v6 || d.Name != name {
-				_ = s.st.UpdateDevice(d.ID, name, v4, v6)
+			nodeKey := d.NodeKey
+			if n.NodeKey != "" {
+				if nodeKey != "" && nodeKey != n.NodeKey {
+					log.Printf("sync: device %d (%s) headscale node_key changed (%s -> %s)", d.ID, d.Name, nodeKey, n.NodeKey)
+				}
+				nodeKey = n.NodeKey
+			}
+			if d.IPv4 != v4 || d.IPv6 != v6 || d.Name != name || d.NodeKey != nodeKey {
+				_ = s.st.UpdateDevice(d.ID, name, v4, v6, nodeKey)
 			}
 			continue
 		}
@@ -1598,7 +1851,7 @@ func (s *Service) Sync(ctx context.Context) error {
 			s.deleteStray(ctx, n, nil, "key revoked or member not active")
 			continue
 		}
-		d := &Device{MemberID: k.MemberID, Kind: k.Kind, HSNodeID: n.ID, Name: name, IPv4: v4, IPv6: v6}
+		d := &Device{MemberID: k.MemberID, Kind: k.Kind, HSNodeID: n.ID, NodeKey: n.NodeKey, Name: name, IPv4: v4, IPv6: v6}
 		if err := s.st.InsertDevice(d); err != nil {
 			return err
 		}

@@ -40,6 +40,7 @@ type HSPreAuthKey struct {
 
 type HSNode struct {
 	ID          string        `json:"id"`
+	NodeKey     string        `json:"nodeKey"`
 	Name        string        `json:"name"`
 	GivenName   string        `json:"givenName"`
 	IPAddresses []string      `json:"ipAddresses"`
@@ -96,6 +97,8 @@ func (h *Headscale) do(ctx context.Context, method, path string, in, out any) er
 		return fmt.Errorf("headscale: %w", err)
 	}
 	defer resp.Body.Close()
+	// 8 MiB caps memory on malformed responses; GET /api/v1/node averages ~1 KB/node,
+	// so this comfortably covers pens up to several thousand nodes (I-30).
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode/100 != 2 {
 		return &HSError{Status: resp.StatusCode, Body: string(bytes.TrimSpace(data))}
@@ -170,6 +173,17 @@ func (h *Headscale) Nodes(ctx context.Context) ([]HSNode, error) {
 		return nil, err
 	}
 	return r.Nodes, nil
+}
+
+func (h *Headscale) Node(ctx context.Context, id string) (*HSNode, error) {
+	var r struct{ Node HSNode }
+	if err := h.do(ctx, http.MethodGet, "/node/"+url.PathEscape(id), nil, &r); err != nil {
+		if isHSNotFound(err) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &r.Node, nil
 }
 
 func (h *Headscale) DeleteNode(ctx context.Context, id string) error {

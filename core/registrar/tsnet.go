@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,30 +48,43 @@ func (e *embeddedMesh) Shutdown(ctx context.Context) {
 	}
 }
 
-func whoIsPeerIP(lc *local.Client) func(ctx context.Context, remoteAddr string) (string, error) {
-	return func(ctx context.Context, remoteAddr string) (string, error) {
+func whoIsPeer(lc *local.Client) func(ctx context.Context, remoteAddr string) (*PeerIdentity, error) {
+	return func(ctx context.Context, remoteAddr string) (*PeerIdentity, error) {
 		host, _, err := net.SplitHostPort(remoteAddr)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		want, err := netip.ParseAddr(host)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		want = want.Unmap()
 		who, err := lc.WhoIs(ctx, remoteAddr)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		if who == nil || who.Node == nil {
-			return "", errors.New("whois returned no node")
+			return nil, errors.New("whois returned no node")
 		}
+		if who.Node.ID <= 0 || who.Node.Key.IsZero() {
+			return nil, errors.New("whois returned incomplete node identity")
+		}
+		matched := false
 		for _, pfx := range who.Node.Addresses {
 			if pfx.Addr().Unmap() == want {
-				return want.String(), nil
+				matched = true
+				break
 			}
 		}
-		return "", fmt.Errorf("whois node addresses did not match peer %s", want)
+		if !matched {
+			return nil, fmt.Errorf("whois node addresses did not match peer %s", want)
+		}
+		return &PeerIdentity{
+			IP:        want.String(),
+			HSNodeID:  strconv.FormatInt(int64(who.Node.ID), 10),
+			NodeKey:   who.Node.Key.String(),
+			KeyExpiry: who.Node.KeyExpiry,
+		}, nil
 	}
 }
 
@@ -238,7 +252,7 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 		GetCertificate: homeMgr.GetCertificate,
 	}
 	tlsLn := tls.NewListener(ln443, tlsCfg)
-	apiHandler := MeshHandlerDirect(s, whoIsPeerIP(lc))
+	apiHandler := MeshHandlerDirect(s, whoIsPeer(lc))
 	portalSrv := &http.Server{
 		Handler:           PortalHandler(s.cfg.Zone, portalDir, apiHandler),
 		ReadHeaderTimeout: 10 * time.Second,

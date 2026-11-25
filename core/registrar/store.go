@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS devices (
 	member_id   INTEGER NOT NULL REFERENCES members(id),
 	kind        TEXT NOT NULL,
 	hs_node_id  TEXT NOT NULL,
+	node_key    TEXT NOT NULL DEFAULT '',
 	name        TEXT NOT NULL,
 	ipv4        TEXT NOT NULL DEFAULT '',
 	ipv6        TEXT NOT NULL DEFAULT '',
@@ -98,6 +99,10 @@ func OpenStore(path string) (*Store, error) {
 	if err := migrateNamesPrivate(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate names.private: %w", err)
+	}
+	if err := migrateDevicesNodeKey(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate devices.node_key: %w", err)
 	}
 	return &Store{db: db}, nil
 }
@@ -144,6 +149,19 @@ func migrateNamesPrivate(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`ALTER TABLE names ADD COLUMN private INTEGER NOT NULL DEFAULT 0`); err != nil {
 		if has, checkErr := hasColumn(db, "names", "private"); checkErr == nil && has {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func migrateDevicesNodeKey(db *sql.DB) error {
+	if has, err := hasColumn(db, "devices", "node_key"); err != nil || has {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE devices ADD COLUMN node_key TEXT NOT NULL DEFAULT ''`); err != nil {
+		if has, checkErr := hasColumn(db, "devices", "node_key"); checkErr == nil && has {
 			return nil
 		}
 		return err
@@ -485,6 +503,24 @@ func (s *Store) CountOpenDeviceKeys(memberID int64) (int, error) {
 	return n, err
 }
 
+// HasOpenDeviceKeys reports whether any member has an unused, unrevoked,
+// unexpired device key awaiting enrolment.
+func (s *Store) HasOpenDeviceKeys() (bool, error) {
+	var exists int
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM device_keys
+		WHERE used_at IS NULL AND revoked_at IS NULL AND expires_at > ?)`, now()).Scan(&exists)
+	return exists != 0, err
+}
+
+// HasPendingMemberCleanup reports whether any removed member still has a
+// Headscale user ID pending deletion retry.
+func (s *Store) HasPendingMemberCleanup() (bool, error) {
+	var exists int
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM members
+		WHERE status = 'removed' AND hs_user_id != '')`).Scan(&exists)
+	return exists != 0, err
+}
+
 func (s *Store) CountOpenInvites(memberID int64) (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT count(*) FROM invites
@@ -545,6 +581,7 @@ type Device struct {
 	Member    string `json:"member"`
 	Kind      string `json:"kind"`
 	HSNodeID  string `json:"-"`
+	NodeKey   string `json:"-"`
 	Name      string `json:"name"`
 	IPv4      string `json:"ipv4"`
 	IPv6      string `json:"ipv6,omitempty"`
@@ -552,12 +589,12 @@ type Device struct {
 	RemovedAt *int64 `json:"removed_at,omitempty"`
 }
 
-const deviceCols = `d.id, d.member_id, m.handle, d.kind, d.hs_node_id, d.name, d.ipv4, d.ipv6, d.created_at, d.removed_at`
+const deviceCols = `d.id, d.member_id, m.handle, d.kind, d.hs_node_id, d.node_key, d.name, d.ipv4, d.ipv6, d.created_at, d.removed_at`
 const deviceFrom = ` FROM devices d JOIN members m ON m.id = d.member_id `
 
 func scanDevice(r interface{ Scan(...any) error }) (*Device, error) {
 	var d Device
-	err := r.Scan(&d.ID, &d.MemberID, &d.Member, &d.Kind, &d.HSNodeID, &d.Name, &d.IPv4, &d.IPv6, &d.CreatedAt, &d.RemovedAt)
+	err := r.Scan(&d.ID, &d.MemberID, &d.Member, &d.Kind, &d.HSNodeID, &d.NodeKey, &d.Name, &d.IPv4, &d.IPv6, &d.CreatedAt, &d.RemovedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -602,9 +639,17 @@ func (s *Store) DeviceByIP(ip string) (*Device, error) {
 		`WHERE d.removed_at IS NULL AND ((d.ipv4 != '' AND d.ipv4 = ?) OR (d.ipv6 != '' AND d.ipv6 = ?))`, ip, ip))
 }
 
+func (s *Store) DeviceByHSNodeID(nodeID string) (*Device, error) {
+	if nodeID == "" {
+		return nil, ErrNotFound
+	}
+	return scanDevice(s.db.QueryRow(`SELECT `+deviceCols+deviceFrom+
+		`WHERE d.removed_at IS NULL AND d.hs_node_id = ?`, nodeID))
+}
+
 func (s *Store) InsertDevice(d *Device) error {
-	res, err := s.db.Exec(`INSERT INTO devices (member_id, kind, hs_node_id, name, ipv4, ipv6, created_at) VALUES (?,?,?,?,?,?,?)`,
-		d.MemberID, d.Kind, d.HSNodeID, d.Name, d.IPv4, d.IPv6, now())
+	res, err := s.db.Exec(`INSERT INTO devices (member_id, kind, hs_node_id, node_key, name, ipv4, ipv6, created_at) VALUES (?,?,?,?,?,?,?,?)`,
+		d.MemberID, d.Kind, d.HSNodeID, d.NodeKey, d.Name, d.IPv4, d.IPv6, now())
 	if err != nil {
 		return err
 	}
@@ -612,8 +657,8 @@ func (s *Store) InsertDevice(d *Device) error {
 	return nil
 }
 
-func (s *Store) UpdateDevice(id int64, name, v4, v6 string) error {
-	_, err := s.db.Exec(`UPDATE devices SET name = ?, ipv4 = ?, ipv6 = ? WHERE id = ?`, name, v4, v6, id)
+func (s *Store) UpdateDevice(id int64, name, v4, v6, nodeKey string) error {
+	_, err := s.db.Exec(`UPDATE devices SET name = ?, ipv4 = ?, ipv6 = ?, node_key = ? WHERE id = ?`, name, v4, v6, nodeKey, id)
 	return err
 }
 
