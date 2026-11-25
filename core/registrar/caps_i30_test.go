@@ -585,4 +585,3 @@ func TestRedTeamRegressionsCapsSyncAndSelfDelete(t *testing.T) {
 		t.Fatalf("private name must be unpointed and retired (held_until != nil), got device_id=%v held_until=%v", devID, heldUntil)
 	}
 }
-

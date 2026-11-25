@@ -330,20 +330,20 @@ func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
 		cfg.PresenceTTL = 5 * time.Second
 	}
 	return &Service{
-		cfg:              cfg,
-		st:               st,
-		hs:               hs,
-		acme:             cfg.ACMEBackend,
-		orphans:          map[string]bool{},
-		missingMKAlerted: map[string]bool{},
-		baseCtx:          context.Background(),
-		rotateCooldown:   map[string]time.Time{},
+		cfg:                cfg,
+		st:                 st,
+		hs:                 hs,
+		acme:               cfg.ACMEBackend,
+		orphans:            map[string]bool{},
+		missingMKAlerted:   map[string]bool{},
+		baseCtx:            context.Background(),
+		rotateCooldown:     map[string]time.Time{},
 		rotateFlight:       map[string]*rotateCall{},
 		rotateSem:          make(chan struct{}, keyRotateMaxConc),
 		deferredPendingDel: map[int64]bool{},
 		serverEABHits:      map[int64][]time.Time{},
-		memberEABHits:    map[int64][]time.Time{},
-		memberTXTHits:    map[int64][]time.Time{},
+		memberEABHits:      map[int64][]time.Time{},
+		memberTXTHits:      map[int64][]time.Time{},
 	}, nil
 }
 
