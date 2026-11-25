@@ -152,59 +152,58 @@ jobs:
           key: go-e2e-v2-ts_omit_peerapiserver-${{ runner.os }}-${{ hashFiles('core/join/go.mod', 'core/join/go.sum', 'core/registrar/go.sum', 'deploy/signup/go.sum', 'deploy/challenge-dns/go.sum') }}
           restore-keys: |
             go-e2e-v2-ts_omit_peerapiserver-${{ runner.os }}-
-      - name: Compile E2E binaries in parallel
+      - name: Compile E2E binaries
         run: |
           set -euo pipefail
           out="$PWD/prebuilt"
           mkdir -p "$out/join" "$out/registrar" "$out/signup" "$out/challenge-dns" "$out/test-bins"
           full="$(git rev-parse 'HEAD^{commit}')"
           ver="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d "$full")-${full:0:7}"
-          # Build all 5 client platforms (matching deploy/build-bins.sh so the
-          # test pen serves the exact same 5-platform SHA256SUMS as a release)
-          # plus the Linux/amd64 server binaries, in parallel across the runner.
+          # Phase 1: compile linux/amd64 join first (alongside small non-tailscale
+          # binaries) so core/registrar reuses tailscale/gvisor/certmagic from
+          # GOCACHE instead of compiling them twice on cold caches.
           (
             cd core/join
             export GOFLAGS="-tags=ts_omit_peerapiserver -trimpath"
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-Linux-x86_64" . &
-            j1=$!
-            (
-              CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-Darwin-arm64" .
-              CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-Darwin-x86_64" .
-            ) &
-            j2=$!
-            (
-              CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-Linux-aarch64" .
-              CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-windows-amd64.exe" .
-            ) &
-            j3=$!
-            wait "$j1"
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=2025.01.01-aaaaaaa" -o "$out/test-bins/hogman-old" . &
-            j4=$!
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=2099.01.01-bbbbbbb" -o "$out/test-bins/hogman-new" . &
-            j5=$!
-            wait "$j2" "$j3" "$j4" "$j5"
-            cd "$out/join" && sha256sum hogman-* > SHA256SUMS
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-Linux-x86_64" .
           ) &
-          p1=$!
-          (
-            cd core/registrar
-            export GOFLAGS="-tags=ts_omit_peerapiserver -trimpath"
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$out/registrar/registrar-linux-amd64" .
-          ) &
-          p2=$!
+          p_join_amd64=$!
           (
             cd deploy/signup
             export GOFLAGS=-trimpath
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$out/signup/hogman-signup-linux-amd64" .
           ) &
-          p3=$!
+          p_signup=$!
           (
             cd deploy/challenge-dns
             export GOFLAGS=-trimpath
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$out/challenge-dns/challenge-dns-linux-amd64" .
           ) &
-          p4=$!
-          wait "$p1" "$p2" "$p3" "$p4"
+          p_cdns=$!
+          wait "$p_join_amd64"
+
+          # Phase 2: cap concurrency to two lanes so the 4-vCPU runner isn't
+          # oversubscribed on cold caches while still overlapping link steps.
+          (
+            cd core/registrar
+            export GOFLAGS="-tags=ts_omit_peerapiserver -trimpath"
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$out/registrar/registrar-linux-amd64" .
+            cd ../join
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=2025.01.01-aaaaaaa" -o "$out/test-bins/hogman-old" .
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=2099.01.01-bbbbbbb" -o "$out/test-bins/hogman-new" .
+            CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-Linux-aarch64" .
+          ) &
+          p_lane1=$!
+          (
+            cd core/join
+            export GOFLAGS="-tags=ts_omit_peerapiserver -trimpath"
+            CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-Darwin-arm64" .
+            CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-Darwin-x86_64" .
+            CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-windows-amd64.exe" .
+          ) &
+          p_lane2=$!
+          wait "$p_signup" "$p_cdns" "$p_lane1" "$p_lane2"
+          (cd "$out/join" && sha256sum hogman-* > SHA256SUMS)
           ls -lh "$out"/*/*
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -357,7 +356,9 @@ jobs:
             src="$RUNNER_TEMP/legacy-reg-src"
             mkdir -p "$src"
             git archive v2026.11.24-76d2903 core/registrar | tar -x --strip-components=2 -C "$src"
-            docker run --rm -v "$src:/src:ro" -v "$out:/out" -w /src \
+            docker run --rm -u "$(id -u):$(id -g)" \
+              -v "$src:/src:ro" -v "$out:/out" -w /src \
+              -e HOME=/tmp -e GOCACHE=/tmp/gocache -e GOMODCACHE=/tmp/gomod \
               -e GOFLAGS=-trimpath \
               golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 \
               sh -c 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /out/registrar-linux-amd64 .'

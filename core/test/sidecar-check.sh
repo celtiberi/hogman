@@ -32,6 +32,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+pull_retry() {
+  local img="$1" i
+  for i in 1 2 3; do
+    docker image inspect "$img" >/dev/null 2>&1 && return 0
+    docker pull -q "$img" >/dev/null && return 0
+    echo "docker pull $img failed (attempt $i/3); retrying..." >&2
+    sleep 2
+  done
+  docker pull -q "$img" >/dev/null
+}
+
 echo "• Validating docker-compose.yml example in docs/sealed-server.md..."
 awk '
   /^```yaml$/ { in_block=1; next }
@@ -60,6 +71,11 @@ echo "✓ Image binary architecture matches host ($got_ver)"
 
 echo "• Creating empty ingress volume (Docker initializes UID 65532 mode 0700 from image)..."
 docker volume create "$VOL" >/dev/null
+
+echo "• Pulling runtime test images..."
+pull_retry "$CADDY_IMG"
+pull_retry "$ALPINE_IMG"
+pull_retry "$GO_IMG"
 
 start_bridge_and_app() {
   docker rm -f "$APP" "$BRIDGE" >/dev/null 2>&1 || true
