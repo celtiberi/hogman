@@ -589,6 +589,24 @@ share_dir_note() { api bob-tools GET /api/directory | jq -e --arg n "notes.$ZONE
 check "the directory shows the share's note" share_dir_note
 notes_listed() { match "notes.*running" join_tool dave-laptop share list; }
 check "share list shows it running" notes_listed
+only_proxy_tcp_listen() {
+  # I-27: with ts_omit_peerapiserver, hogman agent + share must ONLY listen on
+  # the agent's 127.0.0.1:<proxyPort> socket — zero wildcard or extra TCP listeners.
+  local want_hex
+  want_hex="$(printf '0100007F:%04X' "${PROXY##*:}")"
+  run dave-laptop sh -c '
+    want="'"$want_hex"'"
+    v4="$(awk "NR>1 && \$4==\"0A\" { print \$2 }" /proc/net/tcp 2>/dev/null || true)"
+    v6="$(awk "NR>1 && \$4==\"0A\" { print \$2 }" /proc/net/tcp6 2>/dev/null || true)"
+    if [ "$v4" != "$want" ] || [ -n "$v6" ]; then
+      echo "unexpected TCP listeners on dave-laptop: want v4=[$want] v6=[], got v4=[$v4] v6=[$v6]" >&2
+      exit 1
+    fi
+  '
+}
+check "hogman agent and share only open 127.0.0.1:<proxy> TCP listener (I-27)" only_proxy_tcp_listen
+NOTES_IP="$(ip_of notes)"
+check "alice's server cannot reach dave's notes share on 443 (server isolation)" not port_open alice-tools "$NOTES_IP" 443
 notes_device() {
   local out
   out="$($H device list)" || return 1
@@ -877,7 +895,7 @@ if [ -f "$SRC/prebuilt/test-bins/hogman-old" ] && [ -f "$SRC/prebuilt/test-bins/
 else
   docker run --rm -v "$REPO/core/join:/src:ro" -v "$WORK/ver-bins:/out" -w /src \
     -v hogman-gomod:/go/pkg/mod -v hogman-gocache:/root/.cache/go-build \
-    -e CGO_ENABLED=0 -e GOOS=linux -e GOARCH="$DAVE_GOARCH" -e GOFLAGS=-buildvcs=false \
+    -e CGO_ENABLED=0 -e GOOS=linux -e GOARCH="$DAVE_GOARCH" -e GOFLAGS="-buildvcs=false -tags=ts_omit_peerapiserver" \
     golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 sh -c '
       set -e
       go build -trimpath -ldflags="-s -w -X main.version=2025.01.01-aaaaaaa" -o /out/hogman-old .

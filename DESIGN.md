@@ -166,17 +166,18 @@ As built: Headscale runs in database policy mode and the **registrar generates t
 {
   "tagOwners": { "tag:infra": [], "tag:server": [] },
   "grants": [
-    // every active member's device, plus the core, may reach the core's DNS/HTTP/HTTPS/CA
-    { "src": ["<active device IPs>", "tag:infra"], "dst": ["tag:infra"], "ip": ["53", "80", "443", "9000"] },
-    // ... and anything on every active member's servers
-    { "src": ["<active device IPs>", "tag:infra"], "dst": ["<active server IPs>"], "ip": ["*"] }
+    // every active member's device (personal and server), plus the core, may reach the core's DNS and HTTPS portal/registrar
+    { "src": ["<active device IPs>", "tag:infra"], "dst": ["tag:infra"], "ip": ["53", "443"] },
+    // active personal devices (and the core) may reach active servers on HTTPS (443) only; servers are isolated from each other
+    { "src": ["<active personal device IPs>", "tag:infra"], "dst": ["<active server IPs>"], "ip": ["443"] }
   ]
 }
 ```
 
 Listing addresses gives two properties tags cannot: suspending a member is just leaving their devices out (instant and reversible, devices stay registered), and a device that joined around the registrar is in no rule and gets nothing.
 
-- A device is only a server if the member asked the registrar for a server key. Laptops are never reachable by accident.
+- A device is only a server if the member asked the registrar for a server key. Laptops are never reachable by accident, and servers cannot reach other servers by default (preventing lateral movement from a compromised share).
+- Traffic to servers is HTTPS (`443`) only (D-11).
 - Subnet routes and exit nodes are off. Members cannot route the network elsewhere.
 - Tagged servers are not owned by a user inside Headscale, so the **registrar keeps its own ledger of which member owns which device.** Removal depends on that ledger.
 

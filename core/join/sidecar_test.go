@@ -358,7 +358,7 @@ func TestShareIdentityHeaders(t *testing.T) {
 		t.Fatalf("tagged server node/ip = %q / %q", gotHeaders.Get("X-Hogman-Node"), gotHeaders.Get("X-Hogman-IP"))
 	}
 
-	// 4. WhoIs lookup error: spoofed headers stay stripped and no X-Hogman-* header is sent.
+	// 4. WhoIs lookup error: fail closed with 503 and never forward to the upstream app.
 	hErr, closeErr, err := shareHandlerWithResolver(&shareConfig{
 		Name:            "fleet",
 		Zone:            "ops.pens.example.com",
@@ -371,11 +371,17 @@ func TestShareIdentityHeaders(t *testing.T) {
 		t.Fatalf("shareHandlerWithResolver(err): %v", err)
 	}
 	defer closeErr()
-	sendSpoofed(hErr, "100.64.0.11:51234")
-	for k := range gotHeaders {
-		if isHogmanHeaderName(k) {
-			t.Fatalf("header %q leaked on WhoIs error: %v", k, gotHeaders)
-		}
+	gotHeaders = nil
+	errReq := httptest.NewRequest(http.MethodGet, "https://fleet.ops.pens.example.com/api", nil)
+	errReq.RemoteAddr = "100.64.0.11:51234"
+	errReq.Header.Set("X-Hogman-Handle", "spoofed-owner")
+	errRec := httptest.NewRecorder()
+	hErr.ServeHTTP(errRec, errReq)
+	if errRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("WhoIs error status = %d, want 503", errRec.Code)
+	}
+	if gotHeaders != nil {
+		t.Fatalf("upstream must not be called when WhoIs fails; got headers %v", gotHeaders)
 	}
 
 	// 5. Local-target restriction: refuses folder shares and non-loopback LAN targets.

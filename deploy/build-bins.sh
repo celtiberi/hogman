@@ -29,6 +29,7 @@ version="${version:-dev}"
 echo "building the join tool (5 platforms, version $version), the registrar and the sign-up page (linux amd64, arm64)..."
 docker build -q --build-arg "VERSION=$version" --output "type=local,dest=$out/join" "$src/core/join" >/dev/null
 docker run --rm -v "$src/core/registrar:/src:ro" -v "$out/registrar:/out" -w /src \
+  -e GOFLAGS=-tags=ts_omit_peerapiserver \
   -v hogman-gomod:/go/pkg/mod -v hogman-gocache:/root/.cache/go-build "$GO_IMAGE" sh -c '
     set -e
     CGO_ENABLED=0 go test ./... >/dev/null

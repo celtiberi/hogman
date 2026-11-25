@@ -671,6 +671,71 @@ func TestNoCARecordOrPort9000(t *testing.T) {
 	}
 }
 
+func TestBuildPolicyIsolatesServersFromEachOther(t *testing.T) {
+	e := newTestEnv(t)
+	if _, err := e.svc.AddMember(context.Background(), Actor{CLI: true}, "alice", "member"); err != nil {
+		t.Fatal(err)
+	}
+	e.addDevice(t, "alice", "personal", "alice-laptop", "100.64.0.10", "")
+	e.addDevice(t, "alice", "server", "alice-srv1", "100.64.0.11", "")
+	e.addDevice(t, "alice", "server", "alice-srv2", "100.64.0.12", "")
+
+	pol, err := e.svc.buildPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Grants []struct {
+			Src []string `json:"src"`
+			Dst []string `json:"dst"`
+			IP  []string `json:"ip"`
+		} `json:"grants"`
+	}
+	if err := json.Unmarshal([]byte(pol), &parsed); err != nil {
+		t.Fatalf("unmarshal policy: %v", err)
+	}
+	if len(parsed.Grants) != 2 {
+		t.Fatalf("grants count = %d, want 2:\n%s", len(parsed.Grants), pol)
+	}
+	infraGrant := parsed.Grants[0]
+	srvGrant := parsed.Grants[1]
+
+	has := func(list []string, want string) bool {
+		for _, v := range list {
+			if v == want {
+				return true
+			}
+		}
+		return false
+	}
+	// Servers must still reach tag:infra (DNS + registrar/certs).
+	if !has(infraGrant.Src, "100.64.0.10") || !has(infraGrant.Src, "100.64.0.11") || !has(infraGrant.Src, "100.64.0.12") {
+		t.Fatalf("infra grant missing expected devices: %+v", infraGrant.Src)
+	}
+	if !has(infraGrant.IP, "53") || !has(infraGrant.IP, "443") || len(infraGrant.IP) != 2 {
+		t.Fatalf("infra grant ports = %+v, want [53 443]", infraGrant.IP)
+	}
+	// Personal devices reach servers on 443, but servers cannot reach other servers
+	// or personal devices.
+	if !has(srvGrant.Src, "100.64.0.10") || !has(srvGrant.Src, "tag:infra") {
+		t.Fatalf("servers grant missing personal device or tag:infra: %+v", srvGrant.Src)
+	}
+	if has(srvGrant.Src, "100.64.0.11") || has(srvGrant.Src, "100.64.0.12") {
+		t.Fatalf("servers grant must exclude server devices from src: %+v", srvGrant.Src)
+	}
+	if !has(srvGrant.Dst, "100.64.0.11") || !has(srvGrant.Dst, "100.64.0.12") || has(srvGrant.Dst, "100.64.0.10") {
+		t.Fatalf("servers grant destinations unexpected: %+v", srvGrant.Dst)
+	}
+	if !has(srvGrant.IP, "443") || len(srvGrant.IP) != 1 {
+		t.Fatalf("servers grant ports = %+v, want [443]", srvGrant.IP)
+	}
+	for _, g := range parsed.Grants {
+		if has(g.Dst, "100.64.0.10") {
+			t.Fatalf("personal device must never appear in any grant dst: %+v", g)
+		}
+	}
+}
+
 func TestStoreConcurrentSubprocesses(t *testing.T) {
 	if dbPath := os.Getenv("GO_TEST_STORE_HELPER_DB"); dbPath != "" {
 		st, err := OpenStore(dbPath)

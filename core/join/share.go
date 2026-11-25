@@ -1430,6 +1430,8 @@ func shareHandlerWithResolver(c *shareConfig, resolve sharePeerResolver) (http.H
 		targetURL = u
 	}
 
+	type shareIdentityCtxKey struct{}
+
 	rp := &httputil.ReverseProxy{
 		Transport: tr,
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -1452,11 +1454,8 @@ func shareHandlerWithResolver(c *shareConfig, resolve sharePeerResolver) (http.H
 			}
 			pr.Out.Header.Set("X-Forwarded-Host", c.fqdn())
 			pr.Out.Header.Set("X-Forwarded-Proto", "https")
-			if c.IdentityHeaders && resolve != nil {
-				whoCtx, cancel := context.WithTimeout(pr.In.Context(), 2*time.Second)
-				id, err := resolve(whoCtx, pr.In.RemoteAddr)
-				cancel()
-				if err == nil && id != nil {
+			if c.IdentityHeaders {
+				if id, ok := pr.In.Context().Value(shareIdentityCtxKey{}).(*sharePeerIdentity); ok && id != nil {
 					if id.Handle != "" {
 						pr.Out.Header.Set("X-Hogman-Handle", id.Handle)
 					}
@@ -1484,6 +1483,20 @@ func shareHandlerWithResolver(c *shareConfig, resolve sharePeerResolver) (http.H
 		if r.URL.Opaque != "" || (subpath && hasPathTraversal(r.URL)) {
 			http.Error(w, "invalid path", http.StatusBadRequest)
 			return
+		}
+		if c.IdentityHeaders {
+			if resolve == nil {
+				http.Error(w, "could not verify caller identity", http.StatusServiceUnavailable)
+				return
+			}
+			whoCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			id, err := resolve(whoCtx, r.RemoteAddr)
+			cancel()
+			if err != nil || id == nil {
+				http.Error(w, "could not verify caller identity", http.StatusServiceUnavailable)
+				return
+			}
+			r = r.WithContext(context.WithValue(r.Context(), shareIdentityCtxKey{}, id))
 		}
 		rp.ServeHTTP(w, r)
 	}), func() {}, nil
