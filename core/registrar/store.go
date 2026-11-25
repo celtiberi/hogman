@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -57,17 +58,18 @@ CREATE TABLE IF NOT EXISTS device_keys (
 );
 CREATE INDEX IF NOT EXISTS device_keys_open ON device_keys(expires_at) WHERE used_at IS NULL AND revoked_at IS NULL;
 CREATE TABLE IF NOT EXISTS devices (
-	id          INTEGER PRIMARY KEY,
-	member_id   INTEGER NOT NULL REFERENCES members(id),
-	kind        TEXT NOT NULL,
-	hs_node_id  TEXT NOT NULL,
-	node_key    TEXT NOT NULL DEFAULT '',
-	machine_key TEXT NOT NULL DEFAULT '',
-	name        TEXT NOT NULL,
-	ipv4        TEXT NOT NULL DEFAULT '',
-	ipv6        TEXT NOT NULL DEFAULT '',
-	created_at  INTEGER NOT NULL,
-	removed_at  INTEGER
+	id                INTEGER PRIMARY KEY,
+	member_id         INTEGER NOT NULL REFERENCES members(id),
+	kind              TEXT NOT NULL,
+	hs_node_id        TEXT NOT NULL,
+	node_key          TEXT NOT NULL DEFAULT '',
+	machine_key       TEXT NOT NULL DEFAULT '',
+	name              TEXT NOT NULL,
+	ipv4              TEXT NOT NULL DEFAULT '',
+	ipv6              TEXT NOT NULL DEFAULT '',
+	created_at        INTEGER NOT NULL,
+	removed_at        INTEGER,
+	hs_delete_pending INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS devices_live_node ON devices(hs_node_id) WHERE removed_at IS NULL;
 -- Monotonic policy generation counter bumped automatically by SQLite triggers
@@ -132,6 +134,10 @@ func OpenStore(path string) (*Store, error) {
 	if err := migrateDevicesMachineKey(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate devices.machine_key: %w", err)
+	}
+	if err := migrateDevicesHSDeletePending(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate devices.hs_delete_pending: %w", err)
 	}
 	if err := migratePolicyTriggers(db); err != nil {
 		_ = db.Close()
@@ -235,40 +241,89 @@ func migrateDevicesMachineKey(db *sql.DB) error {
 	return nil
 }
 
+func withImmediateTx(db *sql.DB, fn func(*sql.Conn) error) error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	if err := fn(conn); err != nil {
+		_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		return err
+	}
+	return nil
+}
+
+func migrateDevicesHSDeletePending(db *sql.DB) error {
+	if has, err := hasColumn(db, "devices", "hs_delete_pending"); err != nil || has {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE devices ADD COLUMN hs_delete_pending INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if has, checkErr := hasColumn(db, "devices", "hs_delete_pending"); checkErr == nil && has {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 // migratePolicyTriggers performs one-time trigger cleanups on upgraded DBs
 // without acquiring write locks on steady-state read-only CLI opens:
 //  1. Drops legacy members_policy_gen_ai (a new member has 0 devices).
-//  2. Recreates devices_policy_gen_au without ipv6 (policy is IPv4-only).
+//  2. Atomically (BEGIN IMMEDIATE) recreates devices_policy_gen_au without ipv6
+//     (policy is IPv4-only), so concurrent processes cannot slip a mutation
+//     through between DROP and CREATE.
 func migratePolicyTriggers(db *sql.DB) error {
 	var legacyMemberTrig int
 	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'members_policy_gen_ai'`).Scan(&legacyMemberTrig); err != nil {
 		return err
-	}
-	if legacyMemberTrig > 0 {
-		if _, err := db.Exec(`DROP TRIGGER IF EXISTS members_policy_gen_ai`); err != nil {
-			return err
-		}
 	}
 	var devTrigSQL sql.NullString
 	err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'devices_policy_gen_au'`).Scan(&devTrigSQL)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if devTrigSQL.Valid && strings.Contains(strings.ToLower(devTrigSQL.String), "ipv6") {
-		if _, err := db.Exec(`
-			DROP TRIGGER IF EXISTS devices_policy_gen_au;
-			CREATE TRIGGER IF NOT EXISTS devices_policy_gen_au
-			AFTER UPDATE OF member_id, kind, ipv4, removed_at ON devices
-			WHEN OLD.member_id IS NOT NEW.member_id
-			  OR OLD.kind IS NOT NEW.kind
-			  OR OLD.ipv4 IS NOT NEW.ipv4
-			  OR OLD.removed_at IS NOT NEW.removed_at
-			BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
-		`); err != nil {
-			return err
-		}
+	needDevTrig := devTrigSQL.Valid && strings.Contains(strings.ToLower(devTrigSQL.String), "ipv6")
+	if legacyMemberTrig == 0 && !needDevTrig {
+		return nil
 	}
-	return nil
+	return withImmediateTx(db, func(c *sql.Conn) error {
+		ctx := context.Background()
+		if legacyMemberTrig > 0 {
+			if _, err := c.ExecContext(ctx, `DROP TRIGGER IF EXISTS members_policy_gen_ai`); err != nil {
+				return err
+			}
+		}
+		if needDevTrig {
+			var cur sql.NullString
+			if err := c.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'devices_policy_gen_au'`).Scan(&cur); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			if cur.Valid && strings.Contains(strings.ToLower(cur.String), "ipv6") {
+				if _, err := c.ExecContext(ctx, `DROP TRIGGER IF EXISTS devices_policy_gen_au`); err != nil {
+					return err
+				}
+				if _, err := c.ExecContext(ctx, `CREATE TRIGGER IF NOT EXISTS devices_policy_gen_au
+					AFTER UPDATE OF member_id, kind, ipv4, removed_at ON devices
+					WHEN OLD.member_id IS NOT NEW.member_id
+					  OR OLD.kind IS NOT NEW.kind
+					  OR OLD.ipv4 IS NOT NEW.ipv4
+					  OR OLD.removed_at IS NOT NEW.removed_at
+					BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END`); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
 }
 
 var ErrNotFound = errors.New("not found")
@@ -840,6 +895,91 @@ func (s *Store) MarkDeviceRemoved(id int64) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// CommitSelfDelete atomically commits a device's own removal in SQLite (before
+// answering 202 Accepted) so portal auth, /api/me, leaf-name release, audit,
+// policy_gen bump, and Headscale delete intent (hs_delete_pending = 1) are all
+// durable immediately — surviving Headscale outages, mutex contention, and
+// process restarts (I-34).
+func (s *Store) CommitSelfDelete(memberID, deviceID int64, actor string) (*Device, error) {
+	var out *Device
+	err := withImmediateTx(s.db, func(c *sql.Conn) error {
+		ctx := context.Background()
+		var status, handle string
+		if err := c.QueryRowContext(ctx, `SELECT status, handle FROM members WHERE id = ?`, memberID).Scan(&status, &handle); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return forbidden("membership removed")
+			}
+			return err
+		}
+		if status != "active" {
+			return forbidden("membership %s", status)
+		}
+		d, err := scanDevice(c.QueryRowContext(ctx, `SELECT `+deviceCols+deviceFrom+`WHERE d.id = ?`, deviceID))
+		if errors.Is(err, ErrNotFound) || (err == nil && d.RemovedAt != nil) {
+			return missing("no device %d", deviceID)
+		} else if err != nil {
+			return err
+		}
+		if d.MemberID != memberID {
+			return forbidden("not your device")
+		}
+		// Release leaf names served by this device (preserving parent names that
+		// still have child subdomains elsewhere), matching DeleteNamesOfDevice.
+		if _, err := c.ExecContext(ctx, `UPDATE names SET device_id = NULL
+			WHERE device_id = ? AND held_until IS NULL
+			AND EXISTS (
+				SELECT 1 FROM names c
+				WHERE c.name LIKE '%.' || names.name
+				AND (c.held_until IS NOT NULL OR c.device_id IS NULL OR c.device_id != ?)
+			)`, d.ID, d.ID); err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx, `DELETE FROM names WHERE device_id = ? AND held_until IS NULL`, d.ID); err != nil {
+			return err
+		}
+		ts := now()
+		res, err := c.ExecContext(ctx, `UPDATE devices SET removed_at = ?, hs_delete_pending = 1 WHERE id = ? AND removed_at IS NULL`, ts, d.ID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return missing("no device %d", deviceID)
+		}
+		if _, err := c.ExecContext(ctx, `UPDATE names SET device_id = NULL WHERE device_id = ?`, d.ID); err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx, `INSERT INTO audit (at, actor, action, target, detail) VALUES (?,?,?,?,?)`,
+			ts, actor, "device.remove", fmt.Sprintf("%s/%s#%d", handle, d.Name, d.ID), ""); err != nil {
+			return err
+		}
+		d.RemovedAt = &ts
+		out = d
+		return nil
+	})
+	return out, err
+}
+
+// PendingDeviceDeletes returns removed devices whose Headscale node still needs
+// to be deleted asynchronously by finishSelfDelete or syncOnce.
+func (s *Store) PendingDeviceDeletes() ([]*Device, error) {
+	return s.queryDevices(`WHERE d.hs_delete_pending != 0`)
+}
+
+// HasPendingDeviceDeletes reports whether any removed device still has a
+// pending Headscale node deletion.
+func (s *Store) HasPendingDeviceDeletes() (bool, error) {
+	var exists int
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM devices WHERE hs_delete_pending != 0)`).Scan(&exists)
+	return exists == 1, err
+}
+
+// ClearDeviceHSDeletePending clears hs_delete_pending once Headscale confirmed
+// the node is gone. Does not touch columns watched by devices_policy_gen_au.
+func (s *Store) ClearDeviceHSDeletePending(id int64) error {
+	_, err := s.db.Exec(`UPDATE devices SET hs_delete_pending = 0 WHERE id = ?`, id)
+	return err
 }
 
 // ------------------------------------------------------------------ names --

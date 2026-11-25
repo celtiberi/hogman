@@ -143,11 +143,6 @@ type Service struct {
 	lastRenewOnly     bool
 	syncedOnce        bool
 
-	// Deduplicates in-flight asynchronous self-delete jobs (DELETE /api/devices/<self>)
-	// so repeated client retries cannot amplify goroutines while s.mu is busy.
-	selfDeleteMu sync.Mutex
-	selfDeleting map[int64]bool
-
 	// Per-device single-flight, cooldown, and bounded concurrency for
 	// single-node Headscale verification on WireGuard node key rotation.
 	rotateMu       sync.Mutex
@@ -984,35 +979,17 @@ const (
 )
 
 func (s *Service) RemoveDevice(ctx context.Context, a Actor, id int64) error {
-	return s.removeDevice(ctx, a, id, false)
-}
-
-func (s *Service) removeDevice(ctx context.Context, a Actor, id int64, allowSuspendedSelf bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Bail immediately if the caller already disconnected or timed out while
 	// waiting on s.mu (prevents cancelled non-self delete bursts from piling up
-	// Headscale calls under s.mu; ScheduleSelfDelete passes s.baseContext()).
+	// Headscale calls under s.mu).
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	var err error
-	if allowSuspendedSelf && !a.CLI && a.Member != nil {
-		m, merr := s.st.MemberByID(a.Member.ID)
-		if merr != nil {
-			return merr
-		}
-		// Honor an already-accepted 202 self-delete even if the member was
-		// concurrently suspended (removing one's own device strictly reduces
-		// privilege). Kicked/removed members already have all devices removed.
-		if m.Status != "active" && m.Status != "suspended" {
-			return forbidden("membership %s", m.Status)
-		}
-		a = Actor{Member: m}
-	} else {
-		if a, err = s.refreshActorLocked(a); err != nil {
-			return err
-		}
+	if a, err = s.refreshActorLocked(a); err != nil {
+		return err
 	}
 	d, err := s.st.DeviceByID(id)
 	if errors.Is(err, ErrNotFound) || (err == nil && d.RemovedAt != nil) {
@@ -1025,7 +1002,7 @@ func (s *Service) removeDevice(ctx context.Context, a Actor, id int64, allowSusp
 		return err
 	}
 	if !a.Is(owner) {
-		if allowSuspendedSelf || !a.IsAdmin() {
+		if !a.IsAdmin() {
 			return forbidden("not your device")
 		}
 		if (owner.Role == "owner" || owner.Role == "admin") && !a.IsOwner() {
@@ -1058,83 +1035,47 @@ func (s *Service) removeDevice(ctx context.Context, a Actor, id int64, allowSusp
 	return s.applyPolicy(cleanupCtx)
 }
 
-func (s *Service) isSelfDeleting(id int64) bool {
-	s.selfDeleteMu.Lock()
-	ok := s.selfDeleting[id]
-	s.selfDeleteMu.Unlock()
-	return ok
+// SelfRemoveDevice commits an authenticated device's own removal durably in
+// SQLite BEFORE the HTTP handler answers 202 Accepted (no Headscale call and
+// no s.mu wait), then kicks off best-effort background Headscale DeleteNode +
+// SetPolicy cleanup. Because removed_at, leaf-name release, policy_gen bump,
+// and hs_delete_pending = 1 are committed first, portal auth and /api/me deny
+// immediately and syncOnce() durably converges both Headscale node deletion
+// and ACL policy across mutex contention, Headscale outages, or restarts (I-34).
+func (s *Service) SelfRemoveDevice(a Actor, id int64) error {
+	if a.CLI || a.Member == nil {
+		return forbidden("not a member device")
+	}
+	d, err := s.st.CommitSelfDelete(a.Member.ID, id, a.String())
+	if err != nil {
+		return err
+	}
+	// Best-effort fast path: delete from Headscale and push policy promptly.
+	// If shutting down (startBackground returns false) or Headscale is briefly
+	// unavailable, durable hs_delete_pending + dirty policy_gen guarantee
+	// syncOnce() finishes cleanup automatically.
+	s.startBackground(func() {
+		s.finishSelfDelete(d.ID, d.HSNodeID)
+	})
+	return nil
 }
 
-// ScheduleSelfDelete queues an authenticated device's own removal in a tracked
-// detached goroutine so the HTTP handler can answer 202 Accepted before
-// Headscale deletes the caller's WireGuard peer, and so a busy s.mu or client
-// disconnect can never abort the cleanup. Repeated calls for the same device
-// ID coalesce while a removal is already in flight. Returns false only if the
-// service is already shutting down.
-func (s *Service) ScheduleSelfDelete(a Actor, id int64) bool {
-	s.selfDeleteMu.Lock()
-	if s.selfDeleting == nil {
-		s.selfDeleting = map[int64]bool{}
+func (s *Service) finishSelfDelete(id int64, hsNodeID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	opCtx, cancel := context.WithTimeout(s.baseContext(), removeDeviceTimeout)
+	defer cancel()
+	if opCtx.Err() != nil {
+		return
 	}
-	if s.selfDeleting[id] {
-		s.selfDeleteMu.Unlock()
-		return true
+	if err := s.hs.DeleteNode(opCtx, hsNodeID); err != nil {
+		log.Printf("self-delete device #%d (%s): headscale delete failed (will retry in sync): %v", id, hsNodeID, err)
+	} else if err := s.st.ClearDeviceHSDeletePending(id); err != nil {
+		log.Printf("self-delete device #%d: clear hs_delete_pending: %v", id, err)
 	}
-	s.selfDeleting[id] = true
-	s.selfDeleteMu.Unlock()
-
-	started := s.startBackground(func() {
-		defer func() {
-			s.selfDeleteMu.Lock()
-			delete(s.selfDeleting, id)
-			s.selfDeleteMu.Unlock()
-		}()
-		backoffs := []time.Duration{time.Second, 2 * time.Second}
-		for attempt := 0; ; attempt++ {
-			err := s.removeDevice(s.baseContext(), a, id, true)
-			if err == nil {
-				return
-			}
-			var p *Problem
-			if errors.Is(err, ErrNotFound) || (errors.As(err, &p) && p.Status == 404) {
-				// If a prior attempt committed MarkDeviceRemoved and failed only
-				// during applyPolicy, push the dirty policy now instead of bailing.
-				if attempt > 0 && s.NeedsFastSync() {
-					s.mu.Lock()
-					polCtx, polCancel := context.WithTimeout(s.baseContext(), removeDeviceCleanupTimeout)
-					polErr := s.applyPolicy(polCtx)
-					polCancel()
-					s.mu.Unlock()
-					if polErr == nil {
-						return
-					}
-					err = polErr
-				} else {
-					return
-				}
-			} else if errors.As(err, &p) && p.Status == 403 {
-				log.Printf("self-delete device #%d aborted: %v", id, err)
-				return
-			}
-			if attempt >= len(backoffs) || s.baseContext().Err() != nil {
-				log.Printf("self-delete device #%d failed after %d attempt(s): %v", id, attempt+1, err)
-				return
-			}
-			log.Printf("self-delete device #%d attempt %d failed (%v); retrying in %s", id, attempt+1, err, backoffs[attempt])
-			select {
-			case <-time.After(backoffs[attempt]):
-			case <-s.baseContext().Done():
-				return
-			}
-		}
-	})
-	if !started {
-		s.selfDeleteMu.Lock()
-		delete(s.selfDeleting, id)
-		s.selfDeleteMu.Unlock()
-		return false
+	if err := s.applyPolicy(opCtx); err != nil {
+		log.Printf("self-delete device #%d: policy push failed (will retry in sync): %v", id, err)
 	}
-	return true
 }
 
 // WhoIs maps a mesh source address to the device and member behind it.
@@ -1293,7 +1234,7 @@ func (s *Service) VerifyDirectPeer(ctx context.Context, peer *PeerIdentity) (*Me
 	if err != nil {
 		return nil, nil, err
 	}
-	if d.RemovedAt != nil || s.isSelfDeleting(d.ID) {
+	if d.RemovedAt != nil {
 		return nil, nil, ErrNotFound
 	}
 	m, err := s.st.MemberByID(d.MemberID)
@@ -1396,7 +1337,7 @@ func (s *Service) verifyAndRotateNodeKey(ctx context.Context, hsNodeID, peerNode
 	// coalesced caller verifies its own presented NodeKey against the committed
 	// row and receives up-to-date status/role.
 	d, err := s.st.DeviceByHSNodeID(hsNodeID)
-	if err != nil || d.RemovedAt != nil || s.isSelfDeleting(d.ID) {
+	if err != nil || d.RemovedAt != nil {
 		return nil, nil, ErrNotFound
 	}
 	m, err := s.st.MemberByID(d.MemberID)
@@ -1421,7 +1362,7 @@ func (s *Service) commitNodeKeyRotation(hsNodeID string, n *HSNode, addr netip.A
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d, err := s.st.DeviceByHSNodeID(hsNodeID)
-	if err != nil || d.RemovedAt != nil || s.isSelfDeleting(d.ID) {
+	if err != nil || d.RemovedAt != nil {
 		return ErrNotFound
 	}
 	m, err := s.st.MemberByID(d.MemberID)
@@ -1492,9 +1433,6 @@ func (s *Service) VerifyLiveCaller(ctx context.Context, src string) (*Member, *D
 	if err != nil {
 		return nil, nil, err
 	}
-	if s.isSelfDeleting(d.ID) {
-		return nil, nil, ErrNotFound
-	}
 	if m.Status != "active" {
 		return nil, nil, forbidden("membership %s", m.Status)
 	}
@@ -1511,9 +1449,6 @@ func (s *Service) VerifyLiveCaller(ctx context.Context, src string) (*Member, *D
 	m, d, err = s.WhoIs(canon)
 	if err != nil {
 		return nil, nil, err
-	}
-	if s.isSelfDeleting(d.ID) {
-		return nil, nil, ErrNotFound
 	}
 	if m.Status != "active" {
 		return nil, nil, forbidden("membership %s", m.Status)
@@ -2281,6 +2216,9 @@ func (s *Service) NeedsFastSync() bool {
 	if pending, err := s.st.HasPendingMemberCleanup(); err != nil || pending {
 		return true
 	}
+	if pending, err := s.st.HasPendingDeviceDeletes(); err != nil || pending {
+		return true
+	}
 	return false
 }
 
@@ -2351,9 +2289,27 @@ func (s *Service) syncOnce(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("sync drift circuit breaker: %d of %d live devices drifted; refusing mass retirement", len(driftReasons), len(live))
 	}
 
+	pendingDel, err := s.st.PendingDeviceDeletes()
+	if err != nil {
+		return false, err
+	}
+	pendingDelByNode := make(map[string]bool, len(pendingDel))
+	for _, d := range pendingDel {
+		pendingDelByNode[d.HSNodeID] = true
+		if derr := s.hs.DeleteNode(ctx, d.HSNodeID); derr != nil {
+			log.Printf("sync: retry headscale delete for removed device #%d (%s): %v", d.ID, d.HSNodeID, derr)
+		} else if cerr := s.st.ClearDeviceHSDeletePending(d.ID); cerr != nil {
+			log.Printf("sync: clear hs_delete_pending for device #%d: %v", d.ID, cerr)
+		}
+	}
+
 	seen := map[string]bool{}
 	for _, n := range nodes {
 		if n.HasTag("tag:infra") {
+			continue
+		}
+		if pendingDelByNode[n.ID] {
+			seen[n.ID] = true
 			continue
 		}
 		seen[n.ID] = true

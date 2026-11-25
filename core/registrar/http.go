@@ -236,13 +236,7 @@ func meshMux(s *Service) http.Handler {
 			})
 			return
 		}
-		rawDevs, _ := s.st.MemberDevices(c.member.ID)
-		devs := make([]*Device, 0, len(rawDevs))
-		for _, d := range rawDevs {
-			if !s.isSelfDeleting(d.ID) {
-				devs = append(devs, d)
-			}
-		}
+		devs, _ := s.st.MemberDevices(c.member.ID)
 		names, _ := s.st.Names()
 		mine := []*Name{}
 		for _, n := range names {
@@ -398,8 +392,8 @@ func meshMux(s *Service) http.Handler {
 			return
 		}
 		if id == c.device.ID {
-			if !s.ScheduleSelfDelete(c.actor(), id) {
-				fail(w, &Problem{Status: http.StatusServiceUnavailable, Msg: "registrar is shutting down; retry shortly"})
+			if err := s.SelfRemoveDevice(c.actor(), id); err != nil {
+				fail(w, err)
 				return
 			}
 			writeJSON(w, http.StatusAccepted, map[string]bool{"ok": true})

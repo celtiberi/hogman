@@ -150,7 +150,8 @@ func TestLegacyTriggersMigratedOnOpenAndIPv6UpdateNoBump(t *testing.T) {
 		t.Fatalf("policy_gen changed from %d to %d after member insert", g0, g1)
 	}
 
-	// Updating only devices.ipv6 must NOT bump policy_gen, whereas updating ipv4 MUST.
+	// Updating only devices.ipv6 (or clearing hs_delete_pending) must NOT bump
+	// policy_gen, whereas updating ipv4 MUST.
 	d := &Device{MemberID: m.ID, Kind: "personal", HSNodeID: "hs-carol", NodeKey: testNodeKey("carol"), MachineKey: testMachineKey("carol"), Name: "carol-lap", IPv4: "100.64.0.50", IPv6: "fd7a:115c:a1e0::50"}
 	if err := st2.InsertDevice(d); err != nil {
 		t.Fatal(err)
@@ -162,12 +163,15 @@ func TestLegacyTriggersMigratedOnOpenAndIPv6UpdateNoBump(t *testing.T) {
 	if err := st2.UpdateDevice(d.ID, "carol-lap", "100.64.0.50", "fd7a:115c:a1e0::51", d.NodeKey, d.MachineKey); err != nil {
 		t.Fatal(err)
 	}
+	if err := st2.ClearDeviceHSDeletePending(d.ID); err != nil {
+		t.Fatal(err)
+	}
 	g3, _, err := st2.PolicyGenerations()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if g3 != g2 {
-		t.Fatalf("updating only ipv6 bumped policy_gen from %d to %d", g2, g3)
+		t.Fatalf("updating only ipv6 / hs_delete_pending bumped policy_gen from %d to %d", g2, g3)
 	}
 	if err := st2.UpdateDevice(d.ID, "carol-lap", "100.64.0.52", "fd7a:115c:a1e0::51", d.NodeKey, d.MachineKey); err != nil {
 		t.Fatal(err)
@@ -181,7 +185,7 @@ func TestLegacyTriggersMigratedOnOpenAndIPv6UpdateNoBump(t *testing.T) {
 	}
 }
 
-func TestSelfDeleteUnderMutexContentionInstantRevokeAndMeExclusion(t *testing.T) {
+func TestSelfDeleteUnderMutexContentionCommitsDurablyBefore202(t *testing.T) {
 	e := newTestEnv(t)
 	baseCtx, cancelBase := context.WithCancel(context.Background())
 	defer cancelBase()
@@ -231,8 +235,19 @@ func TestSelfDeleteUnderMutexContentionInstantRevokeAndMeExclusion(t *testing.T)
 		t.Fatalf("self-delete blocked on s.mu for %v, expected immediate 202", elapsed)
 	}
 
-	// Immediately after 202 (while s.mu is still held):
-	// 1. dev1 must be immediately rejected on /api/me (403 "not enrolled").
+	// BEFORE s.mu is even released, removal MUST already be committed in SQLite:
+	// 1. RemovedAt != nil and NeedsFastSync() == true.
+	gotNow, err := e.st.DeviceByID(dev1.ID)
+	if err != nil || gotNow.RemovedAt == nil {
+		e.svc.mu.Unlock()
+		t.Fatalf("expected durable RemovedAt in SQLite before 202, got=%+v err=%v", gotNow, err)
+	}
+	if !e.svc.NeedsFastSync() {
+		e.svc.mu.Unlock()
+		t.Fatal("expected NeedsFastSync() == true immediately after durable self-delete")
+	}
+
+	// 2. dev1 is immediately rejected on GET /api/me (403 "not enrolled").
 	me1Rec := httptest.NewRecorder()
 	me1Req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
 	me1Req.Host = "home.bobo.hogman"
@@ -243,8 +258,7 @@ func TestSelfDeleteUnderMutexContentionInstantRevokeAndMeExclusion(t *testing.T)
 		t.Fatalf("post-202 GET /api/me from self-deleting device: status=%d body=%s, want 403 not enrolled", me1Rec.Code, me1Rec.Body.String())
 	}
 
-	// 2. dev2's GET /api/me must already exclude dev1 from devices (so sole-owner
-	//    leave risk sees only dev2 remaining even before s.mu releases).
+	// 3. dev2's GET /api/me already excludes dev1 (D-16 sole-owner leave safety).
 	me2Rec := httptest.NewRecorder()
 	me2Req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
 	me2Req.Host = "home.bobo.hogman"
@@ -266,19 +280,12 @@ func TestSelfDeleteUnderMutexContentionInstantRevokeAndMeExclusion(t *testing.T)
 		t.Fatalf("dev2 /api/me devices = %+v, want only dev2 (#%d)", me2.Devices, dev2.ID)
 	}
 
-	// Release s.mu and wait for background self-delete to finish.
+	// Release s.mu and wait for background Headscale cleanup to finish.
 	e.svc.mu.Unlock()
 	waitCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelWait()
 	e.svc.WaitBackground(waitCtx)
 
-	got, err := e.st.DeviceByID(dev1.ID)
-	if err != nil {
-		t.Fatalf("DeviceByID: %v", err)
-	}
-	if got.RemovedAt == nil {
-		t.Fatal("expected device RemovedAt != nil in SQLite after contended self-delete")
-	}
 	e.hs.mu.Lock()
 	stillInHS := false
 	for _, n := range e.hs.nodes {
@@ -294,6 +301,133 @@ func TestSelfDeleteUnderMutexContentionInstantRevokeAndMeExclusion(t *testing.T)
 	}
 	if strings.Contains(lastPol, `"100.64.0.10"`) {
 		t.Fatalf("expected removed device IP dropped from Headscale policy:\n%s", lastPol)
+	}
+	if pending, err := e.st.HasPendingDeviceDeletes(); err != nil || pending {
+		t.Fatalf("HasPendingDeviceDeletes = (%v, %v), want (false, nil)", pending, err)
+	}
+}
+
+func TestSelfDeleteDurableThroughHeadscaleOutageAndRestart(t *testing.T) {
+	e := newTestEnv(t)
+	baseCtx, cancelBase := context.WithCancel(context.Background())
+	defer cancelBase()
+	e.svc.SetBaseContext(baseCtx)
+	cli := Actor{CLI: true}
+
+	alice, err := e.svc.AddMember(baseCtx, cli, "alice", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, srv := e.addDevice(t, "alice", "server", "alice-share", "100.64.0.20", "")
+	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "blog", srv.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.Sync(baseCtx); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+
+	// Simulate a prolonged Headscale outage where BOTH DeleteNode and SetPolicy fail.
+	var hsOutage atomic.Bool
+	hsOutage.Store(true)
+	e.hs.mu.Lock()
+	e.hs.failSetPolicy = true
+	e.hs.onDeleteNode = func(w http.ResponseWriter, _ string) bool {
+		if hsOutage.Load() {
+			http.Error(w, "headscale restarting", http.StatusServiceUnavailable)
+			return true
+		}
+		return false
+	}
+	e.hs.mu.Unlock()
+
+	h := MeshHandlerDirect(e.svc, func(_ context.Context, _ string) (*PeerIdentity, error) {
+		return &PeerIdentity{IP: "100.64.0.20", HSNodeID: srv.HSNodeID, NodeKey: srv.NodeKey}, nil
+	})
+	req := httptest.NewRequest(http.MethodDelete, "/api/devices/"+strconv.FormatInt(srv.ID, 10), nil)
+	req.Host = "home.bobo.hogman"
+	req.RemoteAddr = "100.64.0.20:54321"
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("self-delete during Headscale outage status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	// Wait for the best-effort background worker to finish failing during the outage.
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWait()
+	e.svc.WaitBackground(waitCtx)
+
+	// Even after the background worker failed, removal MUST remain committed:
+	// 1. /api/me is still denied immediately (403 "not enrolled").
+	meRec := httptest.NewRecorder()
+	meReq := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	meReq.Host = "home.bobo.hogman"
+	meReq.RemoteAddr = "100.64.0.20:54322"
+	h.ServeHTTP(meRec, meReq)
+	if meRec.Code != http.StatusForbidden || !strings.Contains(meRec.Body.String(), "not enrolled") {
+		t.Fatalf("/api/me after failed background delete: status=%d body=%s, want 403 not enrolled", meRec.Code, meRec.Body.String())
+	}
+	// 2. SQLite row stays removed, leaf name is freed, and pending delete + dirty policy persist.
+	got, err := e.st.DeviceByID(srv.ID)
+	if err != nil || got.RemovedAt == nil {
+		t.Fatalf("device row did not stay removed: got=%+v err=%v", got, err)
+	}
+	if _, err := e.st.ResolvableName("blog"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected leaf name 'blog' released on durable self-delete, got err=%v", err)
+	}
+	if pending, err := e.st.HasPendingDeviceDeletes(); err != nil || !pending {
+		t.Fatalf("expected HasPendingDeviceDeletes == true during outage, got (%v, %v)", pending, err)
+	}
+	if !e.svc.NeedsFastSync() {
+		t.Fatal("expected NeedsFastSync() == true during outage")
+	}
+
+	// Simulate a full registrar process restart on the SAME SQLite database.
+	stRestart, err := OpenStore(filepath.Join(e.dir, "registrar.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stRestart.Close()
+	svcRestart, err := NewService(e.svc.cfg, stRestart, NewHeadscale(e.hs.srv.URL, "test-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !svcRestart.NeedsFastSync() {
+		t.Fatal("restarted service must still see NeedsFastSync() == true")
+	}
+
+	// Bring Headscale back online and run Sync(): both Headscale node deletion
+	// and ACL policy exclusion must converge cleanly, with zero orphan warnings.
+	hsOutage.Store(false)
+	e.hs.mu.Lock()
+	e.hs.failSetPolicy = false
+	e.hs.mu.Unlock()
+
+	if err := svcRestart.Sync(baseCtx); err != nil {
+		t.Fatalf("recovery sync: %v", err)
+	}
+	e.hs.mu.Lock()
+	stillInHS := false
+	for _, n := range e.hs.nodes {
+		if n.ID == srv.HSNodeID {
+			stillInHS = true
+			break
+		}
+	}
+	pol := e.hs.policy
+	e.hs.mu.Unlock()
+	if stillInHS {
+		t.Fatalf("expected recovery sync to delete Headscale node %s", srv.HSNodeID)
+	}
+	if strings.Contains(pol, `"100.64.0.20"`) {
+		t.Fatalf("expected recovery sync policy to exclude 100.64.0.20:\n%s", pol)
+	}
+	if pending, err := stRestart.HasPendingDeviceDeletes(); err != nil || pending {
+		t.Fatalf("HasPendingDeviceDeletes after recovery = (%v, %v), want (false, nil)", pending, err)
+	}
+	if svcRestart.NeedsFastSync() {
+		t.Fatal("NeedsFastSync() should be false once policy and node delete converged")
 	}
 }
 
@@ -332,44 +466,6 @@ func TestRemoveDeviceRespectsCallerCancelAndAvoidsMutexDoS(t *testing.T) {
 	}
 }
 
-func TestSelfDeleteAcceptedProceedsAfterConcurrentSuspend(t *testing.T) {
-	e := newTestEnv(t)
-	baseCtx, cancelBase := context.WithCancel(context.Background())
-	defer cancelBase()
-	e.svc.SetBaseContext(baseCtx)
-	cli := Actor{CLI: true}
-
-	if _, err := e.svc.AddMember(baseCtx, cli, "owner", "owner"); err != nil {
-		t.Fatal(err)
-	}
-	bob, err := e.svc.AddMember(baseCtx, cli, "bob", "member")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, dev := e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.20", "")
-
-	// Queue self-delete while s.mu is held, then suspend bob in SQLite before releasing s.mu.
-	e.svc.mu.Lock()
-	if !e.svc.ScheduleSelfDelete(Actor{Member: bob}, dev.ID) {
-		e.svc.mu.Unlock()
-		t.Fatal("ScheduleSelfDelete returned false")
-	}
-	if err := e.st.SetMemberStatus(bob.ID, "suspended"); err != nil {
-		e.svc.mu.Unlock()
-		t.Fatal(err)
-	}
-	e.svc.mu.Unlock()
-
-	waitCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelWait()
-	e.svc.WaitBackground(waitCtx)
-
-	got, err := e.st.DeviceByID(dev.ID)
-	if err != nil || got.RemovedAt == nil {
-		t.Fatalf("expected accepted self-delete to finish despite concurrent suspend: got=%+v err=%v", got, err)
-	}
-}
-
 func TestDeleteNodeTreatsHTTP500NotFoundAsGone(t *testing.T) {
 	e := newTestEnv(t)
 	e.hs.mu.Lock()
@@ -384,73 +480,17 @@ func TestDeleteNodeTreatsHTTP500NotFoundAsGone(t *testing.T) {
 	}
 }
 
-func TestScheduleSelfDeleteRetriesApplyPolicyAfterDBCommit(t *testing.T) {
-	e := newTestEnv(t)
-	baseCtx, cancelBase := context.WithCancel(context.Background())
-	defer cancelBase()
-	e.svc.SetBaseContext(baseCtx)
-	cli := Actor{CLI: true}
-
-	alice, err := e.svc.AddMember(baseCtx, cli, "alice", "owner")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, dev := e.addDevice(t, "alice", "personal", "alice-laptop", "100.64.0.10", "")
-	if err := e.svc.Sync(baseCtx); err != nil {
-		t.Fatal(err)
-	}
-
-	// Fail SetPolicy once so attempt 1 commits MarkDeviceRemoved then errors in applyPolicy;
-	// release failSetPolicy right after and confirm attempt 2 converges Headscale policy.
-	e.hs.mu.Lock()
-	e.hs.failSetPolicy = true
-	e.hs.mu.Unlock()
-
-	if !e.svc.ScheduleSelfDelete(Actor{Member: alice}, dev.ID) {
-		t.Fatal("ScheduleSelfDelete returned false")
-	}
-
-	// Poll briefly until attempt 1 commits RemovedAt, then re-enable SetPolicy.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if got, err := e.st.DeviceByID(dev.ID); err == nil && got.RemovedAt != nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	e.hs.mu.Lock()
-	e.hs.failSetPolicy = false
-	e.hs.mu.Unlock()
-
-	waitCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelWait()
-	e.svc.WaitBackground(waitCtx)
-
-	e.hs.mu.Lock()
-	pol := e.hs.policy
-	e.hs.mu.Unlock()
-	if strings.Contains(pol, `"100.64.0.10"`) {
-		t.Fatalf("expected retry to converge policy after applyPolicy failure, policy still had IP:\n%s", pol)
-	}
-	if e.svc.NeedsFastSync() {
-		t.Fatal("expected policy_gen == applied_gen after applyPolicy retry")
-	}
-}
-
-func TestBeginShutdownRefusesNewSelfDelete(t *testing.T) {
+func TestSelfDeleteDuringShutdownStillCommitsDurably(t *testing.T) {
 	e := newTestEnv(t)
 	cli := Actor{CLI: true}
-	alice, err := e.svc.AddMember(context.Background(), cli, "alice", "owner")
-	if err != nil {
+	if _, err := e.svc.AddMember(context.Background(), cli, "alice", "owner"); err != nil {
 		t.Fatal(err)
 	}
 	_, dev := e.addDevice(t, "alice", "personal", "alice-laptop", "100.64.0.10", "")
 
+	// Even after BeginShutdown() prevents new background goroutines, self-delete
+	// commits durably to SQLite and returns 202 so startup Sync() finishes Headscale cleanup.
 	e.svc.BeginShutdown()
-	if e.svc.ScheduleSelfDelete(Actor{Member: alice}, dev.ID) {
-		t.Fatal("expected ScheduleSelfDelete to return false after BeginShutdown")
-	}
-
 	h := MeshHandlerDirect(e.svc, func(_ context.Context, _ string) (*PeerIdentity, error) {
 		return &PeerIdentity{IP: "100.64.0.10", HSNodeID: dev.HSNodeID, NodeKey: dev.NodeKey}, nil
 	})
@@ -460,8 +500,15 @@ func TestBeginShutdownRefusesNewSelfDelete(t *testing.T) {
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("DELETE /api/devices/<self> during shutdown status = %d, want 503", rec.Code)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("DELETE /api/devices/<self> during shutdown status = %d, want 202", rec.Code)
+	}
+	got, err := e.st.DeviceByID(dev.ID)
+	if err != nil || got.RemovedAt == nil {
+		t.Fatalf("expected durable removal in SQLite during shutdown: got=%+v err=%v", got, err)
+	}
+	if pending, err := e.st.HasPendingDeviceDeletes(); err != nil || !pending {
+		t.Fatalf("expected hs_delete_pending == true for next startup sync, got (%v, %v)", pending, err)
 	}
 }
 
