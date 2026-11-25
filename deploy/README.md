@@ -103,8 +103,11 @@ Every pen container carries memory (`mem_limit`), PID (`pids_limit`), and CPU (`
 so a single busy or spinning pen cannot starve other pens; host-level services (`hogman-front`,
 `challenge-dns`, `hogman-signup`, and `sshd`) stay uncapped at default higher CPU weight (`1024`).
 Each pen's registrar also enforces configurable per-pen guardrails via `/opt/hogman/pens/<name>/.env`:
-`MAX_MEMBERS` (default `500`, counting active and suspended members; permanently retired handles do
-not count) and `MAX_DEVICES` (default `500`, counting live devices plus open unused device keys).
+`MAX_MEMBERS` and `MAX_DEVICES`. `hogman-host add` (and `hogman-host plan`, while preserving custom
+overrides) writes **25 members / 50 devices** for Free and Personal pens and **500 / 500** for Work
+pens (D-50; registrar falls back to `500 / 500` when unset so existing pens without explicit `.env`
+caps remain grandfathered). `MAX_MEMBERS` counts active and suspended members (permanently retired
+handles do not count) and `MAX_DEVICES` counts live devices plus open unused device keys.
 Non-admin members may hold at most `3` open unused device keys at a time (`10` for admins and
 owners). To prevent owner lockout (D-16), active owners requesting a `personal` device receive `+2`
 headroom above `MAX_DEVICES` (and a per-owner floor of `< 2` personal slots even on grandfathered
@@ -244,12 +247,12 @@ hogman-host backup-setup age1...
 hogman-host signup-setup gate.hogman.network get.hogman.network 8
 hogman-host signup-code "for alice"                  # standard Personal code: appends -xxxx random ending
 hogman-host signup-code --vanity "for alice"         # Personal vanity code: allows a bare pen name
-hogman-host signup-code --vanity --work "for acme"   # Work vanity code (PLAN=work, THEME=work, higher cert caps)
+hogman-host signup-code --vanity --work "for acme"   # Work vanity code (PLAN=work, THEME=work, 500/500 & Work cert caps)
 hogman-host signup-cloudflare on                     # trust CF-Connecting-IP + block direct-to-origin bypasses
 hogman-host signup-turnstile <site-key> < ts-secret  # require Cloudflare Turnstile on signup/waitlist
 hogman-host signup-work-host get.work.example.com    # optional Work sign-up host (THEME=work default)
 hogman-host theme <pen> work                         # toggle an existing pen's UI theme (work|default)
-hogman-host plan <pen> work                          # switch an existing pen's cert-cap plan live (personal|work)
+hogman-host plan <pen> work                          # switch an existing pen's cap plan (cert + member/device caps; not billing tier)
 ```
 
 **Cloudflare Proxy rollout order:** deploy this release first, apply the DNS change (`CF_PROXY_ON`),
@@ -307,14 +310,14 @@ sign-up code.
 ```bash
 hogman-host signup-stripe price_123 [--work price_456] [tax] < stripe-keys
 hogman-host signup-stripe work-price price_456         # update Work price without re-piping keys (or: off)
-hogman-host signup-stripe floor 5000 12000 usd         # update broker webhook price/currency floor
+hogman-host signup-stripe floor 2500 25000 usd         # update broker webhook price/currency floor
 hogman-host signup-stripe off
 ```
 
-The broker enforces a minimum payment floor on Stripe webhooks (defaults: `5000` cents Personal,
-`12000` cents Work, `usd`). Whenever you lower a Stripe Price below those defaults or switch
-currencies, run `hogman-host signup-stripe floor <personal-cents> <work-cents> [currency]` so
-legitimate payments are not rejected.
+The broker enforces a minimum payment floor on Stripe webhooks (defaults: `2500` cents Personal,
+`25000` cents Work, `usd`). Whenever you change a Stripe Price or switch currencies, run
+`hogman-host signup-stripe floor <personal-cents> <work-cents> [currency]` to keep the broker floor
+in sync with Stripe.
 
 When `--work` (or `work-price`) is set, checkouts started on the Work sign-up host use the Work
 Stripe Price over the same single webhook, and both Stripe metadata and `/opt/hogman/signup/payments`

@@ -954,7 +954,7 @@ func TestHogmanHostStripeFloorM2(t *testing.T) {
 		return string(out), err
 	}
 
-	// Default signup-setup wires 5000 / 12000 / usd into broker compose.yaml.
+	// Default signup-setup wires 2500 / 25000 / usd into broker compose.yaml (D-50).
 	if out, err := runHost("signup-setup"); err != nil {
 		t.Fatalf("signup-setup failed: err=%v out=%s", err, out)
 	}
@@ -964,8 +964,8 @@ func TestHogmanHostStripeFloorM2(t *testing.T) {
 	}
 	for _, want := range []string{
 		`STRIPE_EXPECT_LIVEMODE: "1"`,
-		`STRIPE_MIN_PERSONAL_CENTS: "5000"`,
-		`STRIPE_MIN_WORK_CENTS: "12000"`,
+		`STRIPE_MIN_PERSONAL_CENTS: "2500"`,
+		`STRIPE_MIN_WORK_CENTS: "25000"`,
 		`STRIPE_CURRENCY: "usd"`,
 	} {
 		if !strings.Contains(string(composeRaw), want) {
@@ -975,18 +975,40 @@ func TestHogmanHostStripeFloorM2(t *testing.T) {
 
 	// Reject malformed floor arguments.
 	for _, bad := range [][]string{
-		{"signup-stripe", "floor", "0", "12000"},
-		{"signup-stripe", "floor", "5000", "abc"},
-		{"signup-stripe", "floor", "5000", "12000", "us"},
+		{"signup-stripe", "floor", "0", "25000"},
+		{"signup-stripe", "floor", "2500", "abc"},
+		{"signup-stripe", "floor", "2500", "25000", "us"},
 	} {
 		if out, err := runHost(bad...); err == nil {
 			t.Fatalf("expected failure for %v, got ok: %s", bad, out)
 		}
 	}
 
-	// Valid floor override writes lowercase currency and custom floors into compose.yaml.
-	if out, err := runHost("signup-stripe", "floor", "6000", "15000", "EUR"); err != nil {
+	// Valid floor override writes lowercase currency and custom floors into compose.yaml
+	// and survives a subsequent no-arg signup-setup (install.sh upgrade path).
+	if out, err := runHost("signup-stripe", "floor", "2500", "12000", "USD"); err != nil {
 		t.Fatalf("signup-stripe floor failed: err=%v out=%s", err, out)
+	}
+	if out, err := runHost("signup-setup"); err != nil {
+		t.Fatalf("no-arg signup-setup failed: err=%v out=%s", err, out)
+	}
+	composeRaw, err = os.ReadFile(filepath.Join(home, "signup", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`STRIPE_MIN_PERSONAL_CENTS: "2500"`,
+		`STRIPE_MIN_WORK_CENTS: "12000"`,
+		`STRIPE_CURRENCY: "usd"`,
+	} {
+		if !strings.Contains(string(composeRaw), want) {
+			t.Fatalf("pinned floor lost across signup-setup, missing %q:\n%s", want, composeRaw)
+		}
+	}
+
+	// Custom non-USD floor override writes lowercase currency into compose.yaml.
+	if out, err := runHost("signup-stripe", "floor", "6000", "15000", "EUR"); err != nil {
+		t.Fatalf("signup-stripe floor EUR failed: err=%v out=%s", err, out)
 	}
 	composeRaw, err = os.ReadFile(filepath.Join(home, "signup", "compose.yaml"))
 	if err != nil {
@@ -1000,5 +1022,277 @@ func TestHogmanHostStripeFloorM2(t *testing.T) {
 		if !strings.Contains(string(composeRaw), want) {
 			t.Fatalf("updated compose.yaml missing %q:\n%s", want, composeRaw)
 		}
+	}
+}
+
+func TestHogmanHostPerPlanCapsAddAndPlanD50(t *testing.T) {
+	hostScript, err := filepath.Abs("../hogman-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(hostScript); err != nil {
+		t.Skip("deploy/hogman-host not found")
+	}
+
+	home := t.TempDir()
+	binDir := filepath.Join(home, "bin")
+	_ = os.MkdirAll(binDir, 0o700)
+	_ = os.MkdirAll(filepath.Join(home, "src"), 0o700)
+	_ = os.MkdirAll(filepath.Join(home, "front"), 0o700)
+	_ = os.WriteFile(filepath.Join(home, "backup-recipient.txt"), []byte("age1testrecipient\n"), 0o600)
+
+	cdnsLog := filepath.Join(home, "cdns.log")
+	cdnsBin := filepath.Join(binDir, "challenge-dns")
+	_ = os.WriteFile(cdnsBin, []byte(
+		"#!/bin/sh\n"+
+			"echo \"$*\" >> \""+cdnsLog+"\"\n"+
+			"if [ \"$1\" = name ] && [ \"$2\" = used ]; then echo free; exit 0; fi\n"+
+			"if [ \"$1\" = cred ] && [ \"$2\" = add ]; then echo 'id: cred-1'; echo 'token: tok-1'; exit 0; fi\n"+
+			"exit 0\n",
+	), 0o755)
+	_ = os.WriteFile(filepath.Join(home, "host.env"), []byte(
+		"GATE_DOMAIN=gate.example.com\nPENS_DOMAIN=gate.example.com\nPENS_ZONE=pens.example.com\nMAX_PENS=8\nCDNS_BIN="+cdnsBin+"\n",
+	), 0o600)
+
+	upLog := filepath.Join(home, "up.log")
+	failUpMarker := filepath.Join(home, "fail-up")
+	_ = os.WriteFile(filepath.Join(home, "src", "hogman"), []byte(
+		"#!/bin/sh\n"+
+			"echo \"$PWD: $*\" >> \""+upLog+"\"\n"+
+			"if [ \"$1\" = up ] && [ -f \""+failUpMarker+"\" ]; then echo 'simulated up failure' >&2; exit 1; fi\n"+
+			"if [ \"$1\" = device ] && [ \"$2\" = key ]; then\n"+
+			"  echo 'link: https://example.com/join#k=testkey123'\n"+
+			"  echo 'valid until 2027-01-01 00:00Z, single use'\n"+
+			"fi\n"+
+			"exit 0\n",
+	), 0o755)
+
+	liveEnvFile := filepath.Join(home, "docker-live-env")
+	_ = os.WriteFile(filepath.Join(binDir, "docker"), []byte(
+		"#!/bin/sh\n"+
+			"if [ \"$1\" = inspect ] && [ -f \""+liveEnvFile+"\" ]; then cat \""+liveEnvFile+"\"; exit 0; fi\n"+
+			"exit 0\n",
+	), 0o755)
+
+	runHost := func(args ...string) (string, error) {
+		cmd := exec.Command("bash", append([]string{hostScript}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"HOGMAN_HOME="+home,
+			"PATH="+binDir+":"+os.Getenv("PATH"),
+		)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	// 1. Default Personal pen (`add`) and explicit `--plan personal` get MAX_MEMBERS=25 and MAX_DEVICES=50.
+	if out, err := runHost("add", "homepen"); err != nil {
+		t.Fatalf("add homepen failed: %v\n%s", err, out)
+	}
+	envRaw, err := os.ReadFile(filepath.Join(home, "pens", "homepen", ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"MAX_MEMBERS=25\n", "MAX_DEVICES=50\n"} {
+		if !strings.Contains(string(envRaw), want) {
+			t.Fatalf("personal .env missing %q:\n%s", want, envRaw)
+		}
+	}
+	if out, err := runHost("add", "perspen", "--plan", "personal"); err != nil {
+		t.Fatalf("add perspen --plan personal failed: %v\n%s", err, out)
+	}
+	persEnv, _ := os.ReadFile(filepath.Join(home, "pens", "perspen", ".env"))
+	for _, want := range []string{"MAX_MEMBERS=25\n", "MAX_DEVICES=50\n"} {
+		if !strings.Contains(string(persEnv), want) {
+			t.Fatalf("explicit personal .env missing %q:\n%s", want, persEnv)
+		}
+	}
+
+	// 2. Work pen (`add --plan work`) and broker `provision` (free/personal vs work) write per-plan caps.
+	if out, err := runHost("add", "workpen", "--plan", "work"); err != nil {
+		t.Fatalf("add workpen failed: %v\n%s", err, out)
+	}
+	workEnv, err := os.ReadFile(filepath.Join(home, "pens", "workpen", ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"PLAN=work\n", "MAX_MEMBERS=500\n", "MAX_DEVICES=500\n"} {
+		if !strings.Contains(string(workEnv), want) {
+			t.Fatalf("work .env missing %q:\n%s", want, workEnv)
+		}
+	}
+	if out, err := runHost("provision", "provfree", "alice"); err != nil {
+		t.Fatalf("provision provfree failed: %v\n%s", err, out)
+	}
+	provFreeEnv, _ := os.ReadFile(filepath.Join(home, "pens", "provfree", ".env"))
+	for _, want := range []string{"MAX_MEMBERS=25\n", "MAX_DEVICES=50\n"} {
+		if !strings.Contains(string(provFreeEnv), want) {
+			t.Fatalf("provisioned free/personal .env missing %q:\n%s", want, provFreeEnv)
+		}
+	}
+	if out, err := runHost("provision", "provwork", "bob", "--theme", "work", "--plan", "work"); err != nil {
+		t.Fatalf("provision provwork failed: %v\n%s", err, out)
+	}
+	provWorkEnv, _ := os.ReadFile(filepath.Join(home, "pens", "provwork", ".env"))
+	for _, want := range []string{"PLAN=work\n", "THEME=work\n", "MAX_MEMBERS=500\n", "MAX_DEVICES=500\n"} {
+		if !strings.Contains(string(provWorkEnv), want) {
+			t.Fatalf("provisioned work .env missing %q:\n%s", want, provWorkEnv)
+		}
+	}
+
+	// 3. Switching a live personal pen to work upgrades caps to 500/500, updates challenge-dns, and runs ./hogman up.
+	_ = os.Remove(upLog)
+	_ = os.Remove(cdnsLog)
+	if out, err := runHost("plan", "homepen", "work"); err != nil {
+		t.Fatalf("plan homepen work failed: %v\n%s", err, out)
+	}
+	envRaw, _ = os.ReadFile(filepath.Join(home, "pens", "homepen", ".env"))
+	for _, want := range []string{"PLAN=work\n", "MAX_MEMBERS=500\n", "MAX_DEVICES=500\n"} {
+		if !strings.Contains(string(envRaw), want) {
+			t.Fatalf("upgraded .env missing %q:\n%s", want, envRaw)
+		}
+	}
+	upCalls, _ := os.ReadFile(upLog)
+	if !strings.Contains(string(upCalls), "homepen: up") {
+		t.Fatalf("expected ./hogman up on live plan change, got:\n%s", upCalls)
+	}
+	cdnsCalls, _ := os.ReadFile(cdnsLog)
+	if !strings.Contains(string(cdnsCalls), "cred plan cred-1 work") {
+		t.Fatalf("expected challenge-dns cred plan work, got:\n%s", cdnsCalls)
+	}
+
+	// 4. No-op `plan` does NOT invoke ./hogman up.
+	_ = os.Remove(upLog)
+	if out, err := runHost("plan", "homepen", "work"); err != nil {
+		t.Fatalf("no-op plan homepen work failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(upLog); !os.IsNotExist(err) {
+		t.Fatal("no-op plan call must NOT invoke ./hogman up")
+	}
+
+	// 5. Switching a sleeping pen updates .env (removing PLAN=work), updates challenge-dns, and does NOT wake it.
+	_ = os.Remove(upLog)
+	_ = os.Remove(cdnsLog)
+	_ = os.WriteFile(filepath.Join(home, "pens", "homepen", ".sleeping"), nil, 0o600)
+	if out, err := runHost("plan", "homepen", "personal"); err != nil {
+		t.Fatalf("plan sleeping homepen personal failed: %v\n%s", err, out)
+	}
+	envRaw, _ = os.ReadFile(filepath.Join(home, "pens", "homepen", ".env"))
+	for _, want := range []string{"MAX_MEMBERS=25\n", "MAX_DEVICES=50\n"} {
+		if !strings.Contains(string(envRaw), want) {
+			t.Fatalf("sleeping downgrade .env missing %q:\n%s", want, envRaw)
+		}
+	}
+	if strings.Contains(string(envRaw), "PLAN=work") {
+		t.Fatalf("sleeping downgrade left PLAN=work in .env:\n%s", envRaw)
+	}
+	if _, err := os.Stat(upLog); !os.IsNotExist(err) {
+		t.Fatal("plan change on sleeping pen must NOT invoke ./hogman up")
+	}
+	cdnsCalls, _ = os.ReadFile(cdnsLog)
+	if !strings.Contains(string(cdnsCalls), "cred plan cred-1 personal") {
+		t.Fatalf("expected challenge-dns cred plan personal, got:\n%s", cdnsCalls)
+	}
+
+	// 6. Pen in .renew-wake is refused cleanly by `plan` (avoids expiry-watcher race).
+	_ = os.WriteFile(filepath.Join(home, "pens", "homepen", ".renew-wake"), nil, 0o600)
+	if out, err := runHost("plan", "homepen", "work"); err == nil {
+		t.Fatalf("expected plan to refuse .renew-wake pen, got ok:\n%s", out)
+	}
+	_ = os.Remove(filepath.Join(home, "pens", "homepen", ".renew-wake"))
+	_ = os.Remove(filepath.Join(home, "pens", "homepen", ".sleeping"))
+
+	// 7. Custom overrides — including appended duplicate lines and values equal to the
+	// other plan's default (e.g. MAX_MEMBERS=500 on Personal) — are preserved across plan changes.
+	appendedEnv := string(envRaw) + "MAX_MEMBERS=500\nMAX_DEVICES=200\n"
+	_ = os.WriteFile(filepath.Join(home, "pens", "homepen", ".env"), []byte(appendedEnv), 0o600)
+	_ = os.Remove(upLog)
+	if out, err := runHost("plan", "homepen", "personal"); err != nil {
+		t.Fatalf("plan personal with custom overrides failed: %v\n%s", err, out)
+	}
+	envRaw, _ = os.ReadFile(filepath.Join(home, "pens", "homepen", ".env"))
+	if !strings.Contains(string(envRaw), "MAX_MEMBERS=500\n") || !strings.Contains(string(envRaw), "MAX_DEVICES=200\n") {
+		t.Fatalf("custom overrides on personal pen were clobbered:\n%s", envRaw)
+	}
+	if _, err := os.Stat(upLog); !os.IsNotExist(err) {
+		t.Fatal("preserving custom overrides on no-op personal plan must NOT invoke ./hogman up")
+	}
+	// Work pen with custom MAX_MEMBERS=25 keeps 25 across `plan work` and `plan personal`.
+	workCustom := strings.ReplaceAll(string(workEnv), "MAX_MEMBERS=500", "MAX_MEMBERS=25")
+	_ = os.WriteFile(filepath.Join(home, "pens", "workpen", ".env"), []byte(workCustom), 0o600)
+	if out, err := runHost("plan", "workpen", "work"); err != nil {
+		t.Fatalf("plan workpen work with custom 25 failed: %v\n%s", err, out)
+	}
+	workEnv, _ = os.ReadFile(filepath.Join(home, "pens", "workpen", ".env"))
+	if !strings.Contains(string(workEnv), "MAX_MEMBERS=25\n") || !strings.Contains(string(workEnv), "MAX_DEVICES=500\n") {
+		t.Fatalf("custom MAX_MEMBERS=25 on work pen was clobbered:\n%s", workEnv)
+	}
+
+	// 8. Grandfathered pre-D-50 pen (no PLAN/MAX_MEMBERS/MAX_DEVICES in .env):
+	//    - `plan personal` leaves caps unset (grandfathered at 500/500) with no restart.
+	//    - `plan work` writes 500/500 with no unnecessary restart (effective caps unchanged).
+	//    - `upgrade` leaves .env untouched.
+	legacyDir := filepath.Join(home, "pens", "legacypen")
+	_ = os.MkdirAll(legacyDir, 0o700)
+	_ = os.WriteFile(filepath.Join(legacyDir, ".env"), []byte("NETWORK=legacypen\nZONE=legacypen.pens.example.com\nPUBLIC_HOST=legacypen.gate.example.com\nSTUN_PORT=3490\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(legacyDir, ".challenge-dns-id"), []byte("cred-legacy\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(legacyDir, "hogman"), []byte("#!/bin/sh\necho \"$PWD: $*\" >> \""+upLog+"\"\nexit 0\n"), 0o755)
+
+	_ = os.Remove(upLog)
+	if out, err := runHost("plan", "legacypen", "personal"); err != nil {
+		t.Fatalf("plan legacypen personal failed: %v\n%s", err, out)
+	}
+	legacyEnv, _ := os.ReadFile(filepath.Join(legacyDir, ".env"))
+	if strings.Contains(string(legacyEnv), "MAX_MEMBERS=") || strings.Contains(string(legacyEnv), "MAX_DEVICES=") {
+		t.Fatalf("no-op plan personal stripped grandfathering from legacy pen:\n%s", legacyEnv)
+	}
+	if _, err := os.Stat(upLog); !os.IsNotExist(err) {
+		t.Fatal("no-op plan personal on grandfathered pen must NOT invoke ./hogman up")
+	}
+
+	_ = os.Remove(upLog)
+	if out, err := runHost("plan", "legacypen", "work"); err != nil {
+		t.Fatalf("plan legacypen work failed: %v\n%s", err, out)
+	}
+	legacyEnv, _ = os.ReadFile(filepath.Join(legacyDir, ".env"))
+	for _, want := range []string{"PLAN=work\n", "MAX_MEMBERS=500\n", "MAX_DEVICES=500\n"} {
+		if !strings.Contains(string(legacyEnv), want) {
+			t.Fatalf("legacypen upgraded to work missing %q:\n%s", want, legacyEnv)
+		}
+	}
+	if _, err := os.Stat(upLog); !os.IsNotExist(err) {
+		t.Fatal("upgrading grandfathered 500/500 pen to work (500/500) must NOT invoke unnecessary ./hogman up")
+	}
+
+	// Verify `upgrade` preserves grandfathered .env without inserting caps.
+	grandDir := filepath.Join(home, "pens", "grandpen")
+	_ = os.MkdirAll(grandDir, 0o700)
+	grandOrig := "NETWORK=grandpen\nZONE=grandpen.pens.example.com\nPUBLIC_HOST=grandpen.gate.example.com\nSTUN_PORT=3491\n"
+	_ = os.WriteFile(filepath.Join(grandDir, ".env"), []byte(grandOrig), 0o600)
+	if out, err := runHost("upgrade", "grandpen"); err != nil {
+		t.Fatalf("upgrade grandpen failed: %v\n%s", err, out)
+	}
+	grandAfter, _ := os.ReadFile(filepath.Join(grandDir, ".env"))
+	if string(grandAfter) != grandOrig {
+		t.Fatalf("upgrade modified grandfathered .env:\ngot:\n%s\nwant:\n%s", grandAfter, grandOrig)
+	}
+
+	// 9. Failed ./hogman up leaves .env updated; re-running `plan` detects live container
+	//    drift via `docker inspect` and retries ./hogman up to converge.
+	_ = os.Remove(upLog)
+	_ = os.WriteFile(failUpMarker, nil, 0o600)
+	_ = os.WriteFile(liveEnvFile, []byte("MAX_MEMBERS=25\nMAX_DEVICES=50\n"), 0o600)
+	if out, err := runHost("plan", "perspen", "work"); err == nil {
+		t.Fatalf("expected simulated ./hogman up failure, got ok:\n%s", out)
+	} else if !strings.Contains(out, "re-run 'hogman-host plan perspen work'") {
+		t.Fatalf("expected recovery hint on ./hogman up failure, got:\n%s", out)
+	}
+	_ = os.Remove(failUpMarker)
+	_ = os.Remove(upLog)
+	if out, err := runHost("plan", "perspen", "work"); err != nil {
+		t.Fatalf("retry plan perspen work failed: %v\n%s", err, out)
+	}
+	upCalls, _ = os.ReadFile(upLog)
+	if !strings.Contains(string(upCalls), "perspen: up") {
+		t.Fatalf("expected retry plan to invoke ./hogman up when live container env drifted, got:\n%s", upCalls)
 	}
 }
