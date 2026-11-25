@@ -257,6 +257,13 @@ func serve(s *Service) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	s.SetBaseContext(ctx)
+	// Always drain detached background workers before main() closes SQLite,
+	// including if ctx cancels early during the initial Headscale sync loop.
+	defer func() {
+		shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.WaitBackground(shut)
+	}()
 
 	tsnetStateDir := strings.TrimSpace(os.Getenv("TSNET_STATE_DIR"))
 	legacyMeshAddr := strings.TrimSpace(os.Getenv("MESH_ADDR"))

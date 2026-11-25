@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -215,18 +217,29 @@ func newTestEnv(t *testing.T) *testEnv {
 	return &testEnv{svc: svc, st: st, hs: hs, dir: dir}
 }
 
+func testNodeKey(seed string) string {
+	sum := sha256.Sum256([]byte("nodekey:" + seed))
+	return "nodekey:" + hex.EncodeToString(sum[:])
+}
+
+func testMachineKey(seed string) string {
+	sum := sha256.Sum256([]byte("mkey:" + seed))
+	return "mkey:" + hex.EncodeToString(sum[:])
+}
+
 func (e *testEnv) addDevice(t *testing.T, handle, kind, name, ipv4, ipv6 string) (*Member, *Device) {
 	t.Helper()
 	m, err := e.st.MemberByHandle(handle)
 	if err != nil {
 		t.Fatal(err)
 	}
+	seed := fmt.Sprintf("%d-%s", m.ID, name)
 	d := &Device{
 		MemberID:   m.ID,
 		Kind:       kind,
 		HSNodeID:   fmt.Sprintf("node-%d-%s", m.ID, name),
-		NodeKey:    fmt.Sprintf("nodekey:test-%d-%s", m.ID, name),
-		MachineKey: fmt.Sprintf("mkey:test-%d-%s", m.ID, name),
+		NodeKey:    testNodeKey(seed),
+		MachineKey: testMachineKey(seed),
 		Name:       name,
 		IPv4:       ipv4,
 		IPv6:       ipv6,

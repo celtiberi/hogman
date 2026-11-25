@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -795,10 +796,12 @@ func (f *fakeHeadscale) handler() http.Handler {
 			name = "node-" + strconv.Itoa(f.nextID)
 		}
 		idStr := strconv.Itoa(f.nextID)
+		mkSum := sha256.Sum256([]byte("fake-mkey:" + idStr))
+		nkSum := sha256.Sum256([]byte("fake-nodekey:" + idStr))
 		node := hsNode{
 			ID:          idStr,
-			MachineKey:  "mkey:fake-" + idStr,
-			NodeKey:     "nodekey:fake-" + idStr,
+			MachineKey:  "mkey:" + hex.EncodeToString(mkSum[:]),
+			NodeKey:     "nodekey:" + hex.EncodeToString(nkSum[:]),
 			Name:        name,
 			GivenName:   name,
 			IPAddresses: []string{in.IP},

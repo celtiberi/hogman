@@ -15,6 +15,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"tailscale.com/tailcfg"
+	"tailscale.com/types/key"
 )
 
 func TestVerifyDirectPeerSteadyStateExpiryAndActiveMember(t *testing.T) {
@@ -222,7 +225,7 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 	}
 
 	// 1. Legitimate personal node-key rotation (same machine_key, same user, same IP).
-	newPersonalKey := "nodekey:alice-rotated-1"
+	newPersonalKey := testNodeKey("alice-rotated-1")
 	updateHSNode(aliceLaptop.HSNodeID, func(n *HSNode) { n.NodeKey = newPersonalKey })
 	e.hs.mu.Lock()
 	e.hs.listNodesCalls, e.hs.getNodeCalls = 0, 0
@@ -267,7 +270,7 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 
 	// 2. Legitimate server node-key rotation: works with both nil user AND Headscale 0.29.7
 	// tagged-devices pseudo-user (id=2147455555, name="tagged-devices").
-	newSrvKey := "nodekey:srv-rotated-1"
+	newSrvKey := testNodeKey("srv-rotated-1")
 	updateHSNode(aliceSrv.HSNodeID, func(n *HSNode) {
 		n.NodeKey = newSrvKey
 		n.User = &HSUser{ID: headscaleTaggedUserID, Name: headscaleTaggedUserName}
@@ -282,10 +285,10 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 	advance(keyRotateCooldown + time.Second)
 	updateHSNode(aliceSrv.HSNodeID, func(n *HSNode) {
 		n.Tags = []string{"tag:server", "tag:infra"}
-		n.NodeKey = "nodekey:srv-infra-escalate"
+		n.NodeKey = testNodeKey("srv-infra-escalate")
 	})
 	if _, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-		IP: "100.64.0.11", HSNodeID: aliceSrv.HSNodeID, NodeKey: "nodekey:srv-infra-escalate",
+		IP: "100.64.0.11", HSNodeID: aliceSrv.HSNodeID, NodeKey: testNodeKey("srv-infra-escalate"),
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("server with tag:infra rotation = %v, want ErrNotFound", err)
 	}
@@ -297,11 +300,11 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 	// 3. Server spoof with different machine_key is refused and leaves stored node_key untouched.
 	advance(keyRotateCooldown + time.Second)
 	updateHSNode(aliceSrv.HSNodeID, func(n *HSNode) {
-		n.MachineKey = "mkey:attacker-other-machine"
-		n.NodeKey = "nodekey:attacker-srv-key"
+		n.MachineKey = testMachineKey("attacker-other-machine")
+		n.NodeKey = testNodeKey("attacker-srv-key")
 	})
 	if _, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-		IP: "100.64.0.11", HSNodeID: aliceSrv.HSNodeID, NodeKey: "nodekey:attacker-srv-key",
+		IP: "100.64.0.11", HSNodeID: aliceSrv.HSNodeID, NodeKey: testNodeKey("attacker-srv-key"),
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("server machine_key spoof = %v, want ErrNotFound", err)
 	}
@@ -315,10 +318,10 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 	updateHSNode(aliceSrv.HSNodeID, func(n *HSNode) {
 		n.MachineKey = aliceSrv.MachineKey
 		n.Tags = nil
-		n.NodeKey = "nodekey:untagged-srv"
+		n.NodeKey = testNodeKey("untagged-srv")
 	})
 	if _, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-		IP: "100.64.0.11", HSNodeID: aliceSrv.HSNodeID, NodeKey: "nodekey:untagged-srv",
+		IP: "100.64.0.11", HSNodeID: aliceSrv.HSNodeID, NodeKey: testNodeKey("untagged-srv"),
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("untagged server rotation = %v, want ErrNotFound", err)
 	}
@@ -326,10 +329,10 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 	updateHSNode(aliceSrv.HSNodeID, func(n *HSNode) {
 		n.Tags = []string{"tag:server"}
 		n.User = &HSUser{ID: alice.HSUserID, Name: alice.Handle}
-		n.NodeKey = "nodekey:user-owned-srv"
+		n.NodeKey = testNodeKey("user-owned-srv")
 	})
 	if _, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-		IP: "100.64.0.11", HSNodeID: aliceSrv.HSNodeID, NodeKey: "nodekey:user-owned-srv",
+		IP: "100.64.0.11", HSNodeID: aliceSrv.HSNodeID, NodeKey: testNodeKey("user-owned-srv"),
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("server with non-empty user rotation = %v, want ErrNotFound", err)
 	}
@@ -337,11 +340,11 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 	// 5. Personal spoof with different machine_key OR different user.id is refused.
 	advance(keyRotateCooldown + time.Second)
 	updateHSNode(aliceLaptop.HSNodeID, func(n *HSNode) {
-		n.MachineKey = "mkey:stolen-id"
-		n.NodeKey = "nodekey:stolen-key"
+		n.MachineKey = testMachineKey("stolen-id")
+		n.NodeKey = testNodeKey("stolen-key")
 	})
 	if _, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-		IP: "100.64.0.10", HSNodeID: aliceLaptop.HSNodeID, NodeKey: "nodekey:stolen-key",
+		IP: "100.64.0.10", HSNodeID: aliceLaptop.HSNodeID, NodeKey: testNodeKey("stolen-key"),
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("personal machine_key spoof = %v, want ErrNotFound", err)
 	}
@@ -349,10 +352,10 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 	updateHSNode(aliceLaptop.HSNodeID, func(n *HSNode) {
 		n.MachineKey = aliceLaptop.MachineKey
 		n.User = &HSUser{ID: bob.HSUserID, Name: bob.Handle}
-		n.NodeKey = "nodekey:wrong-user-key"
+		n.NodeKey = testNodeKey("wrong-user-key")
 	})
 	if _, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-		IP: "100.64.0.10", HSNodeID: aliceLaptop.HSNodeID, NodeKey: "nodekey:wrong-user-key",
+		IP: "100.64.0.10", HSNodeID: aliceLaptop.HSNodeID, NodeKey: testNodeKey("wrong-user-key"),
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("personal wrong user.id rotation = %v, want ErrNotFound", err)
 	}
@@ -361,10 +364,10 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 	updateHSNode(aliceLaptop.HSNodeID, func(n *HSNode) {
 		n.User = &HSUser{ID: alice.HSUserID, Name: alice.Handle}
 		n.Tags = []string{"tag:server"}
-		n.NodeKey = "nodekey:tagged-personal-key"
+		n.NodeKey = testNodeKey("tagged-personal-key")
 	})
 	if _, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-		IP: "100.64.0.10", HSNodeID: aliceLaptop.HSNodeID, NodeKey: "nodekey:tagged-personal-key",
+		IP: "100.64.0.10", HSNodeID: aliceLaptop.HSNodeID, NodeKey: testNodeKey("tagged-personal-key"),
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("personal node with tag rotation = %v, want ErrNotFound", err)
 	}
@@ -375,13 +378,13 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 	updateHSNode(aliceLaptop.HSNodeID, func(n *HSNode) {
 		n.User = &HSUser{ID: alice.HSUserID, Name: alice.Handle}
 		n.IPAddresses = []string{"100.64.0.250"}
-		n.NodeKey = "nodekey:ip-shifted"
+		n.NodeKey = testNodeKey("ip-shifted")
 	})
 	e.hs.mu.Lock()
 	beforeGet := e.hs.getNodeCalls
 	e.hs.mu.Unlock()
 	if _, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-		IP: "100.64.0.250", HSNodeID: aliceLaptop.HSNodeID, NodeKey: "nodekey:ip-shifted",
+		IP: "100.64.0.250", HSNodeID: aliceLaptop.HSNodeID, NodeKey: testNodeKey("ip-shifted"),
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("IP+key rotation = %v, want ErrNotFound", err)
 	}
@@ -403,7 +406,7 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 	e.hs.mu.Unlock()
 	for i := 0; i < 5; i++ {
 		_, _, _ = e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-			IP: "100.64.0.10", HSNodeID: aliceLaptop.HSNodeID, NodeKey: "nodekey:bogus-spam",
+			IP: "100.64.0.10", HSNodeID: aliceLaptop.HSNodeID, NodeKey: testNodeKey("bogus-spam"),
 		})
 	}
 	e.hs.mu.Lock()
@@ -413,16 +416,16 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 		t.Fatalf("5 rapid bad keys made %d Headscale calls, want 1 (rate-limited)", afterSpam-beforeSpam)
 	}
 	// Bob's legitimate rotation immediately succeeds despite Alice being in cooldown.
-	updateHSNode(bobLaptop.HSNodeID, func(n *HSNode) { n.NodeKey = "nodekey:bob-rotated-1" })
+	updateHSNode(bobLaptop.HSNodeID, func(n *HSNode) { n.NodeKey = testNodeKey("bob-rotated-1") })
 	if _, d, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-		IP: "100.64.0.12", HSNodeID: bobLaptop.HSNodeID, NodeKey: "nodekey:bob-rotated-1",
-	}); err != nil || d.NodeKey != "nodekey:bob-rotated-1" {
+		IP: "100.64.0.12", HSNodeID: bobLaptop.HSNodeID, NodeKey: testNodeKey("bob-rotated-1"),
+	}); err != nil || d.NodeKey != testNodeKey("bob-rotated-1") {
 		t.Fatalf("bob rotation blocked by alice cooldown: d=%+v err=%v", d, err)
 	}
 
 	// 8. Conditional SQLite rotation race: device marked removed while Headscale GET is in flight.
 	advance(keyRotateCooldown + time.Second)
-	updateHSNode(bobLaptop.HSNodeID, func(n *HSNode) { n.NodeKey = "nodekey:bob-race-removed" })
+	updateHSNode(bobLaptop.HSNodeID, func(n *HSNode) { n.NodeKey = testNodeKey("bob-race-removed") })
 	e.hs.mu.Lock()
 	e.hs.onGetNode = func(_ context.Context, id string) {
 		if id == bobLaptop.HSNodeID {
@@ -431,7 +434,7 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 	}
 	e.hs.mu.Unlock()
 	_, _, err = e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-		IP: "100.64.0.12", HSNodeID: bobLaptop.HSNodeID, NodeKey: "nodekey:bob-race-removed",
+		IP: "100.64.0.12", HSNodeID: bobLaptop.HSNodeID, NodeKey: testNodeKey("bob-race-removed"),
 	})
 	e.hs.mu.Lock()
 	e.hs.onGetNode = nil
@@ -440,7 +443,7 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 		t.Fatalf("rotation racing with device removal = %v, want ErrNotFound", err)
 	}
 	gotBob, _ := e.st.DeviceByID(bobLaptop.ID)
-	if gotBob.RemovedAt == nil || gotBob.NodeKey != "nodekey:bob-rotated-1" {
+	if gotBob.RemovedAt == nil || gotBob.NodeKey != testNodeKey("bob-rotated-1") {
 		t.Fatalf("removed device altered by racing rotation: %+v", gotBob)
 	}
 
@@ -449,7 +452,7 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 	var devs []*Device
 	for i := 0; i < keyRotateMaxConc+1; i++ {
 		_, d := e.addDevice(t, "alice", "personal", "dev-sem-"+string(rune('a'+i)), "100.64.9."+string(rune('1'+i)), "")
-		updateHSNode(d.HSNodeID, func(n *HSNode) { n.NodeKey = "nodekey:sem-rot-" + d.Name })
+		updateHSNode(d.HSNodeID, func(n *HSNode) { n.NodeKey = testNodeKey("sem-rot-" + d.Name) })
 		devs = append(devs, d)
 	}
 	entered := make(chan struct{}, keyRotateMaxConc)
@@ -467,7 +470,7 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 		go func(d *Device) {
 			defer wg.Done()
 			_, _, _ = e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-				IP: d.IPv4, HSNodeID: d.HSNodeID, NodeKey: "nodekey:sem-rot-" + d.Name,
+				IP: d.IPv4, HSNodeID: d.HSNodeID, NodeKey: testNodeKey("sem-rot-" + d.Name),
 			})
 		}(devs[i])
 	}
@@ -480,7 +483,7 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 	getBeforeFifth := e.hs.getNodeCalls
 	e.hs.mu.Unlock()
 	if _, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-		IP: fifth.IPv4, HSNodeID: fifth.HSNodeID, NodeKey: "nodekey:sem-rot-" + fifth.Name,
+		IP: fifth.IPv4, HSNodeID: fifth.HSNodeID, NodeKey: testNodeKey("sem-rot-" + fifth.Name),
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("5th concurrent rotation = %v, want ErrNotFound", err)
 	}
@@ -496,8 +499,8 @@ func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
 	// CRITICAL (HIGH-3): the 5th device rejected by rotateSem must NOT have
 	// burned its 10s cooldown — immediate retry succeeds without advancing clock!
 	if _, d, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-		IP: fifth.IPv4, HSNodeID: fifth.HSNodeID, NodeKey: "nodekey:sem-rot-" + fifth.Name,
-	}); err != nil || d.NodeKey != "nodekey:sem-rot-"+fifth.Name {
+		IP: fifth.IPv4, HSNodeID: fifth.HSNodeID, NodeKey: testNodeKey("sem-rot-" + fifth.Name),
+	}); err != nil || d.NodeKey != testNodeKey("sem-rot-"+fifth.Name) {
 		t.Fatalf("5th device retry after semaphore freed failed (cooldown burned?): d=%+v err=%v", d, err)
 	}
 }
@@ -545,7 +548,7 @@ func TestKeyRotationConcurrencyTOCTOUAndSyncInvariants(t *testing.T) {
 
 	// 1. Parallel browser requests (3 valid + 1 bogus key) on the same device coalesce
 	// into ONE GET /api/v1/node/{id}: all 3 valid succeed, the 1 bogus fails closed.
-	setNodeKey(bobLap.HSNodeID, "nodekey:bob-parallel-1")
+	setNodeKey(bobLap.HSNodeID, testNodeKey("bob-parallel-1"))
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	e.hs.mu.Lock()
@@ -568,7 +571,7 @@ func TestKeyRotationConcurrencyTOCTOUAndSyncInvariants(t *testing.T) {
 	bogusCh := make(chan res, 1)
 	go func() {
 		m, d, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-			IP: "100.64.0.11", HSNodeID: bobLap.HSNodeID, NodeKey: "nodekey:bob-parallel-1",
+			IP: "100.64.0.11", HSNodeID: bobLap.HSNodeID, NodeKey: testNodeKey("bob-parallel-1"),
 		})
 		validCh <- res{m, d, err}
 	}()
@@ -576,14 +579,14 @@ func TestKeyRotationConcurrencyTOCTOUAndSyncInvariants(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		go func() {
 			m, d, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-				IP: "100.64.0.11", HSNodeID: bobLap.HSNodeID, NodeKey: "nodekey:bob-parallel-1",
+				IP: "100.64.0.11", HSNodeID: bobLap.HSNodeID, NodeKey: testNodeKey("bob-parallel-1"),
 			})
 			validCh <- res{m, d, err}
 		}()
 	}
 	go func() {
 		m, d, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-			IP: "100.64.0.11", HSNodeID: bobLap.HSNodeID, NodeKey: "nodekey:attacker-bogus",
+			IP: "100.64.0.11", HSNodeID: bobLap.HSNodeID, NodeKey: testNodeKey("attacker-bogus"),
 		})
 		bogusCh <- res{m, d, err}
 	}()
@@ -595,7 +598,7 @@ func TestKeyRotationConcurrencyTOCTOUAndSyncInvariants(t *testing.T) {
 	e.hs.mu.Unlock()
 	for i := 0; i < 3; i++ {
 		r := <-validCh
-		if r.err != nil || r.d.NodeKey != "nodekey:bob-parallel-1" {
+		if r.err != nil || r.d.NodeKey != testNodeKey("bob-parallel-1") {
 			t.Fatalf("coalesced valid caller #%d failed: %+v", i, r)
 		}
 	}
@@ -609,7 +612,7 @@ func TestKeyRotationConcurrencyTOCTOUAndSyncInvariants(t *testing.T) {
 	// 2. TOCTOU (HIGH-2): Suspend while s.hs.Node is in flight refuses rotation AND
 	// leaves SQLite node_key untouched.
 	advance(keyRotateCooldown + time.Second)
-	setNodeKey(bobLap.HSNodeID, "nodekey:bob-suspended-race")
+	setNodeKey(bobLap.HSNodeID, testNodeKey("bob-suspended-race"))
 	e.hs.mu.Lock()
 	e.hs.onGetNode = func(_ context.Context, _ string) {
 		if err := e.svc.Suspend(ctx, cli, "bob", "race-suspend"); err != nil {
@@ -618,7 +621,7 @@ func TestKeyRotationConcurrencyTOCTOUAndSyncInvariants(t *testing.T) {
 	}
 	e.hs.mu.Unlock()
 	_, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-		IP: "100.64.0.11", HSNodeID: bobLap.HSNodeID, NodeKey: "nodekey:bob-suspended-race",
+		IP: "100.64.0.11", HSNodeID: bobLap.HSNodeID, NodeKey: testNodeKey("bob-suspended-race"),
 	})
 	e.hs.mu.Lock()
 	e.hs.onGetNode = nil
@@ -628,13 +631,13 @@ func TestKeyRotationConcurrencyTOCTOUAndSyncInvariants(t *testing.T) {
 		t.Fatalf("rotation racing with Suspend = %v, want 403", err)
 	}
 	gotBob, _ := e.st.DeviceByID(bobLap.ID)
-	if gotBob.NodeKey != "nodekey:bob-parallel-1" {
+	if gotBob.NodeKey != testNodeKey("bob-parallel-1") {
 		t.Fatalf("suspended member rotated node_key to %q", gotBob.NodeKey)
 	}
 
 	// 3. TOCTOU (HIGH-2): Role demotion while s.hs.Node is in flight returns FRESH
 	// member role ("member"), never the stale pre-rotation "owner" snapshot.
-	setNodeKey(aliceLap.HSNodeID, "nodekey:alice-demoted-race")
+	setNodeKey(aliceLap.HSNodeID, testNodeKey("alice-demoted-race"))
 	e.hs.mu.Lock()
 	e.hs.onGetNode = func(_ context.Context, _ string) {
 		if err := e.svc.SetRole(ctx, cli, "alice", "member"); err != nil {
@@ -643,18 +646,18 @@ func TestKeyRotationConcurrencyTOCTOUAndSyncInvariants(t *testing.T) {
 	}
 	e.hs.mu.Unlock()
 	mFresh, dFresh, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-		IP: "100.64.0.10", HSNodeID: aliceLap.HSNodeID, NodeKey: "nodekey:alice-demoted-race",
+		IP: "100.64.0.10", HSNodeID: aliceLap.HSNodeID, NodeKey: testNodeKey("alice-demoted-race"),
 	})
 	e.hs.mu.Lock()
 	e.hs.onGetNode = nil
 	e.hs.mu.Unlock()
-	if err != nil || mFresh.Role != "member" || dFresh.NodeKey != "nodekey:alice-demoted-race" {
+	if err != nil || mFresh.Role != "member" || dFresh.NodeKey != testNodeKey("alice-demoted-race") {
 		t.Fatalf("demoted rotation returned m=%+v d=%+v err=%v, want fresh Role=member", mFresh, dFresh, err)
 	}
 
 	// 4. Racing syncOnce already commits new key while s.hs.Node is in flight -> no spurious 403!
 	advance(keyRotateCooldown + time.Second)
-	setNodeKey(aliceLap.HSNodeID, "nodekey:alice-synced-first")
+	setNodeKey(aliceLap.HSNodeID, testNodeKey("alice-synced-first"))
 	e.hs.mu.Lock()
 	e.hs.onGetNode = func(_ context.Context, _ string) {
 		if err := e.svc.Sync(ctx); err != nil {
@@ -663,12 +666,12 @@ func TestKeyRotationConcurrencyTOCTOUAndSyncInvariants(t *testing.T) {
 	}
 	e.hs.mu.Unlock()
 	_, dSynced, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-		IP: "100.64.0.10", HSNodeID: aliceLap.HSNodeID, NodeKey: "nodekey:alice-synced-first",
+		IP: "100.64.0.10", HSNodeID: aliceLap.HSNodeID, NodeKey: testNodeKey("alice-synced-first"),
 	})
 	e.hs.mu.Lock()
 	e.hs.onGetNode = nil
 	e.hs.mu.Unlock()
-	if err != nil || dSynced.NodeKey != "nodekey:alice-synced-first" {
+	if err != nil || dSynced.NodeKey != testNodeKey("alice-synced-first") {
 		t.Fatalf("rotation racing with syncOnce returned spurious error: d=%+v err=%v", dSynced, err)
 	}
 
@@ -679,7 +682,7 @@ func TestKeyRotationConcurrencyTOCTOUAndSyncInvariants(t *testing.T) {
 		if e.hs.nodes[i].ID == aliceLap.HSNodeID {
 			// Missing machineKey on pinned device must NOT overwrite node_key!
 			e.hs.nodes[i].MachineKey = ""
-			e.hs.nodes[i].NodeKey = "nodekey:unpinned-attempt"
+			e.hs.nodes[i].NodeKey = testNodeKey("unpinned-attempt")
 		}
 	}
 	e.hs.mu.Unlock()
@@ -687,7 +690,7 @@ func TestKeyRotationConcurrencyTOCTOUAndSyncInvariants(t *testing.T) {
 		t.Fatal(err)
 	}
 	gotAlice, _ := e.st.DeviceByID(aliceLap.ID)
-	if gotAlice.NodeKey != "nodekey:alice-synced-first" {
+	if gotAlice.NodeKey != testNodeKey("alice-synced-first") {
 		t.Fatalf("syncOnce updated node_key despite missing machine_key: got %q", gotAlice.NodeKey)
 	}
 
@@ -697,7 +700,7 @@ func TestKeyRotationConcurrencyTOCTOUAndSyncInvariants(t *testing.T) {
 		if e.hs.nodes[i].ID == aliceLap.HSNodeID {
 			e.hs.nodes[i].MachineKey = aliceLap.MachineKey
 			e.hs.nodes[i].Tags = []string{"tag:server"} // personal device suddenly tagged!
-			e.hs.nodes[i].NodeKey = "nodekey:tampered-drift"
+			e.hs.nodes[i].NodeKey = testNodeKey("tampered-drift")
 		}
 	}
 	e.hs.mu.Unlock()
@@ -705,7 +708,7 @@ func TestKeyRotationConcurrencyTOCTOUAndSyncInvariants(t *testing.T) {
 		t.Fatal(err)
 	}
 	gotAlice, _ = e.st.DeviceByID(aliceLap.ID)
-	if gotAlice.RemovedAt == nil || gotAlice.NodeKey != "nodekey:alice-synced-first" {
+	if gotAlice.RemovedAt == nil || gotAlice.NodeKey != testNodeKey("alice-synced-first") {
 		t.Fatalf("syncOnce did not retire device on owner/tag drift: %+v", gotAlice)
 	}
 
@@ -744,8 +747,8 @@ func TestSyncOnceMachineKeyChangeRetiresOldDevice(t *testing.T) {
 	e.hs.mu.Lock()
 	for i := range e.hs.nodes {
 		if e.hs.nodes[i].ID == srv.HSNodeID {
-			e.hs.nodes[i].MachineKey = "mkey:replaced-hardware"
-			e.hs.nodes[i].NodeKey = "nodekey:replaced-hardware"
+			e.hs.nodes[i].MachineKey = testMachineKey("replaced-hardware")
+			e.hs.nodes[i].NodeKey = testNodeKey("replaced-hardware")
 		}
 	}
 	e.hs.mu.Unlock()
@@ -845,7 +848,7 @@ func TestPolicyGenTriggersNeedsFastSyncAndSetRoleRenewOnly(t *testing.T) {
 	assertBumped("InsertDevice", func() {
 		dev = &Device{
 			MemberID: owner1.ID, Kind: "personal", HSNodeID: "hs-1",
-			NodeKey: "nodekey:1", MachineKey: "mkey:1", Name: "lap", IPv4: "100.64.0.10",
+			NodeKey: testNodeKey("1"), MachineKey: testMachineKey("1"), Name: "lap", IPv4: "100.64.0.10",
 		}
 		if err := e.st.InsertDevice(dev); err != nil {
 			t.Fatal(err)
@@ -861,17 +864,17 @@ func TestPolicyGenTriggersNeedsFastSyncAndSetRoleRenewOnly(t *testing.T) {
 		}
 	}
 	assertBumped("UpdateDevice(ip change)", func() {
-		if err := e.st.UpdateDevice(dev.ID, "lap2", "100.64.0.99", "", "nodekey:1", "mkey:1"); err != nil {
+		if err := e.st.UpdateDevice(dev.ID, "lap2", "100.64.0.99", "", testNodeKey("1"), testMachineKey("1")); err != nil {
 			t.Fatal(err)
 		}
 	})
 	assertUnchanged("UpdateDevice(name/key only)", func() {
-		if err := e.st.UpdateDevice(dev.ID, "lap3", "100.64.0.99", "", "nodekey:1", "mkey:1"); err != nil {
+		if err := e.st.UpdateDevice(dev.ID, "lap3", "100.64.0.99", "", testNodeKey("1"), testMachineKey("1")); err != nil {
 			t.Fatal(err)
 		}
 	})
 	assertUnchanged("RotateDeviceNodeKey", func() {
-		ok, err := e.st.RotateDeviceNodeKey(dev.ID, "nodekey:1", "mkey:1", "nodekey:2")
+		ok, err := e.st.RotateDeviceNodeKey(dev.ID, testNodeKey("1"), testMachineKey("1"), testNodeKey("2"))
 		if err != nil || !ok {
 			t.Fatalf("RotateDeviceNodeKey ok=%v err=%v", ok, err)
 		}
@@ -1167,7 +1170,7 @@ func TestDetachedSingleFlightSyncAndPresence(t *testing.T) {
 	clockMu.Unlock()
 	for i := 0; i < 5; i++ {
 		_, _, _ = e.svc.VerifyDirectPeer(context.Background(), &PeerIdentity{
-			IP: "100.64.0.99", HSNodeID: "unknown-node", NodeKey: "nodekey:unknown",
+			IP: "100.64.0.99", HSNodeID: "unknown-node", NodeKey: testNodeKey("unknown"),
 		})
 	}
 	e.hs.mu.Lock()
@@ -1228,8 +1231,8 @@ func TestLegacyDBMigrationBackfillsKeysOnInitialSync(t *testing.T) {
 	hs := newFakeHeadscale(t)
 	hs.nodes = []HSNode{{
 		ID:          "10",
-		MachineKey:  "mkey:backfilled-10",
-		NodeKey:     "nodekey:backfilled-10",
+		MachineKey:  testMachineKey("backfilled-10"),
+		NodeKey:     testNodeKey("backfilled-10"),
 		Name:        "alice-lap",
 		GivenName:   "alice-lap",
 		IPAddresses: []string{"100.64.0.10"},
@@ -1242,7 +1245,7 @@ func TestLegacyDBMigrationBackfillsKeysOnInitialSync(t *testing.T) {
 
 	// Before initial Sync, missing node_key/machine_key fails closed.
 	if _, _, err := svc.VerifyDirectPeer(context.Background(), &PeerIdentity{
-		IP: "100.64.0.10", HSNodeID: "10", NodeKey: "nodekey:backfilled-10",
+		IP: "100.64.0.10", HSNodeID: "10", NodeKey: testNodeKey("backfilled-10"),
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("before backfill VerifyDirectPeer = %v, want ErrNotFound", err)
 	}
@@ -1252,7 +1255,7 @@ func TestLegacyDBMigrationBackfillsKeysOnInitialSync(t *testing.T) {
 		t.Fatalf("initial Sync backfill: %v", err)
 	}
 	d, err := st.DeviceByHSNodeID("10")
-	if err != nil || d.NodeKey != "nodekey:backfilled-10" || d.MachineKey != "mkey:backfilled-10" {
+	if err != nil || d.NodeKey != testNodeKey("backfilled-10") || d.MachineKey != testMachineKey("backfilled-10") {
 		t.Fatalf("backfilled device = %+v err=%v", d, err)
 	}
 	logs, _ := st.AuditLog(10)
@@ -1266,7 +1269,7 @@ func TestLegacyDBMigrationBackfillsKeysOnInitialSync(t *testing.T) {
 	hs.listNodesCalls, hs.getNodeCalls = 0, 0
 	hs.mu.Unlock()
 	if m, _, err := svc.VerifyDirectPeer(context.Background(), &PeerIdentity{
-		IP: "100.64.0.10", HSNodeID: "10", NodeKey: "nodekey:backfilled-10",
+		IP: "100.64.0.10", HSNodeID: "10", NodeKey: testNodeKey("backfilled-10"),
 	}); err != nil || m.Handle != "alice" {
 		t.Fatalf("after backfill VerifyDirectPeer = (%+v, %v)", m, err)
 	}
@@ -1430,7 +1433,7 @@ func TestErrorCooldownsEmptyPresenceCacheAndWaitBackground(t *testing.T) {
 	e.hs.mu.Unlock()
 	for i := 0; i < 5; i++ {
 		_, _, _ = e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
-			IP: "100.64.0.99", HSNodeID: "unknown-1", NodeKey: "nodekey:unknown",
+			IP: "100.64.0.99", HSNodeID: "unknown-1", NodeKey: testNodeKey("unknown"),
 		})
 	}
 	e.hs.mu.Lock()
@@ -1530,5 +1533,340 @@ func TestCrossProcessPolicySerialization(t *testing.T) {
 	e.hs.mu.Unlock()
 	if strings.Contains(finalPol, "100.64.0.11") {
 		t.Fatalf("final Headscale policy still grants access to suspended bob:\n%s", finalPol)
+	}
+}
+
+// TestRealHeadscale0297FixtureMatchesTailcfgNodeKey verifies that an exact
+// captured GET /api/v1/node JSON response from headscale/headscale:0.29.7
+// (covering both a personal node and a tag:server node with Headscale's
+// tagged-devices pseudo-user 2147455555) parses cleanly through canonical
+// key.NodePublic / key.MachinePublic normalization and matches tailcfg.Node.Key
+// as returned by tsnet WhoIs().
+func TestRealHeadscale0297FixtureMatchesTailcfgNodeKey(t *testing.T) {
+	// Captured directly from an ephemeral headscale/headscale:0.29.7 container
+	// with disposable synthetic tailscale/tailscale:v1.104.7 nodes.
+	const capturedListNodesJSON = `{
+  "nodes": [
+    {
+      "id": "1",
+      "machineKey": "mkey:e438d44e8488876479738d2017d7738fc66b36bd8d6b85e637ed71bb2173a215",
+      "nodeKey": "nodekey:b5994765e77570a3d011d39ac5050973ebc953a9041cfe7dc7246d8bb806e063",
+      "discoKey": "discokey:832fda1996674b39a093e96285d19f7a7803cbeeb8325e53e2502904047bac59",
+      "ipAddresses": [
+        "100.64.0.1",
+        "fd7a:115c:a1e0::1"
+      ],
+      "name": "alice-laptop",
+      "user": {
+        "id": "1",
+        "name": "alice",
+        "createdAt": "2026-11-25T14:23:32.531882212Z",
+        "displayName": "",
+        "email": "",
+        "providerId": "",
+        "provider": "",
+        "profilePicUrl": ""
+      },
+      "lastSeen": "2026-11-25T14:23:34.710330630Z",
+      "expiry": null,
+      "preAuthKey": {
+        "user": {
+          "id": "1",
+          "name": "alice",
+          "createdAt": "2026-11-25T14:23:32.531882212Z",
+          "displayName": "",
+          "email": "",
+          "providerId": "",
+          "provider": "",
+          "profilePicUrl": ""
+        },
+        "id": "1",
+        "key": "hskey-auth-FIXBEkNxM-vH-***",
+        "reusable": false,
+        "ephemeral": false,
+        "used": true,
+        "expiration": "2026-11-25T15:23:33.279723046Z",
+        "createdAt": "2026-11-25T14:23:33.280365087Z",
+        "aclTags": []
+      },
+      "createdAt": "2026-11-25T14:23:33.849854421Z",
+      "registerMethod": "REGISTER_METHOD_AUTH_KEY",
+      "givenName": "alice-laptop",
+      "online": false,
+      "approvedRoutes": [],
+      "availableRoutes": [],
+      "subnetRoutes": [],
+      "tags": []
+    },
+    {
+      "id": "2",
+      "machineKey": "mkey:1ee6564c897e325f8631ee28e929237ee135e0cbbad1e5038e4c40791ee4ec73",
+      "nodeKey": "nodekey:5786c3765837a3889be946a27d4326e69dbaaaee45080623724cc43d14f27b71",
+      "discoKey": "discokey:0000000000000000000000000000000000000000000000000000000000000000",
+      "ipAddresses": [
+        "100.64.0.2",
+        "fd7a:115c:a1e0::2"
+      ],
+      "name": "alice-srv",
+      "user": {
+        "id": "2147455555",
+        "name": "tagged-devices",
+        "createdAt": "0001-01-01T00:00:00Z",
+        "displayName": "Tagged Devices",
+        "email": "",
+        "providerId": "",
+        "provider": "",
+        "profilePicUrl": ""
+      },
+      "lastSeen": "2026-11-25T14:23:33.904388046Z",
+      "expiry": null,
+      "preAuthKey": {
+        "user": null,
+        "id": "2",
+        "key": "hskey-auth-Rt_ng_raG3ko-***",
+        "reusable": false,
+        "ephemeral": false,
+        "used": true,
+        "expiration": "2026-11-25T15:23:33.402724004Z",
+        "createdAt": "2026-11-25T14:23:33.402887379Z",
+        "aclTags": [
+          "tag:server"
+        ]
+      },
+      "createdAt": "2026-11-25T14:23:33.904574963Z",
+      "registerMethod": "REGISTER_METHOD_AUTH_KEY",
+      "givenName": "alice-srv",
+      "online": false,
+      "approvedRoutes": [],
+      "availableRoutes": [],
+      "subnetRoutes": [],
+      "tags": [
+        "tag:server"
+      ]
+    }
+  ]
+}`
+
+	var listCalls, getCalls atomic.Int32
+	var rawNodes struct {
+		Nodes []json.RawMessage `json:"nodes"`
+	}
+	if err := json.Unmarshal([]byte(capturedListNodesJSON), &rawNodes); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/node", func(w http.ResponseWriter, r *http.Request) {
+		listCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(capturedListNodesJSON))
+	})
+	mux.HandleFunc("GET /api/v1/node/{id}", func(w http.ResponseWriter, r *http.Request) {
+		getCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.PathValue("id") {
+		case "1":
+			_, _ = w.Write([]byte(`{"node":` + string(rawNodes.Nodes[0]) + `}`))
+		case "2":
+			_, _ = w.Write([]byte(`{"node":` + string(rawNodes.Nodes[1]) + `}`))
+		default:
+			http.Error(w, "node not found", http.StatusNotFound)
+		}
+	})
+	mux.HandleFunc("PUT /api/v1/policy", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	st, err := OpenStore(filepath.Join(dir, "registrar.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	svc, err := NewService(Config{Zone: "bobo.hogman", PublicHost: "hs.example.com", CoreIP: "100.64.0.10"}, st, NewHeadscale(srv.URL, "k"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	alice := &Member{Handle: "alice", Role: "owner", Status: "active", HSUserID: "1"}
+	if err := st.InsertMember(alice); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertDeviceKey(&DeviceKey{MemberID: alice.ID, Kind: "personal", HSKeyID: "1", ExpiresAt: time.Now().Add(time.Hour).Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertDeviceKey(&DeviceKey{MemberID: alice.ID, Kind: "server", HSKeyID: "2", ExpiresAt: time.Now().Add(time.Hour).Unix()}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sync enrolls both nodes straight from the captured 0.29.7 JSON body.
+	if err := svc.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync captured 0.29.7 fixture: %v", err)
+	}
+	listCalls.Store(0)
+	getCalls.Store(0)
+
+	// Construct real tailcfg.Node values using key.NodePublic.UnmarshalText,
+	// identical to what tsnet LocalClient.WhoIs() produces on the wire.
+	mustTailcfgNode := func(id tailcfg.NodeID, rawKey string) *tailcfg.Node {
+		t.Helper()
+		var k key.NodePublic
+		if err := k.UnmarshalText([]byte(rawKey)); err != nil {
+			t.Fatalf("key.NodePublic.UnmarshalText(%q): %v", rawKey, err)
+		}
+		return &tailcfg.Node{ID: id, Key: k}
+	}
+	pNode := mustTailcfgNode(1, "nodekey:b5994765e77570a3d011d39ac5050973ebc953a9041cfe7dc7246d8bb806e063")
+	sNode := mustTailcfgNode(2, "nodekey:5786c3765837a3889be946a27d4326e69dbaaaee45080623724cc43d14f27b71")
+
+	// Steady-state VerifyDirectPeer succeeds for BOTH personal and tag:server
+	// nodes with ZERO Headscale calls.
+	if m, d, err := svc.VerifyDirectPeer(context.Background(), &PeerIdentity{
+		IP: "100.64.0.1", HSNodeID: "1", NodeKey: pNode.Key.String(),
+	}); err != nil || m.Handle != "alice" || d.Kind != "personal" {
+		t.Fatalf("personal VerifyDirectPeer on 0.29.7 fixture: m=%+v d=%+v err=%v", m, d, err)
+	}
+	if m, d, err := svc.VerifyDirectPeer(context.Background(), &PeerIdentity{
+		IP: "100.64.0.2", HSNodeID: "2", NodeKey: sNode.Key.String(),
+	}); err != nil || m.Handle != "alice" || d.Kind != "server" {
+		t.Fatalf("server VerifyDirectPeer on 0.29.7 fixture: m=%+v d=%+v err=%v", m, d, err)
+	}
+	if listCalls.Load() != 0 || getCalls.Load() != 0 {
+		t.Fatalf("0.29.7 fixture steady-state auth hit Headscale (list=%d get=%d), want 0", listCalls.Load(), getCalls.Load())
+	}
+
+	// Normalization test: uppercase hex and bare 64-hex (without prefix) normalize
+	// identically to canonical key.NodePublic / key.MachinePublic strings.
+	bareUpperNK := strings.ToUpper(strings.TrimPrefix(pNode.Key.String(), "nodekey:"))
+	if got, ok := canonicalNodeKey(bareUpperNK); !ok || got != pNode.Key.String() {
+		t.Fatalf("canonicalNodeKey(bare upper) = (%q, %v), want (%q, true)", got, ok, pNode.Key.String())
+	}
+	wantMK := "mkey:1ee6564c897e325f8631ee28e929237ee135e0cbbad1e5038e4c40791ee4ec73"
+	bareUpperMK := strings.ToUpper(strings.TrimPrefix(wantMK, "mkey:"))
+	if got, ok := canonicalMachineKey(bareUpperMK); !ok || got != wantMK {
+		t.Fatalf("canonicalMachineKey(bare upper) = (%q, %v), want (%q, true)", got, ok, wantMK)
+	}
+	if _, ok := canonicalNodeKey("nodekey:0000000000000000000000000000000000000000000000000000000000000000"); ok {
+		t.Fatal("canonicalNodeKey accepted all-zero key")
+	}
+	if _, ok := canonicalMachineKey("mkey:not-valid-hex"); ok {
+		t.Fatal("canonicalMachineKey accepted invalid hex")
+	}
+}
+
+func TestSyncDriftCircuitBreakerPreventsMassRetirement(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+
+	if _, err := e.svc.AddMember(ctx, cli, "alice", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.AddMember(ctx, cli, "bob", "member"); err != nil {
+		t.Fatal(err)
+	}
+	_, d1 := e.addDevice(t, "alice", "personal", "alice-1", "100.64.0.10", "")
+	_, d2 := e.addDevice(t, "alice", "server", "alice-2", "100.64.0.11", "")
+	_, d3 := e.addDevice(t, "bob", "personal", "bob-1", "100.64.0.12", "")
+
+	// Simulate a serialization bug / mass drift hitting 2 of 3 live devices in one pass.
+	e.hs.mu.Lock()
+	for i := range e.hs.nodes {
+		if e.hs.nodes[i].ID == d1.HSNodeID || e.hs.nodes[i].ID == d2.HSNodeID {
+			e.hs.nodes[i].MachineKey = testMachineKey("mass-drift-" + e.hs.nodes[i].ID)
+		}
+	}
+	e.hs.mu.Unlock()
+
+	err := e.svc.Sync(ctx)
+	if err == nil || !strings.Contains(err.Error(), "circuit breaker") {
+		t.Fatalf("mass drift Sync() = %v, want circuit breaker error", err)
+	}
+	// ALL 3 devices MUST remain live and serving (zero retirements!).
+	live, err := e.st.LiveDevices()
+	if err != nil || len(live) != 3 {
+		t.Fatalf("live devices after circuit breaker = %d (err=%v), want 3", len(live), err)
+	}
+	for _, d := range []*Device{d1, d2, d3} {
+		if _, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
+			IP: d.IPv4, HSNodeID: d.HSNodeID, NodeKey: d.NodeKey,
+		}); err != nil {
+			t.Fatalf("device %s stopped serving after circuit breaker: %v", d.Name, err)
+		}
+	}
+	// Audit entry sync.drift_breaker must be recorded.
+	logs, _ := e.st.AuditLog(10)
+	foundBreakerAudit := false
+	for _, entry := range logs {
+		if entry.Action == "sync.drift_breaker" {
+			foundBreakerAudit = true
+		}
+	}
+	if !foundBreakerAudit {
+		t.Fatalf("missing sync.drift_breaker audit entry: %+v", logs)
+	}
+
+	// Restore d2 so only 1 device (d1) genuinely drifted: single-device retirement still works!
+	e.hs.mu.Lock()
+	for i := range e.hs.nodes {
+		if e.hs.nodes[i].ID == d2.HSNodeID {
+			e.hs.nodes[i].MachineKey = d2.MachineKey
+		}
+	}
+	e.hs.mu.Unlock()
+	if err := e.svc.Sync(ctx); err != nil {
+		t.Fatalf("single-device drift Sync() failed: %v", err)
+	}
+	got1, _ := e.st.DeviceByID(d1.ID)
+	got2, _ := e.st.DeviceByID(d2.ID)
+	got3, _ := e.st.DeviceByID(d3.ID)
+	if got1.RemovedAt == nil || got2.RemovedAt != nil || got3.RemovedAt != nil {
+		t.Fatalf("single-device drift result: d1.Removed=%v d2.Removed=%v d3.Removed=%v", got1.RemovedAt, got2.RemovedAt, got3.RemovedAt)
+	}
+}
+
+func TestInlineSyncFailureReturns403AndMissingMachineKeyAlertsOnce(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cli := Actor{CLI: true}
+	if _, err := e.svc.AddMember(ctx, cli, "alice", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.svc.IssueDeviceKey(ctx, cli, "alice", "server"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Inline Sync failure for an unknown peer returns ErrNotFound (HTTP 403), NOT 500.
+	e.hs.mu.Lock()
+	e.hs.failListNodes = true
+	e.hs.mu.Unlock()
+	_, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
+		IP: "100.64.0.99", HSNodeID: "unknown-403", NodeKey: testNodeKey("unknown-403"),
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("inline Sync failure returned %v, want ErrNotFound (403)", err)
+	}
+
+	// 2. Device with empty machine_key in both SQLite and Headscale triggers missingMKAlerted once.
+	e.hs.mu.Lock()
+	e.hs.failListNodes = false
+	e.hs.mu.Unlock()
+	_, d := e.addDevice(t, "alice", "personal", "legacy-no-mk", "100.64.0.33", "")
+	if _, err := e.st.db.Exec(`UPDATE devices SET machine_key = '' WHERE id = ?`, d.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.hs.mu.Lock()
+	for i := range e.hs.nodes {
+		if e.hs.nodes[i].ID == d.HSNodeID {
+			e.hs.nodes[i].MachineKey = ""
+		}
+	}
+	e.hs.mu.Unlock()
+	if err := e.svc.Sync(ctx); err != nil {
+		t.Fatalf("Sync missing machine_key: %v", err)
+	}
+	if !e.svc.missingMKAlerted[d.HSNodeID] {
+		t.Fatalf("expected missingMKAlerted[%q] = true after Sync with empty machine_key", d.HSNodeID)
 	}
 }

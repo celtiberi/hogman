@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"tailscale.com/types/key"
 )
 
 type Config struct {
@@ -123,9 +125,10 @@ type Service struct {
 	hs   *Headscale
 	acme ACMEBackend
 
-	mu         sync.Mutex // serialises changes that touch Headscale or policy
-	lastPolicy string
-	orphans    map[string]bool
+	mu               sync.Mutex // serialises changes that touch Headscale or policy
+	lastPolicy       string
+	orphans          map[string]bool
+	missingMKAlerted map[string]bool
 
 	baseCtxMu sync.RWMutex
 	baseCtx   context.Context
@@ -262,18 +265,19 @@ func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
 		cfg.PresenceTTL = 5 * time.Second
 	}
 	return &Service{
-		cfg:            cfg,
-		st:             st,
-		hs:             hs,
-		acme:           cfg.ACMEBackend,
-		orphans:        map[string]bool{},
-		baseCtx:        context.Background(),
-		rotateCooldown: map[string]time.Time{},
-		rotateFlight:   map[string]*rotateCall{},
-		rotateSem:      make(chan struct{}, keyRotateMaxConc),
-		serverEABHits:  map[int64][]time.Time{},
-		memberEABHits:  map[int64][]time.Time{},
-		memberTXTHits:  map[int64][]time.Time{},
+		cfg:              cfg,
+		st:               st,
+		hs:               hs,
+		acme:             cfg.ACMEBackend,
+		orphans:          map[string]bool{},
+		missingMKAlerted: map[string]bool{},
+		baseCtx:          context.Background(),
+		rotateCooldown:   map[string]time.Time{},
+		rotateFlight:     map[string]*rotateCall{},
+		rotateSem:        make(chan struct{}, keyRotateMaxConc),
+		serverEABHits:    map[int64][]time.Time{},
+		memberEABHits:    map[int64][]time.Time{},
+		memberTXTHits:    map[int64][]time.Time{},
 	}, nil
 }
 
@@ -1034,6 +1038,44 @@ func nodeMatchesBinding(m *Member, d *Device, n *HSNode) bool {
 	return len(n.Tags) == 0 && n.User != nil && n.User.ID != "" && n.User.ID == m.HSUserID
 }
 
+// canonicalNodeKey parses a WireGuard node public key via tailscale's typed
+// key.NodePublic parser (accepting "nodekey:<64-hex>" in any case or bare
+// 64-hex) and returns the canonical "nodekey:<lowercase-hex>" representation.
+func canonicalNodeKey(raw string) (string, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", false
+	}
+	lower := strings.ToLower(s)
+	if !strings.Contains(lower, ":") && len(lower) == 64 {
+		lower = "nodekey:" + lower
+	}
+	var k key.NodePublic
+	if err := k.UnmarshalText([]byte(lower)); err != nil || k.IsZero() {
+		return "", false
+	}
+	return k.String(), true
+}
+
+// canonicalMachineKey parses a Tailscale machine public key via tailscale's
+// typed key.MachinePublic parser (accepting "mkey:<64-hex>" in any case or
+// bare 64-hex) and returns the canonical "mkey:<lowercase-hex>" representation.
+func canonicalMachineKey(raw string) (string, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", false
+	}
+	lower := strings.ToLower(s)
+	if !strings.Contains(lower, ":") && len(lower) == 64 {
+		lower = "mkey:" + lower
+	}
+	var k key.MachinePublic
+	if err := k.UnmarshalText([]byte(lower)); err != nil || k.IsZero() {
+		return "", false
+	}
+	return k.String(), true
+}
+
 func nodeMatchesAddr(n *HSNode, addr netip.Addr) bool {
 	if n == nil {
 		return false
@@ -1073,6 +1115,10 @@ func (s *Service) VerifyDirectPeer(ctx context.Context, peer *PeerIdentity) (*Me
 	if peer == nil || peer.Expired || peer.HSNodeID == "" || peer.NodeKey == "" || peer.IP == "" {
 		return nil, nil, ErrNotFound
 	}
+	peerNodeKey, ok := canonicalNodeKey(peer.NodeKey)
+	if !ok {
+		return nil, nil, ErrNotFound
+	}
 	// KeyExpiry.IsZero() means the node key does not expire (e.g. node.expiry: 0
 	// or tagged servers). Only reject non-zero timestamps that have passed.
 	if !peer.KeyExpiry.IsZero() && !peer.KeyExpiry.After(s.clock()) {
@@ -1091,7 +1137,8 @@ func (s *Service) VerifyDirectPeer(ctx context.Context, peer *PeerIdentity) (*Me
 		// key could explain a newly enrolled device racing ahead of the poll.
 		if open, kerr := s.st.HasOpenDeviceKeys(); kerr == nil && open && s.canTriggerInlineSync() {
 			if serr := s.Sync(ctx); serr != nil {
-				return nil, nil, serr
+				log.Printf("auth: inline sync failed for unknown node %s: %v", peer.HSNodeID, serr)
+				return nil, nil, ErrNotFound
 			}
 			d, err = s.st.DeviceByHSNodeID(peer.HSNodeID)
 		}
@@ -1114,12 +1161,14 @@ func (s *Service) VerifyDirectPeer(ctx context.Context, peer *PeerIdentity) (*Me
 	if d.IPv4 != canon && d.IPv6 != canon {
 		return nil, nil, ErrNotFound
 	}
-	if d.NodeKey == "" || d.MachineKey == "" {
-		log.Printf("auth: node %s (%s) missing pinned node_key/machine_key; refusing", d.HSNodeID, d.Name)
+	storedNodeKey, okNK := canonicalNodeKey(d.NodeKey)
+	_, okMK := canonicalMachineKey(d.MachineKey)
+	if !okNK || !okMK {
+		log.Printf("auth: node %s (%s) missing or invalid pinned node_key/machine_key; refusing", d.HSNodeID, d.Name)
 		return nil, nil, ErrNotFound
 	}
-	if d.NodeKey != peer.NodeKey {
-		return s.verifyAndRotateNodeKey(ctx, d.HSNodeID, peer, addr, canon)
+	if storedNodeKey != peerNodeKey {
+		return s.verifyAndRotateNodeKey(ctx, d.HSNodeID, peerNodeKey, addr, canon)
 	}
 	return m, d, nil
 }
@@ -1131,7 +1180,7 @@ func (s *Service) VerifyDirectPeer(ctx context.Context, peer *PeerIdentity) (*Me
 // rotation), requires pinned machine_key + owner/tag binding + IP match + active
 // member, and returns freshly reloaded Member/Device rows so concurrent
 // suspensions or role demotions cannot be bypassed.
-func (s *Service) verifyAndRotateNodeKey(ctx context.Context, hsNodeID string, peer *PeerIdentity, addr netip.Addr, canon string) (*Member, *Device, error) {
+func (s *Service) verifyAndRotateNodeKey(ctx context.Context, hsNodeID, peerNodeKey string, addr netip.Addr, canon string) (*Member, *Device, error) {
 	nowT := s.clock()
 	s.rotateMu.Lock()
 	call := s.rotateFlight[hsNodeID]
@@ -1209,7 +1258,9 @@ func (s *Service) verifyAndRotateNodeKey(ctx context.Context, hsNodeID string, p
 	if d.IPv4 != canon && d.IPv6 != canon {
 		return nil, nil, ErrNotFound
 	}
-	if d.NodeKey == "" || d.MachineKey == "" || d.NodeKey != peer.NodeKey {
+	curNodeKey, okNK := canonicalNodeKey(d.NodeKey)
+	_, okMK := canonicalMachineKey(d.MachineKey)
+	if !okNK || !okMK || curNodeKey != peerNodeKey {
 		return nil, nil, ErrNotFound
 	}
 	return m, d, nil
@@ -1232,31 +1283,34 @@ func (s *Service) commitNodeKeyRotation(hsNodeID string, n *HSNode, addr netip.A
 	if d.IPv4 != canon && d.IPv6 != canon {
 		return ErrNotFound
 	}
-	if d.NodeKey == "" || d.MachineKey == "" {
+	storedNodeKey, okNK := canonicalNodeKey(d.NodeKey)
+	storedMachKey, okMK := canonicalMachineKey(d.MachineKey)
+	if !okNK || !okMK {
 		return ErrNotFound
 	}
-	if n == nil || n.MachineKey == "" || n.MachineKey != d.MachineKey {
-		gotMK := ""
-		if n != nil {
-			gotMK = n.MachineKey
-		}
-		log.Printf("auth: ALERT node %s (%s) machine_key mismatch on key rotation (stored=%q headscale=%q)", d.HSNodeID, d.Name, d.MachineKey, gotMK)
+	if n == nil {
+		return ErrNotFound
+	}
+	hsMachKey, okHSMK := canonicalMachineKey(n.MachineKey)
+	if !okHSMK || hsMachKey != storedMachKey {
+		log.Printf("auth: ALERT node %s (%s) machine_key mismatch on key rotation (stored=%q headscale=%q)", d.HSNodeID, d.Name, storedMachKey, n.MachineKey)
 		return ErrNotFound
 	}
 	if !nodeMatchesBinding(m, d, n) {
 		log.Printf("auth: ALERT node %s (%s) owner/tag binding mismatch on key rotation", d.HSNodeID, d.Name)
 		return ErrNotFound
 	}
-	if !nodeMatchesAddr(n, addr) || n.NodeKey == "" {
+	hsNodeKey, okHSNK := canonicalNodeKey(n.NodeKey)
+	if !nodeMatchesAddr(n, addr) || !okHSNK {
 		log.Printf("auth: node %s (%s) WhoIs node key/IP mismatch against Headscale", d.HSNodeID, d.Name)
 		return ErrNotFound
 	}
-	if d.NodeKey == n.NodeKey {
+	if storedNodeKey == hsNodeKey {
 		// Already rotated (e.g. by a concurrent syncOnce) or Headscale still holds
-		// the old key; caller verifies d.NodeKey == peer.NodeKey after waking.
+		// the old key; caller verifies canonicalNodeKey(d.NodeKey) == peerNodeKey after waking.
 		return nil
 	}
-	rotated, err := s.st.RotateDeviceNodeKey(d.ID, d.NodeKey, d.MachineKey, n.NodeKey)
+	rotated, err := s.st.RotateDeviceNodeKey(d.ID, d.NodeKey, d.MachineKey, hsNodeKey)
 	if err != nil {
 		return err
 	}
@@ -2094,6 +2148,41 @@ func (s *Service) syncOnce(ctx context.Context) (bool, error) {
 		return m
 	}
 
+	// Pre-check drift across all existing live nodes BEFORE making any DB writes.
+	// If more than one live device would be retired for machine_key or owner/tag
+	// binding drift in a single pass, trip a circuit breaker and retire NONE so a
+	// future Headscale serialization change can never wipe out a pen.
+	driftReasons := map[string]string{}
+	for _, n := range nodes {
+		if n.HasTag("tag:infra") {
+			continue
+		}
+		d, ok := byNode[n.ID]
+		if !ok {
+			continue
+		}
+		m := memberOf(d.MemberID)
+		if m != nil && m.Status == "removed" {
+			continue
+		}
+		dMachKey, dHasMK := canonicalMachineKey(d.MachineKey)
+		nMachKey, nHasMK := canonicalMachineKey(n.MachineKey)
+		if dHasMK {
+			if nHasMK && nMachKey != dMachKey {
+				driftReasons[n.ID] = "machine_key changed"
+			} else if nHasMK && m != nil && !nodeMatchesBinding(m, d, &n) {
+				driftReasons[n.ID] = "owner/tag binding changed"
+			}
+		} else if d.MachineKey == "" && nHasMK && m != nil && !nodeMatchesBinding(m, d, &n) {
+			driftReasons[n.ID] = "owner/tag binding mismatch"
+		}
+	}
+	if len(driftReasons) > 1 {
+		log.Printf("sync: ALERT circuit breaker tripped: %d of %d live devices had machine_key or binding drift; retiring none", len(driftReasons), len(live))
+		s.st.Audit("registrar", "sync.drift_breaker", fmt.Sprintf("%d/%d", len(driftReasons), len(live)), "refusing mass device retirement")
+		return false, fmt.Errorf("sync drift circuit breaker: %d of %d live devices drifted; refusing mass retirement", len(driftReasons), len(live))
+	}
+
 	seen := map[string]bool{}
 	for _, n := range nodes {
 		if n.HasTag("tag:infra") {
@@ -2105,59 +2194,50 @@ func (s *Service) syncOnce(ctx context.Context) (bool, error) {
 		if name == "" {
 			name = n.Name
 		}
+		nNodeKey, nHasNK := canonicalNodeKey(n.NodeKey)
+		nMachKey, nHasMK := canonicalMachineKey(n.MachineKey)
 		if d, ok := byNode[n.ID]; ok {
 			m := memberOf(d.MemberID)
 			if m != nil && m.Status == "removed" {
 				s.deleteStray(ctx, n, d, "member removed")
 				continue
 			}
-			// Enforce pinned machine_key and owner/tag binding invariants on sync
-			// just as strictly as verifyAndRotateNodeKey(). Never patch in place on
-			// hardware or ownership drift, and never accept a key update when
-			// Headscale omits machine_key on a pinned device.
-			if d.MachineKey != "" {
-				if n.MachineKey == "" {
-					log.Printf("sync: ALERT node %s (%s) missing machine_key in headscale response; refusing update", n.ID, d.Name)
-					continue
-				}
-				if n.MachineKey != d.MachineKey {
-					log.Printf("sync: ALERT node %s (%s) machine_key changed (%s -> %s); retiring old device #%d", n.ID, d.Name, d.MachineKey, n.MachineKey, d.ID)
-					if err := s.st.MarkDeviceRemoved(d.ID); err != nil {
-						return false, err
-					}
-					s.st.Audit("registrar", "device.gone", fmt.Sprintf("%s/%s#%d", d.Member, d.Name, d.ID), "machine_key changed")
-					delete(byNode, n.ID)
-					goto enrollNew
-				}
-				if m != nil && !nodeMatchesBinding(m, d, &n) {
-					log.Printf("sync: ALERT node %s (%s) owner/tag binding changed; retiring old device #%d", n.ID, d.Name, d.ID)
-					if err := s.st.MarkDeviceRemoved(d.ID); err != nil {
-						return false, err
-					}
-					s.st.Audit("registrar", "device.gone", fmt.Sprintf("%s/%s#%d", d.Member, d.Name, d.ID), "owner/tag binding changed")
-					delete(byNode, n.ID)
-					goto enrollNew
-				}
-			} else if n.MachineKey != "" && m != nil && !nodeMatchesBinding(m, d, &n) {
-				log.Printf("sync: ALERT node %s (%s) owner/tag binding mismatch on backfill; retiring old device #%d", n.ID, d.Name, d.ID)
+			if reason, drifted := driftReasons[n.ID]; drifted {
+				log.Printf("sync: ALERT node %s (%s) %s; retiring old device #%d", n.ID, d.Name, reason, d.ID)
 				if err := s.st.MarkDeviceRemoved(d.ID); err != nil {
 					return false, err
 				}
-				s.st.Audit("registrar", "device.gone", fmt.Sprintf("%s/%s#%d", d.Member, d.Name, d.ID), "owner/tag binding mismatch")
+				s.st.Audit("registrar", "device.gone", fmt.Sprintf("%s/%s#%d", d.Member, d.Name, d.ID), reason)
 				delete(byNode, n.ID)
 				goto enrollNew
 			}
+			dMachKey, dHasMK := canonicalMachineKey(d.MachineKey)
+			if d.MachineKey != "" && !dHasMK {
+				log.Printf("sync: ALERT node %s (%s) has unparseable stored machine_key %q; refusing update", n.ID, d.Name, d.MachineKey)
+				continue
+			}
+			if dHasMK && !nHasMK {
+				log.Printf("sync: ALERT node %s (%s) missing or unparseable machine_key in headscale response; refusing update", n.ID, d.Name)
+				continue
+			}
+			if d.MachineKey == "" && !nHasMK {
+				if !s.missingMKAlerted[n.ID] {
+					log.Printf("sync: ALERT node %s (%s) has no machine_key in headscale or sqlite; direct portal auth will refuse it until headscale provides machineKey", n.ID, d.Name)
+					s.missingMKAlerted[n.ID] = true
+				}
+			}
 
 			nodeKey := d.NodeKey
-			if n.NodeKey != "" {
-				if nodeKey != "" && nodeKey != n.NodeKey {
+			if nHasNK {
+				dNodeKey, dHasNK := canonicalNodeKey(d.NodeKey)
+				if dHasNK && dNodeKey != nNodeKey {
 					s.st.Audit("registrar", "device.key_rotate", fmt.Sprintf("%s/%s#%d", d.Member, d.Name, d.ID), "via sync")
 				}
-				nodeKey = n.NodeKey
+				nodeKey = nNodeKey
 			}
-			machineKey := d.MachineKey
-			if machineKey == "" && n.MachineKey != "" {
-				machineKey = n.MachineKey
+			machineKey := dMachKey
+			if machineKey == "" && nHasMK {
+				machineKey = nMachKey
 			}
 			if d.IPv4 != v4 || d.IPv6 != v6 || d.Name != name || d.NodeKey != nodeKey || d.MachineKey != machineKey {
 				if err := s.st.UpdateDevice(d.ID, name, v4, v6, nodeKey, machineKey); err != nil {
@@ -2183,7 +2263,7 @@ func (s *Service) syncOnce(ctx context.Context) (bool, error) {
 			s.deleteStray(ctx, n, nil, "key revoked or member not active")
 			continue
 		}
-		d := &Device{MemberID: k.MemberID, Kind: k.Kind, HSNodeID: n.ID, NodeKey: n.NodeKey, MachineKey: n.MachineKey, Name: name, IPv4: v4, IPv6: v6}
+		d := &Device{MemberID: k.MemberID, Kind: k.Kind, HSNodeID: n.ID, NodeKey: nNodeKey, MachineKey: nMachKey, Name: name, IPv4: v4, IPv6: v6}
 		if err := s.st.InsertDevice(d); err != nil {
 			return false, err
 		}
