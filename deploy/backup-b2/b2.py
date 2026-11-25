@@ -161,6 +161,11 @@ def cmd_ensure(args: argparse.Namespace) -> int:
     print(f"backup bucket ok: private, Object Lock compliance {RETENTION_DAYS}d, lifecycle delete after {RETENTION_DAYS + 1}d")
     if not args.new_keys:
         return 0
+    # Check both recipients BEFORE creating anything, so a typo can't leave a
+    # live key in B2 that nobody can decrypt.
+    for var in ("B2_SERVER_RECIPIENT", "B2_MAINTAINER_RECIPIENT"):
+        if not AGE_RE.match(os.environ.get(var, "").strip()):
+            raise B2Error(f"{var} is not an age public key (age1...); no keys created")
     os.makedirs(args.out, exist_ok=True)
     w = create_key(b2, WRITE_KEY_NAME, ["writeFiles"], bucket["bucketId"])
     env = (f"B2_KEY_ID={w['applicationKeyId']}\nB2_KEY={w['applicationKey']}\n"

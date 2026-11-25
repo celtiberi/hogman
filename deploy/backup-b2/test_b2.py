@@ -166,6 +166,7 @@ class B2Test(unittest.TestCase):
         os.environ["B2_SERVER_RECIPIENT"] = "not-a-key"
         self.assertEqual(self.b2.main(["ensure", "--new-keys", "--out", os.path.join(self.tmp, "out")]), 1)
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "out", "server-b2.env.age")))
+        self.assertEqual(self.state.keys, [], "a bad recipient must not leave a key behind in B2")
 
     def test_new_keys_are_scoped_and_only_written_encrypted(self):
         self.assertEqual(self.ensure("--new-keys"), 0)
