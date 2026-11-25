@@ -605,6 +605,8 @@ only_proxy_tcp_listen() {
   '
 }
 check "hogman agent and share only open 127.0.0.1:<proxy> TCP listener (I-27)" only_proxy_tcp_listen
+DAVE_LAPTOP_IP="$(ip_of dave-laptop)"
+check "bob's laptop cannot reach dave's tsnet laptop over the mesh (443)" not port_open bob-tools "$DAVE_LAPTOP_IP" 443
 NOTES_IP="$(ip_of notes)"
 check "alice's server cannot reach dave's notes share on 443 (server isolation)" not port_open alice-tools "$NOTES_IP" 443
 notes_device() {
