@@ -102,6 +102,15 @@ Every pen container carries memory (`mem_limit`), PID (`pids_limit`), and CPU (`
 `headscale`, `0.25` on `registrar`, both with `cpu_shares: 256`) limits
 so a single busy or spinning pen cannot starve other pens; host-level services (`hogman-front`,
 `challenge-dns`, `hogman-signup`, and `sshd`) stay uncapped at default higher CPU weight (`1024`).
+Each pen's registrar also enforces configurable per-pen guardrails via `/opt/hogman/pens/<name>/.env`:
+`MAX_MEMBERS` (default `500`, counting active and suspended members; permanently retired handles do
+not count) and `MAX_DEVICES` (default `500`, counting live devices plus open unused device keys).
+Non-admin members may hold at most `3` open unused device keys at a time (`10` for admins and
+owners). To prevent owner lockout (D-16), active owners requesting a `personal` device receive `+2`
+headroom above `MAX_DEVICES` (and a per-owner floor of `< 2` personal slots even on grandfathered
+over-cap pens), CLI `member add` / `device key` commands bypass caps (`bypass_cap`), existing pens
+over cap are grandfathered cleanly, and public `/hogman/v1/redeem` returns an identical generic
+`409` after invite validation without leaking counts.
 `deploy/test-host.sh` exercises two pens on one host, combined multi-pen PAC routing, backup/restore,
 legacy 4-container upgrade/rollback and mixed-fleet routing, name burning, and public sign-ups
 against `challenge-dns` and Pebble.
@@ -378,6 +387,7 @@ using a host-pushed snapshot file and zero host RPC listeners:
 - `/run/hogman-ops` is mounted read-only as a **directory** (not the single file) so atomic snapshot renames are picked up on every request.
 - `hogman-sidecar` runs with `--identity-headers`; `ops-web` fails closed (`403`) unless `X-Hogman-Handle` is present, non-tagged (personal devices only), and listed in `OPS_HANDLES`.
 - Waitlist output contains only counts (`waiting`, `invited`) and the age of the oldest waiting entry — never emails or notes. Customer pen data directories (`pens/<name>/data/`) are never read.
+- Per-pen Headscale `SetPolicy` push latency (`setpolicy_samples`, `setpolicy_last_ms`, and `setpolicy_p95_ms` over the latest 100 pushes) is collected by `ops-snapshot.sh` from running registrar container logs (`policy: applied` / `policy: failed` lines only, bounded integer milliseconds, keeping `PrivateNetwork=yes` and zero access to `pens/<name>/data/`). Whenever any live pen's `p95` exceeds `5 s`, the host sign-up broker (which mounts `/run/hogman-ops` read-only) sends an aggregated, rate-limited `ntfy` alert (`ops` limiter, 6-hour per-pen cooldown).
 - All mutations (`waitlist invite/remove`, `sleep`, `wake`, `purge`, `plan`, `theme`) stay CLI-only via Tailscale SSH + `hogman-host`.
 
 ## Publishing releases
