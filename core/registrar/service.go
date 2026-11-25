@@ -974,7 +974,8 @@ func (s *Service) VerifyDirectPeer(ctx context.Context, peer *PeerIdentity) (*Me
 	d, err := s.st.DeviceByHSNodeID(peer.HSNodeID)
 	if errors.Is(err, ErrNotFound) {
 		// Only trigger an on-demand Sync when an open device key could explain
-		// a brand-new device racing ahead of the background poll.
+		// a brand-new device racing ahead of the background poll. Sync is
+		// single-flight, so repeated bad peers cannot drive concurrent Headscale calls.
 		if open, kerr := s.st.HasOpenDeviceKeys(); kerr == nil && open {
 			if serr := s.Sync(ctx); serr != nil {
 				return nil, nil, serr
@@ -988,6 +989,7 @@ func (s *Service) VerifyDirectPeer(ctx context.Context, peer *PeerIdentity) (*Me
 
 	// Backfill missing node_key on legacy device rows created before this
 	// column existed, or refresh once if the node's mesh IP shifted.
+	// Single-flight Sync ensures concurrent requests share one Headscale pass.
 	if d.NodeKey == "" || (d.IPv4 != canon && d.IPv6 != canon) {
 		if serr := s.Sync(ctx); serr != nil {
 			return nil, nil, serr
@@ -998,6 +1000,9 @@ func (s *Service) VerifyDirectPeer(ctx context.Context, peer *PeerIdentity) (*Me
 		}
 	}
 
+	if d.RemovedAt != nil {
+		return nil, nil, ErrNotFound
+	}
 	if d.NodeKey == "" || d.NodeKey != peer.NodeKey {
 		log.Printf("auth: node %s (%s) WhoIs node key mismatch (stored=%q peer=%q)", d.HSNodeID, d.Name, d.NodeKey, peer.NodeKey)
 		return nil, nil, ErrNotFound
@@ -1008,6 +1013,9 @@ func (s *Service) VerifyDirectPeer(ctx context.Context, peer *PeerIdentity) (*Me
 	m, err := s.st.MemberByID(d.MemberID)
 	if err != nil {
 		return nil, nil, err
+	}
+	if m.Status != "active" {
+		return nil, nil, forbidden("membership %s", m.Status)
 	}
 	return m, d, nil
 }

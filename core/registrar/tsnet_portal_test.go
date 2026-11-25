@@ -137,19 +137,29 @@ func TestVerifyDirectPeerSecurityAndBackfill(t *testing.T) {
 		t.Fatalf("valid peer with empty presence snapshot failed: m=%v d=%v err=%v", m, gotD, err)
 	}
 
-	// 4. Suspending in SQLite immediately blocks direct handler even if WhoIs still resolves the peer.
+	// 4. Suspending in SQLite immediately blocks VerifyDirectPeer itself AND every
+	// direct handler route (including routes like GET /api/directory with no
+	// handler-level status check) even if WhoIs still resolves the peer.
 	if err := e.svc.Suspend(ctx, cli, "bob", "test"); err != nil {
 		t.Fatal(err)
+	}
+	var prob *Problem
+	if _, _, err := e.svc.VerifyDirectPeer(ctx, &PeerIdentity{
+		IP: "100.64.0.10", HSNodeID: d.HSNodeID, NodeKey: d.NodeKey,
+	}); !errors.As(err, &prob) || prob.Status != http.StatusForbidden {
+		t.Fatalf("VerifyDirectPeer suspended member: err=%v want 403 Problem", err)
 	}
 	h := MeshHandlerDirect(e.svc, func(_ context.Context, _ string) (*PeerIdentity, error) {
 		return &PeerIdentity{IP: "100.64.0.10", HSNodeID: d.HSNodeID, NodeKey: d.NodeKey}, nil
 	})
-	req := httptest.NewRequest("GET", "/api/me", nil)
-	req.RemoteAddr = "100.64.0.10:12345"
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("suspended member status=%d want 403", rec.Code)
+	for _, path := range []string{"/api/me", "/api/directory"} {
+		req := httptest.NewRequest("GET", path, nil)
+		req.RemoteAddr = "100.64.0.10:12345"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("suspended member GET %s status=%d want 403", path, rec.Code)
+		}
 	}
 	if err := e.svc.Resume(ctx, cli, "bob"); err != nil {
 		t.Fatal(err)
