@@ -48,6 +48,8 @@ UPLOAD_ATTEMPTS = 5
 WRITE_KEY_NAME = "hogman-server-backup-write"
 READ_KEY_NAME = "hogman-maintainer-backup-read"
 RETRYABLE = re.compile(r"HTTP (408|429|5\d\d)\b|timed out|Connection|reset")
+REMOTE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}/[a-z][a-z0-9-]{0,62}-[0-9]{8}T[0-9]{6}Z\.tar\.gz\.age$")
+MAX_DOWNLOAD = 2 << 30  # 2 GiB; a pen backup is a few hundred KB
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.tar\.gz\.age$")
 
 
@@ -248,29 +250,49 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 def cmd_download(args: argparse.Namespace) -> int:
     name = args.name
-    base = os.path.basename(name)
-    if not NAME_RE.match(base) or name.startswith("/") or ".." in name.split("/"):
-        raise B2Error(f"refusing to download {name!r}: expected <host>/<backup>.tar.gz.age")
+    if not REMOTE_RE.match(name):
+        raise B2Error(f"refusing to download {name!r}: expected <host>/<name>-<YYYYMMDDTHHMMSSZ>.tar.gz.age")
     env = read_env(args.env)
     b2 = B2(env.get("B2_KEY_ID", ""), env.get("B2_KEY", ""))
-    out = args.out or base
-    if os.path.exists(out):
-        raise B2Error(f"{out} already exists; not overwriting")
+    out = args.out or os.path.basename(name)
     url = f"{b2.download_url}/file/{urllib.parse.quote(env['B2_BUCKET'])}/{urllib.parse.quote(name)}"
     req = urllib.request.Request(url, headers={"Authorization": b2.token})
+    # O_EXCL: never overwrite; 0600: backups are private even while encrypted.
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    ok = False
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            data = resp.read()
-            want = resp.headers.get("X-Bz-Content-Sha1", "")
+        h = hashlib.sha1()
+        size = 0
+        with os.fdopen(fd, "wb") as f, urllib.request.urlopen(req, timeout=300) as resp:
+            want = (resp.headers.get("X-Bz-Content-Sha1") or "").strip().lower()
+            # Fail closed: every backup we upload carries its SHA-1.
+            if not re.fullmatch(r"[0-9a-f]{40}", want):
+                raise B2Error(f"{name}: B2 gave no usable SHA-1 ({want!r}); not saved")
+            clen = resp.headers.get("Content-Length")
+            if clen and int(clen) > MAX_DOWNLOAD:
+                raise B2Error(f"{name}: {clen} bytes is over the {MAX_DOWNLOAD} byte limit; not saved")
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_DOWNLOAD:
+                    raise B2Error(f"{name}: over the {MAX_DOWNLOAD} byte limit; not saved")
+                h.update(chunk)
+                f.write(chunk)
+        got = h.hexdigest()
+        if got != want:
+            raise B2Error(f"{name}: SHA-1 mismatch (B2 {want}, got {got}); not saved")
+        ok = True
     except urllib.error.HTTPError as e:
         raise B2Error(f"download {name}: HTTP {e.code}") from None
-    got = hashlib.sha1(data).hexdigest()
-    if want and want != "none" and want != got:
-        raise B2Error(f"{name}: SHA-1 mismatch (B2 {want}, got {got}); not saved")
-    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
-    print(f"downloaded {name} -> {out} ({len(data)} bytes, sha1 verified)")
+    finally:
+        if not ok:
+            try:
+                os.unlink(out)
+            except OSError:
+                pass
+    print(f"downloaded {name} -> {out} ({size} bytes, sha1 verified)")
     return 0
 
 

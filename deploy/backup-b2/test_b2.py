@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
+import sqlite3
+import tarfile
 import os
 import shutil
 import subprocess
@@ -26,6 +29,7 @@ class FakeB2:
         self.files: dict[str, bytes] = {}
         self.calls: list[str] = []
         self.corrupt_sha1 = False
+        self.omit_sha1 = False
         self.fail_uploads = 0
         self.hide_lock = False
 
@@ -54,7 +58,8 @@ def make_handler(state: FakeB2, base: list[str]):
                 body = state.files[name]
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
-                self.send_header("X-Bz-Content-Sha1", "0" * 40 if state.corrupt_sha1 else hashlib.sha1(body).hexdigest())
+                if not state.omit_sha1:
+                    self.send_header("X-Bz-Content-Sha1", "0" * 40 if state.corrupt_sha1 else hashlib.sha1(body).hexdigest())
                 self.end_headers()
                 self.wfile.write(body)
                 return
@@ -241,10 +246,70 @@ class B2Test(unittest.TestCase):
         self.assertEqual(self.b2.main(["download", "host-a/ops-20261125T033000Z.tar.gz.age", "--env", renv, "-o", out]), 1)
         self.assertEqual(self.b2.main(["download", "../etc/passwd", "--env", renv]), 1)
         self.assertEqual(self.b2.main(["download", "host-a/registrar.db", "--env", renv]), 1)
+        self.assertEqual(self.b2.main(["download", "host-a/sub/ops-20261125T033000Z.tar.gz.age", "--env", renv]), 1)
+        # fail closed when B2 sends no SHA-1, and leave nothing behind
+        self.state.omit_sha1 = True
+        nosha = os.path.join(self.tmp, "nosha.tar.gz.age")
+        self.assertEqual(self.b2.main(["download", "host-a/ops-20261125T033000Z.tar.gz.age", "--env", renv, "-o", nosha]), 1)
+        self.assertFalse(os.path.exists(nosha))
+        self.state.omit_sha1 = False
         self.state.corrupt_sha1 = True
         bad = os.path.join(self.tmp, "bad.tar.gz.age")
         self.assertEqual(self.b2.main(["download", "host-a/ops-20261125T033000Z.tar.gz.age", "--env", renv, "-o", bad]), 1)
         self.assertFalse(os.path.exists(bad))
+
+    def _restore_env(self):
+        """Fake bucket + a restore key encrypted to the 'maintainer' test key."""
+        with open(os.path.join(self.tmp, "maintainer.pub")) as f:
+            pub = f.read().strip()
+        self.state.buckets["bkt0"] = {"bucketId": "bkt0", "bucketName": "hogman-backups-x"}
+        renv = "B2_KEY_ID=kid\nB2_KEY=SECRET\nB2_BUCKET=hogman-backups-x\nB2_BUCKET_ID=bkt0\n"
+        rk = os.path.join(self.tmp, "restore.age")
+        subprocess.run(["age", "-r", pub, "-o", rk], input=renv.encode(), check=True)
+        return pub, rk
+
+    def _backup(self, pub, entries):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            for kind, name, data in entries:
+                ti = tarfile.TarInfo(name)
+                if kind == "file":
+                    ti.size = len(data)
+                    tf.addfile(ti, io.BytesIO(data))
+                elif kind == "symlink":
+                    ti.type, ti.linkname = tarfile.SYMTYPE, data
+                    tf.addfile(ti)
+        return subprocess.run(["age", "-r", pub], input=buf.getvalue(), capture_output=True, check=True).stdout
+
+    def _restore_check(self, rk, pen="ops"):
+        script = os.path.join(HERE, "restore-check.sh")
+        env = {**os.environ, "HOGMAN_RESTORE_KEY": rk}
+        return subprocess.run(["bash", script, self.ids["maintainer"], pen], env=env, capture_output=True, text=True)
+
+    def test_restore_check_end_to_end_and_hostile_archives(self):
+        pub, rk = self._restore_env()
+        db = os.path.join(self.tmp, "registrar.db")
+        c = sqlite3.connect(db)
+        c.executescript("CREATE TABLE members(status TEXT); INSERT INTO members VALUES('active'),('active'),('removed');"
+                        "CREATE TABLE devices(removed_at INT); INSERT INTO devices VALUES(NULL),(5);")
+        c.commit(); c.close()
+        with open(db, "rb") as f:
+            good = self._backup(pub, [("file", "data/registrar/registrar.db", f.read())])
+        self.state.files["host-a/ops-20261124T033000Z.tar.gz.age"] = b"older-not-picked"
+        self.state.files["host-a/ops-20261125T033000Z.tar.gz.age"] = good
+        # A planted far-future "backup" must be ignored, not picked as newest.
+        self.state.files["host-b/ops-20991231T000000Z.tar.gz.age"] = self._backup(pub, [("file", "evil", b"x")])
+        r = self._restore_check(rk)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("host-a/ops-20261125T033000Z", r.stdout)
+        if shutil.which("sqlite3"):
+            self.assertIn("2 members, 1 live devices, integrity ok", r.stdout)
+        # Hostile archives are refused before anything is unpacked.
+        for entries in ([("symlink", "data/link", "/etc/passwd")], [("file", "../../escape", b"x")]):
+            self.state.files = {"host-a/ops-20261126T033000Z.tar.gz.age": self._backup(pub, entries)}
+            r = self._restore_check(rk)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("refusing", r.stderr)
 
     def test_upload_refuses_anything_but_encrypted_backups(self):
         env = self._server_env()
