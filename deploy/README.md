@@ -189,9 +189,12 @@ used pen names), encrypted with `age` to a key the server cannot decrypt:
 
    From then on each nightly backup is also uploaded. The server's key can only **add** files:
    it can't list, read or delete them. Object Lock keeps every copy for 27 days, then a lifecycle
-   rule deletes it, within 30 days of upload even with B2's once-a-day sweep (D-37). **Restoring from B2:** decrypt
-   `maintainer-restore-b2.env.age` with your backup key, download the file you need with that
-   read key, then restore as below.
+   rule deletes it, within 30 days of upload even with B2's once-a-day sweep (D-37). **Restoring from B2:**
+   `deploy/backup-b2/restore-check.sh <backup-key-file> [pen]` (restore key read from
+   `~/Documents/hogman-maintainer-restore-b2.env.age`, or set `HOGMAN_RESTORE_KEY=<path>`) decrypts your restore key, downloads the
+   newest backup of a pen (SHA-1 checked), decrypts and unpacks it into a private temp folder, and
+   prints what's inside. Use `b2.py list` / `b2.py download <host>/<file> --env <read.env>` to fetch a
+   specific one, then restore as below.
 
 4. (Until the B2 copy is verified by a test restore) pull encrypted archives to a second
    machine using a restricted SSH key:

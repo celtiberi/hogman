@@ -48,6 +48,8 @@ UPLOAD_ATTEMPTS = 5
 WRITE_KEY_NAME = "hogman-server-backup-write"
 READ_KEY_NAME = "hogman-maintainer-backup-read"
 RETRYABLE = re.compile(r"HTTP (408|429|5\d\d)\b|timed out|Connection|reset")
+REMOTE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}/[a-z][a-z0-9-]{0,62}-[0-9]{8}T[0-9]{6}Z\.tar\.gz\.age$")
+MAX_DOWNLOAD = 2 << 30  # 2 GiB; a pen backup is a few hundred KB
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.tar\.gz\.age$")
 
 
@@ -94,6 +96,7 @@ class B2:
         self.account_id = auth["accountId"]
         self.token = auth["authorizationToken"]
         self.api_url = auth["apiInfo"]["storageApi"]["apiUrl"]
+        self.download_url = auth["apiInfo"]["storageApi"].get("downloadUrl", self.api_url)
 
     def call(self, name: str, body: dict) -> dict:
         return _call(f"{self.api_url}/b2api/v3/{name}", token=self.token, body=body)
@@ -223,6 +226,76 @@ def cmd_upload(args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------------------------------------- list / download --
+# Restore side, run by the maintainer on their own machine with the read key
+# (maintainer-restore-b2.env.age, decrypted with their backup key). Backups stay
+# age-encrypted; decrypting them needs that same offline key.
+
+def cmd_list(args: argparse.Namespace) -> int:
+    env = read_env(args.env)
+    b2 = B2(env.get("B2_KEY_ID", ""), env.get("B2_KEY", ""))
+    start = None
+    while True:
+        body = {"bucketId": env["B2_BUCKET_ID"], "maxFileCount": 1000, "prefix": args.prefix}
+        if start:
+            body["startFileName"] = start
+        res = b2.call("b2_list_file_names", body)
+        for f in res.get("files", []):
+            if f.get("action") == "upload":
+                print(f"{f['fileName']}\t{f.get('contentLength', 0)}")
+        start = res.get("nextFileName")
+        if not start:
+            return 0
+
+
+def cmd_download(args: argparse.Namespace) -> int:
+    name = args.name
+    if not REMOTE_RE.match(name):
+        raise B2Error(f"refusing to download {name!r}: expected <host>/<name>-<YYYYMMDDTHHMMSSZ>.tar.gz.age")
+    env = read_env(args.env)
+    b2 = B2(env.get("B2_KEY_ID", ""), env.get("B2_KEY", ""))
+    out = args.out or os.path.basename(name)
+    url = f"{b2.download_url}/file/{urllib.parse.quote(env['B2_BUCKET'])}/{urllib.parse.quote(name)}"
+    req = urllib.request.Request(url, headers={"Authorization": b2.token})
+    # O_EXCL: never overwrite; 0600: backups are private even while encrypted.
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    ok = False
+    try:
+        h = hashlib.sha1()
+        size = 0
+        with os.fdopen(fd, "wb") as f, urllib.request.urlopen(req, timeout=300) as resp:
+            want = (resp.headers.get("X-Bz-Content-Sha1") or "").strip().lower()
+            # Fail closed: every backup we upload carries its SHA-1.
+            if not re.fullmatch(r"[0-9a-f]{40}", want):
+                raise B2Error(f"{name}: B2 gave no usable SHA-1 ({want!r}); not saved")
+            clen = resp.headers.get("Content-Length")
+            if clen and int(clen) > MAX_DOWNLOAD:
+                raise B2Error(f"{name}: {clen} bytes is over the {MAX_DOWNLOAD} byte limit; not saved")
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_DOWNLOAD:
+                    raise B2Error(f"{name}: over the {MAX_DOWNLOAD} byte limit; not saved")
+                h.update(chunk)
+                f.write(chunk)
+        got = h.hexdigest()
+        if got != want:
+            raise B2Error(f"{name}: SHA-1 mismatch (B2 {want}, got {got}); not saved")
+        ok = True
+    except urllib.error.HTTPError as e:
+        raise B2Error(f"download {name}: HTTP {e.code}") from None
+    finally:
+        if not ok:
+            try:
+                os.unlink(out)
+            except OSError:
+                pass
+    print(f"downloaded {name} -> {out} ({size} bytes, sha1 verified)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -234,9 +307,17 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--env", default="/etc/hogman/b2.env")
     u.add_argument("--host", default=os.uname().nodename)
     u.add_argument("--backoff", type=float, default=1.0, help=argparse.SUPPRESS)
+    ls = sub.add_parser("list", help="list backups (needs the maintainer read key)")
+    ls.add_argument("--env", required=True)
+    ls.add_argument("--prefix", default="")
+    d = sub.add_parser("download", help="download one backup (needs the maintainer read key)")
+    d.add_argument("name", help="<host>/<pen>-<timestamp>.tar.gz.age, as shown by list")
+    d.add_argument("--env", required=True)
+    d.add_argument("-o", "--out")
     args = ap.parse_args(argv)
+    cmds = {"ensure": cmd_ensure, "upload": cmd_upload, "list": cmd_list, "download": cmd_download}
     try:
-        return cmd_ensure(args) if args.cmd == "ensure" else cmd_upload(args)
+        return cmds[args.cmd](args)
     except (B2Error, KeyError, OSError) as e:
         print(f"b2: {e}", file=sys.stderr)
         return 1
