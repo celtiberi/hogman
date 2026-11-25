@@ -507,6 +507,13 @@ html[data-theme="work"] pre {
   color: #f3f4f6;
 }
 
+html[data-theme="work"] pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: #f3f4f6;
+}
+
 html[data-theme="work"] .top {
   background: rgba(250, 250, 248, 0.94);
   border-bottom: 1px solid var(--line);
