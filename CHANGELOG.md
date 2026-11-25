@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2026.11.25-d42f710] - 2026-11-25
+
+### Added
+- `core/test/run.sh`, `core/test/compose.test.yaml` & `core/test/render-join-cmd.sh`: the end-to-end test now joins the way a person does. It renders the join page's one-line command from `join.js`, pastes it into fresh computers under zsh (the macOS Terminal default) and bash, lets `/start` download and verify `hogman` from the front door, and checks the join, the absence of shell errors, the installed `~/hogman` and the portal through the local proxy. Runs on every PR in the required `pen` check.
+- Self-service pen deletion for owners (`I-24`): active owners on a personal device can permanently delete a hosted pen (in `active`, `grace`, or `renew_only` state) from the portal's **Delete this pen** section. Shows live member/device counts and names any other owners, cancels any active Stripe subscription immediately (remaining paid time forfeited) before purging the pen, takes a final 30-day encrypted backup (D-37), writes `deleted_at` to `.retired` (D-21), frees the host slot immediately, and prints the local uninstall command.
+
+### Changed
+- `.github/workflows/e2e.yml`, `core/test/run.sh`, `deploy/test-host.sh` & `core/join/Dockerfile.sidecar.prebuilt`: prebuild the Linux/amd64 Go binaries once in parallel with Go module/build caching (`prebuilt` job) and reuse them via the existing `core/prebuilt/` path in `pen core` and `shared host` (eliminating ~7–8 minutes of repeated cold Docker Go builds per runner while `docker image builds` continues verifying every from-source Dockerfile).
+- `hogman leave`, `hogman leave-all`, and `hogman uninstall` now allow owners to leave without blocking whenever another owner or another of their personal devices is on the pen; only the sole owner on their last personal device is warned and prompted interactively right away (no `--force` re-run needed), while `--force` still works in non-interactive scripts with the warning printed (I-25).
+- macOS & cross-OS proxy setup (`I-26`): `hogman` never asks for your Mac or system password and never invokes `sudo`. Instead, it detects the OS and prints step-by-step manual automatic-proxy instructions using a stable `http://127.0.0.1:<port>/proxy.pac` URL (and matching instructions are shown on the join and post-signup pages while the signed Mac app and browser extensions are completed).
+- Security hardening (`I-27`):
+  - `hogman` and `registrar` now build with Tailscale's `-tags ts_omit_peerapiserver` (enforced by a compile-time guard), eliminating `tsnet`'s wildcard host TCP listener (`0.0.0.0:<32768-65535>`) on macOS and removing PeerAPI's packet-filter bypass.
+  - Pen ACL policy now isolates `server` devices from reaching other `server` devices on `:443` by default (only active personal devices and `tag:infra` can reach shared servers; servers can still reach `tag:infra` on `53`/`443`).
+  - `hogman share --identity-headers` now fails closed with HTTP `503` if caller `WhoIs` verification fails instead of forwarding an unidentified request upstream.
+
+### Fixed
+- Signup broker container (`deploy/hogman-host`): raised `mem_limit` from `384m` to `512m` and set `GOGC=50` so `docker compose` / `buildx` does not OOM-kill during pen provisioning when streaming prebuilt registrar binaries.
+- Pen agents now report their startup executable SHA-256 (`bin_sha256`) on local `/status`, and `hogman update` detects and restarts any running agent whose binary differs from the target release (including older agents that don't report `bin_sha256`), even when the on-disk binaries are already up to date (I-20).
+- Fixed a race on fresh device joins (especially device-link joins) where `hogman` immediately aborted with `could not join the pen: not connected to pen` and ran `__agent-logout` during the brief window before the registrar's `Sync` loop added the new device's IP to Headscale's ACL policy (leaving orphaned devices on the server). `waitAgentUpCtx` now waits through transient post-enrollment `"not connected to pen"` states until the ACL arrives, reports the real status if the deadline expires, and never logs out an already-enrolled device on a follow-up check failure (I-21).
+- `GET /api/me` now returns the real `owners` count to both owners and admins (and omits `owners` for plain members instead of returning `0`), and the portal overview card omits owner wording when the field is absent (I-22).
+- macOS per-connection proxy checks & `--verbose` redaction: `hogman join`, `hogman update`, `hogman status`, and `hogman doctor` now list each enabled macOS hardware network service (such as `Wi-Fi` and a USB Ethernet dock) that is still missing the automatic proxy URL, and `--verbose` now redacts `--authkey` values when logging commands.
+- Work portal code-block contrast and sign-up tab-session polish: reset `background`, `border`, and `padding` on `html[data-theme="work"] pre code` in `core/portal/portal.css` and `core/join-page/join.css`, and clear stale `sessionStorage` jobs in `deploy/signup/web/signup.js` when a tab navigates to a new `#code=...` link (or another flow like `#wait`, `#renew`, `#delete`, or `#wake` after a finished sign-up).
+- Signup page static scripts and styles (`/signup.js`, `/paid.js`, `/signup.css`) now send `Cache-Control: no-store` and are referenced with content-hashed `?v=` query strings in `index.html` and `paid.html`, preventing HTML/JS version skew through CDN and browser caches after deploys.
+
 ## [2026.11.24-6142bbf] - 2026-11-24
 
 ### Changed
