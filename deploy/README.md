@@ -121,7 +121,8 @@ still resolves `home.<zone>` and loads the portal with no re-join, and only then
 pens. `install.sh` refreshes the
 `challenge-dns` binary via `hogman-host refresh-services` and pre-pulls any missing pinned base and
 runtime container images via `hogman-host pull-images` (so the offline sign-up broker never needs
-container registry access when raising a pen after a base-image bump); `hogman-host signup-setup`
+container registry access when raising a pen after a base-image bump; a failed `docker pull` aborts
+`install.sh` early rather than leaving the broker broken); `hogman-host signup-setup`
 runs `pull-images` as well. If upgrading manually (or without prebuilt binaries), re-run
 `hogman-host challenge-dns-setup <public-ip>` (which keeps the existing GCP key) so new
 `challenge-dns` features such as per-plan certificate caps take effect. Both `challenge-dns-setup`

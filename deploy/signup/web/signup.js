@@ -460,6 +460,12 @@
   // (including while on the final setup-link screen during the 5-minute window).
   const JOB = 'hogman-signup-job';
   const JOB_DONE = 'hogman-signup-job-done';
+  const JOB_CODE = 'hogman-signup-job-code';
+  const clearSavedJob = () => {
+    sessionStorage.removeItem(JOB);
+    sessionStorage.removeItem(JOB_DONE);
+    sessionStorage.removeItem(JOB_CODE);
+  };
   const defaultStages = [[0, 'Building the fence'], [8, 'Getting your HTTPS certificate'],
                          [20, 'Opening the gate'], [35, 'Raking the last of the straw'], [90, 'Taking longer than usual; hang on']];
   const workStages = [[0, 'Provisioning isolated network'], [8, 'Issuing HTTPS certificate'],
@@ -509,8 +515,7 @@
     show('done');
   };
   const fail = msg => {
-    sessionStorage.removeItem(JOB);
-    sessionStorage.removeItem(JOB_DONE);
+    clearSavedJob();
     show('form');
     $('err').textContent = msg; $('err').hidden = false;
     $('go').disabled = false;
@@ -525,8 +530,7 @@
       catch (e) {
         if (e.status === 404) {
           if (sessionStorage.getItem(JOB_DONE) === '1') {
-            sessionStorage.removeItem(JOB);
-            sessionStorage.removeItem(JOB_DONE);
+            clearSavedJob();
             show('form');
             return;
           }
@@ -565,9 +569,20 @@
     try {
       const r = await api('POST', '/create', body);
       sessionStorage.setItem(JOB, r.job);
+      sessionStorage.setItem(JOB_CODE, body.code.trim().toUpperCase());
       await follow(r.job);
     } catch (e) { resetTurnstile('form'); fail(e.message); }
   });
+  // If the tab navigated to a new #code=... link (or another flow such as #wait,
+  // #renew, #delete, or #wake after a finished sign-up), drop the previous job
+  // instead of flashing "Creating your pen..." or showing the earlier pen's join link.
+  const hashCode = m ? m[1].toUpperCase() : '';
+  const savedDone = sessionStorage.getItem(JOB_DONE) === '1';
+  const savedCode = sessionStorage.getItem(JOB_CODE) || '';
+  if ((hashCode && (savedDone || (savedCode && hashCode !== savedCode))) ||
+      (savedDone && (location.hash === '#wait' || renewedParam || renewToken || deleteToken || wakePen))) {
+    clearSavedJob();
+  }
   const pending = sessionStorage.getItem(JOB);
   if (pending) {
     follow(pending);
