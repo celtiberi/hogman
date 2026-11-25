@@ -1435,6 +1435,24 @@ UNIT
 OPS_SNAPSHOT_BIN=/usr/local/lib/hogman/ops-snapshot
 OPS_SNAPSHOT_DIR=/run/hogman-ops
 
+# Ensure /run/hogman-ops exists with 0750 root:65532 AND persist its tmpfiles.d
+# entry so Docker never recreates it as root:root 0755 across reboots (shared
+# by ops-setup and signup-setup).
+ensure_ops_snapshot_dir() {
+  if [ "$(id -u)" -eq 0 ] && [ -d /etc/tmpfiles.d ]; then
+    cat > /etc/tmpfiles.d/hogman-ops.conf <<TMP
+d $OPS_SNAPSHOT_DIR 0750 root 65532 -
+TMP
+    if command -v systemd-tmpfiles >/dev/null 2>&1; then
+      systemd-tmpfiles --create /etc/tmpfiles.d/hogman-ops.conf
+      return 0
+    fi
+  fi
+  if [ "$(id -u)" -eq 0 ] && [ ! -d "$OPS_SNAPSHOT_DIR" ]; then
+    install -d -m 0750 -o root -g 65532 "$OPS_SNAPSHOT_DIR" 2>/dev/null || true
+  fi
+}
+
 cmd_ops_setup() {
   load_host
   command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] || die "systemd is required for ops-setup"
@@ -1444,10 +1462,7 @@ cmd_ops_setup() {
   # /run/hogman-ops with numeric GID 65532 at boot before Docker starts
   # (preventing Docker from creating a root:root 0755 mount point), while
   # RuntimeDirectory= guarantees the unit always sees the right directory.
-  cat > /etc/tmpfiles.d/hogman-ops.conf <<TMP
-d $OPS_SNAPSHOT_DIR 0750 root 65532 -
-TMP
-  systemd-tmpfiles --create /etc/tmpfiles.d/hogman-ops.conf
+  ensure_ops_snapshot_dir
 
   cat > /etc/systemd/system/hogman-ops-snapshot.service <<UNIT
 [Unit]
@@ -1456,6 +1471,7 @@ After=docker.service
 
 [Service]
 Type=oneshot
+TimeoutStartSec=45s
 Group=65532
 Environment=HOGMAN_HOME=$HOGMAN_HOME
 Environment=OPS_SNAPSHOT_DIR=$OPS_SNAPSHOT_DIR
@@ -1993,7 +2009,7 @@ cmd_signup_setup() {
   # The broker is as powerful as root, so it gets no internet unless the
   # operator turned on push notifications (the only thing it sends out).
   # Docker itself pulls images and builds; the broker only asks it to.
-  local broker_nets="[signup]" out_net="" broker_mail="" broker_backups_vol=""
+  local broker_nets="[signup]" out_net="" broker_mail="" broker_backups_vol="" broker_ops_vol="" broker_ops_env=""
   if [ -s "$SIGNUP/resend_key" ] && [ -n "${SIGNUP_FROM:-}" ]; then
     broker_mail="      RESEND_API_KEY_FILE: $SIGNUP/resend_key
       BILLING_FROM: \"$SIGNUP_FROM\""
@@ -2004,6 +2020,12 @@ cmd_signup_setup() {
   if [ -d "$BACKUPS" ]; then
     broker_backups_vol="      - $BACKUPS:$BACKUPS
 "
+  fi
+  ensure_ops_snapshot_dir
+  if [ -d "$OPS_SNAPSHOT_DIR" ]; then
+    broker_ops_vol="      - $OPS_SNAPSHOT_DIR:$OPS_SNAPSHOT_DIR:ro
+"
+    broker_ops_env="      OPS_SNAPSHOT_FILE: $OPS_SNAPSHOT_DIR/snapshot.json"
   fi
   # Selling pens (signup-stripe): the page gets the Stripe key, the broker the
   # webhook secret it checks Stripe's events with.
@@ -2094,6 +2116,7 @@ $web_extra_vols
       WORK_SIGNUP_HOST: "${SIGNUP_WORK_HOST:-}"
       RENEW_WAKE_RESERVE: "${RENEW_WAKE_RESERVE:-2}"
       NTFY_URL: ${SIGNUP_NTFY:-}
+$broker_ops_env
 $broker_mail
 $broker_stripe
     volumes:
@@ -2106,7 +2129,7 @@ $broker_stripe
       # pen, and a route uses the *.<gate> wildcard only if these files exist.
       # Without them every gate route lost its certificate line.
       - $GATE_TLS:$GATE_TLS:ro
-$broker_backups_vol
+$broker_backups_vol$broker_ops_vol
     # signup: the page reaches it here (internal: no internet). out, only with
     # push notifications on: nothing else is on it, so nothing reaches it there.
     networks: $broker_nets
@@ -2127,6 +2150,9 @@ EOF
   reload_front
   if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
     cmd_lifecycle_setup
+    if [ -x "$OPS_SNAPSHOT_BIN" ]; then
+      cmd_ops_setup
+    fi
   fi
   info "Sign-ups on: https://$SIGNUP_HOST, front doors at <name>.$PENS_DOMAIN, at most $MAX_PENS here."
   info "DNS: point $SIGNUP_HOST and *.$PENS_DOMAIN at this server. Then: hogman-host signup-code"

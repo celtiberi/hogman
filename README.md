@@ -204,7 +204,10 @@ Read the step-by-step map in [How Hogman works](docs/how-hogman-works.md) or the
   Suffix List, use a separate browser profile for any pen you don't fully trust so cookies stay
   isolated.
 - **Current limits & platforms:** macOS and Linux work today; Windows is built but untested; a
-  mobile app is in the works. Each pen may get certificates for a limited number of distinct new
+  mobile app is in the works. Each pen defaults to **500 members** and **500 devices** (configurable
+  by the host operator; active owners retain personal-device lockout headroom so a full pen cannot
+  lock out an owner), and regular members may hold at most **3 unused device keys** at a time
+  (**10** for admins and owners). Each pen may get certificates for a limited number of distinct new
   names: 5 per rolling hour and 20 per rolling 7 days on Free and Personal pens, 40 and 120 on Work
   pens, under a shared limit across all pens (`home.<pen>` uses one; attempts count, not issued
   certificates; a name already counted in the last 7 days doesn't count again). Pen names, member

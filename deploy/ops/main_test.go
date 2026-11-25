@@ -122,7 +122,7 @@ func TestOpsAtomicRenameAndSchemaSanitization(t *testing.T) {
 	writeAtomicSnapshot(t, dir, `{
 		"generated_at": "2026-11-24T12:00:00Z",
 		"host": {"name": "host-a", "version": "v1", "capacity": {"live": 2, "max": 40}},
-		"pens": [{"name": "alpha", "plan": "personal", "theme": "default", "state": "running", "containers_up": 4, "containers_total": 4, "ram_bytes": 1024}],
+		"pens": [{"name": "alpha", "plan": "personal", "theme": "default", "state": "running", "containers_up": 4, "containers_total": 4, "ram_bytes": 1024, "setpolicy_samples": 10, "setpolicy_last_ms": 203, "setpolicy_p95_ms": 1490}],
 		"waitlist": {
 			"waiting": 3,
 			"invited": 1,
@@ -178,6 +178,9 @@ func TestOpsAtomicRenameAndSchemaSanitization(t *testing.T) {
 	}
 	if out1.Viewer != "alice" || out1.Host.Version != "v1" || out1.Host.Capacity.Live != 2 || out1.Waitlist.Waiting != 3 {
 		t.Fatalf("unexpected v1 payload: %+v", out1)
+	}
+	if len(out1.Pens) != 1 || out1.Pens[0].SetPolicySamples != 10 || out1.Pens[0].SetPolicyLastMs != 203 || out1.Pens[0].SetPolicyP95Ms != 1490 {
+		t.Fatalf("unexpected pen SetPolicy metrics: %+v", out1.Pens)
 	}
 
 	// Atomic rename on host replaces snapshot.json with a brand-new inode (v2).

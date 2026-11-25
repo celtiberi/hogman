@@ -2994,6 +2994,7 @@ func (b *broker) runRenewWakeWatcher() {
 			log.Printf("renew-wake watcher: %v", err)
 		}
 		cancel()
+		b.checkSetPolicyLatencyAlerts(b.now())
 		<-t.C
 	}
 }

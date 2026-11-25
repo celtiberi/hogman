@@ -39,6 +39,18 @@ func mustEnv(k string) string {
 	return v
 }
 
+func positiveIntEnv(k string, def int) int {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		log.Fatalf("%s must be a positive integer (got %q)", k, v)
+	}
+	return n
+}
+
 func durEnv(k string, def time.Duration) time.Duration {
 	if v := os.Getenv(k); v != "" {
 		d, err := time.ParseDuration(v)
@@ -108,6 +120,8 @@ func setup() *Service {
 		InviteTTL:         durEnv("INVITE_TTL", 7*24*time.Hour),
 		DeviceKeyTTL:      durEnv("DEVICE_KEY_TTL", time.Hour),
 		MembersCanInvite:  env("MEMBERS_CAN_INVITE", "false") == "true",
+		MaxMembers:        positiveIntEnv("MAX_MEMBERS", defaultMaxMembers),
+		MaxDevices:        positiveIntEnv("MAX_DEVICES", defaultMaxDevices),
 		BillingStatusPath: env("BILLING_STATUS_FILE", filepath.Join(filepath.Dir(dbPath), "billing-status.json")),
 		ACMEBackend:       acmeBackend,
 	}

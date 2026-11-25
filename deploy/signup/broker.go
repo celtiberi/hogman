@@ -36,6 +36,7 @@ type broker struct {
 	waitNotify             *limiter
 	raiseNotify            *limiter
 	healthNotify           *limiter
+	opsNotify              *limiter
 	ntfySem                chan struct{}
 	mailSem                chan struct{}
 	runSem                 chan struct{} // bounds concurrent non-provision hogman-host forks
@@ -64,6 +65,9 @@ type broker struct {
 	wakeFlightMu           sync.Mutex
 	wakesInFlight          map[string]bool
 	globalCapAlertedAt     time.Time
+	opsSnapshotPath        string
+	setPolicyAlertMu       sync.Mutex
+	setPolicyAlerted       map[string]time.Time
 	bgCtx                  context.Context // optional parent context for async tasks (tests cancel on cleanup)
 	bgWG                   sync.WaitGroup  // tracks broker background goroutines so tests drain before TempDir cleanup
 }
@@ -116,10 +120,11 @@ func (b *broker) nextSuffix() (string, error) {
 
 func runBroker() {
 	b := &broker{
-		home:  env("HOGMAN_HOME", "/opt/hogman"),
-		tool:  env("HOGMAN_HOST_TOOL", "hogman-host"),
-		token: readToken(),
-		ntfy:  env("NTFY_URL", ""),
+		home:            env("HOGMAN_HOME", "/opt/hogman"),
+		tool:            env("HOGMAN_HOST_TOOL", "hogman-host"),
+		token:           readToken(),
+		ntfy:            env("NTFY_URL", ""),
+		opsSnapshotPath: env("OPS_SNAPSHOT_FILE", "/run/hogman-ops/snapshot.json"),
 	}
 	b.webhookSecret = readWebhookSecret("STRIPE_WEBHOOK_SECRET_FILE")
 	b.minPersonalCents, _ = strconv.ParseInt(strings.TrimSpace(os.Getenv("STRIPE_MIN_PERSONAL_CENTS")), 10, 64)
@@ -182,6 +187,9 @@ func (b *broker) ensureLimits() {
 	if b.healthNotify == nil {
 		b.healthNotify = newLimiterWithCap(1, time.Hour, 4)
 	}
+	if b.opsNotify == nil {
+		b.opsNotify = newLimiterWithCap(4, time.Hour, 4)
+	}
 	if b.ntfySem == nil {
 		b.ntfySem = make(chan struct{}, 4)
 	}
@@ -215,6 +223,8 @@ func (b *broker) notifyLimiter(kind string) *limiter {
 		return b.waitNotify
 	case "health":
 		return b.healthNotify
+	case "ops":
+		return b.opsNotify
 	default:
 		return b.raiseNotify
 	}

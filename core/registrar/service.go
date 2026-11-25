@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"net/netip"
 	"regexp"
@@ -22,6 +23,27 @@ import (
 	"tailscale.com/types/key"
 )
 
+const (
+	defaultMaxMembers             = 500
+	defaultMaxDevices             = 500
+	defaultMaxOpenDeviceKeys      = 3
+	defaultMaxAdminOpenDeviceKeys = 10
+	// Extra personal-device slots above MaxDevices reserved strictly for active
+	// owners so an owner can replace or add a personal device to manage the pen
+	// even when the pen is at MAX_DEVICES (D-16).
+	ownerDeviceReserve = 2
+)
+
+func addDeviceReserve(maxDevices int) int {
+	if maxDevices <= 0 {
+		return 0
+	}
+	if maxDevices > math.MaxInt-ownerDeviceReserve {
+		return math.MaxInt
+	}
+	return maxDevices + ownerDeviceReserve
+}
+
 type Config struct {
 	Zone                    string // bobo.pens.hogman.network
 	PublicHost              string // control server hostname
@@ -31,7 +53,10 @@ type Config struct {
 	DeviceKeyTTL            time.Duration
 	MembersCanInvite        bool
 	BillingStatusPath       string
+	MaxMembers              int
+	MaxDevices              int
 	MaxOpenDeviceKeys       int
+	MaxAdminOpenDeviceKeys  int
 	MaxNamesPerMember       int
 	MaxOpenInvites          int
 	MaxInviteNoteLen        int
@@ -159,6 +184,9 @@ type Service struct {
 	presenceAttemptAt time.Time
 	presenceFlight    *presenceCall
 
+	deferredDelMu      sync.Mutex
+	deferredPendingDel map[int64]bool
+
 	acmeMu         sync.Mutex
 	serverEABHits  map[int64][]time.Time
 	memberEABHits  map[int64][]time.Time
@@ -265,8 +293,20 @@ func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
 		return nil, err
 	}
 	cfg.Theme = theme
+	if cfg.MaxMembers <= 0 {
+		cfg.MaxMembers = defaultMaxMembers
+	}
+	if cfg.MaxDevices <= 0 {
+		cfg.MaxDevices = defaultMaxDevices
+	}
 	if cfg.MaxOpenDeviceKeys <= 0 {
-		cfg.MaxOpenDeviceKeys = 10
+		cfg.MaxOpenDeviceKeys = defaultMaxOpenDeviceKeys
+	}
+	if cfg.MaxAdminOpenDeviceKeys <= 0 {
+		cfg.MaxAdminOpenDeviceKeys = defaultMaxAdminOpenDeviceKeys
+	}
+	if cfg.MaxAdminOpenDeviceKeys < cfg.MaxOpenDeviceKeys {
+		cfg.MaxAdminOpenDeviceKeys = cfg.MaxOpenDeviceKeys
 	}
 	if cfg.MaxNamesPerMember <= 0 {
 		cfg.MaxNamesPerMember = 50
@@ -290,19 +330,20 @@ func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
 		cfg.PresenceTTL = 5 * time.Second
 	}
 	return &Service{
-		cfg:              cfg,
-		st:               st,
-		hs:               hs,
-		acme:             cfg.ACMEBackend,
-		orphans:          map[string]bool{},
-		missingMKAlerted: map[string]bool{},
-		baseCtx:          context.Background(),
-		rotateCooldown:   map[string]time.Time{},
-		rotateFlight:     map[string]*rotateCall{},
-		rotateSem:        make(chan struct{}, keyRotateMaxConc),
-		serverEABHits:    map[int64][]time.Time{},
-		memberEABHits:    map[int64][]time.Time{},
-		memberTXTHits:    map[int64][]time.Time{},
+		cfg:                cfg,
+		st:                 st,
+		hs:                 hs,
+		acme:               cfg.ACMEBackend,
+		orphans:            map[string]bool{},
+		missingMKAlerted:   map[string]bool{},
+		baseCtx:            context.Background(),
+		rotateCooldown:     map[string]time.Time{},
+		rotateFlight:       map[string]*rotateCall{},
+		rotateSem:          make(chan struct{}, keyRotateMaxConc),
+		deferredPendingDel: map[int64]bool{},
+		serverEABHits:      map[int64][]time.Time{},
+		memberEABHits:      map[int64][]time.Time{},
+		memberTXTHits:      map[int64][]time.Time{},
 	}, nil
 }
 
@@ -448,8 +489,20 @@ func (s *Service) AddMember(ctx context.Context, a Actor, handle, role string) (
 	if role != "member" && !a.IsOwner() {
 		return nil, forbidden("only the owner can create admins or owners")
 	}
-	m, err := s.createMember(ctx, handle, role, a.memberID())
+	maxMembers := s.cfg.MaxMembers
+	if a.CLI {
+		maxMembers = 0 // operator CLI override (D-16)
+	}
+	if unlock, lockErr := s.st.lockMemberFile(); lockErr == nil {
+		defer unlock()
+	} else {
+		log.Printf("member lock: %v", lockErr)
+	}
+	m, err := s.createMember(ctx, handle, role, a.memberID(), maxMembers)
 	if err != nil {
+		if errors.Is(err, ErrMemberCapReached) {
+			return nil, conflict("this network has reached its member limit (%d)", s.cfg.MaxMembers)
+		}
 		return nil, err
 	}
 	s.st.Audit(a.String(), "member.add", handle, "role="+role)
@@ -463,19 +516,35 @@ func (a Actor) memberID() *int64 {
 	return &a.Member.ID
 }
 
-func (s *Service) createMember(ctx context.Context, handle, role string, invitedBy *int64) (*Member, error) {
+func (s *Service) createMember(ctx context.Context, handle, role string, invitedBy *int64, maxMembers int) (*Member, error) {
 	if !handleRE.MatchString(handle) {
 		return nil, bad("handle must be 2-32 lowercase letters, digits or dashes, starting with a letter")
 	}
 	if _, err := s.st.MemberByHandle(handle); err == nil {
 		return nil, conflict("handle %q is taken", handle)
 	}
+	if maxMembers > 0 {
+		count, err := s.st.CountActiveMembers()
+		if err != nil {
+			return nil, err
+		}
+		if count >= maxMembers {
+			return nil, ErrMemberCapReached
+		}
+	}
 	u, err := s.hs.EnsureUser(ctx, handle)
 	if err != nil {
 		return nil, err
 	}
 	m := &Member{Handle: handle, Role: role, Status: "active", InvitedBy: invitedBy, HSUserID: u.ID}
-	if err := s.st.InsertMember(m); err != nil {
+	if err := s.st.InsertMemberCapped(m, maxMembers); err != nil {
+		if errors.Is(err, ErrMemberCapReached) {
+			rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			if herr := s.hs.DeleteUser(rbCtx, u.ID); herr != nil {
+				log.Printf("createMember cap rollback headscale user %s: %v", u.ID, herr)
+			}
+			rbCancel()
+		}
 		return nil, err
 	}
 	return m, nil
@@ -767,6 +836,15 @@ func (s *Service) MintInvite(a Actor, role, note string, ttl time.Duration) (*Mi
 	case !a.IsAdmin() && !s.cfg.MembersCanInvite:
 		return nil, forbidden("on this network only admins can invite")
 	}
+	if !a.CLI {
+		count, err := s.st.CountActiveMembers()
+		if err != nil {
+			return nil, err
+		}
+		if count >= s.cfg.MaxMembers {
+			return nil, conflict("this network has reached its member limit (%d)", s.cfg.MaxMembers)
+		}
+	}
 	if !a.IsAdmin() && a.memberID() != nil {
 		n, err := s.st.CountOpenInvites(*a.memberID())
 		if err != nil {
@@ -856,34 +934,63 @@ func (s *Service) Redeem(ctx context.Context, token, handle string) (*Enrolment,
 			return nil, forbidden("invite not valid")
 		}
 	}
-	m, err := s.createMember(ctx, handle, inv.Role, inv.MintedBy)
+	// Check pen-wide caps only AFTER invite & minter validation so callers
+	// without a valid open invite cannot probe pen fullness. Never leak counts
+	// or which cap was hit on this public endpoint.
+	const redeemFullMsg = "this network cannot accept new members right now"
+	if count, err := s.st.CountActiveMembers(); err != nil {
+		return nil, err
+	} else if count >= s.cfg.MaxMembers {
+		return nil, conflict(redeemFullMsg)
+	}
+	if live, openKeys, err := s.st.CountDeviceSlots(); err != nil {
+		return nil, err
+	} else if live+openKeys >= s.cfg.MaxDevices {
+		return nil, conflict(redeemFullMsg)
+	}
+
+	// Serialize Headscale user creation/rollback across serve and CLI processes
+	// so a cap-rollback DeleteUser can never delete a user adopted by a concurrent add.
+	if unlock, lockErr := s.st.lockMemberFile(); lockErr == nil {
+		defer unlock()
+	} else {
+		log.Printf("member lock: %v", lockErr)
+	}
+
+	m, err := s.createMember(ctx, handle, inv.Role, inv.MintedBy, s.cfg.MaxMembers)
 	if err != nil {
+		if errors.Is(err, ErrMemberCapReached) {
+			return nil, conflict(redeemFullMsg)
+		}
 		return nil, err
 	}
 	if ok, err := s.st.ClaimInvite(inv.ID, m.ID); err != nil || !ok {
-		if derr := s.st.DeleteMember(m.ID); derr != nil {
-			log.Printf("redeem rollback member %d: %v", m.ID, derr)
-		}
 		rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		if herr := s.hs.DeleteUser(rbCtx, m.HSUserID); herr != nil {
 			log.Printf("redeem rollback headscale user %s: %v", m.HSUserID, herr)
 		}
 		rbCancel()
+		if derr := s.st.DeleteMember(m.ID); derr != nil {
+			log.Printf("redeem rollback member %d: %v", m.ID, derr)
+		}
 		return nil, forbidden("invite not valid")
 	}
-	key, exp, err := s.issueKey(ctx, m, "personal")
+	key, exp, err := s.issueKeyCapped(ctx, m, "personal", s.cfg.MaxDevices, 0, 0, false)
 	if err != nil {
-		if uerr := s.st.UnclaimInvite(inv.ID, m.ID); uerr != nil {
-			log.Printf("redeem rollback invite %d: %v", inv.ID, uerr)
-		}
-		if derr := s.st.DeleteMember(m.ID); derr != nil {
-			log.Printf("redeem rollback member %d: %v", m.ID, derr)
-		}
+		// Delete Headscale user BEFORE removing the SQLite member row (while
+		// still holding lockMemberFile) so no concurrent CLI member add can
+		// adopt m.HSUserID before DeleteUser runs.
 		rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		if herr := s.hs.DeleteUser(rbCtx, m.HSUserID); herr != nil {
 			log.Printf("redeem rollback headscale user %s: %v", m.HSUserID, herr)
 		}
 		rbCancel()
+		if rerr := s.st.RollbackRedeem(inv.ID, m.ID); rerr != nil {
+			log.Printf("redeem rollback invite %d / member %d: %v", inv.ID, m.ID, rerr)
+		}
+		if errors.Is(err, ErrDeviceCapReached) {
+			return nil, conflict(redeemFullMsg)
+		}
 		return nil, err
 	}
 	s.st.Audit(handle, "invite.redeem", fmt.Sprintf("invite#%d", inv.ID), "")
@@ -938,23 +1045,64 @@ func (s *Service) IssueDeviceKey(ctx context.Context, a Actor, handle, kind stri
 	if m.Status != "active" {
 		return "", 0, conflict("%s is %s", handle, m.Status)
 	}
+	maxOpen := 0
+	maxDevices := 0
+	ownerFloor := 0
+	bypassCap := a.CLI
 	if !a.CLI {
+		maxOpen = s.cfg.MaxOpenDeviceKeys
+		if a.IsAdmin() {
+			maxOpen = s.cfg.MaxAdminOpenDeviceKeys
+			if maxOpen < s.cfg.MaxOpenDeviceKeys {
+				maxOpen = s.cfg.MaxOpenDeviceKeys
+			}
+		}
+		maxDevices = s.cfg.MaxDevices
+		if m.Role == "owner" && kind == "personal" {
+			maxDevices = addDeviceReserve(s.cfg.MaxDevices)
+			ownerFloor = ownerDeviceReserve
+		}
+		// Fast pre-checks before creating a Headscale pre-auth key; atomic
+		// enforcement runs inside InsertDeviceKeyCapped (BEGIN IMMEDIATE).
 		open, err := s.st.CountOpenDeviceKeys(m.ID)
 		if err != nil {
 			return "", 0, err
 		}
-		if open >= s.cfg.MaxOpenDeviceKeys {
+		if open >= maxOpen {
 			return "", 0, conflict("too many unused device keys; wait for existing keys to be used or expire")
 		}
+		live, totalOpen, err := s.st.CountDeviceSlots()
+		if err != nil {
+			return "", 0, err
+		}
+		if live+totalOpen >= maxDevices {
+			allowedByFloor := false
+			if ownerFloor > 0 {
+				if ownerSlots, oerr := s.st.CountMemberPersonalSlots(m.ID); oerr == nil && ownerSlots < ownerFloor {
+					allowedByFloor = true
+				}
+			}
+			if !allowedByFloor {
+				return "", 0, conflict("this network has reached its device limit (%d)", s.cfg.MaxDevices)
+			}
+		}
 	}
-	key, exp, err := s.issueKey(ctx, m, kind)
-	if err == nil {
-		s.st.Audit(a.String(), "device.key", handle, kind)
+	key, exp, err := s.issueKeyCapped(ctx, m, kind, maxDevices, maxOpen, ownerFloor, bypassCap)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrOpenKeyCapReached):
+			return "", 0, conflict("too many unused device keys; wait for existing keys to be used or expire")
+		case errors.Is(err, ErrDeviceCapReached):
+			return "", 0, conflict("this network has reached its device limit (%d)", s.cfg.MaxDevices)
+		default:
+			return "", 0, err
+		}
 	}
-	return key, exp, err
+	s.st.Audit(a.String(), "device.key", handle, kind)
+	return key, exp, nil
 }
 
-func (s *Service) issueKey(ctx context.Context, m *Member, kind string) (string, int64, error) {
+func (s *Service) issueKeyCapped(ctx context.Context, m *Member, kind string, maxDevices, maxOpenForMember, ownerPersonalFloor int, bypassCap bool) (string, int64, error) {
 	var k *HSPreAuthKey
 	var err error
 	if kind == "server" {
@@ -965,9 +1113,17 @@ func (s *Service) issueKey(ctx context.Context, m *Member, kind string) (string,
 	if err != nil {
 		return "", 0, err
 	}
-	dk := &DeviceKey{MemberID: m.ID, Kind: kind, HSKeyID: k.ID, ExpiresAt: time.Now().Add(s.cfg.DeviceKeyTTL).Unix()}
-	if err := s.st.InsertDeviceKey(dk); err != nil {
-		_ = s.hs.ExpireKey(ctx, k.ID)
+	dk := &DeviceKey{
+		MemberID:  m.ID,
+		Kind:      kind,
+		HSKeyID:   k.ID,
+		ExpiresAt: time.Now().Add(s.cfg.DeviceKeyTTL).Unix(),
+		BypassCap: bypassCap,
+	}
+	if err := s.st.InsertDeviceKeyCapped(dk, maxDevices, maxOpenForMember, ownerPersonalFloor); err != nil {
+		rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		_ = s.hs.ExpireKey(rbCtx, k.ID)
+		rbCancel()
 		return "", 0, err
 	}
 	return k.Key, dk.ExpiresAt, nil
@@ -1060,6 +1216,38 @@ func (s *Service) SelfRemoveDevice(a Actor, id int64) error {
 	return nil
 }
 
+type pendingDeleteAction int
+
+const (
+	pendingDeleteProceed pendingDeleteAction = iota
+	pendingDeleteSkipClear
+	pendingDeleteDefer
+)
+
+// verifyPendingDeleteTarget checks whether a Headscale node still matches a
+// removed device row before deleting it, preventing node-ID reuse from ever
+// deleting a different machine, a live re-enrolled device, or tag:infra.
+func verifyPendingDeleteTarget(d *Device, n HSNode, liveDev *Device) (pendingDeleteAction, string) {
+	if n.HasTag("tag:infra") {
+		return pendingDeleteSkipClear, "headscale node is tag:infra"
+	}
+	if liveDev != nil && liveDev.ID != d.ID {
+		return pendingDeleteSkipClear, fmt.Sprintf("hs_node_id belongs to live device #%d", liveDev.ID)
+	}
+	dMachKey, dHasMK := canonicalMachineKey(d.MachineKey)
+	if d.MachineKey != "" && !dHasMK {
+		return pendingDeleteDefer, "unparseable stored machine_key"
+	}
+	nMachKey, nHasMK := canonicalMachineKey(n.MachineKey)
+	if dHasMK && nHasMK && dMachKey != nMachKey {
+		return pendingDeleteSkipClear, "headscale node machine_key mismatch"
+	}
+	if dHasMK && !nHasMK {
+		return pendingDeleteDefer, "headscale missing machine_key"
+	}
+	return pendingDeleteProceed, ""
+}
+
 func (s *Service) finishSelfDelete(id int64, hsNodeID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1068,10 +1256,52 @@ func (s *Service) finishSelfDelete(id int64, hsNodeID string) {
 	if opCtx.Err() != nil {
 		return
 	}
-	if err := s.hs.DeleteNode(opCtx, hsNodeID); err != nil {
-		log.Printf("self-delete device #%d (%s): headscale delete failed (will retry in sync): %v", id, hsNodeID, err)
-	} else if err := s.st.ClearDeviceHSDeletePending(id); err != nil {
-		log.Printf("self-delete device #%d: clear hs_delete_pending: %v", id, err)
+	// Re-check durable hs_delete_pending after acquiring s.mu: syncOnce may
+	// already have deleted the node or cleared pending after a machineKey mismatch.
+	pending, err := s.st.DeviceHSDeletePending(id)
+	if err != nil {
+		log.Printf("self-delete device #%d: check hs_delete_pending: %v", id, err)
+	} else if !pending {
+		if err := s.applyPolicy(opCtx); err != nil {
+			log.Printf("self-delete device #%d: policy push failed (will retry in sync): %v", id, err)
+		}
+		return
+	}
+	d, derr := s.st.DeviceByID(id)
+	if derr != nil {
+		log.Printf("self-delete device #%d: reload row: %v", id, derr)
+		return
+	}
+	var liveDev *Device
+	if ld, lerr := s.st.DeviceByHSNodeID(hsNodeID); lerr == nil {
+		liveDev = ld
+	}
+	if liveDev != nil && liveDev.ID != d.ID {
+		log.Printf("self-delete device #%d (%s): ALERT skipping delete: hs_node_id belongs to live device #%d", d.ID, hsNodeID, liveDev.ID)
+		s.st.Audit("registrar", "device.delete_skip", fmt.Sprintf("%s/%s#%d", d.Member, d.Name, d.ID), fmt.Sprintf("hs_node_id belongs to live device #%d", liveDev.ID))
+		_ = s.st.ClearDeviceHSDeletePending(d.ID)
+	} else if n, nerr := s.hs.Node(opCtx, hsNodeID); isHSNotFound(nerr) {
+		if err := s.st.ClearDeviceHSDeletePending(id); err != nil {
+			log.Printf("self-delete device #%d: clear hs_delete_pending: %v", id, err)
+		}
+	} else if nerr != nil {
+		log.Printf("self-delete device #%d (%s): verify node failed (will retry in sync): %v", id, hsNodeID, nerr)
+	} else {
+		action, reason := verifyPendingDeleteTarget(d, *n, liveDev)
+		switch action {
+		case pendingDeleteSkipClear:
+			log.Printf("self-delete device #%d (%s): ALERT skipping delete: %s", d.ID, hsNodeID, reason)
+			s.st.Audit("registrar", "device.delete_skip", fmt.Sprintf("%s/%s#%d", d.Member, d.Name, d.ID), reason)
+			_ = s.st.ClearDeviceHSDeletePending(d.ID)
+		case pendingDeleteDefer:
+			log.Printf("self-delete device #%d (%s): ALERT deferring delete (will retry in sync): %s", d.ID, hsNodeID, reason)
+		case pendingDeleteProceed:
+			if err := s.hs.DeleteNode(opCtx, hsNodeID); err != nil {
+				log.Printf("self-delete device #%d (%s): headscale delete failed (will retry in sync): %v", id, hsNodeID, err)
+			} else if err := s.st.ClearDeviceHSDeletePending(id); err != nil {
+				log.Printf("self-delete device #%d: clear hs_delete_pending: %v", id, err)
+			}
+		}
 	}
 	if err := s.applyPolicy(opCtx); err != nil {
 		log.Printf("self-delete device #%d: policy push failed (will retry in sync): %v", id, err)
@@ -2216,8 +2446,18 @@ func (s *Service) NeedsFastSync() bool {
 	if pending, err := s.st.HasPendingMemberCleanup(); err != nil || pending {
 		return true
 	}
-	if pending, err := s.st.HasPendingDeviceDeletes(); err != nil || pending {
+	pendingIDs, err := s.st.PendingDeviceDeleteIDs()
+	if err != nil {
 		return true
+	}
+	if len(pendingIDs) > 0 {
+		s.deferredDelMu.Lock()
+		defer s.deferredDelMu.Unlock()
+		for _, id := range pendingIDs {
+			if !s.deferredPendingDel[id] {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -2289,19 +2529,59 @@ func (s *Service) syncOnce(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("sync drift circuit breaker: %d of %d live devices drifted; refusing mass retirement", len(driftReasons), len(live))
 	}
 
+	hsByID := make(map[string]HSNode, len(nodes))
+	for _, n := range nodes {
+		hsByID[n.ID] = n
+	}
+
 	pendingDel, err := s.st.PendingDeviceDeletes()
 	if err != nil {
 		return false, err
 	}
 	pendingDelByNode := make(map[string]bool, len(pendingDel))
+	stillDeferred := make(map[int64]bool)
 	for _, d := range pendingDel {
-		pendingDelByNode[d.HSNodeID] = true
-		if derr := s.hs.DeleteNode(ctx, d.HSNodeID); derr != nil {
-			log.Printf("sync: retry headscale delete for removed device #%d (%s): %v", d.ID, d.HSNodeID, derr)
-		} else if cerr := s.st.ClearDeviceHSDeletePending(d.ID); cerr != nil {
-			log.Printf("sync: clear hs_delete_pending for device #%d: %v", d.ID, cerr)
+		n, exists := hsByID[d.HSNodeID]
+		if !exists {
+			if cerr := s.st.ClearDeviceHSDeletePending(d.ID); cerr != nil {
+				log.Printf("sync: clear hs_delete_pending for gone device #%d: %v", d.ID, cerr)
+			}
+			continue
+		}
+		action, reason := verifyPendingDeleteTarget(d, n, byNode[d.HSNodeID])
+		switch action {
+		case pendingDeleteSkipClear:
+			log.Printf("sync: ALERT skipping pending headscale delete for removed device #%d (%s): %s", d.ID, d.HSNodeID, reason)
+			s.st.Audit("registrar", "device.delete_skip", fmt.Sprintf("%s/%s#%d", d.Member, d.Name, d.ID), reason)
+			if cerr := s.st.ClearDeviceHSDeletePending(d.ID); cerr != nil {
+				log.Printf("sync: clear hs_delete_pending after skip for device #%d: %v", d.ID, cerr)
+			}
+			continue
+		case pendingDeleteDefer:
+			stillDeferred[d.ID] = true
+			s.deferredDelMu.Lock()
+			alreadyAlerted := s.deferredPendingDel[d.ID]
+			s.deferredDelMu.Unlock()
+			if !alreadyAlerted {
+				log.Printf("sync: ALERT deferring pending headscale delete for removed device #%d (%s): %s", d.ID, d.HSNodeID, reason)
+			}
+			// Only suppress stray enrollment when no live device already owns this node ID.
+			if _, isLive := byNode[d.HSNodeID]; !isLive {
+				pendingDelByNode[d.HSNodeID] = true
+			}
+			continue
+		case pendingDeleteProceed:
+			pendingDelByNode[d.HSNodeID] = true
+			if derr := s.hs.DeleteNode(ctx, d.HSNodeID); derr != nil {
+				log.Printf("sync: retry headscale delete for removed device #%d (%s): %v", d.ID, d.HSNodeID, derr)
+			} else if cerr := s.st.ClearDeviceHSDeletePending(d.ID); cerr != nil {
+				log.Printf("sync: clear hs_delete_pending for device #%d: %v", d.ID, cerr)
+			}
 		}
 	}
+	s.deferredDelMu.Lock()
+	s.deferredPendingDel = stillDeferred
+	s.deferredDelMu.Unlock()
 
 	seen := map[string]bool{}
 	for _, n := range nodes {
@@ -2388,10 +2668,26 @@ func (s *Service) syncOnce(ctx context.Context) (bool, error) {
 			continue
 		}
 		d := &Device{MemberID: k.MemberID, Kind: k.Kind, HSNodeID: n.ID, NodeKey: nNodeKey, MachineKey: nMachKey, Name: name, IPv4: v4, IPv6: v6}
-		if err := s.st.InsertDevice(d); err != nil {
-			return false, err
+		maxDevices := s.cfg.MaxDevices
+		ownerFloor := 0
+		if k.BypassCap {
+			maxDevices = 0
+		} else if m.Role == "owner" && k.Kind == "personal" {
+			maxDevices = addDeviceReserve(s.cfg.MaxDevices)
+			ownerFloor = ownerDeviceReserve
 		}
-		if err := s.st.MarkDeviceKeyUsed(k.ID); err != nil {
+		if err := s.st.EnrollDeviceCapped(d, k.ID, maxDevices, ownerFloor); err != nil {
+			if errors.Is(err, ErrDeviceAlreadyEnrolled) {
+				// Another concurrent sync process already enrolled this live node.
+				continue
+			}
+			if errors.Is(err, ErrDeviceCapReached) {
+				s.deleteStray(ctx, n, nil, "device limit reached")
+				// Revoke (not MarkUsed) so HasJoined stays false and a transient
+				// DeleteNode failure is automatically retried on subsequent syncs.
+				_ = s.st.RevokeDeviceKey(k.ID)
+				continue
+			}
 			return false, err
 		}
 		s.st.Audit("registrar", "device.join", fmt.Sprintf("%s/%s#%d", m.Handle, name, d.ID), k.Kind+" "+v4)
@@ -2575,9 +2871,12 @@ func (s *Service) applyPolicyTracked(ctx context.Context) (bool, error) {
 		}
 		t0 := time.Now()
 		if err := s.hs.SetPolicy(ctx, pol); err != nil {
+			dur := time.Since(t0).Round(time.Millisecond)
+			log.Printf("policy: failed gen=%d bytes=%d dur=%s dur_ms=%d err=%v", gen, len(pol), dur, dur.Milliseconds(), err)
 			return false, fmt.Errorf("set policy: %w", err)
 		}
-		log.Printf("policy: applied gen=%d bytes=%d dur=%s", gen, len(pol), time.Since(t0).Round(time.Millisecond))
+		dur := time.Since(t0).Round(time.Millisecond)
+		log.Printf("policy: applied gen=%d bytes=%d dur=%s dur_ms=%d", gen, len(pol), dur, dur.Milliseconds())
 		s.lastPolicy = pol
 		if genErr == nil {
 			_ = s.st.MarkPolicyApplied(gen)

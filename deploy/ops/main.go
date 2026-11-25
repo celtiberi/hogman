@@ -63,16 +63,19 @@ type CapacitySnapshot struct {
 }
 
 type PenSnapshot struct {
-	Name            string `json:"name"`
-	PublicHost      string `json:"public_host,omitempty"`
-	Plan            string `json:"plan"`
-	Theme           string `json:"theme"`
-	State           string `json:"state"`
-	PaidUntil       string `json:"paid_until,omitempty"`
-	DeleteAfter     string `json:"delete_after,omitempty"`
-	ContainersUp    int    `json:"containers_up"`
-	ContainersTotal int    `json:"containers_total"`
-	RAMBytes        uint64 `json:"ram_bytes"`
+	Name             string `json:"name"`
+	PublicHost       string `json:"public_host,omitempty"`
+	Plan             string `json:"plan"`
+	Theme            string `json:"theme"`
+	State            string `json:"state"`
+	PaidUntil        string `json:"paid_until,omitempty"`
+	DeleteAfter      string `json:"delete_after,omitempty"`
+	ContainersUp     int    `json:"containers_up"`
+	ContainersTotal  int    `json:"containers_total"`
+	RAMBytes         uint64 `json:"ram_bytes"`
+	SetPolicySamples int    `json:"setpolicy_samples,omitempty"`
+	SetPolicyLastMs  int64  `json:"setpolicy_last_ms,omitempty"`
+	SetPolicyP95Ms   int64  `json:"setpolicy_p95_ms,omitempty"`
 }
 
 type WaitlistSnapshot struct {

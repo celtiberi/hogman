@@ -76,6 +76,67 @@ cgroup_mem_bytes() {
   printf '0'
 }
 
+# Collect recent SetPolicy durations (dur_ms=<int>) from a running registrar
+# container's stdout/stderr logs (no access to pens/<name>/data). Anchors
+# strictly to registrar's log format, bounds values to <= 3600000 ms (1h) so
+# malformed/injected numbers can never overflow Go int64 JSON decoding, and
+# computes "<samples> <last_ms> <p95_ms>" over the latest 100 pushes in one awk.
+collect_setpolicy_stats() {
+  local cname="$1" logs_out
+  if command -v timeout >/dev/null 2>&1; then
+    logs_out="$(timeout 5s docker logs --tail 500 "$cname" 2>&1 || true)"
+  else
+    logs_out="$(docker logs --tail 500 "$cname" 2>&1 || true)"
+  fi
+  if [ -z "$logs_out" ]; then
+    printf '0 0 0\n'
+    return 0
+  fi
+  LC_ALL=C awk '
+    { sub(/\r$/, "") }
+    /^([0-9][0-9][0-9][0-9]\/[0-9][0-9]\/[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] )?policy: (applied|failed) gen=[0-9]+ bytes=[0-9]+ dur=[^ ]+ dur_ms=[0-9]+( err=.*)?$/ {
+      tok = ""
+      for (i = 1; i <= NF; i++) {
+        if (substr($i, 1, 7) == "dur_ms=") {
+          tok = substr($i, 8)
+          break
+        }
+      }
+      if (tok ~ /^[0-9]+$/ && length(tok) <= 8) {
+        n = tok + 0
+        if (n >= 0 && n <= 3600000) {
+          total++
+          ring[(total - 1) % 100] = n
+          last_ms = n
+        }
+      }
+    }
+    END {
+      if (total == 0) {
+        print "0 0 0"
+        exit
+      }
+      count = (total < 100) ? total : 100
+      for (i = 0; i < count; i++) {
+        a[i + 1] = ring[i]
+      }
+      for (i = 2; i <= count; i++) {
+        v = a[i]
+        j = i - 1
+        while (j >= 1 && a[j] > v) {
+          a[j + 1] = a[j]
+          j--
+        }
+        a[j + 1] = v
+      }
+      idx = int((count * 95 + 99) / 100)
+      if (idx < 1) idx = 1
+      if (idx > count) idx = count
+      printf "%d %.0f %.0f\n", count, last_ms, a[idx]
+    }
+  ' <<<"$logs_out"
+}
+
 # --- Host identity & OS metrics ---
 host_name="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown)"
 version="unknown"
@@ -206,6 +267,10 @@ if [ -d "$PENS_DIR" ]; then
     c_up=0
     ram_bytes=0
     hs_running=0
+    reg_running=0
+    sp_samples=0
+    sp_last_ms=0
+    sp_p95_ms=0
     if [ -n "$docker_rows" ]; then
       while IFS=' ' read -r cid cname cstate; do
         [ -n "$cid" ] || continue
@@ -216,6 +281,8 @@ if [ -d "$PENS_DIR" ]; then
               c_up=$((c_up + 1))
               if [ "$cname" = "pen-${n}-headscale-1" ]; then
                 hs_running=1
+              elif [ "$cname" = "pen-${n}-registrar-1" ]; then
+                reg_running=1
               fi
               mem="$(cgroup_mem_bytes "$cid")"
               ram_bytes=$((ram_bytes + mem))
@@ -225,6 +292,12 @@ if [ -d "$PENS_DIR" ]; then
       done <<<"$docker_rows"
       if [ "$state" = "running" ] && [ "$hs_running" -eq 0 ]; then
         state="down"
+      fi
+      if [ "$reg_running" -eq 1 ]; then
+        read -r sp_samples sp_last_ms sp_p95_ms < <(collect_setpolicy_stats "pen-${n}-registrar-1") || { sp_samples=0; sp_last_ms=0; sp_p95_ms=0; }
+        [[ "$sp_samples" =~ ^[0-9]+$ ]] || sp_samples=0
+        [[ "$sp_last_ms" =~ ^[0-9]+$ ]] || sp_last_ms=0
+        [[ "$sp_p95_ms" =~ ^[0-9]+$ ]] || sp_p95_ms=0
       fi
     fi
 
@@ -249,6 +322,9 @@ if [ -d "$PENS_DIR" ]; then
       --argjson c_up "$c_up" \
       --argjson c_total "$c_total" \
       --argjson ram "$ram_bytes" \
+      --argjson sp_samples "${sp_samples:-0}" \
+      --argjson sp_last_ms "${sp_last_ms:-0}" \
+      --argjson sp_p95_ms "${sp_p95_ms:-0}" \
       '. + [{
         name: $name,
         public_host: $pub_host,
@@ -259,7 +335,10 @@ if [ -d "$PENS_DIR" ]; then
         delete_after: $delete_after,
         containers_up: $c_up,
         containers_total: $c_total,
-        ram_bytes: $ram
+        ram_bytes: $ram,
+        setpolicy_samples: $sp_samples,
+        setpolicy_last_ms: $sp_last_ms,
+        setpolicy_p95_ms: $sp_p95_ms
       }]' <<<"$pens_json")"
   done < <(find "$PENS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
 fi
