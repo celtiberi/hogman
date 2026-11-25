@@ -237,15 +237,15 @@ func (b *broker) sendWaitlistAckAsync(email string, place int, isWork bool) {
 	}
 	origin := b.renewOriginForPen(plan)
 	subject, body := waitlistAckEmail(place, isWork, origin)
-	go func() {
+	b.goBackground(func(bg context.Context) {
 		defer func() { <-b.mailSem }()
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(bg, 15*time.Second)
 		defer cancel()
 		// Reuses the broker's Resend sender (RESEND_API_KEY_FILE / BILLING_FROM).
 		if _, err := b.sendBillingAlert(ctx, []string{email}, subject, body); err != nil {
 			log.Printf("waitlist ack mail: send failed: %v", err)
 		}
-	}()
+	})
 }
 
 // notifyKind pushes a capped note to the operator's ntfy topic without growing
@@ -268,16 +268,19 @@ func (b *broker) notifyKind(kind, msg string) {
 		log.Printf("ntfy: skipping %s push (too many in flight)", kind)
 		return
 	}
-	go func() {
+	b.goBackground(func(bg context.Context) {
 		defer func() { <-b.ntfySem }()
-		req, _ := http.NewRequest("POST", u.String(), strings.NewReader(msg))
+		req, err := http.NewRequestWithContext(bg, "POST", u.String(), strings.NewReader(msg))
+		if err != nil {
+			return
+		}
 		req.Header.Set("Title", "Hogman sign-ups")
 		req.Header.Set("Tags", "pig")
 		c := &http.Client{Timeout: 15 * time.Second}
 		if resp, err := c.Do(req); err == nil {
 			resp.Body.Close()
 		}
-	}()
+	})
 }
 
 // dropInvited deletes the waiting-list entry that was sent this code, if any:

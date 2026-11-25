@@ -64,6 +64,23 @@ type broker struct {
 	wakeFlightMu           sync.Mutex
 	wakesInFlight          map[string]bool
 	globalCapAlertedAt     time.Time
+	bgCtx                  context.Context // optional parent context for async tasks (tests cancel on cleanup)
+	bgWG                   sync.WaitGroup  // tracks broker background goroutines so tests drain before TempDir cleanup
+}
+
+func (b *broker) backgroundContext() context.Context {
+	if b.bgCtx != nil {
+		return b.bgCtx
+	}
+	return context.Background()
+}
+
+func (b *broker) goBackground(fn func(ctx context.Context)) {
+	b.bgWG.Add(1)
+	go func() {
+		defer b.bgWG.Done()
+		fn(b.backgroundContext())
+	}()
 }
 
 func (b *broker) now() time.Time {
