@@ -232,14 +232,44 @@ func main() {
 
 // ----------------------------------------------------------------- server --
 
+// validateServeMode enforces that production serve requires TSNET_STATE_DIR
+// unless explicitly configured for legacy Unix-socket test/migration mode.
+func validateServeMode(tsnetStateDir, legacyFlag, meshAddr string) (legacy bool, err error) {
+	tsnetStateDir = strings.TrimSpace(tsnetStateDir)
+	legacy = strings.TrimSpace(legacyFlag) == "1"
+	meshAddr = strings.TrimSpace(meshAddr)
+	if tsnetStateDir == "" && !legacy {
+		return false, errors.New("TSNET_STATE_DIR is required (set REGISTRAR_LEGACY_MESH_SOCKET=1 only for legacy test/migration harnesses)")
+	}
+	if tsnetStateDir != "" && legacy {
+		return false, errors.New("TSNET_STATE_DIR and REGISTRAR_LEGACY_MESH_SOCKET=1 are mutually exclusive")
+	}
+	if legacy {
+		sock, ok := strings.CutPrefix(meshAddr, "unix:")
+		if !ok || strings.TrimSpace(sock) == "" {
+			return false, fmt.Errorf("REGISTRAR_LEGACY_MESH_SOCKET=1 requires MESH_ADDR starting with unix:<path> (got %q)", meshAddr)
+		}
+	}
+	return legacy, nil
+}
+
 func serve(s *Service) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	s.SetBaseContext(ctx)
 
 	tsnetStateDir := strings.TrimSpace(os.Getenv("TSNET_STATE_DIR"))
+	legacyMeshAddr := strings.TrimSpace(os.Getenv("MESH_ADDR"))
+	legacySocket, err := validateServeMode(tsnetStateDir, os.Getenv("REGISTRAR_LEGACY_MESH_SOCKET"), legacyMeshAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if legacySocket {
+		log.Printf("WARN: REGISTRAR_LEGACY_MESH_SOCKET=1 enabled (test/migration only; trusting X-Forwarded-For over %s)", legacyMeshAddr)
+	}
 
-	// Legacy mode (no TSNET_STATE_DIR): start OS-socket DNS first.
-	if tsnetStateDir == "" {
+	// Legacy mode (REGISTRAR_LEGACY_MESH_SOCKET=1): start OS-socket DNS first.
+	if legacySocket {
 		if dnsAddr := env("DNS_ADDR", ":53"); dnsAddr != "" && dnsAddr != "off" {
 			dnsSrv, err := NewDNSServer(s)
 			if err != nil {
@@ -276,11 +306,10 @@ func serve(s *Service) {
 		defer homeMgr.Close()
 	}
 
-	// In embedded tsnet mode, bring up the core node BEFORE starting Headscale
-	// sync, ACME background loops, or the public HTTP server so s.cfg.CoreIP
-	// is populated from the live Tailscale IPv4 before any concurrent reader
-	// (such as /hogman/v1/network) sees it, and before first-boot ./hogman up
-	// waits on TSNET_STATE_DIR/mesh-ip.
+	// Phase 1 of embedded tsnet startup: bring up the core node, write mesh-ip,
+	// and start DNS + /healthz (returning 503 not-ready) BEFORE initial Headscale
+	// Sync(), so s.cfg.CoreIP is populated and ./hogman up can read mesh-ip,
+	// while the :443 portal stays closed until Sync() completes.
 	var em *embeddedMesh
 	if tsnetStateDir != "" {
 		controlURL := env("TSNET_CONTROL_URL", "https://"+s.cfg.PublicHost)
@@ -292,9 +321,16 @@ func serve(s *Service) {
 		if err != nil {
 			log.Fatalf("embedded mesh: %v", err)
 		}
+		defer func() {
+			shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			em.Shutdown(shut)
+		}()
 	}
 
-	// Wait for Headscale, then take control of policy before serving HTTP.
+	// Wait for Headscale, backfill node_key/machine_key on existing rows, and
+	// take control of policy before serving HTTP (capped backoff: 1s -> 5s).
+	backoff := time.Second
 	for {
 		if err := s.Sync(ctx); err == nil {
 			break
@@ -304,19 +340,44 @@ func serve(s *Service) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(2 * time.Second):
+		case <-time.After(backoff):
+		}
+		if backoff < 5*time.Second {
+			backoff *= 2
+			if backoff > 5*time.Second {
+				backoff = 5 * time.Second
+			}
 		}
 	}
 	log.Printf("registrar for %s: in sync with headscale", s.cfg.Zone)
 
+	// Phase 2: now that initial Sync() succeeded, open https://home.<zone>:443
+	// and flip /healthz to ready.
+	if em != nil {
+		if err := em.StartPortal(ctx); err != nil {
+			log.Fatalf("embedded mesh portal: %v", err)
+		}
+	}
+
 	go func() {
-		t := time.NewTicker(durEnv("SYNC_INTERVAL", 3*time.Second))
+		fastInterval := durEnv("SYNC_INTERVAL", 3*time.Second)
+		if fastInterval <= 0 {
+			fastInterval = 3 * time.Second
+		}
+		idleInterval := durEnv("SYNC_IDLE_INTERVAL", 30*time.Second)
+		if idleInterval < fastInterval {
+			idleInterval = fastInterval
+		}
+		t := time.NewTicker(fastInterval)
 		defer t.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				if !s.NeedsFastSync() && s.clock().Sub(s.LastSyncAt()) < idleInterval {
+					continue
+				}
 				if err := s.Sync(ctx); err != nil {
 					log.Printf("sync: %v", err)
 				}
@@ -357,8 +418,8 @@ func serve(s *Service) {
 	}()
 
 	var mesh *http.Server
-	if tsnetStateDir == "" {
-		mesh = &http.Server{Addr: env("MESH_ADDR", "127.0.0.1:8082"), Handler: MeshHandler(s),
+	if legacySocket {
+		mesh = &http.Server{Addr: legacyMeshAddr, Handler: MeshHandler(s),
 			ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
 			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 			ConnContext: markSocketConn}
@@ -384,6 +445,7 @@ func serve(s *Service) {
 	if em != nil {
 		em.Shutdown(shut)
 	}
+	s.WaitBackground(shut)
 }
 
 // -------------------------------------------------------------------- cli --
@@ -525,7 +587,7 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		if err := need(rest, 2, "member role <handle> <role>"); err != nil {
 			return err
 		}
-		if err := s.SetRole(a, rest[0], rest[1]); err != nil {
+		if err := s.SetRole(ctx, a, rest[0], rest[1]); err != nil {
 			return err
 		}
 		fmt.Printf("%s is now %s\n", rest[0], rest[1])

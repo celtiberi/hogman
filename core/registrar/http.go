@@ -177,22 +177,22 @@ type ctxKey struct{}
 type caller struct {
 	member *Member
 	device *Device
-	nodes  []HSNode
 }
 
 func (c caller) actor() Actor { return Actor{Member: c.member} }
 
-// MeshHandler is the member and admin API, served over the Unix socket (or
-// loopback TCP in dev/tests) behind a reverse proxy that sets X-Forwarded-For.
+// MeshHandler is the legacy IP-only member and admin API, kept strictly behind
+// REGISTRAR_LEGACY_MESH_SOCKET=1 for legacy test/migration harnesses.
 func MeshHandler(s *Service) http.Handler {
 	return requireSameOriginAndJSON(s.cfg.Zone, identify(s, meshMux(s)))
 }
 
 // MeshHandlerDirect is the member and admin API served directly on the
 // embedded tsnet listener (https://home.<zone>/api/). Caller identity comes
-// strictly from the WireGuard connection's RemoteAddr verified via tsnet WhoIs;
-// X-Forwarded-For and all other HTTP headers are ignored.
-func MeshHandlerDirect(s *Service, resolvePeer func(ctx context.Context, remoteAddr string) (string, error)) http.Handler {
+// strictly from the WireGuard connection's RemoteAddr verified via tsnet WhoIs
+// (node ID + node public key + IP, checked against SQLite); X-Forwarded-For
+// and all other HTTP headers are ignored.
+func MeshHandlerDirect(s *Service, resolvePeer func(ctx context.Context, remoteAddr string) (*PeerIdentity, error)) http.Handler {
 	return requireSameOriginAndJSON(s.cfg.Zone, identifyDirect(s, resolvePeer, meshMux(s)))
 }
 
@@ -290,12 +290,17 @@ func meshMux(s *Service) http.Handler {
 			fail(w, &Problem{Status: http.StatusConflict, Msg: "this pen is not currently in a renewable grace or wake window"})
 			return
 		}
-		if c.member.Status != "active" || (c.member.Role != "owner" && c.member.Role != "admin") {
+		fresh, err := s.RefreshActor(c.actor())
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		if fresh.Member == nil || fresh.Member.Status != "active" || !fresh.IsAdmin() {
 			fail(w, forbidden("only active owners or admins can renew"))
 			return
 		}
 		keyPath := filepath.Join(filepath.Dir(s.cfg.BillingStatusPath), "renew.key")
-		token, exp, err := mintRenewToken(keyPath, billing.Pen, c.member.Handle, c.member.Role, time.Now().UTC())
+		token, exp, err := mintRenewToken(keyPath, billing.Pen, fresh.Member.Handle, fresh.Member.Role, time.Now().UTC())
 		if err != nil {
 			log.Printf("billing renew-token: %v", err)
 			fail(w, err)
@@ -312,7 +317,12 @@ func meshMux(s *Service) http.Handler {
 	// Mints a short-lived (15m), single-use, domain-separated HMAC token under
 	// hogman-delete-v1: returned in the URL fragment (#delete=<token>).
 	h("POST /api/pen/delete-token", true, false, func(w http.ResponseWriter, r *http.Request, c caller) {
-		if c.member.Status != "active" || !c.actor().IsOwner() {
+		fresh, err := s.RefreshActor(c.actor())
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		if fresh.Member == nil || fresh.Member.Status != "active" || !fresh.IsOwner() {
 			fail(w, forbidden("only active owners can delete this pen"))
 			return
 		}
@@ -332,13 +342,13 @@ func meshMux(s *Service) http.Handler {
 			return
 		}
 		keyPath := filepath.Join(filepath.Dir(s.cfg.BillingStatusPath), "renew.key")
-		token, exp, err := mintDeleteToken(keyPath, meta.Pen, c.member.Handle, time.Now().UTC())
+		token, exp, err := mintDeleteToken(keyPath, meta.Pen, fresh.Member.Handle, time.Now().UTC())
 		if err != nil {
 			log.Printf("pen delete-token: %v", err)
 			fail(w, err)
 			return
 		}
-		s.st.Audit(c.member.Handle, "pen.delete.token", meta.Pen, "")
+		s.st.Audit(fresh.Member.Handle, "pen.delete.token", meta.Pen, "")
 		writeJSON(w, 200, map[string]any{
 			"url":        strings.TrimRight(meta.DeleteURL, "/") + "/#delete=" + token,
 			"expires_at": exp.UTC().Format(time.RFC3339),
@@ -496,7 +506,7 @@ func meshMux(s *Service) http.Handler {
 			fail(w, err)
 			return
 		}
-		byID := indexNodesByID(c.nodes)
+		byID := s.PresenceSnapshot(r.Context())
 		out := make([]directoryEntry, 0, len(names))
 		for _, n := range names {
 			entry := directoryEntry{
@@ -607,7 +617,7 @@ func meshMux(s *Service) http.Handler {
 			}
 			writeJSON(w, 200, rep)
 		case "role":
-			done(w, s.SetRole(c.actor(), handle, in.Role))
+			done(w, s.SetRole(r.Context(), c.actor(), handle, in.Role))
 		default:
 			fail(w, missing("unknown action"))
 		}
@@ -619,7 +629,7 @@ func meshMux(s *Service) http.Handler {
 			fail(w, err)
 			return
 		}
-		byID := indexNodesByID(c.nodes)
+		byID := s.PresenceSnapshot(r.Context())
 		out := make([]deviceView, 0, len(ds))
 		for _, d := range ds {
 			online, lastSeen := nodePresence(byID, d.HSNodeID)
@@ -663,25 +673,26 @@ func meshMux(s *Service) http.Handler {
 }
 
 // identifyDirect resolves the calling device strictly from the authenticated
-// WireGuard peer address (RemoteAddr verified via tsnet WhoIs). X-Forwarded-For
-// is never consulted.
-func identifyDirect(s *Service, resolvePeer func(ctx context.Context, remoteAddr string) (string, error), next http.Handler) http.Handler {
+// WireGuard peer identity returned by tsnet WhoIs (node ID, node public key,
+// key expiry, and IP) matched against SQLite. X-Forwarded-For is never consulted
+// and no Headscale REST call is made on steady-state requests.
+func identifyDirect(s *Service, resolvePeer func(ctx context.Context, remoteAddr string) (*PeerIdentity, error), next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if resolvePeer == nil {
+			fail(w, forbidden("this device is not enrolled in the network"))
+			return
+		}
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil || net.ParseIP(host) == nil {
 			fail(w, forbidden("this device is not enrolled in the network"))
 			return
 		}
-		src := host
-		if resolvePeer != nil {
-			peerIP, err := resolvePeer(r.Context(), r.RemoteAddr)
-			if err != nil || peerIP == "" || net.ParseIP(peerIP) == nil {
-				fail(w, forbidden("this device is not enrolled in the network"))
-				return
-			}
-			src = peerIP
+		peer, err := resolvePeer(r.Context(), r.RemoteAddr)
+		if err != nil || peer == nil || peer.IP == "" || net.ParseIP(peer.IP) == nil {
+			fail(w, forbidden("this device is not enrolled in the network"))
+			return
 		}
-		m, d, nodes, err := s.verifyLiveCallerWithNodes(r.Context(), src)
+		m, d, err := s.VerifyDirectPeer(r.Context(), peer)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
 				fail(w, forbidden("this device is not enrolled in the network"))
@@ -694,7 +705,7 @@ func identifyDirect(s *Service, resolvePeer func(ctx context.Context, remoteAddr
 			fail(w, forbidden("membership %s", m.Status))
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, caller{member: m, device: d, nodes: nodes})))
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, caller{member: m, device: d})))
 	})
 }
 
@@ -803,7 +814,7 @@ func identify(s *Service, next http.Handler) http.Handler {
 			fail(w, forbidden("this device is not enrolled in the network"))
 			return
 		}
-		m, d, nodes, err := s.verifyLiveCallerWithNodes(r.Context(), src)
+		m, d, err := s.VerifyLiveCaller(r.Context(), src)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
 				fail(w, forbidden("this device is not enrolled in the network"))
@@ -816,7 +827,7 @@ func identify(s *Service, next http.Handler) http.Handler {
 			fail(w, forbidden("membership %s", m.Status))
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, caller{member: m, device: d, nodes: nodes})))
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, caller{member: m, device: d})))
 	})
 }
 
@@ -838,9 +849,6 @@ type deviceView struct {
 }
 
 func indexNodesByID(nodes []HSNode) map[string]HSNode {
-	if len(nodes) == 0 {
-		return nil
-	}
 	byID := make(map[string]HSNode, len(nodes))
 	for _, n := range nodes {
 		if n.ID != "" {

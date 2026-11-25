@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Headscale is a minimal client for Headscale's REST API (/api/v1).
@@ -40,6 +41,8 @@ type HSPreAuthKey struct {
 
 type HSNode struct {
 	ID          string        `json:"id"`
+	MachineKey  string        `json:"machineKey"`
+	NodeKey     string        `json:"nodeKey"`
 	Name        string        `json:"name"`
 	GivenName   string        `json:"givenName"`
 	IPAddresses []string      `json:"ipAddresses"`
@@ -74,6 +77,27 @@ func isHSNotFound(err error) bool {
 	return he.Status == http.StatusNotFound || strings.Contains(strings.ToLower(he.Body), "not found")
 }
 
+const (
+	// 8 MiB caps memory on malformed responses; GET /api/v1/node averages ~1 KB/node,
+	// so this comfortably covers pens up to several thousand nodes (I-30).
+	maxHSResponseBytes = 8 << 20
+	// Cap error bodies stored in HSError/logs so a verbose upstream error cannot spam logs.
+	maxHSErrorBytes = 4 << 10
+)
+
+func truncateErrorBody(b []byte) string {
+	trimmed := bytes.TrimSpace(b)
+	if len(trimmed) > maxHSErrorBytes {
+		cut := trimmed[:maxHSErrorBytes]
+		// Back up off any partial multi-byte UTF-8 rune at the cut boundary.
+		for len(cut) > 0 && !utf8.Valid(cut) {
+			cut = cut[:len(cut)-1]
+		}
+		return string(cut) + "...(truncated)"
+	}
+	return string(trimmed)
+}
+
 func (h *Headscale) do(ctx context.Context, method, path string, in, out any) error {
 	var body io.Reader
 	if in != nil {
@@ -96,9 +120,15 @@ func (h *Headscale) do(ctx context.Context, method, path string, in, out any) er
 		return fmt.Errorf("headscale: %w", err)
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxHSResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("headscale: read response: %w", err)
+	}
+	if len(data) > maxHSResponseBytes {
+		return fmt.Errorf("headscale: response exceeded %d bytes", maxHSResponseBytes)
+	}
 	if resp.StatusCode/100 != 2 {
-		return &HSError{Status: resp.StatusCode, Body: string(bytes.TrimSpace(data))}
+		return &HSError{Status: resp.StatusCode, Body: truncateErrorBody(data)}
 	}
 	if out != nil {
 		return json.Unmarshal(data, out)
@@ -170,6 +200,24 @@ func (h *Headscale) Nodes(ctx context.Context) ([]HSNode, error) {
 		return nil, err
 	}
 	return r.Nodes, nil
+}
+
+func (h *Headscale) Node(ctx context.Context, id string) (*HSNode, error) {
+	id = strings.TrimSpace(id)
+	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, "/\\") {
+		return nil, fmt.Errorf("headscale: invalid node id %q", id)
+	}
+	var r struct{ Node HSNode }
+	if err := h.do(ctx, http.MethodGet, "/node/"+url.PathEscape(id), nil, &r); err != nil {
+		if isHSNotFound(err) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if r.Node.ID == "" || r.Node.ID != id {
+		return nil, fmt.Errorf("headscale: node %q response mismatched id %q", id, r.Node.ID)
+	}
+	return &r.Node, nil
 }
 
 func (h *Headscale) DeleteNode(ctx context.Context, id string) error {

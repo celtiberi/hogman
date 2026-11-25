@@ -319,9 +319,21 @@ func TestFakeHeadscaleAndMock429(t *testing.T) {
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("hs-node: %d %s", resp.StatusCode, string(body))
 	}
+	var created hsNode
+	if err := json.Unmarshal(body, &created); err != nil || created.ID == "" {
+		t.Fatalf("decode hs-node: err=%v body=%s", err, string(body))
+	}
 	resp, body = doJSONReq(t, hsSrv.URL+"/api/v1/node", "GET", "", nil)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"100.64.0.11"`) || !strings.Contains(string(body), `"tag:server"`) {
 		t.Fatalf("GET nodes: %d %s", resp.StatusCode, string(body))
+	}
+	resp, body = doJSONReq(t, hsSrv.URL+"/api/v1/node/"+created.ID, "GET", "", nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"id":"`+created.ID+`"`) || !strings.Contains(string(body), `"100.64.0.11"`) {
+		t.Fatalf("GET node/%s: %d %s", created.ID, resp.StatusCode, string(body))
+	}
+	resp, _ = doJSONReq(t, hsSrv.URL+"/api/v1/node/999", "GET", "", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET node/999: got %d want 404", resp.StatusCode)
 	}
 
 	// Verify mock429 TLS server dir/nonce/acct/order behavior.
