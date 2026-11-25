@@ -592,11 +592,12 @@ check "share list shows it running" notes_listed
 only_proxy_tcp_listen() {
   # I-27: with ts_omit_peerapiserver, hogman agent + share must ONLY listen on
   # the agent's 127.0.0.1:<proxyPort> socket — zero wildcard or extra TCP listeners.
+  # Ignore Docker's built-in container DNS listener on 127.0.0.11 (0B00007F).
   local want_hex
   want_hex="$(printf '0100007F:%04X' "${PROXY##*:}")"
   run dave-laptop sh -c '
     want="'"$want_hex"'"
-    v4="$(awk "NR>1 && \$4==\"0A\" { print \$2 }" /proc/net/tcp 2>/dev/null || true)"
+    v4="$(awk "NR>1 && \$4==\"0A\" && \$2 !~ /^0B00007F:/ { print \$2 }" /proc/net/tcp 2>/dev/null || true)"
     v6="$(awk "NR>1 && \$4==\"0A\" { print \$2 }" /proc/net/tcp6 2>/dev/null || true)"
     if [ "$v4" != "$want" ] || [ -n "$v6" ]; then
       echo "unexpected TCP listeners on dave-laptop: want v4=[$want] v6=[], got v4=[$v4] v6=[$v6]" >&2
