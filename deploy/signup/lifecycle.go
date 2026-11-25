@@ -2379,11 +2379,14 @@ func (b *broker) checkPenHealth(ctx context.Context, pen string) error {
 // runRenewWakeAsync executes the slow Docker wake and waits for the registrar
 // to confirm home.<zone> TLS readiness before starting the 10-minute renewal
 // window (bounded by the 20-minute hard ceiling from button press).
-func (b *broker) runRenewWakeAsync(pen string, wakeStartedAt, ceilingUnix int64) {
-	ctx, cancel := context.WithTimeout(context.Background(), renewWakeCeiling)
+func (b *broker) runRenewWakeAsync(bg context.Context, pen string, wakeStartedAt, ceilingUnix int64) {
+	ctx, cancel := context.WithTimeout(bg, renewWakeCeiling)
 	defer cancel()
 
 	if !b.tryBeginWake(pen) {
+		if bg.Err() != nil {
+			return
+		}
 		log.Printf("lifecycle wake %s: wake already in flight; rolling back renew-only request", pen)
 		b.rollbackFailedRenewWake(pen, wakeStartedAt)
 		return
@@ -2393,6 +2396,9 @@ func (b *broker) runRenewWakeAsync(pen string, wakeStartedAt, ceilingUnix int64)
 		_, code, stderr := b.runUnbounded(ctx, "wake", "--renew-only", "--no-lifecycle", pen)
 		b.invalidateCapacityCache()
 		if code != 0 {
+			if bg.Err() != nil {
+				return false
+			}
 			log.Printf("lifecycle wake %s: wake --renew-only failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))
 			b.rollbackFailedRenewWake(pen, wakeStartedAt)
 			return false
@@ -2746,11 +2752,12 @@ func (b *broker) lifecycleTransitionHandler(w http.ResponseWriter, r *http.Reque
 			jsonOut(w, 500, map[string]string{"error": fmt.Sprintf("wake --renew-only %s failed (exit %d): %s", pen, code, strings.TrimSpace(stderr))})
 			return
 		}
-		go func(p string, started, ceil int64) {
-			ctx, cancel := context.WithTimeout(context.Background(), renewWakeCeiling)
+		p, started, ceil := pen, nowUnix, ceilUnix
+		b.goBackground(func(bg context.Context) {
+			ctx, cancel := context.WithTimeout(bg, renewWakeCeiling)
 			defer cancel()
 			b.pollRenewWakeReady(ctx, p, started, ceil)
-		}(pen, nowUnix, ceilUnix)
+		})
 		b.ledger(fmt.Sprintf("%s lifecycle %s: operator renew-only wake (ceiling %s)",
 			now.Format(time.RFC3339), pen, time.Unix(ceilUnix, 0).UTC().Format(time.RFC3339)))
 		jsonOut(w, 200, map[string]any{"ok": true, "pen": pen, "state": stateRenewOnly})
@@ -2778,7 +2785,9 @@ func (b *broker) lifecycleWakeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	shouldStart, startedAt, ceiling, _ := b.requestRenewWake(r.Context(), pen, b.now())
 	if shouldStart {
-		go b.runRenewWakeAsync(pen, startedAt, ceiling)
+		b.goBackground(func(bg context.Context) {
+			b.runRenewWakeAsync(bg, pen, startedAt, ceiling)
+		})
 	}
 	jsonOut(w, 202, map[string]any{"ok": true})
 }

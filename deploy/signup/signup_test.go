@@ -61,7 +61,16 @@ func newTestBroker(t *testing.T, codes string) (*broker, string) {
 	if err := os.WriteFile(filepath.Join(home, "signup", "codes"), []byte(codes), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return &broker{home: home, tool: tool, token: testToken}, home
+	ctx, cancel := context.WithCancel(context.Background())
+	b := &broker{home: home, tool: tool, token: testToken, bgCtx: ctx}
+	// Registered after t.TempDir() calls so LIFO cleanup cancels and drains all
+	// async broker goroutines (renew wakes, renewal work, ntfy/mail) before
+	// TempDir's RemoveAll tears down home/tool.
+	t.Cleanup(func() {
+		cancel()
+		b.bgWG.Wait()
+	})
+	return b, home
 }
 
 func call(h http.Handler, method, path, body string, hdr map[string]string) (int, map[string]any) {

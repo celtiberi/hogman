@@ -44,7 +44,6 @@ func TestRenewOnlyWakeCapsCapacityPersistenceAndTimingI7(t *testing.T) {
 	// Fake hogman-host tool that slows down wake --renew-only slightly (to prove
 	// POST /api/wake returns immediately without waiting) and logs invocations.
 	b, home := newTestBroker(t, "")
-	b.tool = filepath.Join(t.TempDir(), "hogman-host")
 	if err := os.WriteFile(b.tool, []byte(`#!/bin/sh
 echo "$*" >> "$HOGMAN_HOME/tool.log"
 if [ "$1" = "wake" ] && [ "$2" = "--renew-only" ]; then
@@ -963,7 +962,6 @@ func TestBrokerLifecycleTransitionEndpointI12(t *testing.T) {
 		"if [ \"$1\" = wake ] && [ \"$2\" = --renew-only ]; then touch \"" + penDir + "/.renew-wake\"; exit 0; fi\n" +
 		"if [ \"$1\" = wake ]; then rm -f \"" + penDir + "/.sleeping\" \"" + penDir + "/.renew-wake\"; exit 0; fi\n" +
 		"exit 0\n"
-	b.tool = filepath.Join(t.TempDir(), "hogman-host")
 	_ = os.WriteFile(b.tool, []byte(script), 0o755)
 
 	callTransition := func(action string) *httptest.ResponseRecorder {

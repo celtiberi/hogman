@@ -717,13 +717,14 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 			}
 			if !alreadyApplied {
 				if wasSleeping || (updatedRec != nil && updatedRec.PendingOwner != "") {
-					go func(pen string, wake bool) {
-						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+					targetPen, wake, sessionID := pen, wasSleeping, s.ID
+					b.goBackground(func(bg context.Context) {
+						ctx, cancel := context.WithTimeout(bg, 5*time.Minute)
 						defer cancel()
-						if err := b.finishRenewalWork(ctx, pen, wake); err != nil {
-							log.Printf("stripe renew %s (%s) post-work: %v", s.ID, pen, err)
+						if err := b.finishRenewalWork(ctx, targetPen, wake); err != nil {
+							log.Printf("stripe renew %s (%s) post-work: %v", sessionID, targetPen, err)
 						}
-					}(pen, wasSleeping)
+					})
 				}
 				b.notifyKind("raise", "Pen renewed ("+pen+")")
 			}
@@ -789,13 +790,14 @@ func (b *broker) stripeEvent(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if err == nil && !alreadyApplied && wasSleeping {
-					go func(pen string) {
-						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+					targetPen, invID := pen, inv.ID
+					b.goBackground(func(bg context.Context) {
+						ctx, cancel := context.WithTimeout(bg, 5*time.Minute)
 						defer cancel()
-						if err := b.finishRenewalWork(ctx, pen, true); err != nil {
-							log.Printf("stripe invoice %s (%s) wake: %v", inv.ID, pen, err)
+						if err := b.finishRenewalWork(ctx, targetPen, true); err != nil {
+							log.Printf("stripe invoice %s (%s) wake: %v", invID, targetPen, err)
 						}
-					}(pen)
+					})
 				}
 			}
 		}
