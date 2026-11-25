@@ -20,7 +20,8 @@ on Earth, there is no public IP address to scan.
   $120/year (Work).
 - **Documentation:** [work.hogman.network/docs](https://work.hogman.network/docs/) ·
   [Policies & billing](https://work.hogman.network/docs/policies.html)
-- **Architecture & threat model:** [Architecture & security](https://work.hogman.network/docs/security.html)
+- **How Hogman works:** [Step-by-step architecture map](docs/how-hogman-works.md) ·
+  [Architecture & security](https://work.hogman.network/docs/security.html)
 
 Hogman runs pen control planes hosted-only on `hogman.network` (no self-hosted pen server support),
 while your sites, folders, and bridged local devices run on your own machines via
@@ -177,7 +178,7 @@ A stranger looking up the same name publicly: NODATA from ns1. Zero A/AAAA recor
   gh attestation verify hogman --repo celtiberi/hogman
   ```
 
-Read the full breakdown in [Architecture & security](https://work.hogman.network/docs/security.html).
+Read the step-by-step map in [How Hogman works](docs/how-hogman-works.md) or the full security breakdown in [Architecture & security](https://work.hogman.network/docs/security.html).
 
 ---
 
@@ -235,6 +236,7 @@ More developer & operator docs:
 - [`core/README.md`](core/README.md) — core stack and Docker e2e test harness
 - [`deploy/README.md`](deploy/README.md) — operator guide (hosted pens, `challenge-dns`, backups, monitoring)
 - [`browser-ext/README.md`](browser-ext/README.md) — extension architecture, build, and local install
+- [`docs/how-hogman-works.md`](docs/how-hogman-works.md) — plain-English step-by-step map of every moving part, packet flow, portal auth, revocation, and scaling
 - [`docs/security/`](docs/security/) — security design notes and public-certificate architecture
 - [`DESIGN.md`](DESIGN.md) — initial design spec and decision history
 
