@@ -485,14 +485,55 @@ func uninstallCmd(args []string, o options) error {
 		}
 	}
 	self, _ := os.Executable()
+	home, _ := os.UserHomeDir()
+	leftovers := leftoverHogmanBinaries(self, home)
 	say("\n✓ Hogman is off this computer.")
-	if self != "" {
+	if len(leftovers) > 0 {
 		if runtime.GOOS == "windows" {
-			say("  Last step: delete the program itself:  del \"%s\"", self)
+			var parts []string
+			for _, p := range leftovers {
+				parts = append(parts, fmt.Sprintf(`"%s"`, p))
+			}
+			say("  Last step: delete the program itself:  del %s", strings.Join(parts, " "))
 		} else {
-			say("  Last step: delete the program itself:  rm '%s'", self)
+			var parts []string
+			for _, p := range leftovers {
+				parts = append(parts, fmt.Sprintf("'%s'", p))
+			}
+			say("  Last step: delete the program itself:  rm %s", strings.Join(parts, " "))
 		}
 	}
 	say("  If you added the Hogman browser extension, remove it from your browser's extensions page.")
 	return nil
+}
+
+// leftoverHogmanBinaries returns the running executable plus any common home-dir
+// copies (~/hogman, ~/hogman-join) that still exist on disk so `hogman uninstall`
+// lists every leftover binary for the user to delete.
+func leftoverHogmanBinaries(self, home string) []string {
+	var out []string
+	addUnique := func(p string) {
+		if p == "" {
+			return
+		}
+		for _, prev := range out {
+			if sameFilePath(prev, p) {
+				return
+			}
+		}
+		out = append(out, p)
+	}
+	if self != "" {
+		addUnique(self)
+	}
+	if home != "" {
+		candidates := []string{cliBinaryName(), legacyBinaryName(runtime.GOOS)}
+		for _, name := range candidates {
+			p := filepath.Join(home, name)
+			if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+				addUnique(p)
+			}
+		}
+	}
+	return out
 }

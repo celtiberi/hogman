@@ -1680,7 +1680,8 @@ func (s *Service) buildPolicy() (string, error) {
 		membersByID[m.ID] = m
 	}
 	renewOnly := s.isRenewOnly()
-	src := []string{}
+	infraSrc := []string{}
+	serverSrc := []string{}
 	servers := []string{}
 	for _, d := range live {
 		m := membersByID[d.MemberID]
@@ -1696,15 +1697,21 @@ func (s *Service) buildPolicy() (string, error) {
 			if ip == "" {
 				continue
 			}
-			src = append(src, ip)
-			if !renewOnly && d.Kind == "server" {
-				servers = append(servers, ip)
+			infraSrc = append(infraSrc, ip)
+			if !renewOnly {
+				if d.Kind == "server" {
+					servers = append(servers, ip)
+				} else {
+					serverSrc = append(serverSrc, ip)
+				}
 			}
 		}
 	}
-	sort.Strings(src)
+	sort.Strings(infraSrc)
+	sort.Strings(serverSrc)
 	sort.Strings(servers)
-	src = append(src, "tag:infra")
+	infraSrc = append(infraSrc, "tag:infra")
+	serverSrc = append(serverSrc, "tag:infra")
 
 	type grant struct {
 		Src []string `json:"src"`
@@ -1712,10 +1719,11 @@ func (s *Service) buildPolicy() (string, error) {
 		IP  []string `json:"ip"`
 	}
 	// The pen's own services: DNS and the home page (HTTPS).
-	grants := []grant{{Src: src, Dst: []string{"tag:infra"}, IP: []string{"53", "443"}}}
+	grants := []grant{{Src: infraSrc, Dst: []string{"tag:infra"}, IP: []string{"53", "443"}}}
 	if !renewOnly && len(servers) > 0 {
-		// HTTPS only (D-11): members reach servers on 443 and nothing else.
-		grants = append(grants, grant{Src: src, Dst: servers, IP: []string{"443"}})
+		// HTTPS only (D-11): active personal devices (and tag:infra) reach servers
+		// on 443. Server devices are isolated from each other by default.
+		grants = append(grants, grant{Src: serverSrc, Dst: servers, IP: []string{"443"}})
 	}
 	pol := map[string]any{
 		"tagOwners": map[string][]string{"tag:infra": {}, "tag:server": {}},

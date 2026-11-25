@@ -184,7 +184,7 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 		cmd.Flags().StringVar(&o.handle, "handle", "", "the name you want on the network (invite links only; asked if missing)")
 		cmd.Flags().StringVar(&o.hostname, "hostname", "", "what this device is called on the network (default: this computer's name)")
 		cmd.Flags().BoolVar(&o.noService, "no-service", false, "don't register a login item, just run in the background")
-		cmd.Flags().BoolVar(&o.noSystemProxy, "no-system-proxy", false, "don't change this computer's automatic proxy setting")
+		cmd.Flags().BoolVar(&o.noSystemProxy, "no-system-proxy", false, "skip automatic proxy checks and setup instructions")
 		cmd.Flags().BoolVar(&o.dryRun, "dry-run", false, "check the link and the network, then stop without changing anything")
 		cmd.Flags().BoolVar(&o.linkStdin, "link-stdin", false, "read the join link from standard input instead of an argument")
 	}
