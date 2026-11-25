@@ -1,6 +1,9 @@
-FROM golang:1.27-alpine
+# syntax=docker/dockerfile:1
+FROM golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280
 WORKDIR /src
-ENV GOFLAGS=-tags=ts_omit_peerapiserver
+ENV GOFLAGS="-tags=ts_omit_peerapiserver -trimpath"
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY *.go ./
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go test -c -o /usr/local/bin/join.test .

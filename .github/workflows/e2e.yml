@@ -68,14 +68,49 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build registrar image (isolated context + go test)
-        run: docker build --progress=plain -t hogman-registrar-check core/registrar
-      - name: Build signup images (isolated context + go test)
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build and test isolated Docker images in parallel
         run: |
-          docker build --progress=plain --target web -t hogman-signup-web-check deploy/signup
-          docker build --progress=plain --target broker -t hogman-signup-broker-check deploy/signup
-      - name: Test join client in isolated Docker context
-        run: docker build --progress=plain --target test -t hogman-join-test core/join
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/img-logs"
+          docker buildx build --progress=plain --load \
+            --cache-from type=gha,scope=registrar \
+            --cache-to type=gha,mode=max,scope=registrar \
+            -t hogman-registrar-check core/registrar >"$RUNNER_TEMP/img-logs/registrar.log" 2>&1 &
+          p_reg=$!
+          (
+            docker buildx build --progress=plain --load --target web \
+              --cache-from type=gha,scope=signup \
+              --cache-to type=gha,mode=max,scope=signup \
+              -t hogman-signup-web-check deploy/signup
+            docker buildx build --progress=plain --load --target broker \
+              --cache-from type=gha,scope=signup \
+              --cache-to type=gha,mode=max,scope=signup \
+              -t hogman-signup-broker-check deploy/signup
+          ) >"$RUNNER_TEMP/img-logs/signup.log" 2>&1 &
+          p_signup=$!
+          docker buildx build --progress=plain --load --target test \
+            --cache-from type=gha,scope=join-test \
+            --cache-to type=gha,mode=max,scope=join-test \
+            -t hogman-join-test core/join >"$RUNNER_TEMP/img-logs/join.log" 2>&1 &
+          p_join=$!
+          docker buildx build --progress=plain --load \
+            --cache-from type=gha,scope=ops \
+            --cache-to type=gha,mode=max,scope=ops \
+            -t hogman-ops-check deploy/ops >"$RUNNER_TEMP/img-logs/ops.log" 2>&1 &
+          p_ops=$!
+
+          rc=0
+          for item in "registrar:$p_reg" "signup:$p_signup" "join:$p_join" "ops:$p_ops"; do
+            name="${item%%:*}"; pid="${item#*:}"
+            if ! wait "$pid"; then
+              echo "::group::FAILED $name build"
+              cat "$RUNNER_TEMP/img-logs/$name.log"
+              echo "::endgroup::"
+              rc=1
+            fi
+          done
+          exit "$rc"
       - name: Commands shown to users run under zsh
         # macOS Terminal uses zsh, where an unquoted word starting with "="
         # (like --proto =https) is replaced by a program path and fails with
@@ -90,10 +125,8 @@ jobs:
             deploy/changelog-fold.sh --check
             deploy/test-changelog-fold.sh
           fi
-      - name: Build Fleet Ops image and test snapshot collector
-        run: |
-          docker build --progress=plain -t hogman-ops-check deploy/ops
-          deploy/test-ops-snapshot.sh
+      - name: Test Fleet Ops snapshot collector
+        run: deploy/test-ops-snapshot.sh
 
   prebuilt:
     name: prebuild e2e binaries
@@ -108,54 +141,69 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: core/join/go.mod
-          cache: true
-          cache-dependency-path: |
-            core/join/go.sum
-            core/registrar/go.sum
-            deploy/signup/go.sum
-            deploy/challenge-dns/go.sum
-      - name: Compile E2E binaries in parallel
+          cache: false
+      # Key includes build tags (ts_omit_peerapiserver) and go.mod so flag
+      # changes never get stuck on a permanently poisoned setup-go cache.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-e2e-v2-ts_omit_peerapiserver-${{ runner.os }}-${{ hashFiles('core/join/go.mod', 'core/join/go.sum', 'core/registrar/go.sum', 'deploy/signup/go.sum', 'deploy/challenge-dns/go.sum') }}
+          restore-keys: |
+            go-e2e-v2-ts_omit_peerapiserver-${{ runner.os }}-
+      - name: Compile E2E binaries
         run: |
           set -euo pipefail
           out="$PWD/prebuilt"
           mkdir -p "$out/join" "$out/registrar" "$out/signup" "$out/challenge-dns" "$out/test-bins"
           full="$(git rev-parse 'HEAD^{commit}')"
           ver="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d "$full")-${full:0:7}"
-          # Build all 5 client platforms (matching deploy/build-bins.sh so the
-          # test pen serves the exact same 5-platform SHA256SUMS as a release)
-          # plus the Linux/amd64 server binaries, all in parallel with warm Go cache.
+          # Phase 1: compile linux/amd64 join first (alongside small non-tailscale
+          # binaries) so core/registrar reuses tailscale/gvisor/certmagic from
+          # GOCACHE instead of compiling them twice on cold caches.
           (
             cd core/join
-            export GOFLAGS=-tags=ts_omit_peerapiserver
-            for t in Darwin-arm64:darwin/arm64 Darwin-x86_64:darwin/amd64 \
-                     Linux-x86_64:linux/amd64 Linux-aarch64:linux/arm64 \
-                     windows-amd64.exe:windows/amd64; do
-              name=${t%%:*}; plat=${t#*:}
-              CGO_ENABLED=0 GOOS=${plat%/*} GOARCH=${plat#*/} \
-                go build -trimpath -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-$name" .
-            done
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=2025.01.01-aaaaaaa" -o "$out/test-bins/hogman-old" .
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=2099.01.01-bbbbbbb" -o "$out/test-bins/hogman-new" .
-            cd "$out/join" && sha256sum hogman-* > SHA256SUMS
+            export GOFLAGS="-tags=ts_omit_peerapiserver -trimpath"
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-Linux-x86_64" .
           ) &
-          p1=$!
-          (
-            cd core/registrar
-            export GOFLAGS=-tags=ts_omit_peerapiserver
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$out/registrar/registrar-linux-amd64" .
-          ) &
-          p2=$!
+          p_join_amd64=$!
           (
             cd deploy/signup
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$out/signup/hogman-signup-linux-amd64" .
+            export GOFLAGS=-trimpath
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$out/signup/hogman-signup-linux-amd64" .
           ) &
-          p3=$!
+          p_signup=$!
           (
             cd deploy/challenge-dns
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$out/challenge-dns/challenge-dns-linux-amd64" .
+            export GOFLAGS=-trimpath
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$out/challenge-dns/challenge-dns-linux-amd64" .
           ) &
-          p4=$!
-          wait "$p1" "$p2" "$p3" "$p4"
+          p_cdns=$!
+          wait "$p_join_amd64"
+
+          # Phase 2: cap concurrency to two lanes so the 4-vCPU runner isn't
+          # oversubscribed on cold caches while still overlapping link steps.
+          (
+            cd core/registrar
+            export GOFLAGS="-tags=ts_omit_peerapiserver -trimpath"
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$out/registrar/registrar-linux-amd64" .
+            cd ../join
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=2025.01.01-aaaaaaa" -o "$out/test-bins/hogman-old" .
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=2099.01.01-bbbbbbb" -o "$out/test-bins/hogman-new" .
+            CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-Linux-aarch64" .
+          ) &
+          p_lane1=$!
+          (
+            cd core/join
+            export GOFLAGS="-tags=ts_omit_peerapiserver -trimpath"
+            CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-Darwin-arm64" .
+            CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-Darwin-x86_64" .
+            CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-windows-amd64.exe" .
+          ) &
+          p_lane2=$!
+          wait "$p_signup" "$p_cdns" "$p_lane1" "$p_lane2"
+          (cd "$out/join" && sha256sum hogman-* > SHA256SUMS)
           ls -lh "$out"/*/*
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -202,8 +250,39 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build ACME test images with BuildKit cache
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/acme-build-logs"
+          docker buildx build --load \
+            --cache-from type=gha,scope=fake-challengedns \
+            --cache-to type=gha,mode=max,scope=fake-challengedns \
+            -t hogman/fake-challengedns:test core/test/fake-challengedns >"$RUNNER_TEMP/acme-build-logs/fake.log" 2>&1 &
+          p1=$!
+          docker buildx build --load \
+            --cache-from type=gha,scope=registrar \
+            --cache-to type=gha,mode=max,scope=registrar \
+            -t hogman/registrar:dev core/registrar >"$RUNNER_TEMP/acme-build-logs/registrar.log" 2>&1 &
+          p2=$!
+          docker buildx build --load \
+            --cache-from type=gha,scope=join-e2e \
+            --cache-to type=gha,mode=max,scope=join-e2e \
+            -f core/join/Dockerfile.e2e -t hogman/join-e2e:test core/join >"$RUNNER_TEMP/acme-build-logs/join-e2e.log" 2>&1 &
+          p3=$!
+          rc=0
+          for item in "fake:$p1" "registrar:$p2" "join-e2e:$p3"; do
+            name="${item%%:*}"; pid="${item#*:}"
+            if ! wait "$pid"; then
+              cat "$RUNNER_TEMP/acme-build-logs/$name.log"
+              rc=1
+            fi
+          done
+          exit "$rc"
       - name: Run the ACME Pebble suite
-        run: sudo --preserve-env=PATH core/test/acme-pebble.sh
+        env:
+          ACME_NO_BUILD: "1"
+        run: sudo --preserve-env=PATH,ACME_NO_BUILD core/test/acme-pebble.sh
 
   pen-sidecar:
     name: pen sidecar (core/test/sidecar-check.sh)
@@ -215,7 +294,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build sidecar image with BuildKit cache
+        run: |
+          docker buildx build --load \
+            --cache-from type=gha,scope=join-sidecar \
+            --cache-to type=gha,mode=max,scope=join-sidecar \
+            -f core/join/Dockerfile.sidecar -t hogman-sidecar-ci:test core/join
       - name: Run the sealed sidecar check
+        env:
+          SIDECAR_PREBUILT_IMG: hogman-sidecar-ci:test
         run: core/test/sidecar-check.sh
 
   # Required status check on main (keeps the exact existing check name while
@@ -254,10 +342,34 @@ jobs:
         run: find core/prebuilt -type f ! -name SHA256SUMS -exec chmod 0755 {} +
       - name: Fetch previous release tag for legacy upgrade test
         run: git fetch --no-tags --depth=1 origin refs/tags/v2026.11.24-76d2903:refs/tags/v2026.11.24-76d2903
+      - name: Cache immutable legacy registrar binary (v2026.11.24-76d2903)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/legacy-prebuilt
+          key: legacy-registrar-v2026.11.24-76d2903-linux-amd64
+      - name: Build legacy registrar binary on cache miss
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/legacy-prebuilt"
+          mkdir -p "$out"
+          if [ ! -f "$out/registrar-linux-amd64" ]; then
+            src="$RUNNER_TEMP/legacy-reg-src"
+            mkdir -p "$src"
+            git archive v2026.11.24-76d2903 core/registrar | tar -x --strip-components=2 -C "$src"
+            docker run --rm -u "$(id -u):$(id -g)" \
+              -v "$src:/src:ro" -v "$out:/out" -w /src \
+              -e HOME=/tmp -e GOCACHE=/tmp/gocache -e GOMODCACHE=/tmp/gomod \
+              -e GOFLAGS=-trimpath \
+              golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 \
+              sh -c 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /out/registrar-linux-amd64 .'
+          fi
+          chmod 0755 "$out/registrar-linux-amd64"
       - name: Tools
         run: |
           docker version --format 'docker {{.Server.Version}}'
           docker compose version
           jq --version
       - name: Run the shared-host suite
-        run: sudo --preserve-env=PATH deploy/test-host.sh
+        env:
+          LEGACY_REGISTRAR_PREBUILT: ${{ runner.temp }}/legacy-prebuilt/registrar-linux-amd64
+        run: sudo --preserve-env=PATH,LEGACY_REGISTRAR_PREBUILT deploy/test-host.sh

@@ -87,6 +87,7 @@ services:
 
   stray-tools:
     image: nicolaka/netshoot:v0.14
+    init: true
     profiles: [clients]
     network_mode: service:stray-device
     command: ["sleep", "infinity"]
@@ -96,6 +97,7 @@ services:
   # Tools on Alice's laptop: she uses the portal API from here.
   alice-laptop-tools:
     image: nicolaka/netshoot:v0.14
+    init: true
     profiles: [clients]
     network_mode: service:alice-laptop
     command: ["sleep", "infinity"]
@@ -117,6 +119,7 @@ services:
   # tool brings its own connection and a local proxy for pen names only.
   dave-laptop:
     image: nicolaka/netshoot:v0.14
+    init: true
     hostname: dave-laptop
     networks: [outside, acme]
     profiles: [clients]
@@ -138,6 +141,7 @@ services:
   # comes from the front door exactly as /start fetches it for a person.
   zsh-laptop: &paste-computer
     image: nicolaka/netshoot:v0.14
+    init: true
     hostname: zsh-laptop
     networks: [outside, acme]
     profiles: [clients]
@@ -162,6 +166,7 @@ services:
   # link, and must not be able to join as a whole computer with one.
   dave-server:
     image: caddy:2.11.9
+    init: true
     hostname: dave-server
     networks: [outside, acme]
     profiles: [clients]
@@ -181,6 +186,7 @@ services:
 
   dave-server-tools:
     image: nicolaka/netshoot:v0.14
+    init: true
     profiles: [clients]
     network_mode: service:dave-server
     command: ["sleep", "infinity"]
@@ -190,6 +196,7 @@ services:
   # Alice's website, running via `hogman share` outside her laptop/server.
   alice-share:
     image: nicolaka/netshoot:v0.14
+    init: true
     hostname: alice-share
     networks: [outside, acme]
     profiles: [clients]
@@ -210,6 +217,7 @@ services:
   # Tools on Bob's laptop: curl, dig, openssl.
   bob-tools:
     image: nicolaka/netshoot:v0.14
+    init: true
     profiles: [clients]
     network_mode: service:bob-laptop
     command: ["sleep", "infinity"]
@@ -219,6 +227,7 @@ services:
   # Tools on Alice's server, for checking what a server can reach.
   alice-tools:
     image: nicolaka/netshoot:v0.14
+    init: true
     profiles: [clients]
     network_mode: service:alice-server
     command: ["sleep", "infinity"]
