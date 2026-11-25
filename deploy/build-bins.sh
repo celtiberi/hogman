@@ -27,26 +27,42 @@ fi
 version="${version:-dev}"
 
 echo "building the join tool (5 platforms, version $version), the registrar and the sign-up page (linux amd64, arm64)..."
-docker build -q --build-arg "VERSION=$version" --output "type=local,dest=$out/join" "$src/core/join" >/dev/null
+
+docker build -q --build-arg "VERSION=$version" --output "type=local,dest=$out/join" "$src/core/join" >/dev/null &
+p_join=$!
+
 docker run --rm -v "$src/core/registrar:/src:ro" -v "$out/registrar:/out" -w /src \
-  -e GOFLAGS=-tags=ts_omit_peerapiserver \
+  -e GOFLAGS="-tags=ts_omit_peerapiserver -trimpath" \
   -v hogman-gomod:/go/pkg/mod -v hogman-gocache:/root/.cache/go-build "$GO_IMAGE" sh -c '
     set -e
     CGO_ENABLED=0 go test ./... >/dev/null
     for a in amd64 arm64; do
-      CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath -ldflags="-s -w" -o /out/registrar-linux-$a .
-    done'
+      CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -ldflags="-s -w" -o /out/registrar-linux-$a .
+    done' &
+p_reg=$!
+
 docker run --rm -v "$src/deploy/signup:/src:ro" -v "$out/signup:/out" -w /src \
+  -e GOFLAGS=-trimpath \
   -v hogman-gomod:/go/pkg/mod -v hogman-gocache:/root/.cache/go-build "$GO_IMAGE" sh -c '
     set -e
     CGO_ENABLED=0 go test ./... >/dev/null
     for a in amd64 arm64; do
-      CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath -ldflags="-s -w" -o /out/hogman-signup-linux-$a .
-    done'
+      CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -ldflags="-s -w" -o /out/hogman-signup-linux-$a .
+    done' &
+p_signup=$!
+
 docker run --rm -v "$src/deploy/challenge-dns:/src:ro" -v "$out/challenge-dns:/out" -w /src \
+  -e GOFLAGS=-trimpath \
   -v hogman-gomod:/go/pkg/mod -v hogman-gocache:/root/.cache/go-build "$GO_IMAGE" sh -c '
     set -e
     CGO_ENABLED=0 go test ./... >/dev/null
     for a in amd64 arm64; do
-      CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath -ldflags="-s -w" -o /out/challenge-dns-linux-$a .
-    done'
+      CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -ldflags="-s -w" -o /out/challenge-dns-linux-$a .
+    done' &
+p_cdns=$!
+
+rc=0
+for p in "$p_join" "$p_reg" "$p_signup" "$p_cdns"; do
+  wait "$p" || rc=1
+done
+exit "$rc"

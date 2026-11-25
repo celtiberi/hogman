@@ -52,7 +52,7 @@ cleanup() {
     dc ps >&2 || true
     dc logs --tail=80 >&2 || true
   fi
-  dc --profile join-e2e down -v --remove-orphans >/dev/null 2>&1 || true
+  dc --profile join-e2e down -v -t 1 --remove-orphans >/dev/null 2>&1 || true
   rm -rf "$WORKDIR"
   e2e_unlock
   exit "$rc"
@@ -240,7 +240,11 @@ chmod 600 "$WORKDIR/secrets/headscale_api_key" "$WORKDIR/secrets/challenge_dns_t
 chmod 644 "$WORKDIR/config/pebble1.json" "$WORKDIR/config/pebble2.json" "$WORKDIR/config/portal.Caddyfile"
 
 step "Starting Pebble1, Pebble2, challtestsrv, and fake-challengedns"
-dc up -d --build challtestsrv fake-challengedns pebble1 pebble2
+if [ "${ACME_NO_BUILD:-0}" = "1" ]; then
+  dc up -d --no-build challtestsrv fake-challengedns pebble1 pebble2
+else
+  dc up -d --build challtestsrv fake-challengedns pebble1 pebble2
+fi
 
 retry 30 1 curl -sf --cacert "$WORKDIR/certs/ca.crt" "https://127.0.0.1:${ACME_PEBBLE1_DIR_PORT}/dir" >/dev/null || fail "pebble1 not ready"
 retry 30 1 curl -sf --cacert "$WORKDIR/certs/ca.crt" "https://127.0.0.1:${ACME_PEBBLE2_DIR_PORT}/dir" >/dev/null || fail "pebble2 not ready"
@@ -251,8 +255,13 @@ curl -sf --cacert "$WORKDIR/certs/ca.crt" "https://127.0.0.1:${ACME_PEBBLE2_MGMT
 pass "Pebble CAs and fake-challengedns healthy"
 
 step "Test 1: Initial home.${ACME_ZONE} cert issuance + portal HTTPS"
-ACME_CA_URL="https://pebble1:14000/dir" ACME_FALLBACK_CA_URL="" \
-  dc up -d --build registrar portal
+if [ "${ACME_NO_BUILD:-0}" = "1" ]; then
+  ACME_CA_URL="https://pebble1:14000/dir" ACME_FALLBACK_CA_URL="" \
+    dc up -d --no-build registrar portal
+else
+  ACME_CA_URL="https://pebble1:14000/dir" ACME_FALLBACK_CA_URL="" \
+    dc up -d --build registrar portal
+fi
 
 retry 45 1 portal_http_ok "$WORKDIR/pebble1-root.crt" || fail "portal did not serve valid pebble1 HTTPS"
 dc exec -T registrar registrar health || fail "registrar health failed"
@@ -428,8 +437,10 @@ dc exec -T registrar registrar sync >/dev/null
 assert_mesh_status "alice-srv5 claims photos" 201 "100.64.0.11" POST /api/names '{"name":"photos"}'
 assert_mesh_status "alice-srv5 claims sharefb" 201 "100.64.0.11" POST /api/names '{"name":"sharefb"}'
 
-dc --profile join-e2e build join-e2e
-dc --profile join-e2e run --rm join-e2e go test -count=1 -v -run TestSharePublicCertPebbleE2E . || fail "TestSharePublicCertPebbleE2E failed"
+if [ "${ACME_NO_BUILD:-0}" != "1" ]; then
+  dc --profile join-e2e build join-e2e
+fi
+dc --profile join-e2e run --rm join-e2e /usr/local/bin/join.test -test.v -test.count=1 -test.run '^TestSharePublicCertPebbleE2E$' || fail "TestSharePublicCertPebbleE2E failed"
 pass "share public-certificate issuance, restart cache reuse, ownership enforcement, and 429 EAB failover passed"
 
 FAILED=0

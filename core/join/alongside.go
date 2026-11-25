@@ -531,7 +531,11 @@ func removeOwnDevice(zone string) bool {
 		return false
 	}
 	// The pen drops this device as it answers, so the answer may not arrive.
-	if code, err := homeAPI(c, zone, "DELETE", "/devices/"+strconv.FormatInt(me.ThisDevice.ID, 10), nil, nil); err != nil && code != 0 && code != 404 {
+	delClient := *c
+	if delClient.Timeout == 0 || delClient.Timeout > selfDeleteTimeout {
+		delClient.Timeout = selfDeleteTimeout
+	}
+	if code, err := homeAPI(&delClient, zone, "DELETE", "/devices/"+strconv.FormatInt(me.ThisDevice.ID, 10), nil, nil); err != nil && code != 0 && code != 404 {
 		note("could not remove this computer from your devices: %v", firstLine(err.Error()))
 		return false
 	}

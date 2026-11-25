@@ -39,7 +39,12 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: ${{ matrix.module }}/go.mod
-          cache: false
+          cache: true
+          cache-dependency-path: ${{ matrix.module }}/go.*
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/bin/staticcheck
+          key: tool-staticcheck-v0.8.2-${{ runner.os }}-${{ hashFiles('core/join/go.mod') }}
       - name: gofmt
         working-directory: ${{ matrix.module }}
         run: |
@@ -54,16 +59,36 @@ jobs:
         env:
           MODULE: ${{ matrix.module }}
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          set -euo pipefail
+          sc="$(go env GOPATH)/bin/staticcheck"
+          if [ ! -x "$sc" ]; then
+            go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          fi
           case "$MODULE" in
             core/join|core/registrar) export GOFLAGS="-tags=ts_omit_peerapiserver" ;;
           esac
-          # Check the same platforms the code is built for.
-          for goos in linux darwin windows; do
-            case "$MODULE" in core/join) ;; *) [ "$goos" = linux ] || continue ;; esac
-            echo "== GOOS=$goos"
-            GOOS="$goos" "$(go env GOPATH)/bin/staticcheck" ./...
-          done
+          # Check the same platforms the code is built for (in parallel for core/join).
+          if [ "$MODULE" = "core/join" ]; then
+            mkdir -p "$RUNNER_TEMP/sc-logs"
+            pids=()
+            for goos in linux darwin windows; do
+              GOOS="$goos" "$sc" ./... >"$RUNNER_TEMP/sc-logs/$goos.log" 2>&1 &
+              pids+=("$goos:$!")
+            done
+            rc=0
+            for item in "${pids[@]}"; do
+              goos="${item%%:*}"; pid="${item#*:}"
+              echo "== GOOS=$goos"
+              if ! wait "$pid"; then
+                rc=1
+              fi
+              cat "$RUNNER_TEMP/sc-logs/$goos.log"
+            done
+            exit "$rc"
+          else
+            echo "== GOOS=linux"
+            GOOS=linux "$sc" ./...
+          fi
 
   zizmor:
     name: zizmor (workflows)
@@ -95,14 +120,22 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: ${{ matrix.module }}/go.mod
-          cache: false
+          cache: true
+          cache-dependency-path: ${{ matrix.module }}/go.*
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/bin/gosec
+          key: tool-gosec-v2.30.0-${{ runner.os }}-${{ hashFiles('core/join/go.mod') }}
       - name: gosec
         working-directory: ${{ matrix.module }}
         env:
           MODULE: ${{ matrix.module }}
         run: |
           set -euo pipefail
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+          gs="$(go env GOPATH)/bin/gosec"
+          if [ ! -x "$gs" ]; then
+            go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+          fi
           tags_args=()
           case "$MODULE" in
             core/join|core/registrar)
@@ -110,7 +143,7 @@ jobs:
               tags_args=(-tags ts_omit_peerapiserver)
               ;;
           esac
-          "$(go env GOPATH)/bin/gosec" "${tags_args[@]}" -quiet -no-fail -tests=false -fmt sarif -out "$RUNNER_TEMP/gosec.sarif" ./...
+          "$gs" "${tags_args[@]}" -quiet -no-fail -tests=false -fmt sarif -out "$RUNNER_TEMP/gosec.sarif" ./...
       - name: Category name
         id: cat
         env:

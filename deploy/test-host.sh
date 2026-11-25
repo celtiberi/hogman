@@ -50,9 +50,9 @@ retry() { local n="$1"; shift; for _ in $(seq "$n"); do "$@" >/dev/null 2>&1 && 
 cleanup() {
   if [ "$KEEP" = true ]; then echo; echo "Left running. HOGMAN_HOME=$HOGMAN_HOME"; return; fi
   for c in client-bobo client-zebra client-signup client-alpha client-legacy hogman-test-cdns hogman-test-pebble; do docker rm -f "$c" >/dev/null 2>&1; done
-  (cd "$HOGMAN_HOME/signup" 2>/dev/null && docker compose down -v >/dev/null 2>&1)
-  for n in bobo zebra alpha smithy jones legacy; do (cd "$HOGMAN_HOME/pens/$n" 2>/dev/null && ./hogman down -v --remove-orphans >/dev/null 2>&1); done
-  (cd "$HOGMAN_HOME/front" 2>/dev/null && docker compose down -v >/dev/null 2>&1)
+  (cd "$HOGMAN_HOME/signup" 2>/dev/null && docker compose down -v -t 1 >/dev/null 2>&1)
+  for n in bobo zebra alpha smithy jones legacy; do (cd "$HOGMAN_HOME/pens/$n" 2>/dev/null && ./hogman down -v -t 1 --remove-orphans >/dev/null 2>&1); done
+  (cd "$HOGMAN_HOME/front" 2>/dev/null && docker compose down -v -t 1 >/dev/null 2>&1)
   for n in bobo zebra alpha smithy jones legacy; do docker network rm "pen-$n-core" >/dev/null 2>&1; done
   docker network rm hogman-front >/dev/null 2>&1
   rm -rf "$HOGMAN_HOME"
@@ -161,7 +161,7 @@ check "each pen has its own relay port" sh -c "[ \"\$(grep -h ^STUN_PORT= $HOGMA
 # host only through the front door.
 client() {  # client <pen>. Public DNS would point both names at the host; here, at the front door.
   local front_ip; front_ip="$(docker inspect -f '{{(index .NetworkSettings.Networks "hogman-front").IPAddress}}' hogman-front-front-1)"
-  docker run -d --name "client-$1" --network hogman-front \
+  docker run -d --init --name "client-$1" --network hogman-front \
     --add-host "bobo.gate.hogman.test:$front_ip" --add-host "zebra.gate.hogman.test:$front_ip" \
     --add-host "legacy.gate.hogman.test:$front_ip" \
     -e HOGMAN_ACME_CA_ROOT=/issued-root.crt -v "$ACME/issued-root.crt:/issued-root.crt:ro" \
@@ -364,7 +364,7 @@ code="$(awk '/^code:/ {print $2}' <<<"$vanity_out")"
 check "signup-code --vanity tags the code and link" bash -c 'grep -q "^$1 vanity for the test$" "$2/signup/codes" && grep -q "vanity=1" <<<"$3"' _ "$code" "$HOGMAN_HOME" "$vanity_out"
 
 front_ip="$(docker inspect -f '{{(index .NetworkSettings.Networks "hogman-front").IPAddress}}' hogman-front-front-1)"
-docker run -d --name client-signup --network hogman-front \
+docker run -d --init --name client-signup --network hogman-front \
   --add-host "get.example:$front_ip" --add-host "smithy.gate.hogman.test:$front_ip" \
   -e HOGMAN_ACME_CA_ROOT=/issued-root.crt -v "$ACME/issued-root.crt:/issued-root.crt:ro" \
   -v "$FRONT_CA:/front-ca.crt:ro" --entrypoint sh nicolaka/netshoot:v0.14 -c \
@@ -540,6 +540,10 @@ HOGMAN_TEST_ACME_ROOT=$ACME/certs/ca.crt
 EOF
 if [ "$LEGACY_FROM_TAG" = 1 ]; then
   check "legacy pen extracted from actual previous release ($LEGACY_TAG)" test -x "$LEGACY_DIR/hogman"
+  if [ -n "${LEGACY_REGISTRAR_PREBUILT:-}" ] && [ -f "$LEGACY_REGISTRAR_PREBUILT" ]; then
+    mkdir -p "$LEGACY_DIR/prebuilt/registrar"
+    install -m 0755 "$LEGACY_REGISTRAR_PREBUILT" "$LEGACY_DIR/prebuilt/registrar/registrar-linux-amd64"
+  fi
   (cd "$LEGACY_DIR" && ./hogman init >/dev/null)
   printf '%s' "$LEGACY_CDNS_TOK" > "$LEGACY_DIR/data/secrets/registrar/challenge_dns_token"
   chmod 600 "$LEGACY_DIR/data/secrets/registrar/challenge_dns_token"

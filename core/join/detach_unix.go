@@ -33,5 +33,8 @@ func processAlive(pid int) bool {
 		return false
 	}
 	p, err := os.FindProcess(pid)
-	return err == nil && p.Signal(syscall.Signal(0)) == nil
+	if err != nil || p.Signal(syscall.Signal(0)) != nil {
+		return false
+	}
+	return !isZombiePID(pid)
 }

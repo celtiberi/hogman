@@ -1,11 +1,14 @@
+# syntax=docker/dockerfile:1
 # Two images from one program: the public page (web) and the pen-raiser (broker).
 FROM golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build
 WORKDIR /src
+ENV GOFLAGS=-trimpath
 COPY go.mod go.sum ./
-RUN apk add --no-cache ca-certificates && go mod download
+RUN --mount=type=cache,target=/go/pkg/mod apk add --no-cache ca-certificates && go mod download
 COPY *.go ./
 COPY web ./web
-RUN CGO_ENABLED=0 go vet ./... && CGO_ENABLED=0 go test ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /hogman-signup .
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go vet ./... && CGO_ENABLED=0 go test ./... && CGO_ENABLED=0 go build -ldflags="-s -w" -o /hogman-signup .
 
 FROM scratch AS web
 # Root certificates: the page talks to Stripe's API over HTTPS when it sells pens.

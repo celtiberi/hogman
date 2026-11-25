@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-IMG="hogman-sidecar-test:$$"
+IMG="${SIDECAR_PREBUILT_IMG:-hogman-sidecar-test:$$}"
 VOL="hogman-sidecar-in-$$"
 BRIDGE="hogman-bridge-test-$$"
 APP="hogman-app-test-$$"
@@ -25,7 +25,9 @@ TMP_COMPOSE="$(mktemp "${TMPDIR:-/tmp}/sealed-compose.XXXXXX.yml")"
 cleanup() {
   docker rm -f "$PROBE" "$APP" "$BRIDGE" >/dev/null 2>&1 || true
   docker volume rm -f "$VOL" >/dev/null 2>&1 || true
-  docker rmi -f "$IMG" >/dev/null 2>&1 || true
+  if [ -z "${SIDECAR_PREBUILT_IMG:-}" ]; then
+    docker rmi -f "$IMG" >/dev/null 2>&1 || true
+  fi
   rm -f "$TMP_COMPOSE"
 }
 trap cleanup EXIT
@@ -40,8 +42,12 @@ test -s "$TMP_COMPOSE"
 docker compose -f "$TMP_COMPOSE" config -q
 echo "✓ docs/sealed-server.md compose config valid"
 
-echo "• Building scratch hogman-sidecar image..."
-docker build -q -f "$ROOT/core/join/Dockerfile.sidecar" -t "$IMG" "$ROOT/core/join" >/dev/null
+if [ -z "${SIDECAR_PREBUILT_IMG:-}" ]; then
+  echo "• Building scratch hogman-sidecar image..."
+  docker build -q -f "$ROOT/core/join/Dockerfile.sidecar" -t "$IMG" "$ROOT/core/join" >/dev/null
+else
+  echo "• Using prebuilt hogman-sidecar image ($IMG)..."
+fi
 
 want_arch="amd64"
 case "$(uname -m)" in aarch64|arm64) want_arch="arm64" ;; esac

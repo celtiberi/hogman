@@ -1935,13 +1935,23 @@ func undoFreshShare(hc *http.Client, node io.Closer, dir string, c *shareConfig)
 	}
 }
 
+// selfDeleteTimeout bounds DELETE /api/devices/<self> calls: the registrar
+// removes this device from Headscale before answering, so the reply packet is
+// routinely dropped mid-air over WireGuard. Real HTTP errors (4xx/5xx) still
+// arrive in milliseconds; waiting 30s for a dropped packet only stalls shutdown.
+const selfDeleteTimeout = 3 * time.Second
+
 // giveBackDevice removes the share's own device from the pen.
 func giveBackDevice(ctx context.Context, hc *http.Client, c *shareConfig) error {
 	var me meView
 	if _, err := homeAPI(hc, c.Zone, "GET", "/me", nil, &me); err != nil {
 		return errorf("could not reach home.%s from the share: %v", c.Zone, err)
 	}
-	code, err := homeAPI(hc, c.Zone, "DELETE", "/devices/"+strconv.FormatInt(me.ThisDevice.ID, 10), nil, nil)
+	delClient := *hc
+	if delClient.Timeout == 0 || delClient.Timeout > selfDeleteTimeout {
+		delClient.Timeout = selfDeleteTimeout
+	}
+	code, err := homeAPI(&delClient, c.Zone, "DELETE", "/devices/"+strconv.FormatInt(me.ThisDevice.ID, 10), nil, nil)
 	// The pen drops this device as it answers, so the answer may never
 	// arrive (code 0); a 404 means it is already gone. Anything else is real.
 	if err != nil && code != 0 && code != 404 {

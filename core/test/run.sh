@@ -70,7 +70,7 @@ cleanup() {
       "hogman-e2e-sidecar-$$" "hogman-e2e-bridge-$$" "hogman-e2e-app-$$" >/dev/null 2>&1 || true
     docker volume rm -f "hogman-e2e-state-$$" "hogman-e2e-in-$$" >/dev/null 2>&1 || true
     docker rmi -f "hogman-sidecar-e2e:$$" >/dev/null 2>&1 || true
-    dc down -v --remove-orphans >/dev/null 2>&1
+    dc down -v -t 1 --remove-orphans >/dev/null 2>&1
     docker network rm "${COMPOSE_PROJECT_NAME}_core" hogman-test-acme >/dev/null 2>&1 || true
     rm -rf "$WORK"
   fi
@@ -173,6 +173,10 @@ redeem() {  # redeem <token> <handle>  -> prints "<http status> <json>"
 # --- the portal API, called from a device on the mesh ----------------------
 api() {     # api <tools-container> <METHOD> <path> [json]  -> body; fails on non-2xx
   run "$1" curl -sf -m5 --cacert $ROOT -X "$2" "https://home.$ZONE$3" \
+    -H 'content-type: application/json' ${4:+-d "$4"}
+}
+api_blocked() {  # expected-blocked probe with shorter timeout (packets are dropped by ACL)
+  run "$1" curl -sf -m2 --cacert $ROOT -X "$2" "https://home.$ZONE$3" \
     -H 'content-type: application/json' ${4:+-d "$4"}
 }
 api_status() {  # api_status <tools-container> <METHOD> <path> [json] -> HTTP status
@@ -367,15 +371,26 @@ check "alice's site certificate verifies against test public CA" cert_verifies "
 step "Default-deny access policy"
 # HTTPS only (D-11): members reach servers on 443 and nothing else.
 check "bob's laptop can reach alice's server on 443"     retry 20 port_open bob-tools "$ALICE_SERVER_IP" 443
-check "... but not on 80"                                 not port_open bob-tools "$ALICE_SERVER_IP" 80
-check "... but on no other port (2222 is open there)"    not port_open bob-tools "$ALICE_SERVER_IP" 2222
+# Run independent read-only negative connectivity probes in parallel so we keep
+# full 3s nc timeouts without burning 18s serially.
+_pd="$WORK/.probes"; rm -rf "$_pd"; mkdir -p "$_pd"
+( not port_open bob-tools "$ALICE_SERVER_IP" 80   >"$_pd/p1.out" 2>&1; echo $? >"$_pd/p1.rc" ) &
+( not port_open bob-tools "$ALICE_SERVER_IP" 2222 >"$_pd/p2.out" 2>&1; echo $? >"$_pd/p2.rc" ) &
+( not port_open bob-tools "$CORE_MESH_IP" 9000    >"$_pd/p3.out" 2>&1; echo $? >"$_pd/p3.rc" ) &
+( not port_open bob-tools "$ALICE_LAPTOP_IP" 443  >"$_pd/p4.out" 2>&1; echo $? >"$_pd/p4.rc" ) &
+( not port_open alice-tools "$BOB_LAPTOP_IP" 443  >"$_pd/p5.out" 2>&1; echo $? >"$_pd/p5.rc" ) &
+( not port_open bob-tools "$CORE_MESH_IP" 22      >"$_pd/p6.out" 2>&1; echo $? >"$_pd/p6.rc" ) &
+wait
+probe_ok() { local rc; rc="$(cat "$_pd/$1.rc" 2>/dev/null || echo 1)"; [ "$rc" = 0 ] || { cat "$_pd/$1.out" 2>/dev/null; return 1; }; }
+check "... but not on 80"                                 probe_ok p1
+check "... but on no other port (2222 is open there)"    probe_ok p2
 # (Ping still answers: Tailscale's filter lets ICMP through between devices
 # allowed any port. It can't carry data, so it isn't a way in.)
 check "the server itself has 2222 open (so the above means something)" run alice-tools nc -z -w3 127.0.0.1 2222
-check "bob's laptop cannot reach retired CA port 9000"     not port_open bob-tools "$CORE_MESH_IP" 9000
-check "bob's laptop cannot reach alice's laptop"         not port_open bob-tools "$ALICE_LAPTOP_IP" 443
-check "alice's server cannot reach bob's laptop"         not port_open alice-tools "$BOB_LAPTOP_IP" 443
-check "members cannot reach other ports on the core (22)" not port_open bob-tools "$CORE_MESH_IP" 22
+check "bob's laptop cannot reach retired CA port 9000"     probe_ok p3
+check "bob's laptop cannot reach alice's laptop"         probe_ok p4
+check "alice's server cannot reach bob's laptop"         probe_ok p5
+check "members cannot reach other ports on the core (22)" probe_ok p6
 check "bob can't use the admin API"   expect 403 bob-tools GET /api/admin/members
 check "alice (admin) can"             expect 200 alice-laptop-tools GET /api/admin/members
 page_invite() {  # an invite made from the home page comes with its link and QR code
@@ -410,10 +425,16 @@ check "mesh API rejects same-site browser requests (403)" \
 
 step "A device that bypassed the registrar gets nothing"
 check "it is not recorded as anyone's device" no_match stray-device $H device list
-check "it cannot reach the portal"     not port_open stray-tools "$CORE_MESH_IP" 443
-check "it cannot reach retired CA port 9000" not port_open stray-tools "$CORE_MESH_IP" 9000
-check "it cannot reach alice's server" not port_open stray-tools "$ALICE_SERVER_IP" 443
-check "bob cannot reach it"            not can_ping bob-tools "$STRAY_IP"
+rm -rf "$_pd"; mkdir -p "$_pd"
+( not port_open stray-tools "$CORE_MESH_IP" 443   >"$_pd/s1.out" 2>&1; echo $? >"$_pd/s1.rc" ) &
+( not port_open stray-tools "$CORE_MESH_IP" 9000  >"$_pd/s2.out" 2>&1; echo $? >"$_pd/s2.rc" ) &
+( not port_open stray-tools "$ALICE_SERVER_IP" 443 >"$_pd/s3.out" 2>&1; echo $? >"$_pd/s3.rc" ) &
+( not can_ping bob-tools "$STRAY_IP"              >"$_pd/s4.out" 2>&1; echo $? >"$_pd/s4.rc" ) &
+wait
+check "it cannot reach the portal"     probe_ok s1
+check "it cannot reach retired CA port 9000" probe_ok s2
+check "it cannot reach alice's server" probe_ok s3
+check "bob cannot reach it"            probe_ok s4
 
 step "Relay"
 relay="$(run bob-laptop tailscale ping -c 3 "$CORE_MESH_IP" 2>&1 | tr -d '\r')"
@@ -545,7 +566,8 @@ for pair in "zsh-laptop zsh zara" "bash-laptop bash bart"; do
   check "... installed ~/hogman from the front door" run "$1" sh -c 'test -x "$HOME/hogman" && "$HOME/hogman" --version'
   check "... and $3 reaches the portal through the local proxy" retry 15 pasted_portal_ok "$1" "$3"
 done
-dc rm -sf zsh-laptop bash-laptop >/dev/null 2>&1 || true
+dc kill zsh-laptop bash-laptop >/dev/null 2>&1 || true
+dc rm -f zsh-laptop bash-laptop >/dev/null 2>&1 || true
 
 step "Side by side: a computer with no Tailscale at all"
 dc up -d dave-laptop
@@ -970,7 +992,7 @@ check "alice (admin) cannot suspend the owner" expect 403 alice-laptop-tools POS
 $H member suspend bob "testing" >/dev/null
 timed t 30 not fetch alice.$ZONE "hello"
 check "suspended bob loses access (${t}s)" not fetch alice.$ZONE "hello"
-check "suspended bob can't reach the portal" not api bob-tools GET /api/me
+check "suspended bob can't reach the portal" not api_blocked bob-tools GET /api/me
 check "his device is still registered" has_device bob-laptop
 $H member resume bob >/dev/null
 timed t 30 fetch alice.$ZONE "hello"
@@ -987,7 +1009,7 @@ chmod 0644 "$WORK/data/registrar/.renew-only" "$WORK/data/registrar/billing-stat
 $H sync >/dev/null
 timed t 30 not fetch alice.$ZONE "hello"
 check "during renew_only, regular member bob cannot reach alice's share (${t}s)" not fetch alice.$ZONE "hello"
-check "during renew_only, regular member bob cannot reach the portal" not api bob-tools GET /api/me
+check "during renew_only, regular member bob cannot reach the portal" not api_blocked bob-tools GET /api/me
 check "during renew_only, admin alice still reaches /api/me with renew_only state" match '"state":"renew_only"' api alice-laptop-tools GET /api/me
 check "during renew_only, admin alice can mint a renewal token" match 'https://get.example.com/#renew=' api alice-laptop-tools POST /api/billing/renew-token '{}'
 check "during renew_only, admin alice gets 403 on /api/directory" expect 403 alice-laptop-tools GET /api/directory
