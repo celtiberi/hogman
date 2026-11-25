@@ -1,0 +1,1 @@
+- Backups: `deploy/backup-b2/restore-check.sh` downloads the newest off-site backup of a pen, decrypts and unpacks it in a private temp folder, and reports what it contains, proving the B2 copy can be restored. `b2.py` gains `list` and `download` for the restore key.

@@ -45,6 +45,19 @@ def make_handler(state: FakeB2, base: list[str]):
 
         def do_GET(self):
             state.calls.append(self.path)
+            if self.path.startswith("/file/"):
+                _, _, rest = self.path.partition("/file/")
+                _, _, name = rest.partition("/")
+                name = urllib.parse.unquote(name)
+                if name not in state.files or self.headers.get("Authorization") != "tok":
+                    return self._json({"code": "not_found"}, 404)
+                body = state.files[name]
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("X-Bz-Content-Sha1", "0" * 40 if state.corrupt_sha1 else hashlib.sha1(body).hexdigest())
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if self.path.endswith("/b2_authorize_account"):
                 if not self.headers.get("Authorization", "").startswith("Basic "):
                     return self._json({"code": "unauthorized"}, 401)
@@ -95,6 +108,9 @@ def make_handler(state: FakeB2, base: list[str]):
                      "capabilities": body["capabilities"], "bucketId": body["bucketId"], "keyName": body["keyName"]}
                 state.keys.append(k)
                 return self._json(k)
+            if op == "b2_list_file_names":
+                names = sorted(n for n in state.files if n.startswith(body.get("prefix", "")))
+                return self._json({"files": [{"fileName": n, "contentLength": len(state.files[n]), "action": "upload"} for n in names], "nextFileName": None})
             if op == "b2_get_upload_url":
                 return self._json({"uploadUrl": base[0] + "/upload/" + body["bucketId"], "authorizationToken": "uptok"})
             self._json({"code": "not_found"}, 404)
@@ -205,6 +221,30 @@ class B2Test(unittest.TestCase):
         self.state.fail_uploads = 0
         self.state.corrupt_sha1 = True
         self.assertEqual(self.b2.main(["upload", f, "--env", env, "--host", "host-a"]), 1)
+
+    def test_list_and_download_roundtrip(self):
+        env = self._server_env()
+        f = os.path.join(self.tmp, "ops-20261125T033000Z.tar.gz.age")
+        with open(f, "wb") as fh:
+            fh.write(b"encrypted-backup-bytes")
+        self.assertEqual(self.b2.main(["upload", f, "--env", env, "--host", "host-a"]), 0)
+        renv = os.path.join(self.tmp, "read.env")
+        with open(renv, "w") as fh:
+            fh.write(self.decrypt("maintainer", os.path.join(self.tmp, "out", "maintainer-restore-b2.env.age")))
+        self.assertEqual(self.b2.main(["list", "--env", renv]), 0)
+        out = os.path.join(self.tmp, "got.tar.gz.age")
+        self.assertEqual(self.b2.main(["download", "host-a/ops-20261125T033000Z.tar.gz.age", "--env", renv, "-o", out]), 0)
+        with open(out, "rb") as fh:
+            self.assertEqual(fh.read(), b"encrypted-backup-bytes")
+        self.assertEqual(oct(os.stat(out).st_mode & 0o777), "0o600")
+        # never overwrites, refuses traversal / non-backup names, checks SHA-1
+        self.assertEqual(self.b2.main(["download", "host-a/ops-20261125T033000Z.tar.gz.age", "--env", renv, "-o", out]), 1)
+        self.assertEqual(self.b2.main(["download", "../etc/passwd", "--env", renv]), 1)
+        self.assertEqual(self.b2.main(["download", "host-a/registrar.db", "--env", renv]), 1)
+        self.state.corrupt_sha1 = True
+        bad = os.path.join(self.tmp, "bad.tar.gz.age")
+        self.assertEqual(self.b2.main(["download", "host-a/ops-20261125T033000Z.tar.gz.age", "--env", renv, "-o", bad]), 1)
+        self.assertFalse(os.path.exists(bad))
 
     def test_upload_refuses_anything_but_encrypted_backups(self):
         env = self._server_env()

@@ -94,6 +94,7 @@ class B2:
         self.account_id = auth["accountId"]
         self.token = auth["authorizationToken"]
         self.api_url = auth["apiInfo"]["storageApi"]["apiUrl"]
+        self.download_url = auth["apiInfo"]["storageApi"].get("downloadUrl", self.api_url)
 
     def call(self, name: str, body: dict) -> dict:
         return _call(f"{self.api_url}/b2api/v3/{name}", token=self.token, body=body)
@@ -223,6 +224,56 @@ def cmd_upload(args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------------------------------------- list / download --
+# Restore side, run by the maintainer on their own machine with the read key
+# (maintainer-restore-b2.env.age, decrypted with their backup key). Backups stay
+# age-encrypted; decrypting them needs that same offline key.
+
+def cmd_list(args: argparse.Namespace) -> int:
+    env = read_env(args.env)
+    b2 = B2(env.get("B2_KEY_ID", ""), env.get("B2_KEY", ""))
+    start = None
+    while True:
+        body = {"bucketId": env["B2_BUCKET_ID"], "maxFileCount": 1000, "prefix": args.prefix}
+        if start:
+            body["startFileName"] = start
+        res = b2.call("b2_list_file_names", body)
+        for f in res.get("files", []):
+            if f.get("action") == "upload":
+                print(f"{f['fileName']}\t{f.get('contentLength', 0)}")
+        start = res.get("nextFileName")
+        if not start:
+            return 0
+
+
+def cmd_download(args: argparse.Namespace) -> int:
+    name = args.name
+    base = os.path.basename(name)
+    if not NAME_RE.match(base) or name.startswith("/") or ".." in name.split("/"):
+        raise B2Error(f"refusing to download {name!r}: expected <host>/<backup>.tar.gz.age")
+    env = read_env(args.env)
+    b2 = B2(env.get("B2_KEY_ID", ""), env.get("B2_KEY", ""))
+    out = args.out or base
+    if os.path.exists(out):
+        raise B2Error(f"{out} already exists; not overwriting")
+    url = f"{b2.download_url}/file/{urllib.parse.quote(env['B2_BUCKET'])}/{urllib.parse.quote(name)}"
+    req = urllib.request.Request(url, headers={"Authorization": b2.token})
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            data = resp.read()
+            want = resp.headers.get("X-Bz-Content-Sha1", "")
+    except urllib.error.HTTPError as e:
+        raise B2Error(f"download {name}: HTTP {e.code}") from None
+    got = hashlib.sha1(data).hexdigest()
+    if want and want != "none" and want != got:
+        raise B2Error(f"{name}: SHA-1 mismatch (B2 {want}, got {got}); not saved")
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    print(f"downloaded {name} -> {out} ({len(data)} bytes, sha1 verified)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -234,9 +285,17 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--env", default="/etc/hogman/b2.env")
     u.add_argument("--host", default=os.uname().nodename)
     u.add_argument("--backoff", type=float, default=1.0, help=argparse.SUPPRESS)
+    ls = sub.add_parser("list", help="list backups (needs the maintainer read key)")
+    ls.add_argument("--env", required=True)
+    ls.add_argument("--prefix", default="")
+    d = sub.add_parser("download", help="download one backup (needs the maintainer read key)")
+    d.add_argument("name", help="<host>/<pen>-<timestamp>.tar.gz.age, as shown by list")
+    d.add_argument("--env", required=True)
+    d.add_argument("-o", "--out")
     args = ap.parse_args(argv)
+    cmds = {"ensure": cmd_ensure, "upload": cmd_upload, "list": cmd_list, "download": cmd_download}
     try:
-        return cmd_ensure(args) if args.cmd == "ensure" else cmd_upload(args)
+        return cmds[args.cmd](args)
     except (B2Error, KeyError, OSError) as e:
         print(f"b2: {e}", file=sys.stderr)
         return 1
