@@ -156,7 +156,36 @@ used pen names), encrypted with `age` to a key the server cannot decrypt:
    hogman-host backup-setup age1...
    ```
 
-3. Pull encrypted archives from the backup machine using a restricted SSH key:
+3. Turn on the off-site copy on Backblaze B2 (D-48). The bucket and keys are code
+   (`deploy/backup-b2/`, run by the `backup-b2` workflow from the locked `infra` environment):
+
+   ```bash
+   # once, on the server: its own key, which only decrypts the B2 key meant for it
+   age-keygen -o /etc/hogman/b2-host.key && chmod 600 /etc/hogman/b2-host.key
+   age-keygen -y /etc/hogman/b2-host.key
+   ```
+
+   In the repository's locked `infra` environment, set two **variables** (public keys, not
+   secrets): `B2_SERVER_RECIPIENT` = the server's `age1...` key printed above, and
+   `B2_MAINTAINER_RECIPIENT` = your backup key's `age1...` public key. They live there, not in
+   the repo, so a pull request can't redirect new keys to someone else.
+
+   Run the `backup-b2` workflow with **new_keys** and approve it. Its 1-day artifact holds
+   `server-b2.env.age` (encrypted to the server) and `maintainer-restore-b2.env.age` (encrypted to
+   your backup key; keep it with that key). Copy the first one to the server, then:
+
+   ```bash
+   hogman-host backup-b2-install server-b2.env.age   # tests with a small upload
+   ```
+
+   From then on each nightly backup is also uploaded. The server's key can only **add** files:
+   it can't list, read or delete them. Object Lock keeps every copy for 27 days, then a lifecycle
+   rule deletes it, within 30 days of upload even with B2's once-a-day sweep (D-37). **Restoring from B2:** decrypt
+   `maintainer-restore-b2.env.age` with your backup key, download the file you need with that
+   read key, then restore as below.
+
+4. (Until the B2 copy is verified by a test restore) pull encrypted archives to a second
+   machine using a restricted SSH key:
 
    ```bash
    ssh-keygen -t ed25519 -N "" -f ~/.ssh/hogman_backup
