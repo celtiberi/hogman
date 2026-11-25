@@ -23,7 +23,6 @@ body {
 }
 .brand-icon {
   display: block;
-  border-radius: 4px;
 }
 h1 { font-size: 15px; margin: 0; }
 h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #52525b; margin: 0; }
