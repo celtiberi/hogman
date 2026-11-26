@@ -192,23 +192,19 @@ func (a *API) Handler() http.Handler {
 			return
 		}
 		// Exempt the host gate-cert credential from the shared pen global limiter.
-		var releaseGlobal func()
-		if c.Kind != "host" {
-			var ok bool
-			releaseGlobal, ok = a.global.reserve(now)
-			if !ok {
-				w.Header().Set("Retry-After", "60")
-				fail(w, http.StatusTooManyRequests, "fallback account keys are rate-limited; try later")
-				return
-			}
+		// Keep the global slot consumed even if upstream Mint fails so fleet-wide
+		// upstream calls remain bounded during a Google outage or quota lockout;
+		// the per-cred cooldown prevents any single pen from exhausting the global
+		// cap alone, while defer res.Cancel() preserves the pen's weekly quota.
+		if c.Kind != "host" && !a.global.allow(now) {
+			w.Header().Set("Retry-After", "60")
+			fail(w, http.StatusTooManyRequests, "fallback account keys are rate-limited; try later")
+			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 		kid, hmac, err := a.eab.Mint(ctx)
 		if err != nil {
-			if releaseGlobal != nil {
-				releaseGlobal()
-			}
 			if c.Kind != "host" {
 				a.recordCredFail(c.ID, a.store.now())
 			}
@@ -356,33 +352,14 @@ func (l *windowLimiter) pruneLocked(now time.Time) (min int) {
 }
 
 func (l *windowLimiter) allow(now time.Time) bool {
-	_, ok := l.reserve(now)
-	return ok
-}
-
-func (l *windowLimiter) reserve(now time.Time) (release func(), ok bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	min := l.pruneLocked(now)
 	if min >= l.perMin || len(l.events) >= l.perHour {
-		return nil, false
+		return false
 	}
 	l.events = append(l.events, now)
-	released := false
-	return func() {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		if released {
-			return
-		}
-		released = true
-		for i := len(l.events) - 1; i >= 0; i-- {
-			if l.events[i].Equal(now) {
-				l.events = append(l.events[:i], l.events[i+1:]...)
-				return
-			}
-		}
-	}, true
+	return true
 }
 
 func (l *windowLimiter) exceeded(now time.Time) bool {

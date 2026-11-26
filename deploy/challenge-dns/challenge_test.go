@@ -1236,15 +1236,15 @@ func TestAPIEABMintFailureDoesNotBurnQuotaOrEverChallenged(t *testing.T) {
 		t.Fatalf("in-flight EAB revoked before commit = %d, want 401", firstCode)
 	}
 
-	// Repeated upstream 502s from one pen hit that pen's cooldown without starving
-	// other pens' shared global limiter.
+	// Repeated upstream 502s from one pen hit that pen's cooldown (5/min) while
+	// leaving global headroom (10/min) for other pens once upstream recovers.
 	s2, _ := newTestStore(t)
 	_, tokLoop := mustCred(t, s2, "pen", penA)
 	_, tokPeer := mustCred(t, s2, "pen", penB)
 	upstreamDown := true
 	api2 := &API{
 		store:  s2,
-		global: &windowLimiter{perMin: 2, perHour: 2},
+		global: &windowLimiter{perMin: 10, perHour: 10},
 		eab: eabFunc(func() (string, string, error) {
 			if upstreamDown {
 				return "", "", errors.New("upstream 502")
@@ -1265,6 +1265,38 @@ func TestAPIEABMintFailureDoesNotBurnQuotaOrEverChallenged(t *testing.T) {
 	upstreamDown = false
 	if rec := doAPI(t, h2, "POST", "/v1/eab", tokPeer, nil); rec.Code != http.StatusCreated {
 		t.Fatalf("peer pen starved after another pen's 502 burst: %d %s", rec.Code, rec.Body)
+	}
+
+	// Failing upstream mints from N distinct pens still consume the global limiter
+	// so fleet-wide upstream calls stop at the global cap during an outage.
+	s3, _ := newTestStore(t)
+	var distinctTokens []string
+	for i := 0; i < 4; i++ {
+		_, tok := mustCred(t, s3, "pen", fmt.Sprintf("distinctpen%d", i))
+		distinctTokens = append(distinctTokens, tok)
+	}
+	upstreamCalls := 0
+	api3 := &API{
+		store:  s3,
+		global: &windowLimiter{perMin: 3, perHour: 3},
+		eab: eabFunc(func() (string, string, error) {
+			upstreamCalls++
+			return "", "", errors.New("upstream quota exhausted")
+		}),
+		contact: "ops@example.com",
+	}
+	h3 := api3.Handler()
+	for i := 0; i < 3; i++ {
+		if rec := doAPI(t, h3, "POST", "/v1/eab", distinctTokens[i], nil); rec.Code != http.StatusBadGateway {
+			t.Fatalf("distinct pen %d failed mint = %d, want 502", i, rec.Code)
+		}
+	}
+	// 4th distinct pen must stop at the global cap without calling upstream Mint.
+	if rec := doAPI(t, h3, "POST", "/v1/eab", distinctTokens[3], nil); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("4th distinct pen beyond global cap = %d %s, want 429", rec.Code, rec.Body)
+	}
+	if upstreamCalls != 3 {
+		t.Fatalf("upstream Mint called %d times, want 3 (bounded by global cap)", upstreamCalls)
 	}
 }
 
