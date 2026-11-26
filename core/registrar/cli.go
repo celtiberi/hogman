@@ -8,6 +8,8 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"hogman/registrar/internal/registrar"
 )
 
 const usage = `registrar: members, invites, devices and names for one Hogman network
@@ -41,6 +43,10 @@ const usage = `registrar: members, invites, devices and names for one Hogman net
   sync                                   reconcile with headscale now
 `
 
+func cliBad(f string, a ...any) error {
+	return &registrar.Error{Kind: registrar.KindInvalid, Msg: fmt.Sprintf(f, a...)}
+}
+
 // splitFlags pulls "--name value" pairs out of args, wherever they appear.
 func splitFlags(args []string) (pos []string, flags map[string]string) {
 	flags = map[string]string{}
@@ -57,7 +63,7 @@ func splitFlags(args []string) (pos []string, flags map[string]string) {
 
 func need(pos []string, n int, use string) error {
 	if len(pos) < n {
-		return bad("usage: registrar %s", use)
+		return cliBad("usage: registrar %s", use)
 	}
 	return nil
 }
@@ -72,11 +78,11 @@ func table(rows [][]string) {
 
 func ts(t int64) string { return time.Unix(t, 0).UTC().Format("2006-01-02 15:04") }
 
-func cli(ctx context.Context, s *Service, args []string) error {
-	a := Actor{CLI: true}
+func cli(ctx context.Context, s *registrar.Service, args []string) error {
+	a := registrar.Actor{CLI: true}
 	pos, flags := splitFlags(args)
 	if len(pos) < 1 {
-		return bad("missing command")
+		return cliBad("missing command")
 	}
 	sub := ""
 	if len(pos) > 1 {
@@ -102,7 +108,7 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		}
 		fmt.Printf("added %s (%s)\n", m.Handle, m.Role)
 	case "member list":
-		ms, err := s.st.Members()
+		ms, err := s.ListMembers()
 		if err != nil {
 			return err
 		}
@@ -159,7 +165,7 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		if v := flags["ttl"]; v != "" {
 			d, err := time.ParseDuration(v)
 			if err != nil {
-				return bad("--ttl: %v", err)
+				return cliBad("--ttl: %v", err)
 			}
 			ttl = d
 		}
@@ -171,7 +177,7 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		fmt.Printf("token: %s\n", inv.Token)
 		fmt.Printf("link:  %s\n", inv.URL)
 	case "invite list":
-		invs, err := s.st.Invites(nil)
+		invs, err := s.ListInvites(nil)
 		if err != nil {
 			return err
 		}
@@ -191,7 +197,7 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		}
 		id, err := strconv.ParseInt(rest[0], 10, 64)
 		if err != nil || id <= 0 {
-			return bad("invalid invite id %q", rest[0])
+			return cliBad("invalid invite id %q", rest[0])
 		}
 		if err := s.RevokeInvite(a, id); err != nil {
 			return err
@@ -210,7 +216,7 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		fmt.Printf("link:  %s\n", s.DeviceLink(key, rest[1]))
 		fmt.Printf("valid until %s, single use\n", ts(exp))
 	case "device list":
-		ds, err := s.st.LiveDevices()
+		ds, err := s.ListLiveDevices()
 		if err != nil {
 			return err
 		}
@@ -225,7 +231,7 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		}
 		id, err := strconv.ParseInt(rest[0], 10, 64)
 		if err != nil || id <= 0 {
-			return bad("invalid device id %q", rest[0])
+			return cliBad("invalid device id %q", rest[0])
 		}
 		if err := s.RemoveDevice(ctx, a, id); err != nil {
 			return err
@@ -233,7 +239,7 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		fmt.Printf("removed device %d\n", id)
 
 	case "name list":
-		ns, err := s.st.Names()
+		ns, err := s.ListNames()
 		if err != nil {
 			return err
 		}
@@ -246,7 +252,7 @@ func cli(ctx context.Context, s *Service, args []string) error {
 			if at == "" {
 				at = "-"
 			}
-			rows = append(rows, []string{n.Name + "." + s.cfg.Zone, n.Member, at, state, n.Note})
+			rows = append(rows, []string{n.Name + "." + s.Zone(), n.Member, at, state, n.Note})
 		}
 		table(rows)
 	case "name claim":
@@ -255,7 +261,7 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		}
 		id, err := strconv.ParseInt(rest[2], 10, 64)
 		if err != nil || id <= 0 {
-			return bad("invalid device id %q", rest[2])
+			return cliBad("invalid device id %q", rest[2])
 		}
 		var note *string
 		if v, ok := flags["note"]; ok {
@@ -283,10 +289,10 @@ func cli(ctx context.Context, s *Service, args []string) error {
 				var err error
 				n, err = strconv.Atoi(sub)
 				if err != nil || n <= 0 {
-					return bad("invalid audit count %q", sub)
+					return cliBad("invalid audit count %q", sub)
 				}
 			}
-			entries, err := s.st.AuditLog(n)
+			entries, err := s.ListAuditLog(n)
 			if err != nil {
 				return err
 			}
@@ -305,13 +311,13 @@ func cli(ctx context.Context, s *Service, args []string) error {
 			return nil
 		}
 		fmt.Print(usage)
-		return bad("unknown command %q", strings.TrimSpace(pos[0]+" "+sub))
+		return cliBad("unknown command %q", strings.TrimSpace(pos[0]+" "+sub))
 	}
 	return nil
 }
 
-func handles(s *Service) (map[int64]string, error) {
-	ms, err := s.st.Members()
+func handles(s *registrar.Service) (map[int64]string, error) {
+	ms, err := s.ListMembers()
 	if err != nil {
 		return nil, err
 	}

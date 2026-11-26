@@ -9,6 +9,8 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+
+	"hogman/registrar/internal/acme"
 )
 
 // gateCertCmd keeps the host's front-door wildcard certificate (D-18): by
@@ -26,7 +28,7 @@ func gateCertCmd(args []string, logger *slog.Logger) error {
 	}
 	dir := env("GATE_TLS_DIR", "/var/lib/hogman-gate/tls")
 	if len(args) == 1 && args[0] == "health" {
-		return VerifyTLSFiles(dir, "gate")
+		return acme.VerifyTLSFiles(dir, "gate")
 	}
 	if len(args) != 0 {
 		return errors.New("usage: registrar gate-cert [health]")
@@ -40,11 +42,11 @@ func gateCertCmd(args []string, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("challenge DNS token %s: %w", tokPath, err)
 	}
-	backend, err := NewChallengeDNSClient(chURL, string(tok))
+	backend, err := acme.NewChallengeDNSClient(chURL, string(tok))
 	if err != nil {
 		return err
 	}
-	mgr, err := NewHomeCertManager(HomeConfig{
+	mgr, err := acme.NewHomeCertManager(acme.HomeConfig{
 		Host:               env("GATE_HOST", "*.gate.hogman.network"),
 		FileBase:           "gate",
 		HomeTLSDir:         dir,
@@ -57,6 +59,7 @@ func gateCertCmd(args []string, logger *slog.Logger) error {
 		PropagationDelay:   durEnv("ACME_PROPAGATION_DELAY", 0),
 		PropagationTimeout: propTimeoutEnv("ACME_PROPAGATION_TIMEOUT"),
 		Backend:            backend,
+		Logger:             logger,
 	})
 	if err != nil {
 		return err
@@ -64,7 +67,7 @@ func gateCertCmd(args []string, logger *slog.Logger) error {
 	defer mgr.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	logger.Info("gate-cert keeping certificate", "host", mgr.host, "dir", dir)
+	logger.Info("gate-cert keeping certificate", "host", mgr.Host(), "dir", dir)
 	mgr.Run(ctx)
 	return nil
 }

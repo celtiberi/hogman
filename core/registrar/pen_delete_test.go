@@ -14,12 +14,16 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"hogman/registrar/internal/api"
+	"hogman/registrar/internal/billing"
+	"hogman/registrar/internal/registrar"
 )
 
 func TestPenDeleteViewAndToken(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 	if _, err := e.svc.AddMember(ctx, cli, "alice", "owner"); err != nil {
 		t.Fatal(err)
 	}
@@ -49,8 +53,8 @@ func TestPenDeleteViewAndToken(t *testing.T) {
 	dir := t.TempDir()
 	billingPath := filepath.Join(dir, "billing-status.json")
 	metaPath := filepath.Join(dir, "host-meta.json")
-	e.svc.cfg.BillingStatusPath = billingPath
-	h := MeshHandler(e.svc)
+	e.svc.SetBillingStatusPath(billingPath)
+	h := api.MeshHandler(e.svc)
 	js := map[string]string{"Content-Type": "application/json"}
 
 	// Absent host-meta.json -> no pen_delete in /api/me and 409 on delete-token.
@@ -66,7 +70,7 @@ func TestPenDeleteViewAndToken(t *testing.T) {
 	if err := os.WriteFile(metaPath, []byte(`{"pen":"bobo","delete_url":"https://get.example.com","has_subscription":true}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if e.svc.isRenewOnly() {
+	if e.svc.IsRenewOnly() {
 		t.Fatal("host-meta.json must not put an active pen into renew_only mode")
 	}
 
@@ -79,7 +83,7 @@ func TestPenDeleteViewAndToken(t *testing.T) {
 		t.Fatalf("/api/me leaked raw delete_url: %s", rec.Body.String())
 	}
 	var meOut struct {
-		PenDelete *penDeleteView `json:"pen_delete"`
+		PenDelete *billing.PenDeleteView `json:"pen_delete"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &meOut); err != nil || meOut.PenDelete == nil {
 		t.Fatalf("expected pen_delete in owner /api/me: %s", rec.Body.String())
@@ -146,20 +150,20 @@ func TestPenDeleteViewAndToken(t *testing.T) {
 	sigBytes, _ := base64.RawURLEncoding.DecodeString(sigB64)
 	// Domain separation: verifies under hogman-delete-v1:, fails under hogman-renew-v1:.
 	delMAC := hmac.New(sha256.New, key)
-	delMAC.Write([]byte(deleteTokenPurpose))
+	delMAC.Write([]byte("hogman-delete-v1:"))
 	delMAC.Write([]byte(payloadB64))
 	if !hmac.Equal(delMAC.Sum(nil), sigBytes) {
 		t.Fatal("delete token did not verify under hogman-delete-v1:")
 	}
 	renMAC := hmac.New(sha256.New, key)
-	renMAC.Write([]byte(renewTokenPurpose))
+	renMAC.Write([]byte("hogman-renew-v1:"))
 	renMAC.Write([]byte(payloadB64))
 	if hmac.Equal(renMAC.Sum(nil), sigBytes) {
 		t.Fatal("delete token must NOT verify under hogman-renew-v1:")
 	}
 
 	// Audit log recorded pen.delete.token.
-	auditRows, err := e.svc.st.AuditLog(10)
+	auditRows, err := e.st.AuditLog(10)
 	if err != nil {
 		t.Fatal(err)
 	}

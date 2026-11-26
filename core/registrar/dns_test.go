@@ -11,6 +11,10 @@ import (
 	"testing"
 
 	"golang.org/x/net/dns/dnsmessage"
+
+	"hogman/registrar/internal/dns"
+	"hogman/registrar/internal/registrar"
+	"hogman/registrar/internal/store"
 )
 
 func buildDNSQuery(t *testing.T, id uint16, name string, qtype dnsmessage.Type, withEDNS bool, ednsVer uint8) []byte {
@@ -71,7 +75,7 @@ func parseDNSResp(t *testing.T, raw []byte) (dnsmessage.Header, []dnsmessage.Res
 	return hdr, ans, auth, optHdr
 }
 
-func mustResolveA(t *testing.T, srv *DNSServer, fqdn string) string {
+func mustResolveA(t *testing.T, srv *dns.Server, fqdn string) string {
 	t.Helper()
 	req := buildDNSQuery(t, 1, fqdn, dnsmessage.TypeA, true, 0)
 	resp, ok := srv.HandlePacket(req, false)
@@ -92,21 +96,21 @@ func mustResolveA(t *testing.T, srv *DNSServer, fqdn string) string {
 func TestDNSAuthoritativeAndRefused(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	alice, err := e.svc.AddMember(ctx, cli, "alice", "member")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, srv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.20", "fd7a:115c:a1e0::20")
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "alice", srv.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: alice}, "alice", "alice", srv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "blog.alice", srv.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: alice}, "alice", "blog.alice", srv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 
-	dnsSrv, err := NewDNSServer(e.svc)
+	dnsSrv, err := newTestDNSServer(e.svc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +176,7 @@ func TestDNSAuthoritativeAndRefused(t *testing.T) {
 	}
 
 	// Empty non-terminal returns NODATA when only child exists.
-	_, err = e.st.db.Exec(`DELETE FROM names WHERE name = 'alice'`)
+	_, err = e.st.DB().Exec(`DELETE FROM names WHERE name = 'alice'`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,29 +220,29 @@ func TestDNSAuthoritativeAndRefused(t *testing.T) {
 func TestDNSLiveCrossProcessAndKick(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	bob, err := e.svc.AddMember(ctx, cli, "bob", "member")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, srv := e.addDevice(t, "bob", "server", "bob-srv", "100.64.0.30", "")
-	dnsSrv, err := NewDNSServer(e.svc)
+	dnsSrv, err := newTestDNSServer(e.svc)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Separate Store handle on the same SQLite DB simulates `hogman name claim` CLI.
-	stCLI, err := OpenStore(filepath.Join(e.dir, "registrar.db"))
+	stCLI, err := store.Open(filepath.Join(e.dir, "registrar.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stCLI.db.Close()
-	svcCLI, err := NewService(e.svc.cfg, stCLI, e.svc.hs)
+	defer stCLI.DB().Close()
+	svcCLI, err := registrar.NewService(e.svc.Config(), stCLI, e.hsClient)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svcCLI.Claim(Actor{CLI: true}, "bob", "radio", srv.ID, nil); err != nil {
+	if _, err := svcCLI.Claim(registrar.Actor{CLI: true}, "bob", "radio", srv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := mustResolveA(t, dnsSrv, "radio.bobo.hogman."); got != "100.64.0.30" {
@@ -258,7 +262,7 @@ func TestDNSLiveCrossProcessAndKick(t *testing.T) {
 
 func TestDNSUDPAndTCPRoundTrip(t *testing.T) {
 	e := newTestEnv(t)
-	dnsSrv, err := NewDNSServer(e.svc)
+	dnsSrv, err := newTestDNSServer(e.svc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,8 +278,9 @@ func TestDNSUDPAndTCPRoundTrip(t *testing.T) {
 	}
 	defer tcpLn.Close()
 
-	go dnsSrv.serveUDP(udpConn)
-	go dnsSrv.serveTCP(tcpLn)
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	dnsSrv.Serve(srvCtx, []net.PacketConn{udpConn}, tcpLn)
 
 	// UDP query via Go net.Resolver.
 	r := &net.Resolver{

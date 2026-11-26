@@ -10,6 +10,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"hogman/registrar/internal/acme"
+	"hogman/registrar/internal/headscale"
+	"hogman/registrar/internal/registrar"
+	"hogman/registrar/internal/store"
 )
 
 func env(k, def string) string {
@@ -95,9 +100,9 @@ func validateServeMode(tsnetStateDir, legacyFlag, meshAddr string) (legacy bool,
 	return legacy, nil
 }
 
-func loadHomeCertConfig(s *Service, homeTLSDir string) HomeConfig {
-	return HomeConfig{
-		Zone:               s.cfg.Zone,
+func loadHomeCertConfig(s *registrar.Service, homeTLSDir string, logger *slog.Logger) acme.HomeConfig {
+	return acme.HomeConfig{
+		Zone:               s.Zone(),
 		HomeTLSDir:         homeTLSDir,
 		CaddyAdminSocket:   strings.TrimSpace(os.Getenv("CADDY_ADMIN_SOCKET")),
 		StorageDir:         env("ACME_STORAGE_DIR", "/var/lib/registrar/acme"),
@@ -108,12 +113,13 @@ func loadHomeCertConfig(s *Service, homeTLSDir string) HomeConfig {
 		Resolvers:          parseCSV(os.Getenv("ACME_RESOLVERS")),
 		PropagationDelay:   durEnv("ACME_PROPAGATION_DELAY", 0),
 		PropagationTimeout: propTimeoutEnv("ACME_PROPAGATION_TIMEOUT"),
-		Backend:            s.acme,
-		BillingStatusPath:  s.cfg.BillingStatusPath,
+		Backend:            s.ACMEBackend(),
+		IsRenewOnly:        s.IsRenewOnly,
+		Logger:             logger,
 	}
 }
 
-func setup() *Service {
+func setup() (*registrar.Service, func() error) {
 	var coreIP string
 	if tsDir := strings.TrimSpace(os.Getenv("TSNET_STATE_DIR")); tsDir != "" {
 		coreIP = strings.TrimSpace(os.Getenv("CORE_MESH_IP"))
@@ -125,21 +131,21 @@ func setup() *Service {
 	} else {
 		coreIP = mustEnv("CORE_MESH_IP")
 	}
-	var acmeBackend ACMEBackend
+	var acmeBackend acme.Backend
 	if chURL := strings.TrimSpace(os.Getenv("CHALLENGE_DNS_URL")); chURL != "" {
 		tokPath := env("CHALLENGE_DNS_TOKEN_FILE", "/secrets/challenge_dns_token")
 		tokBytes, err := os.ReadFile(tokPath)
 		if err != nil {
 			log.Fatalf("challenge DNS token %s: %v", tokPath, err)
 		}
-		cli, err := NewChallengeDNSClient(chURL, string(tokBytes))
+		cli, err := acme.NewChallengeDNSClient(chURL, string(tokBytes))
 		if err != nil {
 			log.Fatalf("challenge DNS client: %v", err)
 		}
 		acmeBackend = cli
 	}
 	dbPath := env("DB", "/var/lib/registrar/registrar.db")
-	cfg := Config{
+	cfg := registrar.Config{
 		Zone:              mustEnv("ZONE"),
 		PublicHost:        mustEnv("PUBLIC_HOST"),
 		CoreIP:            coreIP,
@@ -147,8 +153,8 @@ func setup() *Service {
 		InviteTTL:         durEnv("INVITE_TTL", 7*24*time.Hour),
 		DeviceKeyTTL:      durEnv("DEVICE_KEY_TTL", time.Hour),
 		MembersCanInvite:  env("MEMBERS_CAN_INVITE", "false") == "true",
-		MaxMembers:        positiveIntEnv("MAX_MEMBERS", defaultMaxMembers),
-		MaxDevices:        positiveIntEnv("MAX_DEVICES", defaultMaxDevices),
+		MaxMembers:        positiveIntEnv("MAX_MEMBERS", registrar.DefaultMaxMembers),
+		MaxDevices:        positiveIntEnv("MAX_DEVICES", registrar.DefaultMaxDevices),
 		BillingStatusPath: env("BILLING_STATUS_FILE", filepath.Join(filepath.Dir(dbPath), "billing-status.json")),
 		ACMEBackend:       acmeBackend,
 		Logger:            slog.Default(),
@@ -157,14 +163,16 @@ func setup() *Service {
 	if err != nil {
 		log.Fatalf("headscale API key: %v", err)
 	}
-	st, err := OpenStore(dbPath)
+	st, err := store.Open(dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}
-	hs := NewHeadscale(env("HEADSCALE_URL", "http://headscale:8080"), strings.TrimSpace(string(key)))
-	svc, err := NewService(cfg, st, hs)
+	st.SetLogger(slog.Default())
+	hs := headscale.New(env("HEADSCALE_URL", "http://headscale:8080"), strings.TrimSpace(string(key)))
+	svc, err := registrar.NewService(cfg, st, hs)
 	if err != nil {
+		_ = st.Close()
 		log.Fatal(err)
 	}
-	return svc
+	return svc, st.Close
 }

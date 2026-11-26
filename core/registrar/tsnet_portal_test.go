@@ -11,12 +11,16 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"hogman/registrar/internal/api"
+	"hogman/registrar/internal/dns"
+	"hogman/registrar/internal/registrar"
 )
 
 func TestMeshHandlerDirectIgnoresXFFAndUsesVerifiedPeer(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 	if _, err := e.svc.AddMember(ctx, cli, "alice", "owner"); err != nil {
 		t.Fatal(err)
 	}
@@ -26,9 +30,9 @@ func TestMeshHandlerDirectIgnoresXFFAndUsesVerifiedPeer(t *testing.T) {
 	e.addDevice(t, "alice", "personal", "alice-laptop", "100.64.0.10", "")
 	_, bobDev := e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.20", "")
 
-	resolve := func(_ context.Context, remoteAddr string) (*PeerIdentity, error) {
+	resolve := func(_ context.Context, remoteAddr string) (*registrar.PeerIdentity, error) {
 		if strings.HasPrefix(remoteAddr, "100.64.0.20:") {
-			return &PeerIdentity{
+			return &registrar.PeerIdentity{
 				IP:       "100.64.0.20",
 				HSNodeID: bobDev.HSNodeID,
 				NodeKey:  bobDev.NodeKey,
@@ -36,7 +40,7 @@ func TestMeshHandlerDirectIgnoresXFFAndUsesVerifiedPeer(t *testing.T) {
 		}
 		return nil, errors.New("unknown peer")
 	}
-	h := MeshHandlerDirect(e.svc, resolve)
+	h := api.MeshHandlerDirect(e.svc, resolve)
 
 	// Reset Headscale counters before testing steady-state WhoIs auth.
 	e.hs.mu.Lock()
@@ -105,11 +109,13 @@ func TestPortalHandlerHeadersHostAndNoDirListing(t *testing.T) {
 	}
 
 	apiCalled := false
-	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	apiStub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiCalled = true
-		writeJSON(w, 200, map[string]bool{"ok": true})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
-	h := PortalHandler("acme.pens.hogman.test", dir, api)
+	h := api.PortalHandler("acme.pens.hogman.test", dir, apiStub)
 
 	// Wrong Host rejected with 404.
 	reqWrong := httptest.NewRequest("GET", "https://evil.example/", nil)
@@ -162,7 +168,7 @@ func TestPortalHandlerHeadersHostAndNoDirListing(t *testing.T) {
 func TestDNSServerSelfCheckAndCoreIPv4Only(t *testing.T) {
 	e := newTestEnv(t)
 	v4 := netip.MustParseAddr("100.64.0.1")
-	d, err := NewDNSServerWithIP(e.svc, v4)
+	d, err := dns.NewServer(e.svc.Zone(), v4, e.svc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,24 +207,24 @@ func TestSetupAllowsEmptyCoreIPInTsnetModeAndConfigureTestCA(t *testing.T) {
 	t.Setenv("DB", filepath.Join(dir, "registrar.db"))
 	t.Setenv("HEADSCALE_API_KEY_FILE", keyFile)
 	t.Setenv("CHALLENGE_DNS_URL", "")
-	svc := setup()
-	defer svc.st.Close()
-	if svc.cfg.CoreIP != "" {
-		t.Fatalf("expected empty CoreIP on first boot before mesh-ip exists, got %q", svc.cfg.CoreIP)
+	svc, closeSvc := setup()
+	defer closeSvc()
+	if svc.CoreIP() != "" {
+		t.Fatalf("expected empty CoreIP on first boot before mesh-ip exists, got %q", svc.CoreIP())
 	}
 
 	// Once tsnet writes mesh-ip, setup() picks it up even if CORE_MESH_IP is unset.
 	if err := os.WriteFile(filepath.Join(tsDir, "mesh-ip"), []byte("100.64.0.9\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	svc2 := setup()
-	defer svc2.st.Close()
-	if svc2.cfg.CoreIP != "100.64.0.9" {
-		t.Fatalf("expected CoreIP from mesh-ip, got %q", svc2.cfg.CoreIP)
+	svc2, closeSvc2 := setup()
+	defer closeSvc2()
+	if svc2.CoreIP() != "100.64.0.9" {
+		t.Fatalf("expected CoreIP from mesh-ip, got %q", svc2.CoreIP())
 	}
 
 	// Unreadable authKeyFile (e.g. a directory instead of a file) must fail loudly rather than booting without an auth key.
-	_, err := startEmbeddedMesh(context.Background(), svc2, nil, tsDir, "https://control.example.test", "core", tsDir, "")
+	_, err := startEmbeddedMesh(context.Background(), svc2, nil, tsDir, "https://control.example.test", "core", tsDir, "", nil)
 	if err == nil || !strings.Contains(err.Error(), "read auth key") {
 		t.Fatalf("startEmbeddedMesh with directory authKeyFile = %v, want read auth key error", err)
 	}

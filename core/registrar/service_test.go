@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,15 +21,20 @@ import (
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
+
+	"hogman/registrar/internal/dns"
+	"hogman/registrar/internal/headscale"
+	"hogman/registrar/internal/registrar"
+	"hogman/registrar/internal/store"
 )
 
 type fakeHeadscale struct {
 	mu              sync.Mutex
 	nextUserID      int
 	nextKeyID       int
-	users           map[string]HSUser
-	keys            map[string]HSPreAuthKey
-	nodes           []HSNode
+	users           map[string]headscale.User
+	keys            map[string]headscale.PreAuthKey
+	nodes           []headscale.Node
 	policy          string
 	failCreateKey   bool
 	failSetPolicy   bool
@@ -46,15 +52,15 @@ type fakeHeadscale struct {
 func newFakeHeadscale(t *testing.T) *fakeHeadscale {
 	t.Helper()
 	f := &fakeHeadscale{
-		users: map[string]HSUser{},
-		keys:  map[string]HSPreAuthKey{},
+		users: map[string]headscale.User{},
+		keys:  map[string]headscale.PreAuthKey{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/user", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		name := r.URL.Query().Get("name")
-		var out []HSUser
+		var out []headscale.User
 		for _, u := range f.users {
 			if name == "" || u.Name == name {
 				out = append(out, u)
@@ -68,7 +74,7 @@ func newFakeHeadscale(t *testing.T) *fakeHeadscale {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.nextUserID++
-		u := HSUser{ID: strconv.Itoa(f.nextUserID), Name: in.Name}
+		u := headscale.User{ID: strconv.Itoa(f.nextUserID), Name: in.Name}
 		f.users[u.ID] = u
 		_ = json.NewEncoder(w).Encode(map[string]any{"user": u})
 	})
@@ -97,7 +103,7 @@ func newFakeHeadscale(t *testing.T) *fakeHeadscale {
 		_ = json.NewDecoder(r.Body).Decode(&in)
 		f.nextKeyID++
 		id := strconv.Itoa(f.nextKeyID)
-		k := HSPreAuthKey{ID: id, Key: "hskey-test-" + id, ACLTags: in.ACLTags}
+		k := headscale.PreAuthKey{ID: id, Key: "hskey-test-" + id, ACLTags: in.ACLTags}
 		f.keys[id] = k
 		_ = json.NewEncoder(w).Encode(map[string]any{"preAuthKey": k})
 	})
@@ -192,33 +198,50 @@ func (f *fakeHeadscale) userExists(id string) bool {
 }
 
 type testEnv struct {
-	svc *Service
-	st  *Store
-	hs  *fakeHeadscale
-	dir string
+	svc      *registrar.Service
+	st       *store.Store
+	hs       *fakeHeadscale
+	hsClient *headscale.Client
+	dir      string
 }
 
 func newTestEnv(t *testing.T) *testEnv {
+	return newTestEnvWithConfig(t, nil)
+}
+
+func newTestEnvWithConfig(t *testing.T, tweak func(*registrar.Config)) *testEnv {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := OpenStore(filepath.Join(dir, "registrar.db"))
+	st, err := store.Open(filepath.Join(dir, "registrar.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = st.db.Close() })
+	t.Cleanup(func() { _ = st.Close() })
 	hs := newFakeHeadscale(t)
-	cfg := Config{
+	hsClient := headscale.New(hs.srv.URL, "test-key")
+	cfg := registrar.Config{
 		Zone:         "bobo.hogman",
 		PublicHost:   "hs.example.com",
 		CoreIP:       "100.64.0.1",
 		InviteTTL:    7 * 24 * time.Hour,
 		DeviceKeyTTL: time.Hour,
 	}
-	svc, err := NewService(cfg, st, NewHeadscale(hs.srv.URL, "test-key"))
+	if tweak != nil {
+		tweak(&cfg)
+	}
+	svc, err := registrar.NewService(cfg, st, hsClient)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &testEnv{svc: svc, st: st, hs: hs, dir: dir}
+	return &testEnv{svc: svc, st: st, hs: hs, hsClient: hsClient, dir: dir}
+}
+
+func newTestDNSServer(s *registrar.Service) (*dns.Server, error) {
+	ip, err := netip.ParseAddr(strings.TrimSpace(s.CoreIP()))
+	if err != nil {
+		return nil, err
+	}
+	return dns.NewServer(s.Zone(), ip, s)
 }
 
 func testNodeKey(seed string) string {
@@ -231,14 +254,14 @@ func testMachineKey(seed string) string {
 	return "mkey:" + hex.EncodeToString(sum[:])
 }
 
-func (e *testEnv) addDevice(t *testing.T, handle, kind, name, ipv4, ipv6 string) (*Member, *Device) {
+func (e *testEnv) addDevice(t *testing.T, handle, kind, name, ipv4, ipv6 string) (*store.Member, *store.Device) {
 	t.Helper()
 	m, err := e.st.MemberByHandle(handle)
 	if err != nil {
 		t.Fatal(err)
 	}
 	seed := fmt.Sprintf("%d-%s", m.ID, name)
-	d := &Device{
+	d := &store.Device{
 		MemberID:   m.ID,
 		Kind:       kind,
 		HSNodeID:   fmt.Sprintf("node-%d-%s", m.ID, name),
@@ -258,7 +281,7 @@ func (e *testEnv) addDevice(t *testing.T, handle, kind, name, ipv4, ipv6 string)
 	if ipv6 != "" {
 		ips = append(ips, ipv6)
 	}
-	hsNode := HSNode{
+	hsNode := headscale.Node{
 		ID:          d.HSNodeID,
 		MachineKey:  d.MachineKey,
 		NodeKey:     d.NodeKey,
@@ -269,7 +292,7 @@ func (e *testEnv) addDevice(t *testing.T, handle, kind, name, ipv4, ipv6 string)
 	if kind == "server" {
 		hsNode.Tags = []string{"tag:server"}
 	} else {
-		hsNode.User = &HSUser{ID: m.HSUserID, Name: m.Handle}
+		hsNode.User = &headscale.User{ID: m.HSUserID, Name: m.Handle}
 	}
 	e.hs.mu.Lock()
 	e.hs.nodes = append(e.hs.nodes, hsNode)
@@ -280,7 +303,7 @@ func (e *testEnv) addDevice(t *testing.T, handle, kind, name, ipv4, ipv6 string)
 func TestRedeemRollbackOnPreAuthKeyFailure(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	inv, err := e.svc.MintInvite(cli, "member", "alice invite", time.Hour)
 	if err != nil {
@@ -302,7 +325,7 @@ func TestRedeemRollbackOnPreAuthKeyFailure(t *testing.T) {
 	if gotInv.State() != "open" {
 		t.Fatalf("invite state = %q, want open after rollback", gotInv.State())
 	}
-	if _, err := e.st.MemberByHandle("alice"); !errors.Is(err, ErrNotFound) {
+	if _, err := e.st.MemberByHandle("alice"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("member alice should have been rolled back, got err=%v", err)
 	}
 	if e.hs.userExists("1") {
@@ -325,13 +348,13 @@ func TestRedeemRollbackOnPreAuthKeyFailure(t *testing.T) {
 func TestRedeemRejectsSuspendedMinter(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	alice, err := e.svc.AddMember(ctx, cli, "alice", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	inv, err := e.svc.MintInvite(Actor{Member: alice}, "member", "", time.Hour)
+	inv, err := e.svc.MintInvite(registrar.Actor{Member: alice}, "member", "", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,9 +363,9 @@ func TestRedeemRejectsSuspendedMinter(t *testing.T) {
 	}
 
 	_, err = e.svc.Redeem(ctx, inv.Token, "bob")
-	var prob *Problem
-	if !errors.As(err, &prob) || prob.Status != 403 {
-		t.Fatalf("want 403 forbidden for suspended minter, got %v", err)
+	var de *registrar.Error
+	if !errors.As(err, &de) || de.Kind != registrar.KindForbidden {
+		t.Fatalf("want KindForbidden for suspended minter, got %v", err)
 	}
 	gotInv, _ := e.st.InviteByID(inv.ID)
 	if gotInv.State() != "open" {
@@ -353,7 +376,7 @@ func TestRedeemRejectsSuspendedMinter(t *testing.T) {
 func TestClaimOwnerSeizeAndConcurrency(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	owner, err := e.svc.AddMember(ctx, cli, "root", "owner")
 	if err != nil {
@@ -371,10 +394,10 @@ func TestClaimOwnerSeizeAndConcurrency(t *testing.T) {
 	_, aliceSrv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.11", "")
 	_, bobSrv := e.addDevice(t, "bob", "server", "bob-srv", "100.64.0.12", "")
 
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "alice", aliceSrv.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: alice}, "alice", "alice", aliceSrv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Claim(Actor{Member: bob}, "bob", "alice", bobSrv.ID, nil); err == nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: bob}, "bob", "alice", bobSrv.ID, nil); err == nil {
 		t.Fatal("bob should not be able to claim alice's name")
 	}
 
@@ -392,12 +415,12 @@ func TestClaimOwnerSeizeAndConcurrency(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, err := e.svc.Claim(Actor{Member: alice}, "alice", "contested", aliceSrv.ID, nil)
+		_, err := e.svc.Claim(registrar.Actor{Member: alice}, "alice", "contested", aliceSrv.ID, nil)
 		errs <- err
 	}()
 	go func() {
 		defer wg.Done()
-		_, err := e.svc.Claim(Actor{Member: bob}, "bob", "contested", bobSrv.ID, nil)
+		_, err := e.svc.Claim(registrar.Actor{Member: bob}, "bob", "contested", bobSrv.ID, nil)
 		errs <- err
 	}()
 	wg.Wait()
@@ -409,8 +432,8 @@ func TestClaimOwnerSeizeAndConcurrency(t *testing.T) {
 			successes++
 			continue
 		}
-		var prob *Problem
-		if errors.As(err, &prob) && prob.Status == 409 {
+		var de *registrar.Error
+		if errors.As(err, &de) && de.Kind == registrar.KindConflict {
 			conflicts++
 		} else {
 			t.Fatalf("unexpected concurrent claim error: %v", err)
@@ -424,14 +447,14 @@ func TestClaimOwnerSeizeAndConcurrency(t *testing.T) {
 func TestResolvableNameIPv6AndConcurrency(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	alice, err := e.svc.AddMember(ctx, cli, "alice", "member")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, srv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.20", "fd7a:115c:a1e0::20")
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "alice", srv.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: alice}, "alice", "alice", srv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -451,12 +474,12 @@ func TestResolvableNameIPv6AndConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			st2, err := OpenStore(dbPath)
+			st2, err := store.Open(dbPath)
 			if err != nil {
 				errs <- err
 				return
 			}
-			defer st2.db.Close()
+			defer st2.DB().Close()
 			if i%2 == 0 {
 				if _, err := st2.ResolvableName("alice"); err != nil {
 					errs <- err
@@ -483,7 +506,7 @@ func TestResolvableNameIPv6AndConcurrency(t *testing.T) {
 func TestRBACAdminRestrictions(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	owner, err := e.svc.AddMember(ctx, cli, "root", "owner")
 	if err != nil {
@@ -507,13 +530,13 @@ func TestRBACAdminRestrictions(t *testing.T) {
 	_, memberDev := e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.13", "")
 	_, memberSrv := e.addDevice(t, "bob", "server", "bob-srv", "100.64.0.14", "")
 
-	if _, err := e.svc.Claim(Actor{Member: owner}, "root", "root-site", ownerSrv.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: owner}, "root", "root-site", ownerSrv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Claim(Actor{Member: admin2}, "carol", "carol-site", admin2Srv.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: admin2}, "carol", "carol-site", admin2Srv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Claim(Actor{Member: member1}, "bob", "bob-site", memberSrv.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: member1}, "bob", "bob-site", memberSrv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Kick a member to put a held name in place.
@@ -529,14 +552,14 @@ func TestRBACAdminRestrictions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a1 := Actor{Member: admin1}
+	a1 := registrar.Actor{Member: admin1}
 
 	// Admin cannot remove another admin's or owner's device, but can remove a member's device.
 	for _, devID := range []int64{ownerSrv.ID, admin2Dev.ID} {
 		err := e.svc.RemoveDevice(ctx, a1, devID)
-		var prob *Problem
-		if !errors.As(err, &prob) || prob.Status != 403 {
-			t.Fatalf("admin RemoveDevice(%d): got %v, want 403", devID, err)
+		var de *registrar.Error
+		if !errors.As(err, &de) || de.Kind != registrar.KindForbidden {
+			t.Fatalf("admin RemoveDevice(%d): got %v, want KindForbidden", devID, err)
 		}
 	}
 	if err := e.svc.RemoveDevice(ctx, a1, memberDev.ID); err != nil {
@@ -546,17 +569,17 @@ func TestRBACAdminRestrictions(t *testing.T) {
 	// Admin cannot release owner's name or another admin's name.
 	for _, name := range []string{"root-site", "carol-site"} {
 		err := e.svc.Release(a1, name)
-		var prob *Problem
-		if !errors.As(err, &prob) || prob.Status != 403 {
-			t.Fatalf("admin Release(%q): got %v, want 403", name, err)
+		var de *registrar.Error
+		if !errors.As(err, &de) || de.Kind != registrar.KindForbidden {
+			t.Fatalf("admin Release(%q): got %v, want KindForbidden", name, err)
 		}
 	}
 	// Nobody (admin, owner, or CLI) can release a permanently retired name.
-	for _, actor := range []Actor{a1, {Member: owner}, cli} {
+	for _, actor := range []registrar.Actor{a1, {Member: owner}, cli} {
 		err := e.svc.Release(actor, "gary-site")
-		var prob *Problem
-		if !errors.As(err, &prob) || prob.Status != 409 {
-			t.Fatalf("%s Release(gary-site): got %v, want 409", actor, err)
+		var de *registrar.Error
+		if !errors.As(err, &de) || de.Kind != registrar.KindConflict {
+			t.Fatalf("%s Release(gary-site): got %v, want KindConflict", actor, err)
 		}
 	}
 	// Admin can still release a regular active member's name.
@@ -567,9 +590,9 @@ func TestRBACAdminRestrictions(t *testing.T) {
 	// Admin cannot issue device keys or claim names for owner or another admin.
 	for _, target := range []string{"root", "carol"} {
 		_, _, err := e.svc.IssueDeviceKey(ctx, a1, target, "personal")
-		var prob *Problem
-		if !errors.As(err, &prob) || prob.Status != 403 {
-			t.Fatalf("admin IssueDeviceKey(%s): got %v, want 403", target, err)
+		var de *registrar.Error
+		if !errors.As(err, &de) || de.Kind != registrar.KindForbidden {
+			t.Fatalf("admin IssueDeviceKey(%s): got %v, want KindForbidden", target, err)
 		}
 	}
 	if _, err := e.svc.Claim(a1, "carol", "hijack", admin2Srv.ID, nil); err == nil {
@@ -580,7 +603,7 @@ func TestRBACAdminRestrictions(t *testing.T) {
 func TestClaimSeizeCleansUpChildSubdomains(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	if _, err := e.svc.AddMember(ctx, cli, "root", "owner"); err != nil {
 		t.Fatal(err)
@@ -592,19 +615,19 @@ func TestClaimSeizeCleansUpChildSubdomains(t *testing.T) {
 	_, rootSrv := e.addDevice(t, "root", "server", "root-srv", "100.64.0.10", "")
 	_, aliceSrv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.11", "")
 
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "alice", aliceSrv.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: alice}, "alice", "alice", aliceSrv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "blog.alice", aliceSrv.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: alice}, "alice", "blog.alice", aliceSrv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.svc.Claim(cli, "root", "alice", rootSrv.ID, nil); err != nil {
 		t.Fatalf("owner seize failed: %v", err)
 	}
-	if _, err := e.st.NameByName("blog.alice"); !errors.Is(err, ErrNotFound) {
+	if _, err := e.st.NameByName("blog.alice"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("child name blog.alice should be deleted on parent seize, got err=%v", err)
 	}
-	dnsSrv, err := NewDNSServer(e.svc)
+	dnsSrv, err := newTestDNSServer(e.svc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,21 +642,22 @@ func TestClaimSeizeCleansUpChildSubdomains(t *testing.T) {
 }
 
 func TestQuotasAndSuspendExpiresKeys(t *testing.T) {
-	e := newTestEnv(t)
-	e.svc.cfg.MaxOpenDeviceKeys = 2
-	e.svc.cfg.MaxNamesPerMember = 2
-	e.svc.cfg.MaxOpenInvites = 2
-	e.svc.cfg.MaxInviteNoteLen = 16
-	e.svc.cfg.MembersCanInvite = true
+	e := newTestEnvWithConfig(t, func(c *registrar.Config) {
+		c.MaxOpenDeviceKeys = 2
+		c.MaxNamesPerMember = 2
+		c.MaxOpenInvites = 2
+		c.MaxInviteNoteLen = 16
+		c.MembersCanInvite = true
+	})
 
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 	alice, err := e.svc.AddMember(ctx, cli, "alice", "member")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, aliceSrv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.11", "")
-	aAlice := Actor{Member: alice}
+	aAlice := registrar.Actor{Member: alice}
 
 	// Open device key quota + PendingDeviceKeys filtering.
 	for i := 0; i < 2; i++ {
@@ -660,20 +684,21 @@ func TestQuotasAndSuspendExpiresKeys(t *testing.T) {
 	if _, _, err := e.svc.IssueDeviceKey(ctx, aAlice, "alice", "personal"); err != nil {
 		t.Fatalf("IssueDeviceKey after suspend/resume: %v", err)
 	}
-	if err := e.st.InsertDeviceKey(&DeviceKey{MemberID: alice.ID, Kind: "personal", HSKeyID: "old-exp", ExpiresAt: now() - 100000}); err != nil {
+	nowUnix := time.Now().Unix()
+	if err := e.st.InsertDeviceKey(&store.DeviceKey{MemberID: alice.ID, Kind: "personal", HSKeyID: "old-exp", ExpiresAt: nowUnix - 100000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.st.InsertDeviceKey(&DeviceKey{MemberID: alice.ID, Kind: "personal", HSKeyID: "used-one", ExpiresAt: now() + 3600}); err != nil {
+	if err := e.st.InsertDeviceKey(&store.DeviceKey{MemberID: alice.ID, Kind: "personal", HSKeyID: "used-one", ExpiresAt: nowUnix + 3600}); err != nil {
 		t.Fatal(err)
 	}
-	allKeys, _ := e.st.PendingDeviceKeys(now() - 86400)
+	allKeys, _ := e.st.PendingDeviceKeys(nowUnix - 86400)
 	if _, ok := allKeys["old-exp"]; ok {
 		t.Fatal("PendingDeviceKeys should exclude old expired keys")
 	}
 	if dk := allKeys["used-one"]; dk != nil {
 		_ = e.st.MarkDeviceKeyUsed(dk.ID)
 	}
-	allKeys, _ = e.st.PendingDeviceKeys(now() - 86400)
+	allKeys, _ = e.st.PendingDeviceKeys(nowUnix - 86400)
 	if _, ok := allKeys["used-one"]; ok {
 		t.Fatal("PendingDeviceKeys should exclude used keys")
 	}
@@ -704,22 +729,22 @@ func TestQuotasAndSuspendExpiresKeys(t *testing.T) {
 
 func TestNoCARecordOrPort9000(t *testing.T) {
 	dir := t.TempDir()
-	st, err := OpenStore(filepath.Join(dir, "registrar.db"))
+	st, err := store.Open(filepath.Join(dir, "registrar.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = st.db.Close() })
+	t.Cleanup(func() { _ = st.DB().Close() })
 	hs := newFakeHeadscale(t)
-	cfg := Config{
+	cfg := registrar.Config{
 		Zone:       "bobo.pens.example.com",
 		PublicHost: "bobo.gate.example.com",
 		CoreIP:     "100.64.0.10",
 	}
-	svc, err := NewService(cfg, st, NewHeadscale(hs.srv.URL, "test-key"))
+	svc, err := registrar.NewService(cfg, st, headscale.New(hs.srv.URL, "test-key"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	dnsSrv, err := NewDNSServer(svc)
+	dnsSrv, err := newTestDNSServer(svc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -731,10 +756,10 @@ func TestNoCARecordOrPort9000(t *testing.T) {
 	if hdr.RCode != dnsmessage.RCodeNameError || len(ans) != 0 {
 		t.Fatalf("ca.<zone> got rcode=%v ans=%d, want NXDOMAIN", hdr.RCode, len(ans))
 	}
-	if _, err := svc.normaliseName("ca"); err != nil {
+	if _, err := svc.NormaliseName("ca"); err != nil {
 		t.Fatalf("expected label ca to be unreserved: %v", err)
 	}
-	pol, _, err := svc.buildPolicy()
+	pol, _, err := svc.BuildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -748,14 +773,14 @@ func TestNoCARecordOrPort9000(t *testing.T) {
 
 func TestBuildPolicyIsolatesServersFromEachOther(t *testing.T) {
 	e := newTestEnv(t)
-	if _, err := e.svc.AddMember(context.Background(), Actor{CLI: true}, "alice", "member"); err != nil {
+	if _, err := e.svc.AddMember(context.Background(), registrar.Actor{CLI: true}, "alice", "member"); err != nil {
 		t.Fatal(err)
 	}
 	e.addDevice(t, "alice", "personal", "alice-laptop", "100.64.0.10", "")
 	e.addDevice(t, "alice", "server", "alice-srv1", "100.64.0.11", "")
 	e.addDevice(t, "alice", "server", "alice-srv2", "100.64.0.12", "")
 
-	pol, _, err := e.svc.buildPolicy()
+	pol, _, err := e.svc.BuildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -813,7 +838,7 @@ func TestBuildPolicyIsolatesServersFromEachOther(t *testing.T) {
 
 func TestStoreConcurrentSubprocesses(t *testing.T) {
 	if dbPath := os.Getenv("GO_TEST_STORE_HELPER_DB"); dbPath != "" {
-		st, err := OpenStore(dbPath)
+		st, err := store.Open(dbPath)
 		if err != nil {
 			t.Fatalf("OpenStore: %v", err)
 		}
@@ -841,17 +866,17 @@ func TestStoreConcurrentSubprocesses(t *testing.T) {
 	}
 
 	dbPath := filepath.Join(t.TempDir(), "registrar.db")
-	st, err := OpenStore(dbPath)
+	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	defer st.Close()
 
-	bob := &Member{Handle: "bob", Role: "member", Status: "active", HSUserID: "u-bob"}
+	bob := &store.Member{Handle: "bob", Role: "member", Status: "active", HSUserID: "u-bob"}
 	if err := st.InsertMember(bob); err != nil {
 		t.Fatalf("InsertMember: %v", err)
 	}
-	if err := st.InsertDevice(&Device{
+	if err := st.InsertDevice(&store.Device{
 		MemberID: bob.ID,
 		Kind:     "personal",
 		HSNodeID: "n-bob",
@@ -942,7 +967,7 @@ func TestStoreConcurrentSubprocesses(t *testing.T) {
 func TestNoAccountRecoveryKeys(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 	root, err := e.svc.AddMember(ctx, cli, "root", "owner")
 	if err != nil {
 		t.Fatal(err)
@@ -963,7 +988,7 @@ func TestNoAccountRecoveryKeys(t *testing.T) {
 		}
 	}
 	// An owner can't make one for someone else either; a server key is fine.
-	owner := Actor{Member: root}
+	owner := registrar.Actor{Member: root}
 	if _, _, err := e.svc.IssueDeviceKey(ctx, owner, "bob", "personal"); err == nil {
 		t.Fatal("owner made a personal key for bob")
 	}
@@ -982,7 +1007,7 @@ func TestOwnersCannotAllBeDemoted(t *testing.T) {
 	for round := 0; round < 20; round++ {
 		e := newTestEnv(t)
 		ctx := context.Background()
-		cli := Actor{CLI: true}
+		cli := registrar.Actor{CLI: true}
 		a, err := e.svc.AddMember(ctx, cli, "ann", "owner")
 		if err != nil {
 			t.Fatal(err)
@@ -993,8 +1018,8 @@ func TestOwnersCannotAllBeDemoted(t *testing.T) {
 		}
 		var wg sync.WaitGroup
 		wg.Add(2)
-		go func() { defer wg.Done(); _ = e.svc.SetRole(ctx, Actor{Member: a}, "bea", "admin") }()
-		go func() { defer wg.Done(); _ = e.svc.SetRole(ctx, Actor{Member: b}, "ann", "admin") }()
+		go func() { defer wg.Done(); _ = e.svc.SetRole(ctx, registrar.Actor{Member: a}, "bea", "admin") }()
+		go func() { defer wg.Done(); _ = e.svc.SetRole(ctx, registrar.Actor{Member: b}, "ann", "admin") }()
 		wg.Wait()
 		if n, _ := e.st.CountOwners(); n < 1 {
 			t.Fatalf("round %d: pen left with %d owners", round, n)
@@ -1007,7 +1032,7 @@ func TestOwnersCannotAllBeDemoted(t *testing.T) {
 func TestInvitesFollowTheirMakersRole(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 	if _, err := e.svc.AddMember(ctx, cli, "root", "owner"); err != nil {
 		t.Fatal(err)
 	}
@@ -1019,11 +1044,11 @@ func TestInvitesFollowTheirMakersRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	adminInv, err := e.svc.MintInvite(Actor{Member: carol}, "admin", "", time.Hour)
+	adminInv, err := e.svc.MintInvite(registrar.Actor{Member: carol}, "admin", "", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	memberInv, err := e.svc.MintInvite(Actor{Member: dan}, "member", "", time.Hour)
+	memberInv, err := e.svc.MintInvite(registrar.Actor{Member: dan}, "member", "", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1051,7 +1076,7 @@ func TestInvitesFollowTheirMakersRole(t *testing.T) {
 func TestKickedNamesPermanentlyRetired(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	owner, err := e.svc.AddMember(ctx, cli, "root", "owner")
 	if err != nil {
@@ -1075,10 +1100,10 @@ func TestKickedNamesPermanentlyRetired(t *testing.T) {
 	_, bobSrv := e.addDevice(t, "bob", "server", "bob-srv", "100.64.0.12", "")
 	_, aliceSrv := e.addDevice(t, "alice", "server", "alice-srv", "100.64.0.13", "")
 
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "photos", aliceSrv.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: alice}, "alice", "photos", aliceSrv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "raw.photos", aliceSrv.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: alice}, "alice", "raw.photos", aliceSrv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1094,38 +1119,38 @@ func TestKickedNamesPermanentlyRetired(t *testing.T) {
 	}
 
 	// Simulate an existing DB row whose old 90-day held_until timestamp is in the past.
-	if _, err := e.st.db.Exec(`UPDATE names SET held_until = 1 WHERE name IN ('photos', 'raw.photos')`); err != nil {
+	if _, err := e.st.DB().Exec(`UPDATE names SET held_until = 1 WHERE name IN ('photos', 'raw.photos')`); err != nil {
 		t.Fatal(err)
 	}
 
 	assertConflict := func(label string, err error) {
 		t.Helper()
-		var prob *Problem
-		if !errors.As(err, &prob) || prob.Status != 409 {
-			t.Fatalf("%s: got %v, want 409 Conflict", label, err)
+		var de *registrar.Error
+		if !errors.As(err, &de) || de.Kind != registrar.KindConflict {
+			t.Fatalf("%s: got %v, want KindConflict", label, err)
 		}
 	}
 
 	// Nobody — member, admin, owner, CLI, or share server — can reclaim a retired name or subdomain under it.
-	_, err = e.svc.Claim(Actor{Member: bob}, "bob", "photos", bobSrv.ID, nil)
+	_, err = e.svc.Claim(registrar.Actor{Member: bob}, "bob", "photos", bobSrv.ID, nil)
 	assertConflict("member Claim retired name", err)
-	_, err = e.svc.Claim(Actor{Member: admin}, "ada", "photos", adminSrv.ID, nil)
+	_, err = e.svc.Claim(registrar.Actor{Member: admin}, "ada", "photos", adminSrv.ID, nil)
 	assertConflict("admin Claim retired name", err)
-	_, err = e.svc.Claim(Actor{Member: owner}, "root", "photos", ownerSrv.ID, nil)
+	_, err = e.svc.Claim(registrar.Actor{Member: owner}, "root", "photos", ownerSrv.ID, nil)
 	assertConflict("owner Claim retired name", err)
 	_, err = e.svc.Claim(cli, "root", "photos", ownerSrv.ID, nil)
 	assertConflict("CLI Claim retired name", err)
-	_, err = e.svc.ServerClaim(Actor{Member: bob}, bobSrv, "photos", nil)
+	_, err = e.svc.ServerClaim(registrar.Actor{Member: bob}, bobSrv, "photos", nil)
 	assertConflict("server Claim retired name", err)
-	_, err = e.svc.ServerClaim(Actor{Member: owner}, ownerSrv, "photos", nil)
+	_, err = e.svc.ServerClaim(registrar.Actor{Member: owner}, ownerSrv, "photos", nil)
 	assertConflict("owner server Claim retired name", err)
 	_, err = e.svc.Claim(cli, "root", "new.photos", ownerSrv.ID, nil)
 	assertConflict("CLI Claim subdomain under retired name", err)
-	_, err = e.svc.ServerClaim(Actor{Member: bob}, bobSrv, "new.photos", nil)
+	_, err = e.svc.ServerClaim(registrar.Actor{Member: bob}, bobSrv, "new.photos", nil)
 	assertConflict("server Claim subdomain under retired name", err)
 
 	// Nobody — member, admin, owner, or CLI — can release a retired name.
-	for _, actor := range []Actor{{Member: bob}, {Member: admin}, {Member: owner}, cli} {
+	for _, actor := range []registrar.Actor{{Member: bob}, {Member: admin}, {Member: owner}, cli} {
 		assertConflict(actor.String()+" Release retired name", e.svc.Release(actor, "photos"))
 		assertConflict(actor.String()+" Release retired child", e.svc.Release(actor, "raw.photos"))
 	}
@@ -1142,13 +1167,13 @@ func TestKickedNamesPermanentlyRetired(t *testing.T) {
 	}
 
 	// Active members can still voluntarily release their own active names for reuse.
-	if _, err := e.svc.Claim(Actor{Member: bob}, "bob", "temp", bobSrv.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: bob}, "bob", "temp", bobSrv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.svc.Release(Actor{Member: bob}, "temp"); err != nil {
+	if err := e.svc.Release(registrar.Actor{Member: bob}, "temp"); err != nil {
 		t.Fatalf("active member Release(temp): %v", err)
 	}
-	if _, err := e.svc.Claim(Actor{Member: owner}, "root", "temp", ownerSrv.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: owner}, "root", "temp", ownerSrv.ID, nil); err != nil {
 		t.Fatalf("reclaim voluntarily released active name: %v", err)
 	}
 }
@@ -1169,9 +1194,9 @@ func TestCLIStrconvValidation(t *testing.T) {
 		{"audit", "-3"},
 	} {
 		err := cli(ctx, e.svc, args)
-		var prob *Problem
-		if !errors.As(err, &prob) || prob.Status != 400 {
-			t.Errorf("cli(%v) = %v, want 400 Problem", args, err)
+		var de *registrar.Error
+		if !errors.As(err, &de) || de.Kind != registrar.KindInvalid {
+			t.Errorf("cli(%v) = %v, want KindInvalid", args, err)
 		}
 	}
 }
@@ -1179,7 +1204,7 @@ func TestCLIStrconvValidation(t *testing.T) {
 func TestReleaseNamesAndMarkDeviceRemoved(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cliActor := Actor{CLI: true}
+	cliActor := registrar.Actor{CLI: true}
 
 	if _, err := e.svc.AddMember(ctx, cliActor, "alice", "owner"); err != nil {
 		t.Fatal(err)
@@ -1195,7 +1220,7 @@ func TestReleaseNamesAndMarkDeviceRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	privLabel := strings.TrimSuffix(privFQDN, "."+e.svc.cfg.Zone)
+	privLabel := strings.TrimSuffix(privFQDN, "."+e.svc.Zone())
 	if err := e.svc.Release(cliActor, privLabel); err != nil {
 		t.Fatalf("Release private: %v", err)
 	}
@@ -1208,7 +1233,7 @@ func TestReleaseNamesAndMarkDeviceRemoved(t *testing.T) {
 		t.Fatalf("Release blog subtree: %v", err)
 	}
 	for _, n := range []string{"blog", "img.blog"} {
-		if _, err := e.st.NameByName(n); !errors.Is(err, ErrNotFound) {
+		if _, err := e.st.NameByName(n); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("released non-private %q still present: err=%v", n, err)
 		}
 	}

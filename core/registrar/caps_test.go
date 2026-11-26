@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,20 +13,26 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"hogman/registrar/internal/api"
+	"hogman/registrar/internal/headscale"
+	"hogman/registrar/internal/registrar"
+	"hogman/registrar/internal/store"
 )
 
 func TestPenCapsMembersDevicesAndRedeemGeneric409(t *testing.T) {
-	e := newTestEnv(t)
-	e.svc.cfg.MaxMembers = 3
-	e.svc.cfg.MaxDevices = 3
+	e := newTestEnvWithConfig(t, func(c *registrar.Config) {
+		c.MaxMembers = 3
+		c.MaxDevices = 3
+	})
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	owner, err := e.svc.AddMember(ctx, cli, "owner1", "owner")
 	if err != nil {
 		t.Fatal(err)
 	}
-	aOwner := Actor{Member: owner}
+	aOwner := registrar.Actor{Member: owner}
 	alice, err := e.svc.AddMember(ctx, aOwner, "alice", "member")
 	if err != nil {
 		t.Fatal(err)
@@ -38,16 +43,16 @@ func TestPenCapsMembersDevicesAndRedeemGeneric409(t *testing.T) {
 	}
 	_ = bob
 
-	// 1. At MAX_MEMBERS=3: portal AddMember and MintInvite fail with 409.
+	// 1. At MAX_MEMBERS=3: portal AddMember and MintInvite fail with conflict.
 	if _, err := e.svc.AddMember(ctx, aOwner, "carol", "member"); err == nil {
 		t.Fatal("expected portal AddMember to hit MaxMembers")
-	} else if p, ok := err.(*Problem); !ok || p.Status != http.StatusConflict {
-		t.Fatalf("portal AddMember err = %v, want 409", err)
+	} else if de, ok := err.(*registrar.Error); !ok || de.Kind != registrar.KindConflict {
+		t.Fatalf("portal AddMember err = %v, want KindConflict", err)
 	}
 	if _, err := e.svc.MintInvite(aOwner, "member", "", time.Hour); err == nil {
 		t.Fatal("expected portal MintInvite to hit MaxMembers")
-	} else if p, ok := err.(*Problem); !ok || p.Status != http.StatusConflict {
-		t.Fatalf("portal MintInvite err = %v, want 409", err)
+	} else if de, ok := err.(*registrar.Error); !ok || de.Kind != registrar.KindConflict {
+		t.Fatalf("portal MintInvite err = %v, want KindConflict", err)
 	}
 
 	// 2. Suspended members still count toward MAX_MEMBERS.
@@ -61,7 +66,7 @@ func TestPenCapsMembersDevicesAndRedeemGeneric409(t *testing.T) {
 	// 3. Public /hogman/v1/redeem:
 	//    - Invalid invite token STILL returns 403 (never leaks fullness to unauthenticated callers).
 	//    - Valid open CLI-minted invite returns generic 409 without counts or cap names.
-	pub := PublicHandler(e.svc)
+	pub := api.PublicHandler(e.svc)
 	postRedeem := func(tok, handle string) *httptest.ResponseRecorder {
 		body, _ := json.Marshal(map[string]string{"token": tok, "handle": handle})
 		req := httptest.NewRequest(http.MethodPost, "/hogman/v1/redeem", bytes.NewReader(body))
@@ -98,15 +103,15 @@ func TestPenCapsMembersDevicesAndRedeemGeneric409(t *testing.T) {
 	e.addDevice(t, "owner1", "personal", "owner-lap", "100.64.0.10", "")
 	e.addDevice(t, "alice", "personal", "alice-lap", "100.64.0.11", "")
 	// 3rd slot taken by an open unused device key from alice.
-	aAlice := Actor{Member: alice}
+	aAlice := registrar.Actor{Member: alice}
 	if _, _, err := e.svc.IssueDeviceKey(ctx, aAlice, "alice", "personal"); err != nil {
 		t.Fatalf("alice 3rd slot key failed: %v", err)
 	}
 	// 4th device key for non-owner must be refused (live=2 + open=1 == MAX_DEVICES=3).
 	if _, _, err := e.svc.IssueDeviceKey(ctx, aAlice, "alice", "personal"); err == nil {
 		t.Fatal("expected alice 4th device slot to hit MaxDevices")
-	} else if p, ok := err.(*Problem); !ok || p.Status != http.StatusConflict {
-		t.Fatalf("alice device cap err = %v, want 409", err)
+	} else if de, ok := err.(*registrar.Error); !ok || de.Kind != registrar.KindConflict {
+		t.Fatalf("alice device cap err = %v, want KindConflict", err)
 	}
 	// Redeem with member slot available (2/3) but device slots full (3/3) must return generic 409 and NOT create carol.
 	rrDevFull := postRedeem(openInv.Token, "carol")
@@ -116,7 +121,7 @@ func TestPenCapsMembersDevicesAndRedeemGeneric409(t *testing.T) {
 	if rrDevFull.Body.String() != rr.Body.String() {
 		t.Fatalf("public /redeem body must be identical for member-cap vs device-cap: got %q vs %q", rrDevFull.Body.String(), rr.Body.String())
 	}
-	if _, err := e.st.MemberByHandle("carol"); !errors.Is(err, ErrNotFound) {
+	if _, err := e.st.MemberByHandle("carol"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("carol must not exist after device-cap redeem failure (err=%v)", err)
 	}
 
@@ -130,10 +135,11 @@ func TestPenCapsMembersDevicesAndRedeemGeneric409(t *testing.T) {
 }
 
 func TestOwnerLockoutReserveAndCLIBypassAndGrandfathering(t *testing.T) {
-	e := newTestEnv(t)
-	e.svc.cfg.MaxDevices = 2
+	e := newTestEnvWithConfig(t, func(c *registrar.Config) {
+		c.MaxDevices = 2
+	})
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	owner, err := e.svc.AddMember(ctx, cli, "owner1", "owner")
 	if err != nil {
@@ -143,8 +149,8 @@ func TestOwnerLockoutReserveAndCLIBypassAndGrandfathering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	aOwner := Actor{Member: owner}
-	aAlice := Actor{Member: alice}
+	aOwner := registrar.Actor{Member: owner}
+	aAlice := registrar.Actor{Member: alice}
 
 	// Fill MAX_DEVICES=2 with regular member devices.
 	e.addDevice(t, "alice", "personal", "alice-1", "100.64.0.10", "")
@@ -159,7 +165,7 @@ func TestOwnerLockoutReserveAndCLIBypassAndGrandfathering(t *testing.T) {
 	}
 
 	// Owner personal device succeeds using D-16 reserve (+2 -> up to 4 total).
-	for i := 1; i <= ownerDeviceReserve; i++ {
+	for i := 1; i <= registrar.OwnerDeviceReserve; i++ {
 		keyStr, _, err := e.svc.IssueDeviceKey(ctx, aOwner, "owner1", "personal")
 		if err != nil {
 			t.Fatalf("owner personal reserve #%d failed: %v", i, err)
@@ -172,12 +178,12 @@ func TestOwnerLockoutReserveAndCLIBypassAndGrandfathering(t *testing.T) {
 		}
 		_ = keyStr
 		e.hs.mu.Lock()
-		e.hs.nodes = append(e.hs.nodes, HSNode{
+		e.hs.nodes = append(e.hs.nodes, headscale.Node{
 			ID:          fmt.Sprintf("owner-node-%d", i),
 			GivenName:   fmt.Sprintf("owner-phone-%d", i),
-			User:        &HSUser{ID: owner.HSUserID, Name: owner.Handle},
+			User:        &headscale.User{ID: owner.HSUserID, Name: owner.Handle},
 			IPAddresses: []string{fmt.Sprintf("100.64.0.%d", 20+i)},
-			PreAuthKey:  &HSPreAuthKey{ID: hkID},
+			PreAuthKey:  &headscale.PreAuthKey{ID: hkID},
 			NodeKey:     testNodeKey(fmt.Sprintf("owner-res-%d", i)),
 			MachineKey:  testMachineKey(fmt.Sprintf("owner-res-%d", i)),
 		})
@@ -229,12 +235,12 @@ func TestOwnerLockoutReserveAndCLIBypassAndGrandfathering(t *testing.T) {
 		t.Fatal("expected CLI device key to persist bypass_cap=true")
 	}
 	e.hs.mu.Lock()
-	e.hs.nodes = append(e.hs.nodes, HSNode{
+	e.hs.nodes = append(e.hs.nodes, headscale.Node{
 		ID:          "cli-srv-node",
 		GivenName:   "cli-srv",
 		Tags:        []string{"tag:server"},
 		IPAddresses: []string{"100.64.0.99"},
-		PreAuthKey:  &HSPreAuthKey{ID: cliKeyID},
+		PreAuthKey:  &headscale.PreAuthKey{ID: cliKeyID},
 		NodeKey:     testNodeKey("cli-srv"),
 		MachineKey:  testMachineKey("cli-srv"),
 	})
@@ -250,23 +256,24 @@ func TestOwnerLockoutReserveAndCLIBypassAndGrandfathering(t *testing.T) {
 func TestSyncEnrollEnforcesDeviceCapAndNonAdminOpenKeyDefault(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	// Default non-admin MaxOpenDeviceKeys is 3; admin/owner default is 10.
-	if e.svc.cfg.MaxOpenDeviceKeys != 3 {
-		t.Fatalf("default MaxOpenDeviceKeys = %d, want 3", e.svc.cfg.MaxOpenDeviceKeys)
+	cfg := e.svc.Config()
+	if cfg.MaxOpenDeviceKeys != 3 {
+		t.Fatalf("default MaxOpenDeviceKeys = %d, want 3", cfg.MaxOpenDeviceKeys)
 	}
-	if e.svc.cfg.MaxAdminOpenDeviceKeys != 10 {
-		t.Fatalf("default MaxAdminOpenDeviceKeys = %d, want 10", e.svc.cfg.MaxAdminOpenDeviceKeys)
+	if cfg.MaxAdminOpenDeviceKeys != 10 {
+		t.Fatalf("default MaxAdminOpenDeviceKeys = %d, want 10", cfg.MaxAdminOpenDeviceKeys)
 	}
-	if e.svc.cfg.MaxMembers != 500 || e.svc.cfg.MaxDevices != 500 {
-		t.Fatalf("default caps = (%d, %d), want (500, 500)", e.svc.cfg.MaxMembers, e.svc.cfg.MaxDevices)
+	if cfg.MaxMembers != 500 || cfg.MaxDevices != 500 {
+		t.Fatalf("default caps = (%d, %d), want (500, 500)", cfg.MaxMembers, cfg.MaxDevices)
 	}
 
 	owner, _ := e.svc.AddMember(ctx, cli, "owner1", "owner")
 	alice, _ := e.svc.AddMember(ctx, cli, "alice", "member")
-	aOwner := Actor{Member: owner}
-	aAlice := Actor{Member: alice}
+	aOwner := registrar.Actor{Member: owner}
+	aAlice := registrar.Actor{Member: alice}
 
 	// Regular member gets 3 open keys, 4th rejected.
 	for i := 0; i < 3; i++ {
@@ -286,7 +293,12 @@ func TestSyncEnrollEnforcesDeviceCapAndNonAdminOpenKeyDefault(t *testing.T) {
 
 	// Now lower MaxDevices to 1 AFTER alice already has open keys, enroll 1 live
 	// device, and verify a second non-bypass key is rejected at syncOnce + deleted from Headscale.
-	e.svc.cfg.MaxDevices = 1
+	cfg.MaxDevices = 1
+	svcLower, err := registrar.NewService(cfg, e.st, e.hsClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.svc = svcLower
 	e.addDevice(t, "alice", "personal", "alice-1", "100.64.0.10", "")
 	pending, _ := e.st.PendingDeviceKeys(0)
 	var aliceKeyID string
@@ -308,12 +320,12 @@ func TestSyncEnrollEnforcesDeviceCapAndNonAdminOpenKeyDefault(t *testing.T) {
 		return false
 	}
 	e.hs.mu.Lock()
-	e.hs.nodes = append(e.hs.nodes, HSNode{
+	e.hs.nodes = append(e.hs.nodes, headscale.Node{
 		ID:          "overcap-node",
 		GivenName:   "overcap-laptop",
-		User:        &HSUser{ID: alice.HSUserID, Name: alice.Handle},
+		User:        &headscale.User{ID: alice.HSUserID, Name: alice.Handle},
 		IPAddresses: []string{"100.64.0.44"},
-		PreAuthKey:  &HSPreAuthKey{ID: aliceKeyID},
+		PreAuthKey:  &headscale.PreAuthKey{ID: aliceKeyID},
 		NodeKey:     testNodeKey("overcap-node"),
 		MachineKey:  testMachineKey("overcap-node"),
 	})
@@ -321,7 +333,7 @@ func TestSyncEnrollEnforcesDeviceCapAndNonAdminOpenKeyDefault(t *testing.T) {
 	if err := e.svc.Sync(ctx); err != nil {
 		t.Fatalf("Sync on over-cap enroll failed: %v", err)
 	}
-	if _, err := e.st.DeviceByHSNodeID("overcap-node"); !errors.Is(err, ErrNotFound) {
+	if _, err := e.st.DeviceByHSNodeID("overcap-node"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("over-cap node must not be enrolled in SQLite (err=%v)", err)
 	}
 	delMu.Lock()
@@ -335,7 +347,7 @@ func TestSyncEnrollEnforcesDeviceCapAndNonAdminOpenKeyDefault(t *testing.T) {
 func TestSyncPendingDeleteVerifiesMachineKey(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	alice, _ := e.svc.AddMember(ctx, cli, "alice", "member")
 	_, dev := e.addDevice(t, "alice", "personal", "alice-old", "100.64.0.10", "")
@@ -420,37 +432,43 @@ func TestSyncPendingDeleteVerifiesMachineKey(t *testing.T) {
 func TestRedTeamRegressionsCapsSyncAndSelfDelete(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	owner, _ := e.svc.AddMember(ctx, cli, "owner1", "owner")
 	alice, _ := e.svc.AddMember(ctx, cli, "alice", "member")
 	bob, _ := e.svc.AddMember(ctx, cli, "bob", "member")
-	aOwner := Actor{Member: owner}
+	aOwner := registrar.Actor{Member: owner}
 
 	// 1. InsertMemberCapped checks handle uniqueness BEFORE cap (no false cap rollback on duplicate handle).
-	if err := e.st.InsertMemberCapped(&Member{Handle: "alice", Role: "member", Status: "active", HSUserID: "u99"}, 1); err == nil || errors.Is(err, ErrMemberCapReached) {
-		t.Fatalf("duplicate handle at cap = %v, want handle-taken conflict (not ErrMemberCapReached)", err)
+	if err := e.st.InsertMemberCapped(&store.Member{Handle: "alice", Role: "member", Status: "active", HSUserID: "u99"}, 1); err == nil || errors.Is(err, store.ErrMemberCapReached) {
+		t.Fatalf("duplicate handle at cap = %v, want handle-taken conflict (not store.ErrMemberCapReached)", err)
 	}
 
 	// 2. EnrollDeviceCapped checks already-enrolled BEFORE cap so overlapping serve+CLI syncs
-	//    at slot MAX_DEVICES return ErrDeviceAlreadyEnrolled instead of deleting the live node.
+	//    at slot MAX_DEVICES return store.ErrDeviceAlreadyEnrolled instead of deleting the live node.
 	_, d1 := e.addDevice(t, "alice", "personal", "alice-1", "100.64.0.10", "")
-	if err := e.st.EnrollDeviceCapped(&Device{
+	if err := e.st.EnrollDeviceCapped(&store.Device{
 		MemberID: alice.ID, Kind: "personal", HSNodeID: d1.HSNodeID, Name: "alice-1", IPv4: "100.64.0.10",
-	}, 0, 1, 0); !errors.Is(err, ErrDeviceAlreadyEnrolled) {
-		t.Fatalf("EnrollDeviceCapped for existing live node at cap = %v, want ErrDeviceAlreadyEnrolled", err)
+	}, 0, 1, 0); !errors.Is(err, store.ErrDeviceAlreadyEnrolled) {
+		t.Fatalf("EnrollDeviceCapped for existing live node at cap = %v, want store.ErrDeviceAlreadyEnrolled", err)
 	}
 
 	// 3. syncOnce over-cap rejection REVOKES the key (leaving HasJoined=false) and retries
 	//    DeleteNode on the next sync if pass 1 failed transiently!
-	e.svc.cfg.MaxDevices = 1
+	cfgLower := e.svc.Config()
+	cfgLower.MaxDevices = 1
+	svcLower, err := registrar.NewService(cfgLower, e.st, e.hsClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.svc = svcLower
 	bobKey, _, err := e.svc.IssueDeviceKey(ctx, cli, "bob", "personal")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = bobKey
 	// Flip bypass_cap=0 on bob's key to simulate a pre-existing non-CLI key when cap became full.
-	if _, err := e.st.db.Exec(`UPDATE device_keys SET bypass_cap = 0 WHERE member_id = ?`, bob.ID); err != nil {
+	if _, err := e.st.DB().Exec(`UPDATE device_keys SET bypass_cap = 0 WHERE member_id = ?`, bob.ID); err != nil {
 		t.Fatal(err)
 	}
 	pending, _ := e.st.PendingDeviceKeys(0)
@@ -474,12 +492,12 @@ func TestRedTeamRegressionsCapsSyncAndSelfDelete(t *testing.T) {
 		return false
 	}
 	e.hs.mu.Lock()
-	e.hs.nodes = append(e.hs.nodes, HSNode{
+	e.hs.nodes = append(e.hs.nodes, headscale.Node{
 		ID:          "bob-overcap",
 		GivenName:   "bob-lap",
-		User:        &HSUser{ID: bob.HSUserID, Name: bob.Handle},
+		User:        &headscale.User{ID: bob.HSUserID, Name: bob.Handle},
 		IPAddresses: []string{"100.64.0.55"},
-		PreAuthKey:  &HSPreAuthKey{ID: bobKeyID},
+		PreAuthKey:  &headscale.PreAuthKey{ID: bobKeyID},
 		NodeKey:     testNodeKey("bob-overcap"),
 		MachineKey:  testMachineKey("bob-overcap"),
 	})
@@ -499,16 +517,12 @@ func TestRedTeamRegressionsCapsSyncAndSelfDelete(t *testing.T) {
 	}
 	e.hs.onDeleteNode = nil
 
-	// 4. D-16 per-owner floor on a grandfathered pen well above MaxDevices + 2,
-	//    plus addDeviceReserve(math.MaxInt) overflow guard.
-	if addDeviceReserve(math.MaxInt) != math.MaxInt {
-		t.Fatalf("addDeviceReserve(MaxInt) overflowed: %d", addDeviceReserve(math.MaxInt))
-	}
+	// 4. D-16 per-owner floor on a grandfathered pen well above MaxDevices + 2.
 	e.addDevice(t, "alice", "server", "alice-s1", "100.64.0.11", "")
 	e.addDevice(t, "alice", "server", "alice-s2", "100.64.0.12", "")
 	e.addDevice(t, "alice", "server", "alice-s3", "100.64.0.13", "")
 	// Now 4 live devices vs MaxDevices=1 (> MaxDevices+2=3), owner1 has 0 personal devices:
-	// owner1 must still be able to add up to ownerDeviceReserve (2) personal devices!
+	// owner1 must still be able to add up to registrar.OwnerDeviceReserve (2) personal devices!
 	if _, _, err := e.svc.IssueDeviceKey(ctx, aOwner, "owner1", "personal"); err != nil {
 		t.Fatalf("owner personal key #1 on grandfathered pen must succeed: %v", err)
 	}
@@ -519,11 +533,9 @@ func TestRedTeamRegressionsCapsSyncAndSelfDelete(t *testing.T) {
 		t.Fatal("owner personal key #3 on grandfathered pen should hit floor cap")
 	}
 
-	// 5. finishSelfDelete verifies machineKey + hs_delete_pending and NEVER deletes a reused node ID.
+	// 5. SelfRemoveDevice background cleanup verifies machineKey + hs_delete_pending
+	//    and NEVER deletes a reused node ID.
 	_, dSelf := e.addDevice(t, "alice", "personal", "alice-self", "100.64.0.70", "")
-	if _, err := e.st.CommitSelfDelete(alice.ID, dSelf.ID, "alice"); err != nil {
-		t.Fatal(err)
-	}
 	e.hs.mu.Lock()
 	for i := range e.hs.nodes {
 		if e.hs.nodes[i].ID == dSelf.HSNodeID {
@@ -538,18 +550,21 @@ func TestRedTeamRegressionsCapsSyncAndSelfDelete(t *testing.T) {
 		}
 		return false
 	}
-	e.svc.finishSelfDelete(dSelf.ID, dSelf.HSNodeID)
+	if err := e.svc.SelfRemoveDevice(registrar.Actor{Member: alice}, dSelf.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.svc.WaitBackground(ctx)
 	if finishDeletes.Load() != 0 {
-		t.Fatalf("finishSelfDelete deleted node despite machineKey mismatch (%d calls)", finishDeletes.Load())
+		t.Fatalf("SelfRemoveDevice deleted node despite machineKey mismatch (%d calls)", finishDeletes.Load())
 	}
 	if pending, _ := e.st.DeviceHSDeletePending(dSelf.ID); pending {
-		t.Fatal("finishSelfDelete should clear hs_delete_pending on machineKey mismatch")
+		t.Fatal("SelfRemoveDevice should clear hs_delete_pending on machineKey mismatch")
 	}
 	e.hs.onDeleteNode = nil
 
 	// 6. Deferred pending delete (missing Headscale machineKey) must NOT pin NeedsFastSync to permanent true!
 	//    Also expire open keys first so NeedsFastSync isolates pendingDel.
-	_, _ = e.st.db.Exec(`UPDATE device_keys SET revoked_at = 1 WHERE revoked_at IS NULL AND used_at IS NULL`)
+	_, _ = e.st.DB().Exec(`UPDATE device_keys SET revoked_at = 1 WHERE revoked_at IS NULL AND used_at IS NULL`)
 	_, dDef := e.addDevice(t, "alice", "personal", "alice-def", "100.64.0.71", "")
 	if _, err := e.st.CommitSelfDelete(alice.ID, dDef.ID, "alice"); err != nil {
 		t.Fatal(err)
@@ -570,7 +585,7 @@ func TestRedTeamRegressionsCapsSyncAndSelfDelete(t *testing.T) {
 
 	// 7. releaseLeafNamesOfDevice retires private=1 random site names (D-21) instead of hard-deleting them.
 	_, dPriv := e.addDevice(t, "alice", "server", "alice-priv-srv", "100.64.0.72", "")
-	if _, err := e.st.db.Exec(`INSERT INTO names (name, member_id, device_id, note, private, created_at) VALUES ('priv-rand-abc', ?, ?, 'secret', 1, ?)`, alice.ID, dPriv.ID, now()); err != nil {
+	if _, err := e.st.DB().Exec(`INSERT INTO names (name, member_id, device_id, note, private, created_at) VALUES ('priv-rand-abc', ?, ?, 'secret', 1, ?)`, alice.ID, dPriv.ID, time.Now().Unix()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.st.CommitSelfDelete(alice.ID, dPriv.ID, "alice"); err != nil {
@@ -578,7 +593,7 @@ func TestRedTeamRegressionsCapsSyncAndSelfDelete(t *testing.T) {
 	}
 	var heldUntil *int64
 	var devID *int64
-	if err := e.st.db.QueryRow(`SELECT device_id, held_until FROM names WHERE name = 'priv-rand-abc'`).Scan(&devID, &heldUntil); err != nil {
+	if err := e.st.DB().QueryRow(`SELECT device_id, held_until FROM names WHERE name = 'priv-rand-abc'`).Scan(&devID, &heldUntil); err != nil {
 		t.Fatalf("private name row must remain retired (not hard-deleted) on device removal: %v", err)
 	}
 	if devID != nil || heldUntil == nil {

@@ -8,6 +8,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"hogman/registrar/internal/acme"
+	"hogman/registrar/internal/api"
+	"hogman/registrar/internal/headscale"
+	"hogman/registrar/internal/registrar"
+	"hogman/registrar/internal/store"
 )
 
 type auditStubACME struct {
@@ -24,15 +30,15 @@ func (f *auditStubACME) DeleteTXT(ctx context.Context, fqdn, value string) error
 	return nil
 }
 
-func (f *auditStubACME) MintEAB(ctx context.Context) (*EABPair, error) {
+func (f *auditStubACME) MintEAB(ctx context.Context) (*acme.EABPair, error) {
 	f.eabCalls++
-	return &EABPair{KID: "kid-1", HMACB64URL: "hmac-1", Contact: "ops@example.com"}, nil
+	return &acme.EABPair{KID: "kid-1", HMACB64URL: "hmac-1", Contact: "ops@example.com"}, nil
 }
 
 func TestAuditSubdomainHijackPrevented(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	alice, err := e.svc.AddMember(ctx, cli, "alice", "member")
 	if err != nil {
@@ -44,27 +50,27 @@ func TestAuditSubdomainHijackPrevented(t *testing.T) {
 	}
 
 	// Enroll two servers for alice and one for bob.
-	s1 := &Device{MemberID: alice.ID, Kind: "server", HSNodeID: "hs-s1", Name: "srv1", IPv4: "100.64.0.10"}
-	s2 := &Device{MemberID: alice.ID, Kind: "server", HSNodeID: "hs-s2", Name: "srv2", IPv4: "100.64.0.11"}
-	b1 := &Device{MemberID: bob.ID, Kind: "server", HSNodeID: "hs-b1", Name: "bsrv", IPv4: "100.64.0.12"}
-	for _, d := range []*Device{s1, s2, b1} {
+	s1 := &store.Device{MemberID: alice.ID, Kind: "server", HSNodeID: "hs-s1", Name: "srv1", IPv4: "100.64.0.10"}
+	s2 := &store.Device{MemberID: alice.ID, Kind: "server", HSNodeID: "hs-s2", Name: "srv2", IPv4: "100.64.0.11"}
+	b1 := &store.Device{MemberID: bob.ID, Kind: "server", HSNodeID: "hs-b1", Name: "bsrv", IPv4: "100.64.0.12"}
+	for _, d := range []*store.Device{s1, s2, b1} {
 		if err := e.st.InsertDevice(d); err != nil {
 			t.Fatal(err)
 		}
 		e.hs.mu.Lock()
-		e.hs.nodes = append(e.hs.nodes, HSNode{ID: d.HSNodeID, Name: d.Name, IPAddresses: []string{d.IPv4}})
+		e.hs.nodes = append(e.hs.nodes, headscale.Node{ID: d.HSNodeID, Name: d.Name, IPAddresses: []string{d.IPv4}})
 		e.hs.mu.Unlock()
 	}
 
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "corp", s1.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: alice}, "alice", "corp", s1.ID, nil); err != nil {
 		t.Fatalf("alice claim corp: %v", err)
 	}
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "auth.corp", s2.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: alice}, "alice", "auth.corp", s2.ID, nil); err != nil {
 		t.Fatalf("alice claim auth.corp: %v", err)
 	}
 
 	// Removing s1 must unpoint corp (preserving alice's ownership) while auth.corp stays on s2.
-	if err := e.svc.RemoveDevice(ctx, Actor{Member: alice}, s1.ID); err != nil {
+	if err := e.svc.RemoveDevice(ctx, registrar.Actor{Member: alice}, s1.ID); err != nil {
 		t.Fatalf("remove s1: %v", err)
 	}
 	corpRow, err := e.st.NameByName("corp")
@@ -76,7 +82,7 @@ func TestAuditSubdomainHijackPrevented(t *testing.T) {
 	}
 
 	// Bob must not be able to claim corp.
-	if _, err := e.svc.Claim(Actor{Member: bob}, "bob", "corp", b1.ID, nil); err == nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: bob}, "bob", "corp", b1.ID, nil); err == nil {
 		t.Fatal("bob claimed alice's unpointed parent corp")
 	}
 
@@ -84,7 +90,7 @@ func TestAuditSubdomainHijackPrevented(t *testing.T) {
 	if err := e.st.DeleteName("corp"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Claim(Actor{Member: bob}, "bob", "corp", b1.ID, nil); err == nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: bob}, "bob", "corp", b1.ID, nil); err == nil {
 		t.Fatal("bob claimed orphaned parent corp while alice owns auth.corp")
 	}
 
@@ -92,7 +98,7 @@ func TestAuditSubdomainHijackPrevented(t *testing.T) {
 	if err := e.st.UpsertName("corp", bob.ID, &b1.ID, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.svc.Release(Actor{Member: bob}, "corp"); err == nil {
+	if err := e.svc.Release(registrar.Actor{Member: bob}, "corp"); err == nil {
 		t.Fatal("bob released corp despite alice owning auth.corp")
 	}
 	if _, err := e.st.NameByName("auth.corp"); err != nil {
@@ -103,7 +109,7 @@ func TestAuditSubdomainHijackPrevented(t *testing.T) {
 func TestAuditLifecycleLockOrderAndNoResurrection(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	_, err := e.svc.AddMember(ctx, cli, "owner1", "owner")
 	if err != nil {
@@ -130,7 +136,7 @@ func TestAuditLifecycleLockOrderAndNoResurrection(t *testing.T) {
 	}
 
 	// 2. Stale admin Actor snapshot is rejected after demotion in SQLite.
-	staleAdminActor := Actor{Member: &Member{ID: adm.ID, Handle: adm.Handle, Role: "admin", Status: "active"}}
+	staleAdminActor := registrar.Actor{Member: &store.Member{ID: adm.ID, Handle: adm.Handle, Role: "admin", Status: "active"}}
 	if err := e.svc.SetRole(ctx, cli, "adm1", "member"); err != nil {
 		t.Fatal(err)
 	}
@@ -150,16 +156,16 @@ func TestAuditLifecycleLockOrderAndNoResurrection(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Simulate a racing key inserted just before revocation finished.
-	dk := &DeviceKey{MemberID: carol.ID, Kind: "personal", HSKeyID: "k-race", ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	dk := &store.DeviceKey{MemberID: carol.ID, Kind: "personal", HSKeyID: "k-race", ExpiresAt: time.Now().Add(time.Hour).Unix()}
 	if err := e.st.InsertDeviceKey(dk); err != nil {
 		t.Fatal(err)
 	}
 	e.hs.mu.Lock()
-	e.hs.nodes = append(e.hs.nodes, HSNode{
+	e.hs.nodes = append(e.hs.nodes, headscale.Node{
 		ID:          "node-race",
 		Name:        "carol-laptop",
 		IPAddresses: []string{"100.64.0.77"},
-		PreAuthKey:  &HSPreAuthKey{ID: "k-race"},
+		PreAuthKey:  &headscale.PreAuthKey{ID: "k-race"},
 	})
 	e.hs.mu.Unlock()
 	if err := e.svc.Sync(ctx); err != nil {
@@ -182,31 +188,32 @@ func TestAuditLifecycleLockOrderAndNoResurrection(t *testing.T) {
 }
 
 func TestAuditACMERateLimitAndAuditActor(t *testing.T) {
-	e := newTestEnv(t)
-	ctx := context.Background()
-	cli := Actor{CLI: true}
 	stub := &auditStubACME{}
-	e.svc.acme = stub
-	e.svc.cfg.MaxServerEABPerDay = 2
-	e.svc.cfg.MaxMemberEABPerDay = 3
-	e.svc.cfg.MaxMemberACMETXTPerHour = 2
+	e := newTestEnvWithConfig(t, func(cfg *registrar.Config) {
+		cfg.ACMEBackend = stub
+		cfg.MaxServerEABPerDay = 2
+		cfg.MaxMemberEABPerDay = 3
+		cfg.MaxMemberACMETXTPerHour = 2
+	})
+	ctx := context.Background()
+	cli := registrar.Actor{CLI: true}
 
 	alice, err := e.svc.AddMember(ctx, cli, "alice", "member")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Client-controlled device name tries to spoof "owner@cli".
-	s1 := &Device{MemberID: alice.ID, Member: alice.Handle, Kind: "server", HSNodeID: "hs-1", Name: "owner@cli", IPv4: "100.64.0.20"}
-	s2 := &Device{MemberID: alice.ID, Member: alice.Handle, Kind: "server", HSNodeID: "hs-2", Name: "srv2", IPv4: "100.64.0.21"}
-	for _, d := range []*Device{s1, s2} {
+	s1 := &store.Device{MemberID: alice.ID, Member: alice.Handle, Kind: "server", HSNodeID: "hs-1", Name: "owner@cli", IPv4: "100.64.0.20"}
+	s2 := &store.Device{MemberID: alice.ID, Member: alice.Handle, Kind: "server", HSNodeID: "hs-2", Name: "srv2", IPv4: "100.64.0.21"}
+	for _, d := range []*store.Device{s1, s2} {
 		if err := e.st.InsertDevice(d); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "app1", s1.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: alice}, "alice", "app1", s1.ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "app2", s2.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: alice}, "alice", "app2", s2.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -217,9 +224,9 @@ func TestAuditACMERateLimitAndAuditActor(t *testing.T) {
 		}
 	}
 	_, err = e.svc.ServerMintACMEEAB(ctx, s1)
-	var prob *Problem
-	if !errors.As(err, &prob) || prob.Status != 429 || prob.RetryAfter < 1 {
-		t.Fatalf("3rd s1 EAB = %v, want 429 with RetryAfter", err)
+	var de *registrar.Error
+	if !errors.As(err, &de) || de.Kind != registrar.KindRateLimited || de.RetryAfter < 1 {
+		t.Fatalf("3rd s1 EAB = %v, want KindRateLimited with RetryAfter", err)
 	}
 	if stub.eabCalls != 2 {
 		t.Fatalf("eabCalls = %d, want 2", stub.eabCalls)
@@ -230,7 +237,7 @@ func TestAuditACMERateLimitAndAuditActor(t *testing.T) {
 		t.Fatalf("s2 EAB #1: %v", err)
 	}
 	_, err = e.svc.ServerMintACMEEAB(ctx, s2)
-	if !errors.As(err, &prob) || prob.Status != 429 {
+	if !errors.As(err, &de) || de.Kind != registrar.KindRateLimited {
 		t.Fatalf("4th member EAB = %v, want 429", err)
 	}
 
@@ -253,14 +260,14 @@ func TestAuditACMERateLimitAndAuditActor(t *testing.T) {
 		}
 	}
 	_, err = e.svc.ServerSetACMETXT(ctx, s1, "app1", val)
-	if !errors.As(err, &prob) || prob.Status != 429 {
-		t.Fatalf("3rd SetACMETXT = %v, want 429", err)
+	if !errors.As(err, &de) || de.Kind != registrar.KindRateLimited {
+		t.Fatalf("3rd SetACMETXT = %v, want KindRateLimited", err)
 	}
 }
 
 func TestAuditCrossOriginGETBlockedAndSanitization(t *testing.T) {
 	e := newTestEnv(t)
-	h := MeshHandler(e.svc)
+	h := api.MeshHandler(e.svc)
 
 	// Cross-origin and same-site GETs must be rejected with 403 before identify() even checks XFF.
 	for _, sfs := range []string{"cross-site", "same-site"} {
@@ -275,7 +282,7 @@ func TestAuditCrossOriginGETBlockedAndSanitization(t *testing.T) {
 	}
 
 	// Invite notes must drop ANSI ESC / control chars.
-	inv, err := e.svc.MintInvite(Actor{CLI: true}, "member", "for\x1b[31m alice\x00\t\nline2", time.Hour)
+	inv, err := e.svc.MintInvite(registrar.Actor{CLI: true}, "member", "for\x1b[31m alice\x00\t\nline2", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,10 +290,10 @@ func TestAuditCrossOriginGETBlockedAndSanitization(t *testing.T) {
 		t.Fatalf("unsanitized invite note: %q", inv.Note)
 	}
 
-	// normaliseName must reject ns[0-9]* labels (ns1, sub.ns2).
+	// NormaliseName must reject ns[0-9]* labels (ns1, sub.ns2).
 	for _, badName := range []string{"ns1", "sub.ns2", "ns0"} {
-		if _, err := e.svc.normaliseName(badName); err == nil {
-			t.Fatalf("normaliseName(%q) succeeded, want forbidden", badName)
+		if _, err := e.svc.NormaliseName(badName); err == nil {
+			t.Fatalf("NormaliseName(%q) succeeded, want forbidden", badName)
 		}
 	}
 }
@@ -294,7 +301,7 @@ func TestAuditCrossOriginGETBlockedAndSanitization(t *testing.T) {
 func TestAuditKickAndSyncClearHSUserIDWithoutRetryLoop(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	if _, err := e.svc.AddMember(ctx, cli, "owner", "owner"); err != nil {
 		t.Fatal(err)
@@ -319,7 +326,7 @@ func TestAuditKickAndSyncClearHSUserIDWithoutRetryLoop(t *testing.T) {
 			t.Fatalf("Sync %d: %v", i, err)
 		}
 	}
-	svc2, err := NewService(e.svc.cfg, e.st, e.svc.hs)
+	svc2, err := registrar.NewService(e.svc.Config(), e.st, e.hsClient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +343,7 @@ func TestAuditKickAndSyncClearHSUserIDWithoutRetryLoop(t *testing.T) {
 	// Simulate an upgraded DB where a previously removed member still has a stale
 	// hs_user_id whose Headscale user is already gone (404): first Sync clears it,
 	// subsequent Syncs make zero further calls.
-	if _, err := e.st.db.Exec(`UPDATE members SET hs_user_id = '99999' WHERE id = ?`, bob.ID); err != nil {
+	if _, err := e.st.DB().Exec(`UPDATE members SET hs_user_id = '99999' WHERE id = ?`, bob.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc2.Sync(ctx); err != nil {

@@ -12,12 +12,17 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"hogman/registrar/internal/api"
+	"hogman/registrar/internal/headscale"
+	"hogman/registrar/internal/registrar"
+	"hogman/registrar/internal/store"
 )
 
 func TestBuildPolicyIPv4OnlyCompactAndMemberInsertNoBump(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	if _, err := e.svc.AddMember(ctx, cli, "alice", "owner"); err != nil {
 		t.Fatal(err)
@@ -28,7 +33,7 @@ func TestBuildPolicyIPv4OnlyCompactAndMemberInsertNoBump(t *testing.T) {
 	if err := e.svc.Sync(ctx); err != nil {
 		t.Fatalf("initial sync: %v", err)
 	}
-	polBefore, _, err := e.svc.buildPolicy()
+	polBefore, _, err := e.svc.BuildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +70,7 @@ func TestBuildPolicyIPv4OnlyCompactAndMemberInsertNoBump(t *testing.T) {
 	if _, err := e.svc.AddMember(ctx, cli, "bob", "member"); err != nil {
 		t.Fatal(err)
 	}
-	polAfter, _, err := e.svc.buildPolicy()
+	polAfter, _, err := e.svc.BuildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,13 +98,13 @@ func TestBuildPolicyIPv4OnlyCompactAndMemberInsertNoBump(t *testing.T) {
 
 func TestLegacyTriggersMigratedOnOpenAndIPv6UpdateNoBump(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "legacy.db")
-	st1, err := OpenStore(dbPath)
+	st1, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Simulate an upgraded database with legacy members_policy_gen_ai and
 	// legacy devices_policy_gen_au watching ipv6.
-	if _, err := st1.db.Exec(`
+	if _, err := st1.DB().Exec(`
 		CREATE TRIGGER members_policy_gen_ai AFTER INSERT ON members BEGIN UPDATE sync_state SET policy_gen = policy_gen + 1 WHERE id = 1; END;
 		DROP TRIGGER IF EXISTS devices_policy_gen_au;
 		CREATE TRIGGER devices_policy_gen_au AFTER UPDATE OF member_id, kind, ipv4, ipv6, removed_at ON devices
@@ -112,21 +117,21 @@ func TestLegacyTriggersMigratedOnOpenAndIPv6UpdateNoBump(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	st2, err := OpenStore(dbPath)
+	st2, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
 	defer st2.Close()
 
 	var count int
-	if err := st2.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'members_policy_gen_ai'`).Scan(&count); err != nil {
+	if err := st2.DB().QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'members_policy_gen_ai'`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
 		t.Fatalf("expected legacy trigger members_policy_gen_ai to be dropped on OpenStore, count=%d", count)
 	}
 	var devTrigSQL string
-	if err := st2.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'devices_policy_gen_au'`).Scan(&devTrigSQL); err != nil {
+	if err := st2.DB().QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'devices_policy_gen_au'`).Scan(&devTrigSQL); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(strings.ToLower(devTrigSQL), "ipv6") {
@@ -138,7 +143,7 @@ func TestLegacyTriggersMigratedOnOpenAndIPv6UpdateNoBump(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := &Member{Handle: "carol", Role: "member", Status: "active"}
+	m := &store.Member{Handle: "carol", Role: "member", Status: "active"}
 	if err := st2.InsertMember(m); err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +157,7 @@ func TestLegacyTriggersMigratedOnOpenAndIPv6UpdateNoBump(t *testing.T) {
 
 	// Updating only devices.ipv6 (or clearing hs_delete_pending) must NOT bump
 	// policy_gen, whereas updating ipv4 MUST.
-	d := &Device{MemberID: m.ID, Kind: "personal", HSNodeID: "hs-carol", NodeKey: testNodeKey("carol"), MachineKey: testMachineKey("carol"), Name: "carol-lap", IPv4: "100.64.0.50", IPv6: "fd7a:115c:a1e0::50"}
+	d := &store.Device{MemberID: m.ID, Kind: "personal", HSNodeID: "hs-carol", NodeKey: testNodeKey("carol"), MachineKey: testMachineKey("carol"), Name: "carol-lap", IPv4: "100.64.0.50", IPv6: "fd7a:115c:a1e0::50"}
 	if err := st2.InsertDevice(d); err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +195,7 @@ func TestSelfDeleteUnderMutexContentionCommitsDurablyBefore202(t *testing.T) {
 	baseCtx, cancelBase := context.WithCancel(context.Background())
 	defer cancelBase()
 	e.svc.SetBaseContext(baseCtx)
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	if _, err := e.svc.AddMember(baseCtx, cli, "alice", "owner"); err != nil {
 		t.Fatal(err)
@@ -201,19 +206,47 @@ func TestSelfDeleteUnderMutexContentionCommitsDurablyBefore202(t *testing.T) {
 		t.Fatalf("sync: %v", err)
 	}
 
-	h := MeshHandlerDirect(e.svc, func(_ context.Context, remoteAddr string) (*PeerIdentity, error) {
+	h := api.MeshHandlerDirect(e.svc, func(_ context.Context, remoteAddr string) (*registrar.PeerIdentity, error) {
 		if strings.HasPrefix(remoteAddr, "100.64.0.10:") {
-			return &PeerIdentity{IP: "100.64.0.10", HSNodeID: dev1.HSNodeID, NodeKey: dev1.NodeKey}, nil
+			return &registrar.PeerIdentity{IP: "100.64.0.10", HSNodeID: dev1.HSNodeID, NodeKey: dev1.NodeKey}, nil
 		}
 		if strings.HasPrefix(remoteAddr, "100.64.0.11:") {
-			return &PeerIdentity{IP: "100.64.0.11", HSNodeID: dev2.HSNodeID, NodeKey: dev2.NodeKey}, nil
+			return &registrar.PeerIdentity{IP: "100.64.0.11", HSNodeID: dev2.HSNodeID, NodeKey: dev2.NodeKey}, nil
 		}
-		return nil, ErrNotFound
+		return nil, store.ErrNotFound
 	})
 
-	// Hold s.mu to simulate a long-running Sync() under contention while dev1
-	// sends DELETE /api/devices/<self> and immediately disconnects.
-	e.svc.mu.Lock()
+	// Hold s.mu via an in-flight Sync() blocked inside Headscale Nodes() while
+	// dev1 sends DELETE /api/devices/<self> and immediately disconnects.
+	syncEntered := make(chan struct{})
+	releaseSync := make(chan struct{})
+	e.hs.mu.Lock()
+	e.hs.onListNodes = func(ctx context.Context) {
+		close(syncEntered)
+		select {
+		case <-releaseSync:
+		case <-ctx.Done():
+		}
+	}
+	e.hs.mu.Unlock()
+	syncDone := make(chan error, 1)
+	go func() {
+		syncDone <- e.svc.Sync(context.Background())
+	}()
+	<-syncEntered
+	released := false
+	unlockSync := func() {
+		if !released {
+			released = true
+			e.hs.mu.Lock()
+			e.hs.onListNodes = nil
+			e.hs.mu.Unlock()
+			close(releaseSync)
+			<-syncDone
+		}
+	}
+	defer unlockSync()
+
 	reqCtx, cancelReq := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodDelete, "/api/devices/"+strconv.FormatInt(dev1.ID, 10), nil).WithContext(reqCtx)
 	req.Host = "home.bobo.hogman"
@@ -227,23 +260,18 @@ func TestSelfDeleteUnderMutexContentionCommitsDurablyBefore202(t *testing.T) {
 	cancelReq()
 
 	if rec.Code != http.StatusAccepted {
-		e.svc.mu.Unlock()
 		t.Fatalf("self-delete under contention status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
 	}
 	if elapsed > 2*time.Second {
-		e.svc.mu.Unlock()
 		t.Fatalf("self-delete blocked on s.mu for %v, expected immediate 202", elapsed)
 	}
 
-	// BEFORE s.mu is even released, removal MUST already be committed in SQLite:
-	// 1. RemovedAt != nil and NeedsFastSync() == true.
+	// BEFORE Sync releases s.mu, removal MUST already be committed in SQLite:
 	gotNow, err := e.st.DeviceByID(dev1.ID)
 	if err != nil || gotNow.RemovedAt == nil {
-		e.svc.mu.Unlock()
 		t.Fatalf("expected durable RemovedAt in SQLite before 202, got=%+v err=%v", gotNow, err)
 	}
 	if !e.svc.NeedsFastSync() {
-		e.svc.mu.Unlock()
 		t.Fatal("expected NeedsFastSync() == true immediately after durable self-delete")
 	}
 
@@ -254,7 +282,6 @@ func TestSelfDeleteUnderMutexContentionCommitsDurablyBefore202(t *testing.T) {
 	me1Req.RemoteAddr = "100.64.0.10:54322"
 	h.ServeHTTP(me1Rec, me1Req)
 	if me1Rec.Code != http.StatusForbidden || !strings.Contains(me1Rec.Body.String(), "not enrolled") {
-		e.svc.mu.Unlock()
 		t.Fatalf("post-202 GET /api/me from self-deleting device: status=%d body=%s, want 403 not enrolled", me1Rec.Code, me1Rec.Body.String())
 	}
 
@@ -265,23 +292,20 @@ func TestSelfDeleteUnderMutexContentionCommitsDurablyBefore202(t *testing.T) {
 	me2Req.RemoteAddr = "100.64.0.11:54323"
 	h.ServeHTTP(me2Rec, me2Req)
 	if me2Rec.Code != http.StatusOK {
-		e.svc.mu.Unlock()
 		t.Fatalf("dev2 GET /api/me status=%d body=%s", me2Rec.Code, me2Rec.Body.String())
 	}
 	var me2 struct {
-		Devices []Device `json:"devices"`
+		Devices []store.Device `json:"devices"`
 	}
 	if err := json.Unmarshal(me2Rec.Body.Bytes(), &me2); err != nil {
-		e.svc.mu.Unlock()
 		t.Fatalf("decode dev2 /api/me: %v", err)
 	}
 	if len(me2.Devices) != 1 || me2.Devices[0].ID != dev2.ID {
-		e.svc.mu.Unlock()
 		t.Fatalf("dev2 /api/me devices = %+v, want only dev2 (#%d)", me2.Devices, dev2.ID)
 	}
 
-	// Release s.mu and wait for background Headscale cleanup to finish.
-	e.svc.mu.Unlock()
+	// Release Sync/s.mu and wait for background Headscale cleanup to finish.
+	unlockSync()
 	waitCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelWait()
 	e.svc.WaitBackground(waitCtx)
@@ -312,14 +336,14 @@ func TestSelfDeleteDurableThroughHeadscaleOutageAndRestart(t *testing.T) {
 	baseCtx, cancelBase := context.WithCancel(context.Background())
 	defer cancelBase()
 	e.svc.SetBaseContext(baseCtx)
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	alice, err := e.svc.AddMember(baseCtx, cli, "alice", "owner")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, srv := e.addDevice(t, "alice", "server", "alice-share", "100.64.0.20", "")
-	if _, err := e.svc.Claim(Actor{Member: alice}, "alice", "blog", srv.ID, nil); err != nil {
+	if _, err := e.svc.Claim(registrar.Actor{Member: alice}, "alice", "blog", srv.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.svc.Sync(baseCtx); err != nil {
@@ -340,8 +364,8 @@ func TestSelfDeleteDurableThroughHeadscaleOutageAndRestart(t *testing.T) {
 	}
 	e.hs.mu.Unlock()
 
-	h := MeshHandlerDirect(e.svc, func(_ context.Context, _ string) (*PeerIdentity, error) {
-		return &PeerIdentity{IP: "100.64.0.20", HSNodeID: srv.HSNodeID, NodeKey: srv.NodeKey}, nil
+	h := api.MeshHandlerDirect(e.svc, func(_ context.Context, _ string) (*registrar.PeerIdentity, error) {
+		return &registrar.PeerIdentity{IP: "100.64.0.20", HSNodeID: srv.HSNodeID, NodeKey: srv.NodeKey}, nil
 	})
 	req := httptest.NewRequest(http.MethodDelete, "/api/devices/"+strconv.FormatInt(srv.ID, 10), nil)
 	req.Host = "home.bobo.hogman"
@@ -373,7 +397,7 @@ func TestSelfDeleteDurableThroughHeadscaleOutageAndRestart(t *testing.T) {
 	if err != nil || got.RemovedAt == nil {
 		t.Fatalf("device row did not stay removed: got=%+v err=%v", got, err)
 	}
-	if _, err := e.st.ResolvableName("blog"); !errors.Is(err, ErrNotFound) {
+	if _, err := e.st.ResolvableName("blog"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected leaf name 'blog' released on durable self-delete, got err=%v", err)
 	}
 	if pending, err := e.st.HasPendingDeviceDeletes(); err != nil || !pending {
@@ -384,12 +408,12 @@ func TestSelfDeleteDurableThroughHeadscaleOutageAndRestart(t *testing.T) {
 	}
 
 	// Simulate a full registrar process restart on the SAME SQLite database.
-	stRestart, err := OpenStore(filepath.Join(e.dir, "registrar.db"))
+	stRestart, err := store.Open(filepath.Join(e.dir, "registrar.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stRestart.Close()
-	svcRestart, err := NewService(e.svc.cfg, stRestart, NewHeadscale(e.hs.srv.URL, "test-key"))
+	svcRestart, err := registrar.NewService(e.svc.Config(), stRestart, headscale.New(e.hs.srv.URL, "test-key"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,7 +460,7 @@ func TestRemoveDeviceRespectsCallerCancelAndAvoidsMutexDoS(t *testing.T) {
 	baseCtx, cancelBase := context.WithCancel(context.Background())
 	defer cancelBase()
 	e.svc.SetBaseContext(baseCtx)
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	if _, err := e.svc.AddMember(baseCtx, cli, "alice", "owner"); err != nil {
 		t.Fatal(err)
@@ -475,14 +499,14 @@ func TestDeleteNodeTreatsHTTP500NotFoundAsGone(t *testing.T) {
 	}
 	e.hs.mu.Unlock()
 
-	if err := e.svc.hs.DeleteNode(context.Background(), "999"); err != nil {
+	if err := e.hsClient.DeleteNode(context.Background(), "999"); err != nil {
 		t.Fatalf("DeleteNode on Headscale HTTP 500 not-found = %v, want nil", err)
 	}
 }
 
 func TestSelfDeleteDuringShutdownStillCommitsDurably(t *testing.T) {
 	e := newTestEnv(t)
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 	if _, err := e.svc.AddMember(context.Background(), cli, "alice", "owner"); err != nil {
 		t.Fatal(err)
 	}
@@ -491,8 +515,8 @@ func TestSelfDeleteDuringShutdownStillCommitsDurably(t *testing.T) {
 	// Even after BeginShutdown() prevents new background goroutines, self-delete
 	// commits durably to SQLite and returns 202 so startup Sync() finishes Headscale cleanup.
 	e.svc.BeginShutdown()
-	h := MeshHandlerDirect(e.svc, func(_ context.Context, _ string) (*PeerIdentity, error) {
-		return &PeerIdentity{IP: "100.64.0.10", HSNodeID: dev.HSNodeID, NodeKey: dev.NodeKey}, nil
+	h := api.MeshHandlerDirect(e.svc, func(_ context.Context, _ string) (*registrar.PeerIdentity, error) {
+		return &registrar.PeerIdentity{IP: "100.64.0.10", HSNodeID: dev.HSNodeID, NodeKey: dev.NodeKey}, nil
 	})
 	req := httptest.NewRequest(http.MethodDelete, "/api/devices/"+strconv.FormatInt(dev.ID, 10), nil)
 	req.Host = "home.bobo.hogman"
@@ -514,17 +538,17 @@ func TestSelfDeleteDuringShutdownStillCommitsDurably(t *testing.T) {
 
 func TestVerifyDirectPeerRejectsIPv6(t *testing.T) {
 	e := newTestEnv(t)
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 	if _, err := e.svc.AddMember(context.Background(), cli, "alice", "owner"); err != nil {
 		t.Fatal(err)
 	}
 	_, dev := e.addDevice(t, "alice", "personal", "alice-laptop", "100.64.0.10", "fd7a:115c:a1e0::10")
 
-	if _, _, err := e.svc.VerifyDirectPeer(context.Background(), &PeerIdentity{
+	if _, _, err := e.svc.VerifyDirectPeer(context.Background(), &registrar.PeerIdentity{
 		IP:       "fd7a:115c:a1e0::10",
 		HSNodeID: dev.HSNodeID,
 		NodeKey:  dev.NodeKey,
-	}); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("VerifyDirectPeer over IPv6 = %v, want ErrNotFound", err)
+	}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("VerifyDirectPeer over IPv6 = %v, want store.ErrNotFound", err)
 	}
 }
