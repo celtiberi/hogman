@@ -251,7 +251,6 @@ More developer docs:
 - [`browser-ext/README.md`](browser-ext/README.md) — extension architecture, build, and local install
 - [`docs/how-hogman-works.md`](docs/how-hogman-works.md) — step-by-step map of every moving part, packet flow, portal auth, revocation, and scaling
 - [`docs/security/`](docs/security/) — security design notes and public-certificate architecture
-- [`docs/history/initial-design.md`](docs/history/initial-design.md) — initial design spec and decision history
 
 ---
 
