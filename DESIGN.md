@@ -3,7 +3,7 @@
 > **Note:** This is the original architecture spec from initial prototyping. Three core decisions have since superseded parts of this document:
 > - **D-11:** HTTPS-only side-by-side client (`hogman-join` userspace `tsnet` + loopback `:443` `CONNECT` proxy instead of a host Tailscale switch/daemon or all-ports mesh access).
 > - **D-18 / D-22:** Standard public web certificates via split-horizon ACME DNS-01 (`challenge-dns` + `CertMagic` with Let's Encrypt / Google Trust Services fallback), retiring per-pen `step-ca` and private root installation (`docs/security/public-certificates.md`, `/docs/security.html`).
-> - **D-24:** Hosted control plane on `hogman.network` only (no self-hosted pen server support; see `README.md` and `deploy/README.md`).
+> - **D-24:** Hosted control plane on `hogman.network` only (no self-hosted pen server support; see `README.md`).
 
 Status: early core prototype design superseded in practice by the current implementation in [README.md](README.md), [`core/`](core/), and [`deploy/`](deploy/).
 
