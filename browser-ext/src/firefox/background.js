@@ -1,4 +1,9 @@
 import {
+  HOST_PERMISSION_ORIGINS,
+  NATIVE_HOST,
+  STORAGE_KEYS,
+} from "./constants.js";
+import {
   FAIL_CLOSED_FIREFOX,
   computeEffectiveRoutes,
   isKnownPenHost,
@@ -6,49 +11,35 @@ import {
   resolveFirefoxProxy,
   sanitizeNativeSnapshot,
 } from "./pac.js";
+import {
+  applyBadge,
+  createInitialState,
+  createSerializedRunner,
+  formatErrorMessage,
+} from "./state.js";
 
-const NATIVE_HOST = "network.hogman.browser";
 const REFRESH_TTL_MS = 10000;
 const NATIVE_ERROR_BACKOFF_MS = 5000;
 const UNKNOWN_REFRESH_COOLDOWN_MS = 15000;
-const HOST_PERMISSION_ORIGINS = [
-  "*://*.pens.hogman.network/*",
-  "*://pens.hogman.network/*",
-];
 
 let cachedSnapshot = null;
 let cachedRoutes = {};
 let prefsLoaded = false;
-let rebuildInFlight = null;
-let rebuildPending = false;
 let lastFetchAt = 0;
 let lastFailedFetchAt = 0;
 let lastUnknownRefreshAt = 0;
 let inFlightRefresh = null;
 
-let state = {
-  browser: "firefox",
-  connected: false,
-  nativeError: "",
-  paused: false,
-  conflict: "",
-  conflictDetail: "",
-  osProxyConflict: false,
-  osProxyKind: "",
-  allowOSProxyOverride: false,
-  entries: [],
-  incognitoAllowed: false,
-  missingHostPermission: false,
-};
+const state = createInitialState("firefox");
 
 async function loadPrefs() {
   const stored = await browser.storage.local.get([
-    "paused",
-    "enabledZones",
+    STORAGE_KEYS.paused,
+    STORAGE_KEYS.enabledZones,
   ]);
   return {
-    paused: Boolean(stored.paused),
-    enabledZones: stored.enabledZones || {},
+    paused: Boolean(stored[STORAGE_KEYS.paused]),
+    enabledZones: stored[STORAGE_KEYS.enabledZones] || {},
   };
 }
 
@@ -57,45 +48,22 @@ async function checkHostPermission() {
     return true;
   }
   try {
-    return await browser.permissions.contains({ origins: HOST_PERMISSION_ORIGINS });
+    return await browser.permissions.contains({ origins: [...HOST_PERMISSION_ORIGINS] });
   } catch (_) {
     return false;
   }
 }
 
 function updateBadge() {
-  if (state.paused) {
-    browser.action.setBadgeText({ text: "OFF" });
-    browser.action.setBadgeBackgroundColor({ color: "#666666" });
-    return;
-  }
-  if (state.missingHostPermission || state.nativeError) {
-    browser.action.setBadgeText({ text: "!" });
-    browser.action.setBadgeBackgroundColor({ color: "#b91c1c" });
-    return;
-  }
-  const activeCount = state.entries.filter((e) => e.routeStatus === "active").length;
-  browser.action.setBadgeText({ text: activeCount > 0 ? String(activeCount) : "" });
-  browser.action.setBadgeBackgroundColor({ color: "#15803d" });
+  applyBadge(browser.action, state);
 }
 
-function rebuildRoutesFromCache() {
-  if (rebuildInFlight) {
-    rebuildPending = true;
-    return rebuildInFlight;
-  }
-  rebuildInFlight = (async () => {
-    try {
-      do {
-        rebuildPending = false;
-        await rebuildRoutesFromCacheOnce();
-      } while (rebuildPending);
-    } finally {
-      rebuildInFlight = null;
-    }
-  })();
-  return rebuildInFlight;
-}
+const rebuildRoutesFromCache = createSerializedRunner(rebuildRoutesFromCacheOnce, () => {
+  cachedRoutes = {};
+  prefsLoaded = false;
+  state.entries = [];
+  updateBadge();
+});
 
 async function rebuildRoutesFromCacheOnce() {
   const prefs = await loadPrefs();
@@ -165,7 +133,7 @@ function refreshSnapshot(force = false) {
       lastFetchAt = 0;
       lastFailedFetchAt = Date.now();
       state.connected = false;
-      state.nativeError = String(err && err.message ? err.message : err);
+      state.nativeError = formatErrorMessage(err);
     } finally {
       try {
         await rebuildRoutesFromCache();
@@ -222,7 +190,7 @@ async function handleProxyRequest(details) {
 }
 
 browser.proxy.onRequest.addListener(handleProxyRequest, {
-  urls: HOST_PERMISSION_ORIGINS,
+  urls: [...HOST_PERMISSION_ORIGINS],
 });
 
 if (browser.permissions?.onAdded) {
@@ -233,7 +201,7 @@ if (browser.permissions?.onRemoved) {
 }
 
 browser.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && (changes.paused || changes.enabledZones)) {
+  if (area === "local" && (changes[STORAGE_KEYS.paused] || changes[STORAGE_KEYS.enabledZones])) {
     rebuildRoutesFromCache().catch(() => {});
   }
 });
@@ -249,4 +217,6 @@ browser.runtime.onMessage.addListener((msg) => {
   return undefined;
 });
 
+// Clean up any snapshot persisted by pre-0.1.1 development installs.
+browser.storage.local.remove("cachedSnapshot").catch(() => {});
 refreshSnapshot(true).catch(() => {});

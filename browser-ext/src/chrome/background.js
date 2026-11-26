@@ -1,10 +1,16 @@
+import { NATIVE_HOST, STORAGE_KEYS } from "./constants.js";
 import {
   buildPACScript,
   computeEffectiveRoutes,
   sanitizeNativeSnapshot,
 } from "./pac.js";
+import {
+  applyBadge,
+  createInitialState,
+  createSerializedRunner,
+  formatErrorMessage,
+} from "./state.js";
 
-const NATIVE_HOST = "network.hogman.browser";
 const PROXY_ERROR_COOLDOWN_MS = 5000;
 const REFRESH_WAIT_TIMEOUT_MS = 2500;
 
@@ -12,25 +18,9 @@ let nativePort = null;
 let reconnectTimer = null;
 let lastSnapshot = null;
 let lastProxyErrorRefreshAt = 0;
-let applyInFlight = null;
-let applyPending = false;
 let nativeReplySeq = 0;
 let pendingRefreshWaiters = [];
-let state = {
-  browser: "chrome",
-  connected: false,
-  nativeError: "",
-  proxyError: "",
-  paused: false,
-  conflict: "", // "", "other_extension", "policy", "os_proxy"
-  conflictDetail: "",
-  osProxyConflict: false,
-  osProxyKind: "",
-  allowOSProxyOverride: false,
-  entries: [],
-  incognitoAllowed: true,
-  missingHostPermission: false,
-};
+const state = createInitialState("chrome");
 
 function settleRefreshWaiters(completedSeq) {
   if (pendingRefreshWaiters.length === 0) return;
@@ -67,61 +57,34 @@ function waitForNativeUpdate(timeoutMs = REFRESH_WAIT_TIMEOUT_MS) {
 
 async function loadPrefs() {
   const stored = await chrome.storage.local.get([
-    "paused",
-    "enabledZones",
-    "allowOSProxyOverride",
-    "lastKnownOSProxyConflict",
-    "lastKnownOSProxyKind",
+    STORAGE_KEYS.paused,
+    STORAGE_KEYS.enabledZones,
+    STORAGE_KEYS.allowOSProxyOverride,
+    STORAGE_KEYS.lastKnownOSProxyConflict,
+    STORAGE_KEYS.lastKnownOSProxyKind,
   ]);
   return {
-    paused: Boolean(stored.paused),
-    enabledZones: stored.enabledZones || {},
-    allowOSProxyOverride: Boolean(stored.allowOSProxyOverride),
-    lastKnownOSProxyConflict: Boolean(stored.lastKnownOSProxyConflict),
-    lastKnownOSProxyKind: typeof stored.lastKnownOSProxyKind === "string" ? stored.lastKnownOSProxyKind : "",
+    paused: Boolean(stored[STORAGE_KEYS.paused]),
+    enabledZones: stored[STORAGE_KEYS.enabledZones] || {},
+    allowOSProxyOverride: Boolean(stored[STORAGE_KEYS.allowOSProxyOverride]),
+    lastKnownOSProxyConflict: Boolean(stored[STORAGE_KEYS.lastKnownOSProxyConflict]),
+    lastKnownOSProxyKind:
+      typeof stored[STORAGE_KEYS.lastKnownOSProxyKind] === "string"
+        ? stored[STORAGE_KEYS.lastKnownOSProxyKind]
+        : "",
   };
 }
 
 function updateBadge() {
-  if (state.paused) {
-    chrome.action.setBadgeText({ text: "OFF" });
-    chrome.action.setBadgeBackgroundColor({ color: "#666666" });
-    return;
-  }
-  if (state.conflict || state.nativeError || state.proxyError) {
-    chrome.action.setBadgeText({ text: "!" });
-    chrome.action.setBadgeBackgroundColor({ color: "#b91c1c" });
-    return;
-  }
-  const activeCount = state.entries.filter((e) => e.routeStatus === "active").length;
-  chrome.action.setBadgeText({ text: activeCount > 0 ? String(activeCount) : "" });
-  chrome.action.setBadgeBackgroundColor({ color: "#15803d" });
+  applyBadge(chrome.action, state);
 }
 
 // Serialize proxy settings updates so concurrent startup, storage, and native
 // host events cannot race and overwrite newer state with stale PAC data.
-function applyProxyConfig() {
-  if (applyInFlight) {
-    applyPending = true;
-    return applyInFlight;
-  }
-  applyInFlight = (async () => {
-    try {
-      do {
-        applyPending = false;
-        try {
-          await applyProxyConfigOnce();
-        } catch (err) {
-          state.proxyError = String(err && err.message ? err.message : err);
-          updateBadge();
-        }
-      } while (applyPending);
-    } finally {
-      applyInFlight = null;
-    }
-  })();
-  return applyInFlight;
-}
+const applyProxyConfig = createSerializedRunner(applyProxyConfigOnce, (err) => {
+  state.proxyError = formatErrorMessage(err);
+  updateBadge();
+});
 
 async function applyProxyConfigOnce() {
   const prefs = await loadPrefs();
@@ -140,8 +103,8 @@ async function applyProxyConfigOnce() {
       snap.osProxyKind !== prefs.lastKnownOSProxyKind
     ) {
       await chrome.storage.local.set({
-        lastKnownOSProxyConflict: snap.osProxyConflict,
-        lastKnownOSProxyKind: snap.osProxyKind,
+        [STORAGE_KEYS.lastKnownOSProxyConflict]: snap.osProxyConflict,
+        [STORAGE_KEYS.lastKnownOSProxyKind]: snap.osProxyKind,
       });
     }
 
@@ -252,7 +215,10 @@ function connectWatch() {
       // conflict flag so Chrome does not stay stepped aside forever.
       const hostMissing = /not found|does not exist|not registered/i.test(errMsg);
       const prep = hostMissing
-        ? chrome.storage.local.remove(["lastKnownOSProxyConflict", "lastKnownOSProxyKind"]).catch(() => {})
+        ? chrome.storage.local.remove([
+          STORAGE_KEYS.lastKnownOSProxyConflict,
+          STORAGE_KEYS.lastKnownOSProxyKind,
+        ]).catch(() => {})
         : Promise.resolve();
       prep
         .then(() => applyProxyConfig())
@@ -266,7 +232,7 @@ function connectWatch() {
     nativePort = null;
     lastSnapshot = null;
     state.connected = false;
-    state.nativeError = String(err && err.message ? err.message : err);
+    state.nativeError = formatErrorMessage(err);
     applyProxyConfig().finally(() => settleRefreshWaiters(seq));
     scheduleReconnect();
   }
@@ -306,7 +272,12 @@ chrome.proxy.onProxyError.addListener(() => {
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && (changes.paused || changes.enabledZones || changes.allowOSProxyOverride)) {
+  if (
+    area === "local" &&
+    (changes[STORAGE_KEYS.paused] ||
+      changes[STORAGE_KEYS.enabledZones] ||
+      changes[STORAGE_KEYS.allowOSProxyOverride])
+  ) {
     applyProxyConfig().catch(() => {});
   }
 });
