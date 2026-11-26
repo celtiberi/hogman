@@ -113,7 +113,9 @@ func (s *Service) ListAuditLog(limit int) ([]*store.AuditEntry, error) {
 func (s *Service) CountOwners() (int, error) { return s.st.CountOwners() }
 
 // MintRenewToken authenticates an active owner/admin actor and mints a
-// short-lived (15m) HMAC renewal link when the pen is in grace or renew_only.
+// short-lived (15m), single-use, purpose- and pen-bound HMAC renewal link
+// when the pen is in grace or renew_only. The token is returned in the URL
+// fragment (#renew=<token>) so it never hits logs or referers.
 func (s *Service) MintRenewToken(a Actor) (string, time.Time, error) {
 	bp := s.Billing()
 	st := bp.Status()
@@ -136,8 +138,9 @@ func (s *Service) MintRenewToken(a Actor) (string, time.Time, error) {
 }
 
 // MintPenDeleteToken authenticates an active owner, verifies exact pen-name
-// confirmation against host-meta.json, mints a short-lived delete HMAC token,
-// and records the audit entry.
+// confirmation against host-meta.json, mints a short-lived (15m), single-use,
+// domain-separated delete HMAC token returned in the URL fragment
+// (#delete=<token>) so it never hits logs or referers, and records the audit entry.
 func (s *Service) MintPenDeleteToken(a Actor, confirm string) (string, time.Time, error) {
 	fresh, err := s.RefreshActor(a)
 	if err != nil {

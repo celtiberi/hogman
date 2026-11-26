@@ -165,9 +165,14 @@ func serve(s *registrar.Service, logger *slog.Logger) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Keep detached background workers (especially already-accepted 202
+	// SelfRemoveDevice jobs) alive during graceful HTTP shutdown so SIGTERM
+	// does not abort committed self-removals mid-flight.
 	workerCtx, cancelWorkers := context.WithCancel(context.Background())
 	defer cancelWorkers()
 	s.SetBaseContext(workerCtx)
+	// Always stop accepting new background workers and drain in-flight ones
+	// before main() closes SQLite, including on early exit during initial sync.
 	defer func() {
 		s.BeginShutdown()
 		cancelWorkers()
@@ -210,6 +215,10 @@ func serve(s *registrar.Service, logger *slog.Logger) {
 		defer homeMgr.Close()
 	}
 
+	// Phase 1 of embedded tsnet startup: bring up the core node, write mesh-ip,
+	// and start DNS + /healthz (returning 503 not-ready) BEFORE initial Headscale
+	// Sync(), so s.CoreIP() is populated and ./hogman up can read mesh-ip,
+	// while the :443 portal stays closed until Sync() completes.
 	var em *embeddedMesh
 	if tsnetStateDir != "" {
 		controlURL := env("TSNET_CONTROL_URL", "https://"+s.PublicHost())
@@ -228,10 +237,14 @@ func serve(s *registrar.Service, logger *slog.Logger) {
 		}()
 	}
 
+	// Wait for Headscale, backfill node_key/machine_key on existing rows, and
+	// take control of policy before serving HTTP (capped backoff: 1s -> 5s).
 	if !waitForInitialSync(ctx, s, logger) {
 		return
 	}
 
+	// Phase 2: now that initial Sync() succeeded, open https://home.<zone>:443
+	// and flip /healthz to ready.
 	if em != nil {
 		if err := em.StartPortal(ctx); err != nil {
 			log.Fatalf("embedded mesh portal: %v", err)
@@ -270,6 +283,8 @@ func serve(s *registrar.Service, logger *slog.Logger) {
 	}
 
 	<-ctx.Done()
+	// Phase 1: stop accepting new HTTP requests and drain active handlers while
+	// workerCtx is still alive.
 	httpShut, httpCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = pub.Shutdown(httpShut)
 	if mesh != nil {
@@ -280,6 +295,9 @@ func serve(s *registrar.Service, logger *slog.Logger) {
 	}
 	httpCancel()
 
+	// Phase 2: freeze new background spawns, then give already-accepted workers
+	// (such as queued 202 self-deletes) a dedicated drain window to finish
+	// Headscale + SQLite + policy cleanup before cancelling workerCtx.
 	s.BeginShutdown()
 	drainShut, drainCancel := context.WithTimeout(context.Background(), 8*time.Second)
 	s.WaitBackground(drainShut)

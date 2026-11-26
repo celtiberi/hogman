@@ -386,6 +386,12 @@ func writeError(logger *slog.Logger, w http.ResponseWriter, err error) {
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 }
 
+// The mesh API trusts X-Forwarded-For to say who is asking, so who can reach
+// it matters (audit H2). In a pen it listens only on a Unix socket in a folder
+// mounted into the registrar and the portal and nothing else: other services
+// sharing the network namespace (core-mesh) have no way to it, and the kernel
+// enforces that. MESH_ADDR "unix:/path" selects it; a host:port (for
+// development and tests only) listens on loopback TCP instead.
 type viaSocketKey struct{}
 
 // MarkSocketConn tags connections accepted over a Unix domain socket so the
