@@ -72,6 +72,10 @@ jobs:
         run: |
           deploy/changelog-fold.sh --check
           deploy/test-changelog-fold.sh
+      - name: Verify shared portal and join-page CSS stay in sync
+        run: |
+          cmp -s core/portal/tokens.css core/join-page/tokens.css || { echo "core/portal/tokens.css and core/join-page/tokens.css differ" >&2; exit 1; }
+          cmp -s core/portal/base.css core/join-page/base.css || { echo "core/portal/base.css and core/join-page/base.css differ" >&2; exit 1; }
       - name: Test browser extension PAC, state & packager
         run: |
           node --test browser-ext/test/*_test.mjs
