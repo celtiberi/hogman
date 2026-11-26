@@ -10,6 +10,32 @@
     return data;
   };
 
+  const el = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  };
+  const when = t => new Date(t * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+  const errIn = id => e => { const p = $(id); p.textContent = e.message; p.hidden = false; };
+  const copyToClipboard = async (text, btn) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.textContent = 'Copied';
+    } catch (_) {
+      btn.textContent = 'Copy failed';
+    }
+  };
+  const setQR = (img, svg, show) => {
+    if (show && svg) {
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+      img.hidden = false;
+    } else {
+      img.removeAttribute('src');
+      img.hidden = true;
+    }
+  };
+
   let me = null;
   let timer = null;
   let isWork = false;
@@ -19,17 +45,37 @@
   let cachedAudit = [];
   let adminDevicesFilter = { q: '', kind: 'all' };
   let auditShown = 25;
-  const armed = new Set();
+  const herd = { q: '', offset: 0, total: 0, unfilteredTotal: null, seq: 0 };
+  const armedTimers = new Map();
 
-  const setFavicon = href => {
-    document.querySelectorAll('link[rel="icon"]').forEach(el => el.remove());
-    const link = document.createElement('link');
-    link.rel = 'icon';
-    link.type = 'image/svg+xml';
-    link.href = href;
-    document.head.appendChild(link);
-    const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', '#14181f');
+  // Two presses instead of a browser dialog.
+  const pressTwice = (key, btn, warn) => {
+    const existing = armedTimers.get(key);
+    if (existing) {
+      clearTimeout(existing.tid);
+      armedTimers.delete(key);
+      if (existing.btn === btn && btn.isConnected) {
+        btn.textContent = existing.was;
+        btn.classList.remove('armed');
+        return true;
+      }
+      if (existing.btn && existing.btn.isConnected) {
+        existing.btn.textContent = existing.was;
+        existing.btn.classList.remove('armed');
+      }
+    }
+    const was = btn.textContent;
+    btn.textContent = warn;
+    btn.classList.add('armed');
+    const tid = setTimeout(() => {
+      armedTimers.delete(key);
+      if (btn.isConnected) {
+        btn.textContent = was;
+        btn.classList.remove('armed');
+      }
+    }, 5000);
+    armedTimers.set(key, { tid, btn, was });
+    return false;
   };
 
   const applyWorkTheme = () => {
@@ -37,9 +83,9 @@
     workApplied = true;
     document.documentElement.dataset.theme = 'work';
     document.title = 'Portal · Hogman for Work';
-    setFavicon('/work-favicon.svg');
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', '#14181f');
 
-    $('brand-icon').src = '/work-favicon.svg';
     $('brand-name').textContent = 'Hogman';
     $('brand-tag').hidden = false;
 
@@ -47,6 +93,7 @@
     $('nav-host').textContent = 'Bridge';
     $('nav-docs').href = 'https://work.hogman.network/docs/';
     $('stat-sites-label').textContent = 'Bridges & apps';
+    $('sites-title').textContent = 'Bridges & apps';
     $('all-devices-intro').textContent = 'Every enrolled staff workstation and bridge server across this pen. Remove a lost laptop or retired bridge at any time.';
     $('audit-intro').textContent = 'Audit log of member onboarding, offboarding, role changes, device enrollments, and bridged services in this pen.';
     $('status-pill-text').textContent = 'Connected to private network \u00b7 HTTPS only';
@@ -64,6 +111,7 @@
     );
 
     $('device-card-hint').textContent = 'Generate a one-time link for another workstation (works once, expires in 1 hour). Use Get a share link for an always-on on-site bridge computer such as a Raspberry Pi or mini PC.';
+    $('phone-line').hidden = true;
     $('invite-note').placeholder = 'Who is it for? (e.g. Jordan \u2014 HVAC contractor, Store North)';
 
     $('herd-title').textContent = 'Members';
@@ -123,8 +171,9 @@
       } else {
         const rm = document.createElement('button'); rm.className = 'link danger'; rm.type = 'button'; rm.textContent = 'Remove';
         rm.onclick = async () => {
-          if (!confirmRemove(d.id, d.name)) return;
+          if (!pressTwice('mydev' + d.id, rm, `Remove ${d.name}?`)) return;
           rm.disabled = true;
+          $('adderr').hidden = true;
           try { await api('DELETE', '/devices/' + d.id); await load(); }
           catch (e) { rm.disabled = false; showError(e); }
         };
@@ -168,7 +217,7 @@
     if (!me || !me.is_admin) return;
     $('overview').hidden = false;
 
-    const totalMembers = herd.q ? null : herd.total;
+    const totalMembers = herd.q ? herd.unfilteredTotal : herd.total;
     if (totalMembers !== null) {
       $('stat-members').textContent = String(totalMembers);
     }
@@ -278,15 +327,6 @@
     renderOverview();
   };
 
-  // A plain inline confirmation instead of a browser dialog.
-  const confirmRemove = (id, name) => {
-    if (armed.has(id)) { armed.delete(id); return true; }
-    armed.add(id);
-    showError(new Error(`Press Remove again to take ${name} off the network.`));
-    setTimeout(() => { armed.delete(id); }, 5000);
-    return false;
-  };
-
   const showError = e => { const p = $('adderr'); p.textContent = e.message; p.hidden = false; };
 
   const add = async kind => {
@@ -294,21 +334,17 @@
     $('add-personal').disabled = $('add-server').disabled = true;
     try {
       const r = await api('POST', '/devices', { kind });
-      $('qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(r.join_qr_svg || '');
       // A share link is for a computer: no phone QR, and say what to run.
-      $('qr').hidden = !r.join_qr_svg || kind === 'server';
-      $('phone-line').hidden = kind === 'server';
+      setQR($('qr'), r.join_qr_svg, kind !== 'server');
+      $('phone-line').hidden = kind === 'server' || isWork;
       $('computer-line').textContent = kind === 'server'
         ? (isWork
-            ? 'Share link: on the on-site bridge computer, open this link (it shows the command), or run ./hogman share NAME URL-or-PORT \'<this link>\' --background:'
-            : 'Share link: on the computer that runs the thing you want to share, open this link (it shows the command), or run ./hogman share NAME PORT-or-FOLDER \'<this link>\':')
+            ? 'Share link: on the on-site bridge computer, open this link (it shows the command), or run ~/hogman share NAME URL-or-PORT \'<this link>\':'
+            : 'Share link: on the computer that runs the thing you want to share, open this link (it shows the command), or run ~/hogman share NAME PORT-or-FOLDER \'<this link>\':')
         : 'Computer: open this link on it and follow the steps:';
       $('linktext').textContent = r.join_link;
       $('newlink').hidden = false;
-      $('copy').onclick = async () => {
-        await navigator.clipboard.writeText(r.join_link);
-        $('copy').textContent = 'Copied';
-      };
+      $('copy').onclick = () => copyToClipboard(r.join_link, $('copy'));
       $('copy').textContent = 'Copy link';
       clearInterval(timer);
       const tick = () => {
@@ -332,42 +368,17 @@
 
   // ------------------------------------------------------------ invites --
 
-  const el = (tag, cls, text) => {
-    const e = document.createElement(tag);
-    if (cls) e.className = cls;
-    if (text !== undefined) e.textContent = text;
-    return e;
-  };
-  const when = t => new Date(t * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
-  const errIn = id => e => { const p = $(id); p.textContent = e.message; p.hidden = false; };
-
-  // Two presses instead of a browser dialog.
-  const pressTwice = (key, btn, warn, onErr) => {
-    if (armed.has(key)) { armed.delete(key); btn.classList.remove('armed'); return true; }
-    armed.add(key);
-    const was = btn.textContent;
-    btn.textContent = warn;
-    btn.classList.add('armed');
-    setTimeout(() => { armed.delete(key); btn.textContent = was; btn.classList.remove('armed'); }, 5000);
-    onErr && onErr(null);
-    return false;
-  };
-
   $('invite-form').onsubmit = async ev => {
     ev.preventDefault();
     $('invite-err').hidden = true;
     $('invite-make').disabled = true;
     try {
       const r = await api('POST', '/invites', { note: $('invite-note').value.trim() });
-      $('invite-qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(r.qr_svg || '');
-      $('invite-qr').hidden = !r.qr_svg;
+      setQR($('invite-qr'), r.qr_svg, true);
       $('invite-link').textContent = r.url;
       $('invite-exp').textContent = `Works once, until ${when(r.expires_at)}.`;
       $('invite-copy').textContent = 'Copy link';
-      $('invite-copy').onclick = async () => {
-        await navigator.clipboard.writeText(r.url);
-        $('invite-copy').textContent = 'Copied';
-      };
+      $('invite-copy').onclick = () => copyToClipboard(r.url, $('invite-copy'));
       $('invite-new').hidden = false;
       $('invite-note').value = '';
       await loadInvites();
@@ -389,8 +400,10 @@
       const rv = el('button', 'link danger', 'Revoke'); rv.type = 'button';
       rv.onclick = async () => {
         if (!pressTwice('inv' + i.id, rv, 'Press again to revoke')) return;
+        rv.disabled = true;
+        $('invite-err').hidden = true;
         try { await api('DELETE', '/invites/' + i.id); await loadInvites(); }
-        catch (e) { errIn('invite-err')(e); }
+        catch (e) { rv.disabled = false; errIn('invite-err')(e); }
       };
       li.append(rv);
       ul.append(li);
@@ -398,9 +411,6 @@
   };
 
   // --------------------------------------------------------------- herd --
-
-  // Searched and paged by the registrar: a pen of ten thousand loads like ten.
-  const herd = { q: '', offset: 0, total: 0, seq: 0 };
 
   const herdCount = () => {
     const shown = $('members').children.length;
@@ -466,16 +476,28 @@
     const accessGroup = el('div', 'drawer-group');
     accessGroup.append(el('span', 'drawer-label', 'Access'));
     if (m.status === 'suspended') {
-      accessGroup.append(makeBtn('Resume', false, 'resume', null, null, () => { m.status = 'active'; redraw(); }));
+      accessGroup.append(makeBtn('Resume', false, 'resume', null, null, () => { m.status = 'active'; redraw(); loadAudit().catch(() => {}); }));
     } else {
       accessGroup.append(makeBtn('Suspend', false, 'suspend',
         { reason: isWork ? 'suspended from the portal' : 'suspended from the home page' },
-        `Suspend ${m.handle}?`, () => { m.status = 'suspended'; redraw(); }));
+        `Suspend ${m.handle}?`, () => { m.status = 'suspended'; redraw(); loadAudit().catch(() => {}); }));
     }
     accessGroup.append(makeBtn(isWork ? 'Remove' : 'Kick', true, 'kick',
       { reason: isWork ? 'removed from the portal' : 'kicked from the home page' },
       isWork ? `Remove ${m.handle} permanently?` : `Kick ${m.handle} for good?`,
-      () => { li.remove(); herd.total--; herd.offset--; herdCount(); renderOverview(); loadAdminDevices().catch(() => {}); loadAudit().catch(() => {}); }));
+      () => {
+        li.remove();
+        herd.total = Math.max(0, herd.total - 1);
+        herd.offset = Math.max(0, herd.offset - 1);
+        if (herd.unfilteredTotal !== null) herd.unfilteredTotal = Math.max(0, herd.unfilteredTotal - 1);
+        herdCount();
+        renderOverview();
+        api('GET', '/me').then(fresh => { me = fresh; render(); renderPenDelete(); }).catch(() => {});
+        loadDirectory().catch(() => {});
+        if (me.can_invite) loadInvites().catch(() => {});
+        loadAdminDevices().catch(() => {});
+        loadAudit().catch(() => {});
+      }));
     drawer.append(accessGroup);
 
     const roleBtns = [];
@@ -525,6 +547,7 @@
     if (!more) $('members').replaceChildren();
     for (const m of r.members) $('members').append(memberRow(m));
     herd.total = r.total;
+    if (!herd.q) herd.unfilteredTotal = r.total;
     herd.offset += r.members.length;
     herdCount();
     renderOverview();
@@ -589,11 +612,13 @@
           $('all-devices-err').hidden = true;
           try {
             await api('DELETE', '/devices/' + d.id);
-            await Promise.all([loadAdminDevices(), loadDirectory(), loadAudit()]);
           } catch (e) {
             rm.disabled = false;
             errIn('all-devices-err')(e);
+            return;
           }
+          const refreshMe = api('GET', '/me').then(fresh => { me = fresh; render(); renderPenDelete(); });
+          await Promise.allSettled([refreshMe, loadAdminDevices(), loadDirectory(), loadHerd(false), loadAudit()]);
         };
         right.append(rm);
       }
@@ -691,10 +716,13 @@
   $('audit-refresh').onclick = () => loadAudit().catch(errIn('audit-err'));
 
   const renderBillingBanner = (st) => {
-    const el = $('billing-banner');
-    if (!el) return;
-    if (!st || (st.state !== 'grace' && st.state !== 'renew_only')) { el.hidden = true; return; }
+    const banner = $('billing-banner');
+    if (!banner) return;
+    if (!st || (st.state !== 'grace' && st.state !== 'renew_only')) { banner.hidden = true; return; }
     const p = document.createElement('p');
+    const errP = el('p', 'error');
+    errP.id = 'billing-err';
+    errP.hidden = true;
     const strong = document.createElement('strong');
     const appendRenewButton = () => {
       if (!st.can_renew) return;
@@ -705,13 +733,17 @@
       btn.textContent = 'Renew now';
       btn.onclick = async () => {
         btn.disabled = true;
+        errP.hidden = true;
         try {
           const r = await api('POST', '/billing/renew-token', {});
           if (typeof r.url === 'string' && r.url.startsWith('https://')) {
-            window.open(r.url, '_blank', 'noopener,noreferrer');
+            location.href = r.url;
+            return;
           }
+          throw new Error('Renewal link was not returned.');
         } catch (e) {
-          showError(e);
+          errP.textContent = e.message;
+          errP.hidden = false;
         } finally {
           btn.disabled = false;
         }
@@ -736,8 +768,8 @@
         'Once payment completes, normal access restores automatically.'
       ));
       appendRenewButton();
-      el.replaceChildren(p);
-      el.hidden = false;
+      banner.replaceChildren(p, errP);
+      banner.hidden = false;
       return;
     }
 
@@ -763,8 +795,8 @@
         'Ask an owner or admin to renew it from this page.'
       ));
     }
-    el.replaceChildren(p);
-    el.hidden = false;
+    banner.replaceChildren(p, errP);
+    banner.hidden = false;
   };
 
   const renderPenDelete = () => {
@@ -836,9 +868,10 @@
       try {
         const r = await api('POST', '/pen/delete-token', { confirm: val });
         if (typeof r.url === 'string' && r.url.startsWith('https://')) {
-          const w = window.open(r.url, '_blank', 'noopener,noreferrer');
-          if (!w) location.href = r.url;
+          location.href = r.url;
+          return;
         }
+        throw new Error('Delete confirmation link was not returned.');
       } catch (e) {
         err.textContent = e.message;
         err.hidden = false;
@@ -855,7 +888,7 @@
       ['overview', 'sites', 'mine', 'invite', 'herd', 'all-devices', 'audit', 'host'].forEach(id => { const s = $(id); if (s) s.hidden = true; });
       return;
     }
-    loadDirectory().catch(errIn('sites-err'));
+    loadDirectory().catch(e => { $('sites').hidden = false; errIn('sites-err')(e); });
     if (!me.devices) return;   // a server
     if (me.can_invite) {
       $('invite').hidden = false;

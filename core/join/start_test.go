@@ -155,4 +155,36 @@ esac
 	if err == nil || !strings.Contains(out, "no terminal to ask for your invite link") {
 		t.Fatalf("case 5 (fresh machine) should ask for invite link, err=%v out=%s", err, out)
 	}
+
+	// 6. Empty tokens (#t=, #k=, #t=&for=share) are rejected before downloading.
+	for _, badLink := range []string{
+		"https://pen2.gate.example.com/join#t=",
+		"https://pen2.gate.example.com/join#k=",
+		"https://pen2.gate.example.com/join#t=&for=share",
+		"https://pen2.gate.example.com/join#k=&for=share",
+	} {
+		out, curlLog, err = runStart(homeFresh, []string{"HOGMAN_EXPECTED_HOST=pen2.gate.example.com"}, badLink)
+		if err == nil || curlLog != "" {
+			t.Fatalf("case 6 (empty token %q) should fail before curl, err=%v curlLog=%q out=%s", badLink, err, curlLog, out)
+		}
+	}
+
+	// 7. CRLF SHA256SUMS is accepted cleanly.
+	_ = os.WriteFile(filepath.Join(dlDir, "SHA256SUMS"), []byte(strings.ReplaceAll(sumsBody, "\n", "\r\n")), 0o600)
+	out, _, err = runStart(homeFresh, []string{"HOGMAN_EXPECTED_HOST=pen2.gate.example.com"}, "https://pen2.gate.example.com/join#t=crlfok")
+	_ = os.WriteFile(filepath.Join(dlDir, "SHA256SUMS"), []byte(sumsBody), 0o600)
+	if err != nil || !strings.Contains(out, "FAKE_HOGMAN_ARGS:https://pen2.gate.example.com/join#t=crlfok") {
+		t.Fatalf("case 7 (CRLF SHA256SUMS) failed: err=%v out=%s", err, out)
+	}
+
+	// 8. Unwritable $HOME fails cleanly instead of reporting false success (POSIX set -e inside &&/||).
+	if os.Geteuid() != 0 {
+		roHome := filepath.Join(tmp, "home-ro")
+		_ = os.MkdirAll(roHome, 0o500)
+		defer os.Chmod(roHome, 0o700)
+		out, _, err = runStart(roHome, []string{"HOGMAN_EXPECTED_HOST=pen2.gate.example.com"}, "https://pen2.gate.example.com/join#t=rotest")
+		if err == nil || !strings.Contains(out, "could not write") {
+			t.Fatalf("case 8 (read-only HOME) should fail with write error, err=%v out=%s", err, out)
+		}
+	}
 }

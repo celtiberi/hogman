@@ -8,10 +8,11 @@
 # checks it against the SHA-256 published there, saves it as ~/hogman
 # (keep it: it updates, shares things and leaves the pen later), and runs it.
 #
-# Your invite link is pasted here, on your computer. It's never part of the
-# command and never sent to a server except the pen it's for.
+# Your invite link is only sent to the pen host it belongs to — never to any
+# third party. Passing it on the command line (below) avoids a second prompt;
+# treat the command like a password and don't share it.
 #
-# For scripts: curl -fsSL https://<address>/start | sh -s -- '<invite link>' [hogman options]
+# Usage: curl -fsSL --proto '=https' --proto-redir '=https' https://<address>/start | sh -s -- '<invite link>' [hogman options]
 set -eu
 
 say() { printf '%s\n' "$*"; }
@@ -31,32 +32,51 @@ if command -v sha256sum >/dev/null 2>&1; then sum() { sha256sum "$1" | cut -d' '
 elif command -v shasum >/dev/null 2>&1; then sum() { shasum -a 256 "$1" | cut -d' ' -f1; }
 else die "no sha256sum or shasum on this computer to check the download with"; fi
 
+_cleanup_dl() {
+  [ -n "${_stage:-}" ] && rm -f "$_stage"
+  [ -n "${_tmp:-}" ] && rm -rf "$_tmp"
+  _stage=""
+  _tmp=""
+  trap - EXIT INT TERM
+}
+
 download_and_install() {
   _src_label="$1"
   _sums_url="$2"
   _bin_url="$3"
-  _tmp="$(mktemp -d "${TMPDIR:-/tmp}/hogman.XXXXXX")"
-  trap 'rm -rf "$_tmp"' EXIT INT TERM
+  _tmp=""
+  _stage=""
+  _tmp="$(mktemp -d "${TMPDIR:-/tmp}/hogman.XXXXXX")" || return 4
+  trap '_cleanup_dl' EXIT
+  trap 'trap - EXIT; _cleanup_dl; exit 130' INT
+  trap 'trap - EXIT; _cleanup_dl; exit 143' TERM
   say ""
   say "• Downloading hogman for $os $arch from $_src_label"
   curl -fsSL --proto =https --proto-redir =https "$_sums_url" -o "$_tmp/SHA256SUMS" || {
-    rm -rf "$_tmp"; trap - EXIT INT TERM; return 1
+    _cleanup_dl; return 1
   }
-  _want="$(awk -v f="$file" '$2 == f || $2 == "*" f { print $1; exit }' "$_tmp/SHA256SUMS")"
-  [ -n "$_want" ] || { rm -rf "$_tmp"; trap - EXIT INT TERM; return 2; }
+  _want="$(awk -v f="$file" '{ sub(/\r$/, "") } $2 == f || $2 == "*" f { print $1; exit }' "$_tmp/SHA256SUMS")"
+  [ -n "$_want" ] || { _cleanup_dl; return 2; }
   curl -fsSL --proto =https --proto-redir =https "$_bin_url" -o "$_tmp/hogman" || {
-    rm -rf "$_tmp"; trap - EXIT INT TERM; return 3
+    _cleanup_dl; return 3
   }
   _got="$(sum "$_tmp/hogman")"
   if [ "$_got" != "$_want" ]; then
-    rm -rf "$_tmp"; trap - EXIT INT TERM
+    _cleanup_dl
     die "the download doesn't match its published SHA-256 (want $_want, got $_got); not running it"
   fi
   say "  checked: SHA-256 matches"
-  chmod 0755 "$_tmp/hogman"
-  mv -f "$_tmp/hogman" "$HOME/hogman"
+  # Stage inside $HOME via mktemp (O_CREAT|O_EXCL) before rename so replacing a
+  # running ~/hogman is an atomic same-filesystem rename (avoiding ETXTBSY across
+  # tmpfs -> $HOME and avoiding predictable temp filenames).
+  _stage="$(mktemp "$HOME/.hogman.tmp.XXXXXX")" || { _cleanup_dl; return 4; }
+  if ! { cp "$_tmp/hogman" "$_stage" && chmod 0755 "$_stage" && mv -f "$_stage" "$HOME/hogman"; }; then
+    _cleanup_dl
+    return 4
+  fi
+  _stage=""
   say "  saved as $HOME/hogman (keep it: it updates, shares and leaves later)"
-  rm -rf "$_tmp"; trap - EXIT INT TERM
+  _cleanup_dl
   return 0
 }
 
@@ -108,7 +128,7 @@ if [ -z "$link" ] && [ "$has_pens" = 1 ] && { [ -z "${HOGMAN_EXPECTED_HOST:-}" ]
         "$gh_base/$file" && installed=1 || true
     fi
   fi
-  [ "$installed" = 1 ] || die "could not download $file; try: curl -fsSLo ~/hogman https://hogman.network/dl/$file && chmod +x ~/hogman && ~/hogman update"
+  [ "$installed" = 1 ] || die "could not download $file; try: curl -fsSL --proto '=https' --proto-redir '=https' -o ~/hogman https://hogman.network/dl/$file && chmod +x ~/hogman && ~/hogman update"
   [ -e "$HOME/hogman-join" ] && say "  note: once updated, you can delete $HOME/hogman-join"
   say "  (to join another pen later, run: ~/hogman '<invite link>')"
   if have_tty; then
@@ -134,9 +154,11 @@ host="${host%%/*}"
 case "$host" in
   ""|*[!a-zA-Z0-9.:-]*) die "the link's address looks wrong: $host" ;;
 esac
-# Anchor the path strictly to /join#t=... or /join#k=... on that exact host.
+# Anchor the path strictly to non-empty /join#t=... or /join#k=... on that exact host.
 case "$link" in
-  "https://$host/join#t="*|"https://$host/join#k="*) ;;
+  "https://$host/join#t=&"*|"https://$host/join#k=&"*)
+    die "that doesn't look like a Hogman invite link (empty token)" ;;
+  "https://$host/join#t="?*|"https://$host/join#k="?*) ;;
   *) die "that doesn't look like a Hogman invite link (expected https://<host>/join#t=... or #k=...)" ;;
 esac
 if [ -n "${HOGMAN_EXPECTED_HOST:-}" ] && [ "$host" != "$HOGMAN_EXPECTED_HOST" ]; then
@@ -149,11 +171,11 @@ case "$rc" in
   0) ;;
   1) die "couldn't reach https://$host" ;;
   2) die "there's no hogman for $os $arch yet" ;;
+  4) die "could not write $HOME/hogman (check permissions on $HOME)" ;;
   *) die "the download failed; try again" ;;
 esac
 
-# The tool asks questions (your name in the pen; your password once, for the
-# browser proxy setting), so it gets the keyboard, not this download.
+# Give hogman the controlling terminal for interactive handle prompts (never asks for a password).
 if have_tty; then
   exec "$HOME/hogman" "$@" "$link" </dev/tty
 fi

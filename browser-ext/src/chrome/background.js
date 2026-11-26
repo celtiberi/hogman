@@ -6,6 +6,7 @@ import {
 
 const NATIVE_HOST = "network.hogman.browser";
 const PROXY_ERROR_COOLDOWN_MS = 5000;
+const REFRESH_WAIT_TIMEOUT_MS = 2500;
 
 let nativePort = null;
 let reconnectTimer = null;
@@ -13,22 +14,56 @@ let lastSnapshot = null;
 let lastProxyErrorRefreshAt = 0;
 let applyInFlight = null;
 let applyPending = false;
+let nativeReplySeq = 0;
+let pendingRefreshWaiters = [];
 let state = {
   browser: "chrome",
   connected: false,
   nativeError: "",
+  proxyError: "",
   paused: false,
   conflict: "", // "", "other_extension", "policy", "os_proxy"
   conflictDetail: "",
   osProxyConflict: false,
   osProxyKind: "",
-  vpnOverride: false,
-  vpnInterface: "",
   allowOSProxyOverride: false,
   entries: [],
   incognitoAllowed: true,
   missingHostPermission: false,
 };
+
+function settleRefreshWaiters(completedSeq) {
+  if (pendingRefreshWaiters.length === 0) return;
+  const remaining = [];
+  for (const w of pendingRefreshWaiters) {
+    if (w.wantSeq <= completedSeq) {
+      w.resolve();
+    } else {
+      remaining.push(w);
+    }
+  }
+  pendingRefreshWaiters = remaining;
+}
+
+function waitForNativeUpdate(timeoutMs = REFRESH_WAIT_TIMEOUT_MS) {
+  const wantSeq = nativeReplySeq + 1;
+  return new Promise((resolve) => {
+    let settled = false;
+    const entry = {
+      wantSeq,
+      resolve: () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const idx = pendingRefreshWaiters.indexOf(entry);
+        if (idx !== -1) pendingRefreshWaiters.splice(idx, 1);
+        resolve();
+      },
+    };
+    const timer = setTimeout(entry.resolve, timeoutMs);
+    pendingRefreshWaiters.push(entry);
+  });
+}
 
 async function loadPrefs() {
   const stored = await chrome.storage.local.get([
@@ -53,7 +88,7 @@ function updateBadge() {
     chrome.action.setBadgeBackgroundColor({ color: "#666666" });
     return;
   }
-  if (state.conflict || state.nativeError) {
+  if (state.conflict || state.nativeError || state.proxyError) {
     chrome.action.setBadgeText({ text: "!" });
     chrome.action.setBadgeBackgroundColor({ color: "#b91c1c" });
     return;
@@ -74,7 +109,12 @@ function applyProxyConfig() {
     try {
       do {
         applyPending = false;
-        await applyProxyConfigOnce();
+        try {
+          await applyProxyConfigOnce();
+        } catch (err) {
+          state.proxyError = String(err && err.message ? err.message : err);
+          updateBadge();
+        }
       } while (applyPending);
     } finally {
       applyInFlight = null;
@@ -90,12 +130,11 @@ async function applyProxyConfigOnce() {
 
   let snap = null;
   let routes = {};
+  let nextEntries = [];
   if (lastSnapshot) {
     snap = sanitizeNativeSnapshot(lastSnapshot);
     state.osProxyConflict = snap.osProxyConflict;
     state.osProxyKind = snap.osProxyKind;
-    state.vpnOverride = snap.vpnOverride;
-    state.vpnInterface = snap.vpnInterface;
     if (
       snap.osProxyConflict !== prefs.lastKnownOSProxyConflict ||
       snap.osProxyKind !== prefs.lastKnownOSProxyKind
@@ -107,14 +146,12 @@ async function applyProxyConfigOnce() {
     }
 
     const computed = computeEffectiveRoutes(snap.pens, prefs);
-    state.entries = computed.entries;
+    nextEntries = computed.entries;
     routes = prefs.paused ? {} : computed.routes;
   } else {
     state.osProxyConflict = prefs.lastKnownOSProxyConflict;
     state.osProxyKind = prefs.lastKnownOSProxyKind;
-    state.vpnOverride = false;
-    state.vpnInterface = "";
-    state.entries = [];
+    nextEntries = [];
     routes = {};
   }
 
@@ -122,12 +159,16 @@ async function applyProxyConfigOnce() {
   // we never silently override another VPN/proxy extension or corporate policy.
   const current = await chrome.proxy.settings.get({});
   if (current.levelOfControl === "controlled_by_other_extensions") {
+    state.entries = nextEntries;
+    state.proxyError = "";
     state.conflict = "other_extension";
     state.conflictDetail = "Another browser extension controls proxy settings in this profile.";
     updateBadge();
     return;
   }
   if (current.levelOfControl === "not_controllable") {
+    state.entries = nextEntries;
+    state.proxyError = "";
     state.conflict = "policy";
     state.conflictDetail = "Browser proxy settings are locked by an organization policy.";
     updateBadge();
@@ -136,10 +177,12 @@ async function applyProxyConfigOnce() {
   const osProxyActive = snap ? snap.osProxyConflict : prefs.lastKnownOSProxyConflict;
   const osProxyKind = snap ? snap.osProxyKind : prefs.lastKnownOSProxyKind;
   if (osProxyActive && !prefs.allowOSProxyOverride) {
-    state.conflict = "os_proxy";
-    state.conflictDetail = osProxyKind || "non-Hogman OS proxy";
     // Step aside so a corporate OS proxy is not overridden with DIRECT.
     await chrome.proxy.settings.clear({ scope: "regular" });
+    state.entries = nextEntries;
+    state.proxyError = "";
+    state.conflict = "os_proxy";
+    state.conflictDetail = osProxyKind || "non-Hogman OS proxy";
     updateBadge();
     return;
   }
@@ -148,8 +191,6 @@ async function applyProxyConfigOnce() {
   // paused, or all pens disabled in this profile): buildPACScript({}) routes
   // pens.hogman.network and *.pens.hogman.network to 127.0.0.1:1 while keeping
   // ordinary browsing DIRECT.
-  state.conflict = "";
-  state.conflictDetail = "";
   const pacData = buildPACScript(routes);
   await chrome.proxy.settings.set({
     value: {
@@ -158,6 +199,10 @@ async function applyProxyConfigOnce() {
     },
     scope: "regular",
   });
+  state.entries = nextEntries;
+  state.conflict = "";
+  state.conflictDetail = "";
+  state.proxyError = "";
   updateBadge();
 }
 
@@ -171,6 +216,10 @@ function scheduleReconnect() {
 
 function connectWatch() {
   if (nativePort) return;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   try {
     const port = chrome.runtime.connectNative(NATIVE_HOST);
     nativePort = port;
@@ -178,17 +227,22 @@ function connectWatch() {
     state.nativeError = "";
 
     port.onMessage.addListener((msg) => {
+      if (nativePort !== port) return;
+      const seq = ++nativeReplySeq;
       if (msg && msg.ok) {
         lastSnapshot = msg;
         state.nativeError = "";
-        applyProxyConfig().catch((err) => {
-          state.nativeError = String(err && err.message ? err.message : err);
-          updateBadge();
-        });
+        applyProxyConfig().finally(() => settleRefreshWaiters(seq));
+      } else {
+        state.nativeError = (msg && msg.error) ? String(msg.error) : "unexpected native host response";
+        updateBadge();
+        settleRefreshWaiters(seq);
       }
     });
 
     port.onDisconnect.addListener(() => {
+      if (nativePort !== port) return;
+      const seq = ++nativeReplySeq;
       const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : "native host disconnected";
       nativePort = null;
       lastSnapshot = null;
@@ -200,31 +254,37 @@ function connectWatch() {
       const prep = hostMissing
         ? chrome.storage.local.remove(["lastKnownOSProxyConflict", "lastKnownOSProxyKind"]).catch(() => {})
         : Promise.resolve();
-      prep.then(() => applyProxyConfig()).catch(() => updateBadge());
+      prep
+        .then(() => applyProxyConfig())
+        .finally(() => settleRefreshWaiters(seq));
       scheduleReconnect();
     });
 
     port.postMessage({ op: "watch" });
   } catch (err) {
+    const seq = ++nativeReplySeq;
     nativePort = null;
     lastSnapshot = null;
     state.connected = false;
     state.nativeError = String(err && err.message ? err.message : err);
-    applyProxyConfig().catch(() => updateBadge());
+    applyProxyConfig().finally(() => settleRefreshWaiters(seq));
     scheduleReconnect();
   }
 }
 
 async function refreshNow() {
+  const wait = waitForNativeUpdate();
   if (nativePort) {
     try {
       nativePort.postMessage({ op: "list_pens" });
+      await wait;
       return;
     } catch (_) {
       nativePort = null;
     }
   }
   connectWatch();
+  await wait;
 }
 
 chrome.runtime.onInstalled.addListener(() => {
