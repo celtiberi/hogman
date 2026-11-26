@@ -418,7 +418,7 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	if !o.noSystemProxy && !extensionRecentlySeen(hogmanConfigBase(), 7*24*time.Hour) {
 		if sys := detectSystemProxyState(pens); sys.VPNOverride {
 			say("  ! VPN active (%s): macOS hides automatic proxy settings while a VPN is connected.", sys.VPNInterface)
-			say("    Install the Hogman extension in Chrome, Brave, Edge, or Firefox to browse pen sites with your VPN on (Safari requires pausing the VPN).")
+			say("    Install the Hogman browser extension (%s; Firefox: coming soon), then open its popup and turn on %s to browse pen sites with your VPN on (Safari requires pausing the VPN).", chromeExtensionStoreURL, n.Zone)
 		}
 	}
 	say("  Other tools reach the pen through its proxy, %s", cfg.proxyURL())

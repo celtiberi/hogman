@@ -1,0 +1,1 @@
+- Reordered `core/join` browser setup instructions and `core/join-page` to lead with the Hogman browser extension (linking directly to the Chrome Web Store listing, noting Firefox is coming soon) and present the automatic proxy PAC URL as the fallback for Safari or browsers without the extension.

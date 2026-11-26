@@ -52,17 +52,29 @@ func TestFormatBrowserProxyInstructionsByOS(t *testing.T) {
 	pac := "http://127.0.0.1:18123/proxy.pac"
 
 	macMulti := formatBrowserProxyInstructions("darwin", pac, "acme.pens.example", []string{"acme.pens.example"}, []string{"Wi-Fi", "USB 10/100/1000 LAN"})
+	const extLead = "Using Chrome, Brave, Edge, Arc, or Vivaldi? Install the Hogman browser extension, then open its popup and turn on acme.pens.example. No proxy settings needed."
+	if !strings.HasPrefix(macMulti, extLead) {
+		t.Fatalf("darwin instructions should open with extension lead:\n%s", macMulti)
+	}
+	if strings.Contains(macMulti, "nothing else to set") {
+		t.Fatalf("darwin instructions must not claim nothing else to set (empty allowlist requires popup toggle):\n%s", macMulti)
+	}
 	for _, want := range []string{
+		chromeExtensionStoreURL,
+		"Firefox: coming soon",
+		"Other browsers (Safari, or no extension)",
 		"never asks for your Mac password",
 		"System Settings → Network → Wi-Fi and USB 10/100/1000 LAN → Details… → Proxies (set it on each one)",
 		"Automatic proxy configuration",
 		pac,
 		"https://home.acme.pens.example",
-		"Chrome Web Store",
 	} {
 		if !strings.Contains(macMulti, want) {
 			t.Fatalf("darwin multi-service instructions missing %q:\n%s", want, macMulti)
 		}
+	}
+	if strings.Contains(macMulti, "Tip:") {
+		t.Fatalf("darwin instructions should drop trailing Tip line:\n%s", macMulti)
 	}
 	if strings.Contains(macMulti, "automatic soon") || strings.Contains(macMulti, "signed Mac app") {
 		t.Fatalf("darwin instructions contain stale or unbuilt promises:\n%s", macMulti)
@@ -85,7 +97,11 @@ func TestFormatBrowserProxyInstructionsByOS(t *testing.T) {
 	}
 
 	lin := formatBrowserProxyInstructions("linux", pac, "acme.pens.example", []string{"acme.pens.example", "ops.pens.example"}, nil)
+	if !strings.HasPrefix(lin, extLead) || strings.Contains(lin, "Tip:") {
+		t.Fatalf("linux instructions should open with extension lead and drop Tip:\n%s", lin)
+	}
 	for _, want := range []string{
+		"Other browsers (or no extension)",
 		"Firefox: Settings → Network Settings",
 		"GNOME",
 		pac,
@@ -97,7 +113,11 @@ func TestFormatBrowserProxyInstructionsByOS(t *testing.T) {
 	}
 
 	win := formatBrowserProxyInstructions("windows", pac, "acme.pens.example", []string{"acme.pens.example"}, nil)
+	if !strings.HasPrefix(win, extLead) || strings.Contains(win, "Tip:") {
+		t.Fatalf("windows instructions should open with extension lead and drop Tip:\n%s", win)
+	}
 	for _, want := range []string{
+		"Other browsers (or no extension)",
 		"Settings → Network & Internet → Proxy",
 		"Use setup script",
 		pac,

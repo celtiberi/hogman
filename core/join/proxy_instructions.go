@@ -5,6 +5,11 @@ import (
 	"strings"
 )
 
+// chromeExtensionStoreURL is the published Chrome Web Store listing for the
+// Hogman browser extension (Chrome, Brave, Edge, Arc, Vivaldi). Kept in one
+// place so the Firefox Add-ons URL can be added alongside it once live.
+const chromeExtensionStoreURL = "https://chromewebstore.google.com/detail/hogman/mgokdogedagoejnjmjpmbcmicbmhplkk"
+
 type networkServiceInfo struct {
 	Name         string
 	HardwarePort string
@@ -98,16 +103,25 @@ func formatServiceList(services []string) string {
 	}
 }
 
-// formatBrowserProxyInstructions returns plain, OS-specific one-time automatic
-// proxy setup instructions using the stable, unversioned local PAC URL
-// (http://127.0.0.1:<port>/proxy.pac). Hogman never asks for a Mac/system
-// password to change proxy settings.
+// formatBrowserProxyInstructions returns plain, OS-specific browser setup
+// instructions: leading with the Hogman browser extension (no proxy config
+// needed on Chrome, Brave, Edge, Arc, or Vivaldi) and falling back to the
+// stable, unversioned local PAC URL (http://127.0.0.1:<port>/proxy.pac) for
+// Safari, Firefox (while AMO review is pending), or browsers without the
+// extension. Hogman never asks for a Mac/system password.
 func formatBrowserProxyInstructions(goos, pacURL, zone string, zones, services []string) string {
 	portal := "https://home." + zone
 	multiNote := ""
 	if len(zones) > 1 {
-		multiNote = fmt.Sprintf("\n    (This same URL covers all %d pens: %s.)", len(zones), strings.Join(zones, ", "))
+		multiNote = fmt.Sprintf("\n    (This same setup covers all %d pens: %s.)", len(zones), strings.Join(zones, ", "))
 	}
+	extLead := fmt.Sprintf(
+		"Using Chrome, Brave, Edge, Arc, or Vivaldi? Install the Hogman browser extension, then open its popup and turn on %s. No proxy settings needed.\n"+
+			"    Chrome Web Store: %s\n"+
+			"    (Firefox: coming soon.)\n"+
+			"    Then open %s%s",
+		zone, chromeExtensionStoreURL, portal, multiNote,
+	)
 	switch goos {
 	case "darwin":
 		svcList := formatServiceList(services)
@@ -116,33 +130,33 @@ func formatBrowserProxyInstructions(goos, pacURL, zone string, zones, services [
 			eachHint = " (set it on each one)"
 		}
 		return fmt.Sprintf(
-			"Hogman never asks for your Mac password — set the automatic proxy URL once in System Settings:\n"+
+			"%s\n"+
+				"    Other browsers (Safari, or no extension) — Hogman never asks for your Mac password; set the automatic proxy URL once in System Settings:\n"+
 				"    1. Open System Settings → Network → %s → Details… → Proxies%s\n"+
 				"    2. Turn on \"Automatic proxy configuration\" and paste:\n"+
 				"         %s\n"+
-				"    3. Click OK, then open %s%s\n"+
-				"    (Using Firefox? Settings → Network Settings → Automatic proxy configuration URL works inside Firefox too.)\n"+
-				"    Tip: for Chrome, Brave, Edge, or Chromium, install the Hogman browser extension from the Chrome Web Store to route pens without changing system proxy settings (Firefox Add-ons is pending review).",
-			svcList, eachHint, pacURL, portal, multiNote,
+				"    3. Click OK, then open %s\n"+
+				"    (Using Firefox? Settings → Network Settings → Automatic proxy configuration URL works inside Firefox too.)",
+			extLead, svcList, eachHint, pacURL, portal,
 		)
 	case "windows":
 		return fmt.Sprintf(
-			"Hogman never asks for administrator access — set the automatic proxy URL once in Windows Settings:\n"+
+			"%s\n"+
+				"    Other browsers (or no extension) — Hogman never asks for administrator access; set the automatic proxy URL once in Windows Settings:\n"+
 				"    1. Open Settings → Network & Internet → Proxy → \"Use setup script\" → Set up\n"+
 				"    2. Turn on \"Use setup script\" and paste:\n"+
 				"         %s\n"+
-				"    3. Click Save, then open %s%s\n"+
-				"    Tip: for Chrome, Brave, Edge, or Chromium, install the Hogman browser extension from the Chrome Web Store to route pens without changing proxy settings (Firefox Add-ons is pending review).",
-			pacURL, portal, multiNote,
+				"    3. Click Save, then open %s",
+			extLead, pacURL, portal,
 		)
 	default: // linux and other unix desktops
 		return fmt.Sprintf(
-			"Hogman never asks for your password — set your browser's automatic proxy URL once:\n"+
+			"%s\n"+
+				"    Other browsers (or no extension) — Hogman never asks for your password; set your browser's automatic proxy URL once:\n"+
 				"    • Firefox: Settings → Network Settings → Automatic proxy configuration URL → %s\n"+
 				"    • System / Chrome (GNOME): Settings → Network → Network Proxy → Automatic → %s\n"+
-				"    Then open %s%s\n"+
-				"    Tip: for Chrome, Brave, Edge, or Chromium, install the Hogman browser extension from the Chrome Web Store to route pens without changing proxy settings (Firefox Add-ons is pending review).",
-			pacURL, pacURL, portal, multiNote,
+				"    Then open %s",
+			extLead, pacURL, pacURL, portal,
 		)
 	}
 }
