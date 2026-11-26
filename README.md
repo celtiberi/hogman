@@ -232,7 +232,6 @@ Built on [Headscale](https://github.com/juanfont/headscale), [Tailscale `tsnet`]
 | [`core/join`](core/join) | `hogman` client: enrolls devices, runs the loopback `:443` proxy, hosts `share` nodes, and provides `hogman-native-host` for the browser extension. |
 | [`browser-ext`](browser-ext) | Manifest V3 extension for Chrome, Brave, Edge, Arc, Vivaldi, Chromium, Firefox (128+), and LibreWolf (VPN coexistence + per-profile pen allowlists). |
 | [`deploy/`](deploy/README.md) | Authoritative DNS-01 challenge server ([`deploy/challenge-dns`](deploy/challenge-dns)) plus build, release, and changelog scripts. |
-| [`packaging`](packaging) | Homebrew formula and WinGet manifest templates for the `hogman` CLI. |
 
 ### Building and testing from source
 
