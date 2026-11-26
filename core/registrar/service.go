@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"math"
 	"math/big"
 	"net/netip"
@@ -65,6 +66,7 @@ type Config struct {
 	MaxMemberACMETXTPerHour int
 	PresenceTTL             time.Duration
 	ACMEBackend             ACMEBackend
+	Logger                  *slog.Logger
 }
 
 // normaliseTheme validates the pen UI theme against the strict allowlist.
@@ -187,12 +189,23 @@ type Service struct {
 	deferredDelMu      sync.Mutex
 	deferredPendingDel map[int64]bool
 
-	acmeMu         sync.Mutex
-	serverEABHits  map[int64][]time.Time
-	memberEABHits  map[int64][]time.Time
-	memberTXTHits  map[int64][]time.Time
+	serverEABLim   *slidingWindow[int64]
+	memberEABLim   *slidingWindow[int64]
+	memberTXTLim   *slidingWindow[int64]
+	logger         *slog.Logger
 	nowFn          func() time.Time
 	privateLabelFn func() (string, error)
+}
+
+func (s *Service) loggerOrDefault() *slog.Logger {
+	if s != nil && s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
+}
+
+func (s *Service) billingPolicy() *BillingPolicy {
+	return NewBillingPolicy(s.cfg.BillingStatusPath)
 }
 
 func (s *Service) SetBaseContext(ctx context.Context) {
@@ -258,35 +271,6 @@ func (s *Service) clock() time.Time {
 	return time.Now()
 }
 
-// checkWindow prunes expired entries for key and reports whether another hit is
-// permitted without recording one (so failed upstream calls do not burn budget).
-func checkWindow(m map[int64][]time.Time, key int64, limit int, window time.Duration, ts time.Time) (bool, int) {
-	if limit <= 0 {
-		return true, 0
-	}
-	prev := m[key]
-	kept := prev[:0]
-	for _, t := range prev {
-		if ts.Sub(t) < window {
-			kept = append(kept, t)
-		}
-	}
-	m[key] = kept
-	if len(kept) >= limit {
-		rem := kept[0].Add(window).Sub(ts)
-		secs := int((rem + time.Second - 1) / time.Second)
-		if secs < 1 {
-			secs = 1
-		}
-		return false, secs
-	}
-	return true, 0
-}
-
-func recordWindow(m map[int64][]time.Time, key int64, ts time.Time) {
-	m[key] = append(m[key], ts)
-}
-
 func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
 	theme, err := normaliseTheme(cfg.Theme)
 	if err != nil {
@@ -329,6 +313,10 @@ func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
 	if cfg.PresenceTTL <= 0 {
 		cfg.PresenceTTL = 5 * time.Second
 	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Service{
 		cfg:                cfg,
 		st:                 st,
@@ -341,9 +329,10 @@ func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
 		rotateFlight:       map[string]*rotateCall{},
 		rotateSem:          make(chan struct{}, keyRotateMaxConc),
 		deferredPendingDel: map[int64]bool{},
-		serverEABHits:      map[int64][]time.Time{},
-		memberEABHits:      map[int64][]time.Time{},
-		memberTXTHits:      map[int64][]time.Time{},
+		serverEABLim:       newSlidingWindow[int64](cfg.MaxServerEABPerDay, 24*time.Hour, defaultLimiterMaxKeys),
+		memberEABLim:       newSlidingWindow[int64](cfg.MaxMemberEABPerDay, 24*time.Hour, defaultLimiterMaxKeys),
+		memberTXTLim:       newSlidingWindow[int64](cfg.MaxMemberACMETXTPerHour, time.Hour, defaultLimiterMaxKeys),
+		logger:             logger,
 	}, nil
 }
 
@@ -2211,19 +2200,14 @@ func (s *Service) ServerSetACMETXT(ctx context.Context, d *Device, rawName, valu
 	if err != nil {
 		return "", err
 	}
-	s.acmeMu.Lock()
-	ok, retry := checkWindow(s.memberTXTHits, d.MemberID, s.cfg.MaxMemberACMETXTPerHour, time.Hour, s.clock())
-	s.acmeMu.Unlock()
-	if !ok {
+	if ok, retry := s.memberTXTLim.CheckLimit(d.MemberID, s.cfg.MaxMemberACMETXTPerHour, s.clock()); !ok {
 		return "", &Problem{Status: 429, Msg: "too many ACME challenge writes for this member in the last hour", RetryAfter: retry}
 	}
 	fqdn := "_acme-challenge." + name + "." + s.cfg.Zone
 	if err := s.acme.SetTXT(ctx, fqdn, value); err != nil {
 		return "", err
 	}
-	s.acmeMu.Lock()
-	recordWindow(s.memberTXTHits, d.MemberID, s.clock())
-	s.acmeMu.Unlock()
+	s.memberTXTLim.Record(d.MemberID, s.clock())
 	return fqdn, nil
 }
 
@@ -2263,27 +2247,20 @@ func (s *Service) ServerMintACMEEAB(ctx context.Context, d *Device) (*EABPair, e
 	if !hasName {
 		return nil, forbidden("claim a name for this server first")
 	}
-	s.acmeMu.Lock()
 	nowTS := s.clock()
-	memberOK, memberRetry := checkWindow(s.memberEABHits, d.MemberID, s.cfg.MaxMemberEABPerDay, 24*time.Hour, nowTS)
-	if !memberOK {
-		s.acmeMu.Unlock()
+	if memberOK, memberRetry := s.memberEABLim.CheckLimit(d.MemberID, s.cfg.MaxMemberEABPerDay, nowTS); !memberOK {
 		return nil, &Problem{Status: 429, Msg: "too many fallback account keys for this member today", RetryAfter: memberRetry}
 	}
-	serverOK, serverRetry := checkWindow(s.serverEABHits, d.ID, s.cfg.MaxServerEABPerDay, 24*time.Hour, nowTS)
-	s.acmeMu.Unlock()
-	if !serverOK {
+	if serverOK, serverRetry := s.serverEABLim.CheckLimit(d.ID, s.cfg.MaxServerEABPerDay, nowTS); !serverOK {
 		return nil, &Problem{Status: 429, Msg: "too many fallback account keys for this server today", RetryAfter: serverRetry}
 	}
 	pair, err := s.acme.MintEAB(ctx)
 	if err != nil {
 		return nil, err
 	}
-	s.acmeMu.Lock()
 	recTS := s.clock()
-	recordWindow(s.memberEABHits, d.MemberID, recTS)
-	recordWindow(s.serverEABHits, d.ID, recTS)
-	s.acmeMu.Unlock()
+	s.memberEABLim.Record(d.MemberID, recTS)
+	s.serverEABLim.Record(d.ID, recTS)
 	s.st.Audit(d.Member, "acme.eab", fmt.Sprintf("device#%d", d.ID), "")
 	return pair, nil
 }
@@ -2760,7 +2737,7 @@ func splitIPs(ips []string) (v4, v6 string) {
 }
 
 func (s *Service) isRenewOnly() bool {
-	return isRenewOnlyMode(s.cfg.BillingStatusPath)
+	return s.billingPolicy().IsRenewOnly()
 }
 
 // buildPolicy is the default-deny policy of DESIGN.md section 8, expressed

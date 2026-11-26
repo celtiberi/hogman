@@ -686,7 +686,7 @@ func (m *HomeCertManager) syncStoredCert(ctx context.Context, cfg *certmagic.Con
 }
 
 func (m *HomeCertManager) isRenewOnlyWake() bool {
-	return isRenewOnlyMode(m.cfg.BillingStatusPath)
+	return NewBillingPolicy(m.cfg.BillingStatusPath).IsRenewOnly()
 }
 
 // certValidForAtLeast reports whether <HomeTLSDir>/<FileBase>.crt/.key exists

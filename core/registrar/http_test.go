@@ -754,25 +754,34 @@ func TestIPRateLimiterIPv6AndBoundedEviction(t *testing.T) {
 		t.Fatalf("v4-mapped IPv6 should match IPv4: %q != %q", a, b)
 	}
 
-	l := newIPRateLimiterWithCap(2, time.Minute, 3)
+	l := newSlidingWindow[string](2, time.Minute, 3)
 	t0 := time.Now()
-	if !l.allow("abuser", t0) || !l.allow("abuser", t0.Add(time.Second)) || l.allow("abuser", t0.Add(2*time.Second)) {
+	if ok1, _ := l.Allow("abuser", t0); !ok1 {
+		t.Fatal("abuser first hit should pass")
+	}
+	if ok2, _ := l.Allow("abuser", t0.Add(time.Second)); !ok2 {
+		t.Fatal("abuser second hit should pass")
+	}
+	if ok3, _ := l.Allow("abuser", t0.Add(2*time.Second)); ok3 {
 		t.Fatal("abuser should hit limit at 2")
 	}
-	if !l.allow("idle", t0.Add(3*time.Second)) || !l.allow("warm", t0.Add(4*time.Second)) {
-		t.Fatal("first two distinct keys should pass")
+	if ok1, _ := l.Allow("idle", t0.Add(3*time.Second)); !ok1 {
+		t.Fatal("idle should pass")
+	}
+	if ok2, _ := l.Allow("warm", t0.Add(4*time.Second)); !ok2 {
+		t.Fatal("warm should pass")
 	}
 	// Touch abuser so "idle" is evicted instead of abuser when a 4th key floods in.
-	if l.allow("abuser", t0.Add(5*time.Second)) {
+	if ok, _ := l.Allow("abuser", t0.Add(5*time.Second)); ok {
 		t.Fatal("abuser should remain throttled")
 	}
-	if !l.allow("flooder", t0.Add(6*time.Second)) {
+	if ok, _ := l.Allow("flooder", t0.Add(6*time.Second)); !ok {
 		t.Fatal("flooder should be admitted by evicting idle")
 	}
-	if len(l.buckets) > 3 {
-		t.Fatalf("buckets size = %d, want <= 3", len(l.buckets))
+	if l.Len() > 3 {
+		t.Fatalf("entries size = %d, want <= 3", l.Len())
 	}
-	if l.allow("abuser", t0.Add(7*time.Second)) {
+	if ok, _ := l.Allow("abuser", t0.Add(7*time.Second)); ok {
 		t.Fatal("active abuser must stay throttled after eviction")
 	}
 }
