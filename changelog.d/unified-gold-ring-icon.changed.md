@@ -1,1 +1,1 @@
-- Unify the Hogman icon across the browser extension, home portal, join page, and sign-up page with the gold-ring circular vector badge (D-46), replacing the old portrait favicons and Work letter-H icon.
+- Unify the Hogman icon across the browser extension, home portal, and join page with the gold-ring circular vector badge (D-46), replacing the old portrait favicons and Work letter-H icon.

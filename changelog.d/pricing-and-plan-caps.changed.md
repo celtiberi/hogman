@@ -1,2 +1,0 @@
-- Update default paid pen pricing to $25/year Personal and $250/year Work (`deploy/signup` sign-up copy and Stripe webhook floor defaults `2500` / `25000` cents USD, D-50).
-- Set per-plan default registrar caps via `hogman-host add` and `hogman-host plan`: Free and Personal pens default to `MAX_MEMBERS=25` and `MAX_DEVICES=50`; Work pens default to `MAX_MEMBERS=500` and `MAX_DEVICES=500` (preserving custom operator overrides, appended `.env` overrides, and existing grandfathered pens).

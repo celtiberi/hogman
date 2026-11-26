@@ -22,19 +22,33 @@ check() {  # check <label> <command>
 }
 
 # The join page builds its commands from these templates.
-while IFS= read -r tmpl; do
+join_count=0
+while IFS= read -r tmpl || [ -n "$tmpl" ]; do
+  [ -n "$tmpl" ] || continue
+  join_count=$((join_count + 1))
   cmd="$(printf '%s' "$tmpl" \
     | sed -e "s|\${host}|$host|g" -e "s|\${quoted}|'$link'|g" \
           -e 's|\${args ? .* : .*}||' -e 's|\${verb}||g' \
           -e 's|&& \./hogman .*|\&\& true|')"
   check "join.js: ${cmd:0:60}" "$cmd"
 done < <(sed -n "s/^  const make[A-Za-z]*Cmd = [a-z]* => \`\(.*\)\`;\$/\1/p" core/join-page/join.js)
+if [ "$join_count" -eq 0 ]; then
+  echo "FAIL join.js: extracted 0 command templates (extractor regex may have drifted)" >&2
+  fail=1
+fi
 
 # README code lines that start with "$ curl".
-while IFS= read -r line; do
+readme_count=0
+while IFS= read -r line || [ -n "$line" ]; do
+  [ -n "$line" ] || continue
+  readme_count=$((readme_count + 1))
   cmd="$(printf '%s' "${line#\$ }" | sed -e "s|<your-pen>|example|g")"
   check "README: ${cmd:0:60}" "$cmd"
-done < <(grep -E '^\$ curl ' README.md)
+done < <(grep -E '^\$ curl ' README.md || true)
+if [ "$readme_count" -eq 0 ]; then
+  echo "FAIL README.md: extracted 0 '\$ curl ' commands" >&2
+  fail=1
+fi
 
-[ "$fail" = 0 ] && echo "all user-facing commands run under zsh"
+[ "$fail" = 0 ] && echo "all user-facing commands run under zsh ($join_count join.js, $readme_count README.md)"
 exit "$fail"

@@ -5,7 +5,7 @@
 > - **D-18 / D-22:** Standard public web certificates via split-horizon ACME DNS-01 (`challenge-dns` + `CertMagic` with Let's Encrypt / Google Trust Services fallback), retiring per-pen `step-ca` and private root installation (`docs/security/public-certificates.md`, `/docs/security.html`).
 > - **D-24:** Hosted control plane on `hogman.network` only (no self-hosted pen server support; see `README.md`).
 
-Status: early core prototype design superseded in practice by the current implementation in [README.md](README.md), [`core/`](core/), and [`deploy/`](deploy/).
+Status: early core prototype design superseded in practice by the current implementation in [README.md](../../README.md), [`core/`](../../core/), and [`deploy/`](../../deploy/).
 
 ## 1. What this is
 

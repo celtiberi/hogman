@@ -3,7 +3,7 @@
 ---
 
 ## GROK (Grok Build CLI [stable]) - 2026-11-20 19:05 UTC
-*Headless via grok_collab.py; genuine output appended verbatim; sandboxed cwd (inlined files only).*
+*Independent model review; output appended verbatim from a sandboxed read-only workspace.*
 
 I'll review the threat model against the spike and the side-by-side agent, and check the OS and tsnet behaviors the rulings depend on.
 

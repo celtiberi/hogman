@@ -64,8 +64,8 @@ $ curl -fsSL --proto '=https' --proto-redir '=https' https://<your-pen>.gate.hog
 
 - Runs unprivileged as your user (no `TUN` interface, no root daemon) and leaves your regular
   internet, LAN, and any existing Tailscale setup untouched.
-- On macOS, it prompts for local-network access and asks once for your Mac password to configure the
-  system automatic proxy (`networksetup`).
+- On macOS, Hogman never asks for your Mac password or runs `sudo`: install the Hogman browser
+  extension (or paste the printed automatic proxy URL once in *System Settings → Network → Proxies*).
 - Add more devices from your pen's home page (*Add a device*), update anytime with
   `~/hogman update`, or leave one pen with `~/hogman leave <pen>` (its short name, full name or link).
   `~/hogman leave-all` leaves every pen and asks first.
@@ -133,10 +133,10 @@ stays up.
   proxy configuration URL* to the `http://127.0.0.1:<port>/proxy.pac` address printed by
   `hogman`. Pen sites go to Hogman; ordinary browsing stays on your VPN.
 - **Browser extension ([`browser-ext/`](browser-ext/README.md)):** Manifest V3 extension for
-  Chrome, Brave, Edge, and Firefox (128+) that routes only the pens you explicitly allow per
-  browser profile straight to `hogman` (fail-closed for everything else) while leaving regular
-  traffic on your VPN. It is not yet published on the Chrome Web Store or Mozilla Add-ons;
-  developers can load unpacked builds from `browser-ext/` today.
+  Chrome, Brave, Edge, Arc, Vivaldi, Chromium, Firefox (128+), and LibreWolf that routes only the
+  pens you explicitly allow per browser profile straight to `hogman` (fail-closed for everything
+  else) while leaving regular traffic on your VPN. Published on the Chrome Web Store, with Firefox
+  Add-ons (AMO) review pending; developers can also load unpacked builds from `browser-ext/`.
 - **Safari:** Apple does not expose proxy APIs to Safari extensions, so pause your VPN while
   visiting pen sites in Safari.
 
@@ -230,16 +230,28 @@ Built on [Headscale](https://github.com/juanfont/headscale), [Tailscale `tsnet`]
 |---|---|
 | [`core/registrar`](core/registrar) | Membership ledger, invites, devices, names, kicking, ACL policy generation, mesh DNS, and ACME DNS-01 coordination. |
 | [`core/join`](core/join) | `hogman` client: enrolls devices, runs the loopback `:443` proxy, hosts `share` nodes, and provides `hogman-native-host` for the browser extension. |
-| [`browser-ext`](browser-ext) | Manifest V3 extension for Chrome, Brave, Edge, and Firefox (VPN coexistence + per-profile pen allowlists). |
-| [`deploy/challenge-dns`](deploy/challenge-dns) | Authoritative DNS-01 challenge server (`_acme-challenge.*` TXT, `SOA`, `NS`, `CAA`; never `A`/`AAAA`). |
-| [`test-arena`](test-arena) | Disposable sandbox testing and automated red-team harness. |
+| [`browser-ext`](browser-ext) | Manifest V3 extension for Chrome, Brave, Edge, Arc, Vivaldi, Chromium, Firefox (128+), and LibreWolf (VPN coexistence + per-profile pen allowlists). |
+| [`deploy/`](deploy/README.md) | Authoritative DNS-01 challenge server ([`deploy/challenge-dns`](deploy/challenge-dns)) plus build, release, and changelog scripts. |
+| [`packaging`](packaging) | Homebrew formula and WinGet manifest templates for the `hogman` CLI. |
+
+### Building and testing from source
+
+`core/join` and `core/registrar` enforce `-tags=ts_omit_peerapiserver` at compile time so Tailscale's
+PeerAPI server is never linked in:
+
+```bash
+(cd core/join && GOFLAGS="-tags=ts_omit_peerapiserver" go test ./...)
+(cd core/registrar && GOFLAGS="-tags=ts_omit_peerapiserver" go test ./...)
+(cd deploy/challenge-dns && go test ./...)
+node --test browser-ext/test/pac_test.mjs
+```
 
 More developer docs:
 - [`core/README.md`](core/README.md) — core stack and Docker e2e test harness
 - [`browser-ext/README.md`](browser-ext/README.md) — extension architecture, build, and local install
 - [`docs/how-hogman-works.md`](docs/how-hogman-works.md) — step-by-step map of every moving part, packet flow, portal auth, revocation, and scaling
 - [`docs/security/`](docs/security/) — security design notes and public-certificate architecture
-- [`DESIGN.md`](DESIGN.md) — initial design spec and decision history
+- [`docs/history/initial-design.md`](docs/history/initial-design.md) — initial design spec and decision history
 
 ---
 

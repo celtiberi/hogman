@@ -2,7 +2,7 @@
 
 The DNS server that answers Let's Encrypt and Google Trust Services when they check a pen's
 certificate requests (ACME DNS-01). It's authoritative for `pens.hogman.network` and
-`_acme-challenge.gate.hogman.network`, which Cloudflare delegates to it, and it serves only:
+`_acme-challenge.gate.hogman.network` (delegated from the parent DNS zone), and it serves only:
 
 - **TXT** challenge records, written through its API and gone after 10 minutes;
 - **CAA** at the pens apex: only Let's Encrypt and Google, only by DNS-01, and no wildcards;
@@ -15,8 +15,8 @@ It never serves an address. Names under its zones that have nothing are answered
 `_acme-challenge.<site>.<its pen name>.pens.hogman.network` and nothing else, subject to a
 two-window cap on distinct new names by plan (D-30):
 - **Personal pens** (default): **5 per rolling hour** (`CDNS_HOURLY_CAP`) and **20 per rolling 7 days** (`CDNS_WEEKLY_CAP`).
-- **Work pens** (`--plan work`): **10 per rolling hour** (`CDNS_WORK_HOURLY_CAP`) and **60 per rolling 7 days** (`CDNS_WORK_WEEKLY_CAP`).
-- **Shared global ceiling** across all pens combined: **40 per rolling hour soft cap** (`CDNS_GLOBAL_HOURLY_CAP`) and **60 per rolling hour hard
+- **Work pens** (`--plan work`): **40 per rolling hour** (`CDNS_WORK_HOURLY_CAP`) and **120 per rolling 7 days** (`CDNS_WORK_WEEKLY_CAP`).
+- **Shared global ceiling** across all pens combined: **80 per rolling hour soft cap** (`CDNS_GLOBAL_HOURLY_CAP`) and **120 per rolling hour hard
 cap** (`CDNS_GLOBAL_HARD_HOURLY_CAP`). Slots between the soft and hard caps are reserved
 exclusively for quiet or newly created pens (pens with fewer than 2 new names in the last hour), so
 bursty pens cannot starve quiet users or new pen sign-ups. `home.<pen>` uses one slot, **attempts
@@ -36,8 +36,8 @@ only `roles/publicca.externalAccountKeyCreator`, `POST /v1/eab` mints one single
 Google account key on request, gated by the same per-pen hourly and weekly caps (`CDNS_HOURLY_CAP`,
 `CDNS_WEEKLY_CAP`) within Google's project quota.
 The service-account key never leaves this server. Google refuses an account without a
-contact, so a key is handed out only with `CDNS_GTS_CONTACT` set (`hogman-host
-fallback-contact <email>`), and the response carries that operator address for the account.
+contact, so a key is handed out only when `CDNS_GTS_CONTACT` is set, and the response carries that
+operator address for the account.
 Without it the API answers 503 rather than mint a key that would be wasted.
 
 Design and threat model: [docs/security/public-certificates.md](../../docs/security/public-certificates.md).

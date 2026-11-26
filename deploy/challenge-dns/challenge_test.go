@@ -1025,7 +1025,7 @@ func TestGlobalWeeklyBudget80PctNtfyAlert(t *testing.T) {
 	if _, err := parseNtfyURL("https://ntfy.sh/"); err == nil {
 		t.Fatal("ntfy URL without topic accepted")
 	}
-	if got, err := parseNtfyURL("https://ntfy.sh/hogman-ops-alerts"); err != nil || got != "https://ntfy.sh/hogman-ops-alerts" {
+	if got, err := parseNtfyURL("https://ntfy.sh/example-alerts"); err != nil || got != "https://ntfy.sh/example-alerts" {
 		t.Fatalf("valid https ntfy URL = (%q, %v)", got, err)
 	}
 

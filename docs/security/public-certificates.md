@@ -1,6 +1,6 @@
 # Public certificates (D-18, D-19): design
 
-Status: **signed off** by @hogman (revision 3, with the sign-off fixes). Build in the order of the plan below, one PR per step.
+Status: **signed off** (revision 3, with the sign-off fixes). Build in the order of the plan below, one PR per step.
 
 Decisions:
 - **D-18:** publicly trusted certificates only, with no private root.
@@ -52,7 +52,7 @@ We follow two existing models rather than invent our own:
   - `pens.hogman.network`: the whole subzone is delegated to the challenge DNS server. Nothing under it needs a public address.
   - `gate.hogman.network` stays in Cloudflare, with `*.gate` A (IPv4 only, like the host) and CAA, because front doors need public addresses. Only `_acme-challenge.gate.hogman.network` is delegated, for the front door's wildcard.
   - The NS target is `ns1.hogman.network`, out of bailiwick. The server binds `:53` on the host's public IPs explicitly, not on `127.0.0.53`, where systemd-resolved sits.
-  - Nothing the server can be made to do changes `hogman.network` itself (`install.sh`, releases, the site). That's @hogman's condition that won't be given up.
+  - Nothing the server can be made to do changes `hogman.network` itself (releases, the site). That invariant won't be given up.
 - **The challenge DNS server is small and authoritative:** our own server on `miekg/dns`, the library the registrar already uses. It serves only:
   - SOA and NS;
   - CAA at `pens.hogman.network`: `0 issue "letsencrypt.org; validationmethods=dns-01"`, `0 issue "pki.goog; validationmethods=dns-01"` and `0 issuewild ";"`;
@@ -223,7 +223,7 @@ Also fixed:
 2. Should the challenge DNS service be acme-dns itself (joohoi/acme-dns, extended with pen scopes and the cap), or our own small server on `miekg/dns`, which the registrar already uses?
 3. certmagic in shares: the dependency weight is acceptable, it already brings libdns and ARI, and keeps `CGO_ENABLED=0`. Better alternatives?
 4. Should `get_certificate http` for the home page and front door replace a custom Caddy build?
-5. Is a per-pen cap of 10 new certificates a week right for the trial? *(Answered: replaced with a two-window cap — 5/hour burst (`CDNS_HOURLY_CAP`) and 20/7d (`CDNS_WEEKLY_CAP`) per pen plus a 40/hour soft / 60/hour hard global ceiling (`CDNS_GLOBAL_HOURLY_CAP`, `CDNS_GLOBAL_HARD_HOURLY_CAP`) reserving headroom for quiet/new pens.)*
+5. Is a per-pen cap of 10 new certificates a week right for the trial? *(Answered: replaced with a two-window cap — 5/hour burst (`CDNS_HOURLY_CAP`) and 20/7d (`CDNS_WEEKLY_CAP`) per personal pen, 40/hour and 120/7d per Work pen, plus an 80/hour soft / 120/hour hard global ceiling (`CDNS_GLOBAL_HOURLY_CAP`, `CDNS_GLOBAL_HARD_HOURLY_CAP`) reserving headroom for quiet/new pens.)*
 6. Keep 8-character pen IDs, or longer?
 
 ## What the operator needs to set up (before code reaches production)
@@ -247,4 +247,4 @@ Also fixed:
 5. Remove step-ca and root trust.
 6. Docs, then recreate the test pens.
 
-Each step is its own PR, reviewed by the other AI.
+Each step is its own PR with a dedicated security review.
