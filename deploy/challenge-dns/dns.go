@@ -11,6 +11,7 @@ package main
 // and the SOA in the authority section. Outside the zones: REFUSED.
 
 import (
+	"net"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -40,7 +41,7 @@ func (d *DNS) zoneOf(name string) string {
 	return ""
 }
 
-func (d *DNS) soa(zone, owner string) *dns.SOA {
+func (d *DNS) soa(owner string) *dns.SOA {
 	return &dns.SOA{
 		Hdr:     dns.RR_Header{Name: dns.Fqdn(owner), Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: apexTTL},
 		Ns:      dns.Fqdn(d.ns),
@@ -48,6 +49,17 @@ func (d *DNS) soa(zone, owner string) *dns.SOA {
 		Serial:  2026112101,
 		Refresh: 3600, Retry: 600, Expire: 86400, Minttl: negTTL,
 	}
+}
+
+func clampedEDNS0Size(opt *dns.OPT) uint16 {
+	size := opt.UDPSize()
+	if size < dns.MinMsgSize {
+		return dns.MinMsgSize
+	}
+	if size > 1232 {
+		return 1232
+	}
+	return size
 }
 
 func (d *DNS) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
@@ -67,11 +79,17 @@ func (d *DNS) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 	m.Authoritative = true
-	// The zone apex, written in the asker's own letter case.
-	apexOwner := q.Name[len(q.Name)-len(dns.Fqdn(zone)):]
+	// The zone apex, written in the asker's own letter case when possible.
+	zoneFQDN := dns.Fqdn(zone)
+	qNameFQDN := dns.Fqdn(q.Name)
+	m.Question[0].Name = qNameFQDN
+	apexOwner := zoneFQDN
+	if len(qNameFQDN) >= len(zoneFQDN) && strings.EqualFold(qNameFQDN[len(qNameFQDN)-len(zoneFQDN):], zoneFQDN) {
+		apexOwner = qNameFQDN[len(qNameFQDN)-len(zoneFQDN):]
+	}
 	isApex := normalize(q.Name) == zone
 	hdr := func(t uint16, ttl uint32) dns.RR_Header {
-		return dns.RR_Header{Name: q.Name, Rrtype: t, Class: dns.ClassINET, Ttl: ttl}
+		return dns.RR_Header{Name: qNameFQDN, Rrtype: t, Class: dns.ClassINET, Ttl: ttl}
 	}
 
 	switch {
@@ -80,7 +98,7 @@ func (d *DNS) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			m.Answer = append(m.Answer, &dns.TXT{Hdr: hdr(dns.TypeTXT, answerTTL), Txt: []string{v}})
 		}
 	case isApex && q.Qtype == dns.TypeSOA:
-		m.Answer = append(m.Answer, d.soa(zone, q.Name))
+		m.Answer = append(m.Answer, d.soa(q.Name))
 	case isApex && q.Qtype == dns.TypeNS:
 		m.Answer = append(m.Answer, &dns.NS{Hdr: hdr(dns.TypeNS, apexTTL), Ns: dns.Fqdn(d.ns)})
 	case isApex && q.Qtype == dns.TypeCAA && zone == d.zones.Pens:
@@ -91,26 +109,16 @@ func (d *DNS) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		}
 	}
 	if len(m.Answer) == 0 {
-		m.Ns = append(m.Ns, d.soa(zone, apexOwner))
+		m.Ns = append(m.Ns, d.soa(apexOwner))
 	}
-	if opt := r.IsEdns0(); opt != nil {
-		udpSize := opt.UDPSize()
-		if udpSize < dns.MinMsgSize {
-			udpSize = dns.MinMsgSize
-		} else if udpSize > 1232 {
-			udpSize = 1232
-		}
-		m.SetEdns0(udpSize, false)
+	opt := r.IsEdns0()
+	if opt != nil {
+		m.SetEdns0(clampedEDNS0Size(opt), false)
 	}
-	if _, udp := w.RemoteAddr().(*netUDPAddr); udp {
+	if _, udp := w.RemoteAddr().(*net.UDPAddr); udp {
 		size := dns.MinMsgSize
-		if opt := r.IsEdns0(); opt != nil {
-			size = int(opt.UDPSize())
-			if size < dns.MinMsgSize {
-				size = dns.MinMsgSize
-			} else if size > 1232 {
-				size = 1232
-			}
+		if opt != nil {
+			size = int(clampedEDNS0Size(opt))
 		}
 		m.Truncate(size)
 	}

@@ -636,7 +636,10 @@ func (s *Service) revokeOpenKeys(ctx context.Context, memberID int64, action str
 		if err := s.hs.ExpireKey(ctx, k.HSKeyID); err != nil {
 			log.Printf("%s: expire key %s: %v", action, k.HSKeyID, err)
 		}
-		_ = s.st.RevokeDeviceKey(k.ID)
+		if err := s.st.RevokeDeviceKey(k.ID); err != nil {
+			log.Printf("%s: revoke device key %d: %v", action, k.ID, err)
+			continue
+		}
 		count++
 	}
 	return count
@@ -744,13 +747,18 @@ func (s *Service) Kick(ctx context.Context, a Actor, handle, reason string) (*Ki
 			log.Printf("kick %s: delete node %s: %v (sync will retry)", handle, d.HSNodeID, err)
 			continue
 		}
-		_ = s.st.MarkDeviceRemoved(d.ID)
+		if err := s.st.MarkDeviceRemoved(d.ID); err != nil {
+			log.Printf("kick %s: mark device %d removed: %v", handle, d.ID, err)
+			continue
+		}
 		rep.Devices++
 	}
 	// 5. Their Headscale user. Fails harmlessly if a device deletion failed; sync retries the devices.
 	if m.HSUserID != "" {
 		if err := s.hs.DeleteUser(ctx, m.HSUserID); err == nil || isHSNotFound(err) {
-			_ = s.st.ClearMemberHSUserID(m.ID)
+			if err := s.st.ClearMemberHSUserID(m.ID); err != nil {
+				log.Printf("kick %s: clear headscale user id: %v", handle, err)
+			}
 		} else {
 			log.Printf("kick %s: delete user: %v", handle, err)
 		}
@@ -1788,7 +1796,9 @@ func (s *Service) setPresence(nodes []HSNode) {
 const maxNameNoteRunes = 140
 
 // cleanNameNote turns a site description into a single plain-text line capped at
-// 140 runes, replacing line/tab breaks with spaces and dropping control chars.
+// 140 runes, replacing line/tab breaks with spaces and dropping control,
+// invisible filler, and Unicode format characters (including bidi overrides)
+// while preserving ZWJ/ZWNJ for normal emoji and script shaping.
 func cleanNameNote(raw string) string {
 	var b strings.Builder
 	b.Grow(len(raw))
@@ -1796,7 +1806,9 @@ func cleanNameNote(raw string) string {
 		switch {
 		case r == '\r' || r == '\n' || r == '\t' || r == '\u2028' || r == '\u2029':
 			b.WriteByte(' ')
-		case unicode.IsControl(r):
+		case r == '\u200c' || r == '\u200d':
+			b.WriteRune(r)
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u034f' || r == '\u2800' || r == '\u3164' || r == '\uffa0':
 			continue
 		default:
 			b.WriteRune(r)
@@ -2346,13 +2358,8 @@ func (s *Service) releaseLocked(a Actor, rawName string) error {
 			toRelease = append(toRelease, x)
 		}
 	}
-	for _, x := range toRelease {
-		if x.Private {
-			// D-21: private random labels are permanently retired on release, never recycled.
-			_ = s.st.RetireName(x.Name)
-		} else {
-			_ = s.st.DeleteName(x.Name)
-		}
+	if err := s.st.ReleaseNames(toRelease); err != nil {
+		return err
 	}
 	s.st.Audit(a.String(), "name.release", name+"."+s.cfg.Zone, "")
 	return nil

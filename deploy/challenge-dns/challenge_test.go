@@ -11,9 +11,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -958,7 +960,7 @@ func TestRollbackReleaseIfUnused(t *testing.T) {
 	}
 }
 
-func TestDefaultWorkAndPersonalCapsD38(t *testing.T) {
+func TestDefaultWorkAndPersonalCaps(t *testing.T) {
 	s, now := newTestStore(t)
 	if s.hourlyCap() != 5 || s.weeklyCap() != 20 {
 		t.Fatalf("personal defaults = (%d, %d), want (5, 20)", s.hourlyCap(), s.weeklyCap())
@@ -1128,5 +1130,253 @@ func TestGlobalWeeklyBudget80PctNtfyAlert(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for post-cooldown alert")
+	}
+}
+
+func TestDNSServeNoTrailingDotNoPanic(t *testing.T) {
+	s, _ := newTestStore(t)
+	cA, _ := mustCred(t, s, "pen", penA)
+	txtName := ch("web", penA)
+	if err := s.PutTXT(cA, txtName, val1); err != nil {
+		t.Fatal(err)
+	}
+	srv := &DNS{store: s, zones: testZones, ns: "ns1.example.com", mbox: "hostmaster.example.com"}
+
+	for _, qname := range []string{"pens.hogman.network", "sub.PENS.hogman.network", txtName} {
+		req := new(dns.Msg)
+		req.Question = []dns.Question{{Name: qname, Qtype: dns.TypeTXT, Qclass: dns.ClassINET}}
+		var got *dns.Msg
+		w := &captureDNSWriter{onWrite: func(m *dns.Msg) { got = m }}
+		srv.ServeDNS(w, req)
+		if got == nil || !got.Authoritative || got.Rcode != dns.RcodeSuccess {
+			t.Fatalf("qname %q: unexpected DNS response %+v", qname, got)
+		}
+		if qname == txtName && len(got.Answer) != 1 {
+			t.Fatalf("qname %q: expected 1 TXT answer, got %+v", qname, got.Answer)
+		}
+		if _, err := got.Pack(); err != nil {
+			t.Fatalf("qname %q: DNS response failed to Pack: %v", qname, err)
+		}
+	}
+}
+
+func TestAPIEABMintFailureDoesNotBurnQuotaOrEverChallenged(t *testing.T) {
+	s, _ := newTestStore(t)
+	s.hourlyCapNames = 1
+	s.capNames = 2
+	_, tokA := mustCred(t, s, "pen", penA)
+	cB, tokB := mustCred(t, s, "pen", penB)
+	cC, tokC := mustCred(t, s, "pen", "thirdpen1234")
+
+	failNext := true
+	api := &API{
+		store:  s,
+		global: &windowLimiter{perMin: 20, perHour: 90},
+		eab: eabFunc(func() (string, string, error) {
+			if failNext {
+				return "", "", errors.New("upstream 502")
+			}
+			return "kid-ok", "bWFjLWtleQ", nil
+		}),
+		contact: "ops@example.com",
+	}
+	h := api.Handler()
+	admin := AdminHandler(s)
+
+	// Upstream Mint failure returns 502 and does NOT consume penA's 1/hr quota.
+	if rec := doAPI(t, h, "POST", "/v1/eab", tokA, nil); rec.Code != http.StatusBadGateway {
+		t.Fatalf("failed mint = %d %s, want 502", rec.Code, rec.Body)
+	}
+	failNext = false
+	if rec := doAPI(t, h, "POST", "/v1/eab", tokA, nil); rec.Code != http.StatusCreated {
+		t.Fatalf("retry after failed mint = %d %s, want 201", rec.Code, rec.Body)
+	}
+
+	// Upstream Mint failure on penB must not mark EverChallenged, so rollback still releases the name.
+	failNext = true
+	if rec := doAPI(t, h, "POST", "/v1/eab", tokB, nil); rec.Code != http.StatusBadGateway {
+		t.Fatalf("penB failed mint = %d %s, want 502", rec.Code, rec.Body)
+	}
+	delRec := doAPI(t, admin, "DELETE", "/admin/creds/"+cB.ID+"?release_if_unused=1", "", nil)
+	if delRec.Code != http.StatusNoContent || delRec.Header().Get("X-Name-Released") != "true" {
+		t.Fatalf("rollback after failed EAB mint: code=%d released=%q", delRec.Code, delRec.Header().Get("X-Name-Released"))
+	}
+	if s.NameUsed(penB) {
+		t.Fatal("penB should be released after failed EAB mint")
+	}
+
+	// Concurrent requests for penC (cap=1/hr): second is rejected with 429 while first is in flight,
+	// and if penC is revoked mid-flight, the in-flight Mint gets 401 and name stays retired.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	api.eab = eabFunc(func() (string, string, error) {
+		close(entered)
+		<-release
+		return "kid-c", "bWFjLWtleQ", nil
+	})
+	var wg sync.WaitGroup
+	var firstCode int
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		firstCode = doAPI(t, h, "POST", "/v1/eab", tokC, nil).Code
+	}()
+	<-entered
+	if rec := doAPI(t, h, "POST", "/v1/eab", tokC, nil); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("concurrent second EAB while in-flight = %d %s, want 429", rec.Code, rec.Body)
+	}
+	// Revoking while in-flight must NOT release penC's name.
+	delC := doAPI(t, admin, "DELETE", "/admin/creds/"+cC.ID+"?release_if_unused=1", "", nil)
+	if delC.Code != http.StatusNoContent || delC.Header().Get("X-Name-Released") != "false" {
+		t.Fatalf("delete during in-flight EAB: code=%d released=%q, want false", delC.Code, delC.Header().Get("X-Name-Released"))
+	}
+	close(release)
+	wg.Wait()
+	if firstCode != http.StatusUnauthorized {
+		t.Fatalf("in-flight EAB revoked before commit = %d, want 401", firstCode)
+	}
+
+	// Repeated upstream 502s from one pen hit that pen's cooldown (5/min) while
+	// leaving global headroom (10/min) for other pens once upstream recovers.
+	s2, _ := newTestStore(t)
+	_, tokLoop := mustCred(t, s2, "pen", penA)
+	_, tokPeer := mustCred(t, s2, "pen", penB)
+	upstreamDown := true
+	api2 := &API{
+		store:  s2,
+		global: &windowLimiter{perMin: 10, perHour: 10},
+		eab: eabFunc(func() (string, string, error) {
+			if upstreamDown {
+				return "", "", errors.New("upstream 502")
+			}
+			return "kid-peer", "bWFjLWtleQ", nil
+		}),
+		contact: "ops@example.com",
+	}
+	h2 := api2.Handler()
+	for i := 0; i < 5; i++ {
+		if rec := doAPI(t, h2, "POST", "/v1/eab", tokLoop, nil); rec.Code != http.StatusBadGateway {
+			t.Fatalf("loop failure %d = %d, want 502", i, rec.Code)
+		}
+	}
+	if rec := doAPI(t, h2, "POST", "/v1/eab", tokLoop, nil); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("6th loop attempt = %d, want 429 per-cred cooldown", rec.Code)
+	}
+	upstreamDown = false
+	if rec := doAPI(t, h2, "POST", "/v1/eab", tokPeer, nil); rec.Code != http.StatusCreated {
+		t.Fatalf("peer pen starved after another pen's 502 burst: %d %s", rec.Code, rec.Body)
+	}
+
+	// Failing upstream mints from N distinct pens still consume the global limiter
+	// so fleet-wide upstream calls stop at the global cap during an outage.
+	s3, _ := newTestStore(t)
+	var distinctTokens []string
+	for i := 0; i < 4; i++ {
+		_, tok := mustCred(t, s3, "pen", fmt.Sprintf("distinctpen%d", i))
+		distinctTokens = append(distinctTokens, tok)
+	}
+	upstreamCalls := 0
+	api3 := &API{
+		store:  s3,
+		global: &windowLimiter{perMin: 3, perHour: 3},
+		eab: eabFunc(func() (string, string, error) {
+			upstreamCalls++
+			return "", "", errors.New("upstream quota exhausted")
+		}),
+		contact: "ops@example.com",
+	}
+	h3 := api3.Handler()
+	for i := 0; i < 3; i++ {
+		if rec := doAPI(t, h3, "POST", "/v1/eab", distinctTokens[i], nil); rec.Code != http.StatusBadGateway {
+			t.Fatalf("distinct pen %d failed mint = %d, want 502", i, rec.Code)
+		}
+	}
+	// 4th distinct pen must stop at the global cap without calling upstream Mint.
+	if rec := doAPI(t, h3, "POST", "/v1/eab", distinctTokens[3], nil); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("4th distinct pen beyond global cap = %d %s, want 429", rec.Code, rec.Body)
+	}
+	if upstreamCalls != 3 {
+		t.Fatalf("upstream Mint called %d times, want 3 (bounded by global cap)", upstreamCalls)
+	}
+}
+
+func TestEABCredFailCooldownPrunesExpiredEntries(t *testing.T) {
+	s, now := newTestStore(t)
+	c1, tok1 := mustCred(t, s, "pen", penA)
+	c2, tok2 := mustCred(t, s, "pen", penB)
+	api := &API{
+		store:   s,
+		global:  &windowLimiter{perMin: 20, perHour: 90},
+		eab:     eabFunc(func() (string, string, error) { return "", "", errors.New("upstream 502") }),
+		contact: "ops@example.com",
+	}
+	h := api.Handler()
+
+	if rec := doAPI(t, h, "POST", "/v1/eab", tok1, nil); rec.Code != http.StatusBadGateway {
+		t.Fatalf("c1 failed mint = %d, want 502", rec.Code)
+	}
+	if _, ok := api.credFails[c1.ID]; !ok {
+		t.Fatalf("expected c1 %q recorded in credFails", c1.ID)
+	}
+
+	// Simulate c1 being deleted/revoked so it never calls /v1/eab again.
+	if err := s.RemoveCred(c1.ID); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(time.Hour + time.Minute)
+
+	// Recording a failure for another credential sweeps expired entries.
+	if rec := doAPI(t, h, "POST", "/v1/eab", tok2, nil); rec.Code != http.StatusBadGateway {
+		t.Fatalf("c2 failed mint = %d, want 502", rec.Code)
+	}
+	api.failMu.Lock()
+	_, hasC1 := api.credFails[c1.ID]
+	_, hasC2 := api.credFails[c2.ID]
+	total := len(api.credFails)
+	api.failMu.Unlock()
+	if hasC1 || !hasC2 || total != 1 {
+		t.Fatalf("credFails not pruned after expiry: hasC1=%v hasC2=%v len=%d", hasC1, hasC2, total)
+	}
+}
+
+func TestAdminCredsEmptyJSONArrayAndErrorCodes(t *testing.T) {
+	s, _ := newTestStore(t)
+	admin := AdminHandler(s)
+
+	// Empty credential list returns [] rather than null.
+	rec := doAPI(t, admin, "GET", "/admin/creds", "", nil)
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("GET /admin/creds empty = %d %q, want 200 []", rec.Code, rec.Body.String())
+	}
+
+	// Unknown credential returns 404 on plan update and delete.
+	if rec := doAPI(t, admin, "PUT", "/admin/creds/missing/plan", "", map[string]string{"plan": "work"}); rec.Code != http.StatusNotFound {
+		t.Fatalf("PUT missing plan = %d %s, want 404", rec.Code, rec.Body)
+	}
+	if rec := doAPI(t, admin, "DELETE", "/admin/creds/missing", "", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("DELETE missing = %d %s, want 404", rec.Code, rec.Body)
+	}
+
+	// Host cred cannot have a plan set -> 400.
+	hostCred, _ := mustCred(t, s, "host", "")
+	if rec := doAPI(t, admin, "PUT", "/admin/creds/"+hostCred.ID+"/plan", "", map[string]string{"plan": "work"}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT host plan = %d %s, want 400", rec.Code, rec.Body)
+	}
+
+	// Persistence error returns 500 rather than 404/400.
+	penCred, _ := mustCred(t, s, "pen", penA)
+	badDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(badDir, []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.path = filepath.Join(badDir, "state.json")
+	if rec := doAPI(t, admin, "POST", "/admin/creds", "", map[string]string{"kind": "pen", "pen_id": penB}); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("POST cred with broken state path = %d %s, want 500", rec.Code, rec.Body)
+	}
+	if rec := doAPI(t, admin, "PUT", "/admin/creds/"+penCred.ID+"/plan", "", map[string]string{"plan": "work"}); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("PUT plan with broken state path = %d %s, want 500", rec.Code, rec.Body)
+	}
+	if rec := doAPI(t, admin, "DELETE", "/admin/creds/"+penCred.ID, "", nil); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("DELETE with broken state path = %d %s, want 500", rec.Code, rec.Body)
 	}
 }

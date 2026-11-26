@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-func TestPenCapsMembersDevicesAndRedeemGeneric409I30(t *testing.T) {
+func TestPenCapsMembersDevicesAndRedeemGeneric409(t *testing.T) {
 	e := newTestEnv(t)
 	e.svc.cfg.MaxMembers = 3
 	e.svc.cfg.MaxDevices = 3
@@ -129,7 +129,7 @@ func TestPenCapsMembersDevicesAndRedeemGeneric409I30(t *testing.T) {
 	}
 }
 
-func TestOwnerLockoutReserveAndCLIBypassAndGrandfatheringI30(t *testing.T) {
+func TestOwnerLockoutReserveAndCLIBypassAndGrandfathering(t *testing.T) {
 	e := newTestEnv(t)
 	e.svc.cfg.MaxDevices = 2
 	ctx := context.Background()
@@ -247,7 +247,7 @@ func TestOwnerLockoutReserveAndCLIBypassAndGrandfatheringI30(t *testing.T) {
 	}
 }
 
-func TestSyncEnrollEnforcesDeviceCapAndNonAdminOpenKeyDefaultI30(t *testing.T) {
+func TestSyncEnrollEnforcesDeviceCapAndNonAdminOpenKeyDefault(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
 	cli := Actor{CLI: true}
@@ -332,7 +332,7 @@ func TestSyncEnrollEnforcesDeviceCapAndNonAdminOpenKeyDefaultI30(t *testing.T) {
 	}
 }
 
-func TestSyncPendingDeleteVerifiesMachineKey1368(t *testing.T) {
+func TestSyncPendingDeleteVerifiesMachineKey(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
 	cli := Actor{CLI: true}

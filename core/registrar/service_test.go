@@ -1152,3 +1152,84 @@ func TestKickedNamesPermanentlyRetired(t *testing.T) {
 		t.Fatalf("reclaim voluntarily released active name: %v", err)
 	}
 }
+
+func TestCLIStrconvValidation(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	for _, args := range [][]string{
+		{"invite", "revoke", "abc"},
+		{"invite", "revoke", "0"},
+		{"invite", "revoke", "-5"},
+		{"device", "rm", "notanid"},
+		{"device", "rm", "0"},
+		{"name", "claim", "alice", "web", "notanid"},
+		{"name", "claim", "alice", "web", "-1"},
+		{"audit", "nope"},
+		{"audit", "0"},
+		{"audit", "-3"},
+	} {
+		err := cli(ctx, e.svc, args)
+		var prob *Problem
+		if !errors.As(err, &prob) || prob.Status != 400 {
+			t.Errorf("cli(%v) = %v, want 400 Problem", args, err)
+		}
+	}
+}
+
+func TestReleaseNamesAndMarkDeviceRemoved(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	cliActor := Actor{CLI: true}
+
+	if _, err := e.svc.AddMember(ctx, cliActor, "alice", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	_, srv := e.addDevice(t, "alice", "server", "srv1", "100.64.0.11", "")
+	if _, err := e.svc.Claim(cliActor, "alice", "blog", srv.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Claim(cliActor, "alice", "img.blog", srv.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	privFQDN, err := e.svc.ClaimPrivate(cliActor, "alice", srv.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privLabel := strings.TrimSuffix(privFQDN, "."+e.svc.cfg.Zone)
+	if err := e.svc.Release(cliActor, privLabel); err != nil {
+		t.Fatalf("Release private: %v", err)
+	}
+	gotPriv, err := e.st.NameByName(privLabel)
+	if err != nil || gotPriv.RetiredAt == nil {
+		t.Fatalf("private name after Release = %+v, err=%v; want retired", gotPriv, err)
+	}
+	// Multi-row non-private release deletes both parent and child atomically.
+	if err := e.svc.Release(cliActor, "blog"); err != nil {
+		t.Fatalf("Release blog subtree: %v", err)
+	}
+	for _, n := range []string{"blog", "img.blog"} {
+		if _, err := e.st.NameByName(n); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("released non-private %q still present: err=%v", n, err)
+		}
+	}
+	// Re-claim blog to verify MarkDeviceRemoved unpoints names aimed at the removed device.
+	if _, err := e.svc.Claim(cliActor, "alice", "blog", srv.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := e.st.MarkDeviceRemoved(srv.ID); err != nil {
+		t.Fatalf("MarkDeviceRemoved: %v", err)
+	}
+	gotDev, err := e.st.DeviceByID(srv.ID)
+	if err != nil || gotDev.RemovedAt == nil {
+		t.Fatalf("removed device after MarkDeviceRemoved = %+v, err=%v; want RemovedAt != nil", gotDev, err)
+	}
+	live, err := e.st.LiveDevices()
+	if err != nil || len(live) != 0 {
+		t.Fatalf("LiveDevices after MarkDeviceRemoved = %+v, err=%v; want empty", live, err)
+	}
+	gotBlog, err := e.st.NameByName("blog")
+	if err != nil || gotBlog.DeviceID != nil {
+		t.Fatalf("name after MarkDeviceRemoved = %+v, err=%v; want unpointed", gotBlog, err)
+	}
+}

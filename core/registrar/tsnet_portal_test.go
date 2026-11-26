@@ -216,4 +216,10 @@ func TestSetupAllowsEmptyCoreIPInTsnetModeAndConfigureTestCA(t *testing.T) {
 	if svc2.cfg.CoreIP != "100.64.0.9" {
 		t.Fatalf("expected CoreIP from mesh-ip, got %q", svc2.cfg.CoreIP)
 	}
+
+	// Unreadable authKeyFile (e.g. a directory instead of a file) must fail loudly rather than booting without an auth key.
+	_, err := startEmbeddedMesh(context.Background(), svc2, nil, tsDir, "https://control.example.test", "core", tsDir, "")
+	if err == nil || !strings.Contains(err.Error(), "read auth key") {
+		t.Fatalf("startEmbeddedMesh with directory authKeyFile = %v, want read auth key error", err)
+	}
 }

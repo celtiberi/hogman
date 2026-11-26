@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-func TestRenewOnlyPolicyAndHTTPEnforcementI7(t *testing.T) {
+func TestRenewOnlyPolicyAndHTTPEnforcement(t *testing.T) {
 	e := newTestEnv(t)
 	if _, err := e.svc.AddMember(context.Background(), Actor{CLI: true}, "owner1", "owner"); err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestRenewOnlyPolicyAndHTTPEnforcementI7(t *testing.T) {
 	_ = os.Remove(billingPath)
 }
 
-func TestHomeCertManagerRenewOnlyReuseAndCapI7(t *testing.T) {
+func TestHomeCertManagerRenewOnlyReuseAndCap(t *testing.T) {
 	dir := t.TempDir()
 	tlsDir := filepath.Join(dir, "tls")
 	storageDir := filepath.Join(dir, "acme")

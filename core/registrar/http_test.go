@@ -530,8 +530,9 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 	h := MeshHandler(e.svc)
 	js := map[string]string{"Content-Type": "application/json"}
 
-	// Control characters / newlines are stripped and whitespace collapsed.
-	body := `{"name":"photos","note":"  Summer\n\ttrip\u0000\u001b[31m   photos  "}`
+	// Control characters, invisible fillers, Unicode bidi overrides, and newlines
+	// are stripped while normal ZWJ emojis are preserved.
+	body := `{"name":"photos","note":"  Summer\n\ttrip\u0000\u001b[31m\u202e\u200b\u3164   photos 👩\u200d💻  "}`
 	if rec := doMeshReq(h, "POST", "/api/names", "100.64.0.11", body, js); rec.Code != 201 {
 		t.Fatalf("server claim with note: %d %s", rec.Code, rec.Body.String())
 	}
@@ -568,7 +569,7 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 	for _, d := range got {
 		byName[d.Name] = d
 	}
-	if byName["photos.bobo.hogman"].Member != "alice" || byName["photos.bobo.hogman"].Note != "Summer trip[31m photos" {
+	if byName["photos.bobo.hogman"].Member != "alice" || byName["photos.bobo.hogman"].Note != "Summer trip[31m photos 👩‍💻" {
 		t.Fatalf("photos directory entry = %+v", byName["photos.bobo.hogman"])
 	}
 	if gotRunes := len([]rune(byName["blog.bobo.hogman"].Note)); gotRunes != 140 {
@@ -581,7 +582,7 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 	}
 	got = readDir("100.64.0.11")
 	for _, d := range got {
-		if d.Name == "photos.bobo.hogman" && d.Note != "Summer trip[31m photos" {
+		if d.Name == "photos.bobo.hogman" && d.Note != "Summer trip[31m photos 👩‍💻" {
 			t.Fatalf("photos note mutated after 409: %+v", d)
 		}
 	}
@@ -1098,5 +1099,23 @@ func TestPortalPresenceDirectoryAndAdminDevices(t *testing.T) {
 	}
 	if _, ok := gotDev["bob-ghost"]["online"]; ok {
 		t.Fatalf("bob-ghost absent from Headscale should omit online: %#v", gotDev["bob-ghost"])
+	}
+}
+
+func TestMeHelpersPropagateStoreErrors(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	owner, err := e.svc.AddMember(ctx, Actor{CLI: true}, "alice", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ownerCount(e.svc, Actor{Member: owner}); err == nil {
+		t.Fatal("ownerCount on closed store = nil, want error")
+	}
+	if _, err := buildPenDeleteView(e.svc, "alice", &hostMeta{Pen: "bobo", DeleteURL: "https://example.test"}); err == nil {
+		t.Fatal("buildPenDeleteView on closed store = nil, want error")
 	}
 }

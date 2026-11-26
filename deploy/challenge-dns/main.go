@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -26,8 +27,6 @@ import (
 
 	"github.com/miekg/dns"
 )
-
-type netUDPAddr = net.UDPAddr
 
 func env(k, def string) string {
 	if v := os.Getenv(k); v != "" {
@@ -298,7 +297,7 @@ func serve() error {
 	}
 	zones := zonesFromEnv()
 	statePath := env("CDNS_STATE", "/var/lib/challenge-dns/state.json")
-	if err := os.MkdirAll(dirOf(statePath), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
 		return err
 	}
 	store, err := OpenStore(statePath, zones)
@@ -366,7 +365,7 @@ func serve() error {
 		return fmt.Errorf("CDNS_API_GID: %w", err)
 	}
 	apiSock := env("CDNS_API_SOCK", "/run/hogman-acme/api.sock")
-	if err := os.MkdirAll(dirOf(apiSock), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(apiSock), 0o755); err != nil {
 		return err
 	}
 	apiLn, err := listenUnix(apiSock, 0o660, gid)
@@ -376,7 +375,7 @@ func serve() error {
 	serveHTTP("API", apiLn, api.Handler())
 
 	adminSock := env("CDNS_ADMIN_SOCK", "/run/challenge-dns/admin.sock")
-	if err := os.MkdirAll(dirOf(adminSock), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(adminSock), 0o700); err != nil {
 		return err
 	}
 	adminLn, err := listenUnix(adminSock, 0o600, -1)
@@ -399,15 +398,6 @@ func serve() error {
 	case err := <-errc:
 		return err
 	}
-}
-
-func dirOf(p string) string {
-	for i := len(p) - 1; i >= 0; i-- {
-		if p[i] == '/' {
-			return p[:i]
-		}
-	}
-	return "."
 }
 
 func credCmd(args []string) error {
