@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -52,7 +53,16 @@ func TestPresenceCacheTTLCoalescingAndErrorBackoff(t *testing.T) {
 			results[idx] = cache.Snapshot(context.Background())
 		}(i)
 	}
-	time.Sleep(10 * time.Millisecond)
+	// Wait deterministically until the second caller has coalesced onto the in-flight call.
+	for {
+		cache.mu.RLock()
+		joined := cache.flight != nil && cache.flight.waiters == 1
+		cache.mu.RUnlock()
+		if joined {
+			break
+		}
+		runtime.Gosched()
+	}
 	close(gate)
 	wg.Wait()
 
@@ -118,6 +128,16 @@ func TestKeyRotatorCoalescingCooldownAndConcurrencyCap(t *testing.T) {
 		}()
 	}
 	<-started
+	// Wait deterministically until the second node-1 caller has joined the in-flight call.
+	for {
+		rot.mu.Lock()
+		joined := rot.flight["node-1"] != nil && rot.flight["node-1"].waiters == 1
+		rot.mu.Unlock()
+		if joined {
+			break
+		}
+		runtime.Gosched()
+	}
 	if err := rot.Do(context.Background(), "node-2", func() error { return nil }); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("concurrency-capped node-2 = %v, want ErrNotFound", err)
 	}

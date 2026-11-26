@@ -102,8 +102,9 @@ func nodeMatchesAddr(n *HSNode, addr netip.Addr) bool {
 // ------------------------------------------------------------- keyRotator --
 
 type rotateCall struct {
-	done chan struct{}
-	err  error
+	done    chan struct{}
+	err     error
+	waiters int
 }
 
 // keyRotator provides per-node single-flight coalescing, per-node cooldown,
@@ -187,6 +188,8 @@ func (r *keyRotator) Do(ctx context.Context, keyID string, fn func() error) erro
 			r.mu.Unlock()
 			return ErrNotFound
 		}
+	} else {
+		call.waiters++
 	}
 	r.mu.Unlock()
 
@@ -201,8 +204,9 @@ func (r *keyRotator) Do(ctx context.Context, keyID string, fn func() error) erro
 // ---------------------------------------------------------- presenceCache --
 
 type presenceCall struct {
-	done  chan struct{}
-	nodes map[string]HSNode
+	done    chan struct{}
+	nodes   map[string]HSNode
+	waiters int
 }
 
 // presenceCache maintains a display-only TTL cache of Headscale nodes with
@@ -321,6 +325,8 @@ func (c *presenceCache) Snapshot(ctx context.Context) map[string]HSNode {
 			c.mu.Unlock()
 			return stale
 		}
+	} else {
+		call.waiters++
 	}
 	c.mu.Unlock()
 
