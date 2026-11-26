@@ -379,24 +379,7 @@ func aliceSrvMember(t *testing.T, e *testEnv, handle string) *Member {
 	return m
 }
 
-type fakeCertmagicIssuer struct {
-	key  string
-	cert *certmagic.IssuedCertificate
-	err  error
-	hits atomic.Int32
-}
-
-func (f *fakeCertmagicIssuer) IssuerKey() string { return f.key }
-
-func (f *fakeCertmagicIssuer) Issue(context.Context, *x509.CertificateRequest) (*certmagic.IssuedCertificate, error) {
-	f.hits.Add(1)
-	if f.err != nil {
-		return nil, f.err
-	}
-	return f.cert, nil
-}
-
-func TestShouldFailoverAndFailoverIssuer(t *testing.T) {
+func TestShouldFailoverACME(t *testing.T) {
 	if shouldFailoverACME(nil) {
 		t.Fatal("nil error must not failover")
 	}
@@ -420,38 +403,6 @@ func TestShouldFailoverAndFailoverIssuer(t *testing.T) {
 	}
 	if !shouldFailoverACME(&net.OpError{Op: "dial", Err: errors.New("connection refused")}) {
 		t.Fatal("network outage must failover")
-	}
-
-	okCert := &certmagic.IssuedCertificate{Certificate: []byte("cert")}
-	var fbInits atomic.Int32
-	primary := &fakeCertmagicIssuer{key: "primary", cert: okCert}
-	fb := &fakeCertmagicIssuer{key: "fallback", cert: okCert}
-	iss := &FailoverIssuer{
-		Primary: primary,
-		FallbackFactory: func(context.Context) (certmagic.Issuer, error) {
-			fbInits.Add(1)
-			return fb, nil
-		},
-	}
-
-	// Primary succeeds: fallback never touched.
-	if got, err := iss.Issue(context.Background(), nil); err != nil || got != okCert || fbInits.Load() != 0 {
-		t.Fatalf("primary success path failed: got=%v err=%v fbInits=%d", got, err, fbInits.Load())
-	}
-
-	// DNS error: fallback never touched.
-	primary.err = acme.Problem{Type: "urn:ietf:params:acme:error:dns", Status: http.StatusBadRequest}
-	if _, err := iss.Issue(context.Background(), nil); err == nil || fbInits.Load() != 0 || fb.hits.Load() != 0 {
-		t.Fatalf("DNS failure wrongly triggered fallback: err=%v fbInits=%d hits=%d", err, fbInits.Load(), fb.hits.Load())
-	}
-
-	// 429 rateLimited: lazy fallback initializes once and succeeds cleanly.
-	primary.err = acme.Problem{Type: "urn:ietf:params:acme:error:rateLimited", Status: http.StatusTooManyRequests}
-	if got, err := iss.Issue(context.Background(), nil); err != nil || got != okCert || fbInits.Load() != 1 || fb.hits.Load() != 1 {
-		t.Fatalf("429 failover failed: got=%v err=%v fbInits=%d hits=%d", got, err, fbInits.Load(), fb.hits.Load())
-	}
-	if _, err := iss.Issue(context.Background(), nil); err != nil || fbInits.Load() != 1 || fb.hits.Load() != 2 {
-		t.Fatalf("second 429 reused factory unexpectedly: err=%v fbInits=%d hits=%d", err, fbInits.Load(), fb.hits.Load())
 	}
 }
 
@@ -1176,4 +1127,97 @@ func TestHomeCertManagerCloseIsIdempotent(t *testing.T) {
 	m.Run(ctx)
 	m.Close()
 	m.Close()
+}
+
+func TestVerifyTLSFilesUsesBaseInErrors(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, keyPEM := makeSelfSignedPEM(t, "*.gate.example.test", time.Now().Add(-time.Hour))
+	if err := writeTLSFilesAtomic(dir, "gate", certPEM, keyPEM); err != nil {
+		t.Fatal(err)
+	}
+	err := VerifyTLSFiles(dir, "gate")
+	if err == nil || !strings.Contains(err.Error(), "gate certificate expired at") {
+		t.Fatalf("VerifyTLSFiles(gate) = %v, want error naming gate certificate", err)
+	}
+}
+
+func TestHomeCertManagerHandleFailoverRenewOnlyCap(t *testing.T) {
+	dir := t.TempDir()
+	tlsDir := filepath.Join(dir, "tls")
+	billingPath := filepath.Join(dir, "billing-status.json")
+	if err := os.WriteFile(billingPath, []byte(`{"state":"renew_only"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var fbHits atomic.Int32
+	fbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fbHits.Add(1)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer fbSrv.Close()
+
+	m, err := NewHomeCertManager(HomeConfig{
+		Zone:              "bobo.pens.example.test",
+		HomeTLSDir:        tlsDir,
+		StorageDir:        filepath.Join(dir, "acme"),
+		PrimaryCA:         "http://127.0.0.1:1/dir",
+		FallbackCA:        fbSrv.URL + "/dir",
+		BillingStatusPath: billingPath,
+		Backend:           &stubACMEBackend{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	// Valid on-disk cert (>= 1h remaining) during renew-only wake: failover skips CA entirely.
+	certPEM, keyPEM := makeSelfSignedPEM(t, "home.bobo.pens.example.test", time.Now().Add(24*time.Hour))
+	if err := writeHomeTLSAtomic(tlsDir, certPEM, keyPEM); err != nil {
+		t.Fatal(err)
+	}
+	m.handleFailover(context.Background())
+	if fbHits.Load() != 0 {
+		t.Fatalf("handleFailover touched fallback CA despite valid cert on disk: hits=%d", fbHits.Load())
+	}
+
+	// Seed an expired managed primary cert into storage AND m.cache (the real
+	// production precondition when background renewal emits cert_failed).
+	// Calling handleFailover must bypass ManageSync's shared-cache short-circuit
+	// and actually contact the fallback CA once, then enforce the 1-per-wake cap.
+	expCertPEM, expKeyPEM := makeSelfSignedPEM(t, "home.bobo.pens.example.test", time.Now().Add(-time.Hour))
+	if err := writeHomeTLSAtomic(tlsDir, expCertPEM, expKeyPEM); err != nil {
+		t.Fatal(err)
+	}
+	pCertKey := certmagic.StorageKeys.SiteCert(m.primaryIss.IssuerKey(), m.host)
+	pPrivKey := certmagic.StorageKeys.SitePrivateKey(m.primaryIss.IssuerKey(), m.host)
+	pMetaKey := certmagic.StorageKeys.SiteMeta(m.primaryIss.IssuerKey(), m.host)
+	if err := m.storage.Store(context.Background(), pCertKey, expCertPEM); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.storage.Store(context.Background(), pPrivKey, expKeyPEM); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.storage.Store(context.Background(), pMetaKey, []byte(`{"sans":["home.bobo.pens.example.test"]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.syncStoredCert(context.Background(), m.primaryCfg, m.primaryIss); err != nil {
+		t.Fatalf("seed primary cert in cache: %v", err)
+	}
+	m.handleFailover(context.Background())
+	afterFirst := fbHits.Load()
+	if afterFirst == 0 {
+		t.Fatal("expected first failover attempt with cached expired primary cert to reach fallback CA")
+	}
+	m.handleFailover(context.Background())
+	if fbHits.Load() != afterFirst {
+		t.Fatalf("second failover in same renew-only wake bypassed 1-per-wake cap: hits=%d -> %d", afterFirst, fbHits.Load())
+	}
+
+	// Synchronous ForceRenew failure on primary must NOT enqueue a stale token on failoverCh.
+	_ = m.ForceRenew(context.Background())
+	select {
+	case <-m.failoverCh:
+		t.Fatal("synchronous ForceRenew leaked a stale token into failoverCh")
+	default:
+	}
 }

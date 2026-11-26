@@ -328,65 +328,6 @@ func shouldFailoverACME(err error) bool {
 	return false
 }
 
-// FailoverIssuer wraps a primary issuer and a lazily constructed fallback issuer,
-// triggering fallback only when shouldFailoverACME approves the failure.
-type FailoverIssuer struct {
-	Primary         certmagic.Issuer
-	FallbackFactory func(context.Context) (certmagic.Issuer, error)
-	AllowFailover   func(error) bool
-
-	mu       sync.Mutex
-	fallback certmagic.Issuer
-}
-
-func (f *FailoverIssuer) IssuerKey() string {
-	return f.Primary.IssuerKey()
-}
-
-func (f *FailoverIssuer) PreCheck(ctx context.Context, names []string, interactive bool) error {
-	if pc, ok := f.Primary.(certmagic.PreChecker); ok {
-		return pc.PreCheck(ctx, names, interactive)
-	}
-	return nil
-}
-
-func (f *FailoverIssuer) Issue(ctx context.Context, csr *x509.CertificateRequest) (*certmagic.IssuedCertificate, error) {
-	cert, err := f.Primary.Issue(ctx, csr)
-	if err == nil {
-		return cert, nil
-	}
-	allow := f.AllowFailover
-	if allow == nil {
-		allow = shouldFailoverACME
-	}
-	if !allow(err) || f.FallbackFactory == nil {
-		return nil, err
-	}
-	fb, fbErr := f.getFallback(ctx)
-	if fbErr != nil {
-		return nil, fmt.Errorf("primary failed (%w); fallback init failed: %v", err, fbErr)
-	}
-	fbCert, err2 := fb.Issue(ctx, csr)
-	if err2 != nil {
-		return nil, fmt.Errorf("primary failed (%w); fallback failed: %v", err, err2)
-	}
-	return fbCert, nil
-}
-
-func (f *FailoverIssuer) getFallback(ctx context.Context) (certmagic.Issuer, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.fallback != nil {
-		return f.fallback, nil
-	}
-	iss, err := f.FallbackFactory(ctx)
-	if err != nil {
-		return nil, err
-	}
-	f.fallback = iss
-	return iss, nil
-}
-
 // HomeConfig configures certificate issuance and renewal for home.<zone>.
 type HomeConfig struct {
 	Zone               string
@@ -552,7 +493,6 @@ func (m *HomeCertManager) GetCertificate(_ *tls.ClientHelloInfo) (*tls.Certifica
 	return cert, nil
 }
 
-// Close stops background CertMagic cache maintenance.
 // Close stops the certificate cache. Safe to call more than once, and after Run.
 func (m *HomeCertManager) Close() {
 	m.stopOnce.Do(func() {
@@ -610,6 +550,9 @@ func (m *HomeCertManager) newManagedConfig(caURL string, withEAB bool) (*certmag
 			if err != nil {
 				return acct, err
 			}
+			if pair == nil {
+				return acct, errors.New("fallback ACME EAB response is empty")
+			}
 			iss.ExternalAccount = &acme.EAB{
 				KeyID:  pair.KID,
 				MACKey: pair.HMACB64URL,
@@ -638,12 +581,39 @@ func (n nonInteractiveACMEIssuer) PreCheck(ctx context.Context, names []string, 
 }
 
 func (m *HomeCertManager) newSyncConfig(cfg *certmagic.Config, iss *certmagic.ACMEIssuer) *certmagic.Config {
+	// Synchronous EnsureOnce/ForceRenew/handleFailover calls handle failover
+	// inline under renewMu, so suppress cert_failed -> failoverCh enqueues while
+	// still exporting newly obtained certificates.
+	onEvent := func(ctx context.Context, event string, data map[string]any) error {
+		if event != "cert_obtained" {
+			return nil
+		}
+		return cfg.OnEvent(ctx, event, data)
+	}
 	return certmagic.New(m.cache, certmagic.Config{
 		Storage: m.storage,
-		OnEvent: cfg.OnEvent,
+		OnEvent: onEvent,
 		Logger:  m.logger,
 		Issuers: []certmagic.Issuer{nonInteractiveACMEIssuer{iss}},
 	})
+}
+
+func (m *HomeCertManager) obtainOrRenewSync(ctx context.Context, cfg *certmagic.Config, iss *certmagic.ACMEIssuer, force bool) error {
+	syncCfg := m.newSyncConfig(cfg, iss)
+	if m.storageHasPair(ctx, iss.IssuerKey()) {
+		return syncCfg.RenewCertSync(ctx, m.host, force)
+	}
+	return syncCfg.ObtainCertSync(ctx, m.host)
+}
+
+func (m *HomeCertManager) evictCachedCert(issuerKey string) {
+	if m.cache == nil || issuerKey == "" {
+		return
+	}
+	m.cache.RemoveManaged([]certmagic.SubjectIssuer{{
+		Subject:   m.host,
+		IssuerKey: issuerKey,
+	}})
 }
 
 func (m *HomeCertManager) getConfigForCert(cert certmagic.Certificate) (*certmagic.Config, error) {
@@ -770,7 +740,7 @@ func (m *HomeCertManager) EnsureOnce(ctx context.Context) error {
 		m.renewWakeIssued = true
 	}
 
-	err = m.newSyncConfig(m.primaryCfg, m.primaryIss).ManageSync(ctx, []string{m.host})
+	err = m.obtainOrRenewSync(ctx, m.primaryCfg, m.primaryIss, false)
 	if err == nil {
 		_, syncErr := m.syncStoredCert(ctx, m.primaryCfg, m.primaryIss)
 		return syncErr
@@ -780,10 +750,11 @@ func (m *HomeCertManager) EnsureOnce(ctx context.Context) error {
 	}
 
 	log.Printf("acme: primary CA failed for %s (%v); failing over to fallback CA", m.host, err)
-	fbErr := m.newSyncConfig(m.fallbackCfg, m.fallbackIss).ManageSync(ctx, []string{m.host})
+	fbErr := m.obtainOrRenewSync(ctx, m.fallbackCfg, m.fallbackIss, false)
 	if fbErr != nil {
 		return fmt.Errorf("primary failed (%w); fallback failed: %v", err, fbErr)
 	}
+	m.evictCachedCert(m.primaryIss.IssuerKey())
 	_, syncErr := m.syncStoredCert(ctx, m.fallbackCfg, m.fallbackIss)
 	return syncErr
 }
@@ -796,7 +767,7 @@ func (m *HomeCertManager) ForceRenew(ctx context.Context) error {
 
 	if m.fallbackCfg != nil && m.fallbackIss != nil {
 		if m.storageHasPair(ctx, m.fallbackIss.IssuerKey()) && !m.storageHasPair(ctx, m.primaryIss.IssuerKey()) {
-			if err := m.newSyncConfig(m.fallbackCfg, m.fallbackIss).RenewCertSync(ctx, m.host, true); err != nil {
+			if err := m.obtainOrRenewSync(ctx, m.fallbackCfg, m.fallbackIss, true); err != nil {
 				return err
 			}
 			_, syncErr := m.syncStoredCert(ctx, m.fallbackCfg, m.fallbackIss)
@@ -804,7 +775,7 @@ func (m *HomeCertManager) ForceRenew(ctx context.Context) error {
 		}
 	}
 
-	err := m.newSyncConfig(m.primaryCfg, m.primaryIss).RenewCertSync(ctx, m.host, true)
+	err := m.obtainOrRenewSync(ctx, m.primaryCfg, m.primaryIss, true)
 	if err == nil {
 		_, syncErr := m.syncStoredCert(ctx, m.primaryCfg, m.primaryIss)
 		return syncErr
@@ -814,15 +785,10 @@ func (m *HomeCertManager) ForceRenew(ctx context.Context) error {
 	}
 
 	log.Printf("acme: primary forced renewal failed for %s (%v); failing over to fallback CA", m.host, err)
-	var fbErr error
-	if m.storageHasPair(ctx, m.fallbackIss.IssuerKey()) {
-		fbErr = m.newSyncConfig(m.fallbackCfg, m.fallbackIss).RenewCertSync(ctx, m.host, true)
-	} else {
-		fbErr = m.newSyncConfig(m.fallbackCfg, m.fallbackIss).ManageSync(ctx, []string{m.host})
-	}
-	if fbErr != nil {
+	if fbErr := m.obtainOrRenewSync(ctx, m.fallbackCfg, m.fallbackIss, true); fbErr != nil {
 		return fmt.Errorf("primary failed (%w); fallback failed: %v", err, fbErr)
 	}
+	m.evictCachedCert(m.primaryIss.IssuerKey())
 	_, syncErr := m.syncStoredCert(ctx, m.fallbackCfg, m.fallbackIss)
 	return syncErr
 }
@@ -858,15 +824,50 @@ func (m *HomeCertManager) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-m.failoverCh:
-			if m.fallbackCfg == nil {
-				continue
-			}
-			log.Printf("acme: primary renewal failed for %s; failing over to fallback CA", m.host)
-			if err := m.newSyncConfig(m.fallbackCfg, m.fallbackIss).ManageSync(ctx, []string{m.host}); err != nil {
-				log.Printf("acme: fallback renewal failed for %s: %v", m.host, err)
-			}
-			_, _ = m.syncStoredCert(ctx, m.fallbackCfg, m.fallbackIss)
+			m.handleFailover(ctx)
 		}
+	}
+}
+
+func (m *HomeCertManager) handleFailover(ctx context.Context) {
+	if m.fallbackCfg == nil {
+		return
+	}
+	m.renewMu.Lock()
+	defer m.renewMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	renewOnly := m.isRenewOnlyWake()
+	if !renewOnly {
+		m.renewWakeIssued = false
+	} else {
+		if certValidForAtLeast(m.cfg.HomeTLSDir, m.cfg.FileBase, time.Hour) {
+			log.Printf("acme: skipping fallback renewal for %s during renew-only wake (on-disk cert still valid)", m.host)
+			return
+		}
+		if m.renewWakeIssued {
+			log.Printf("acme: skipping fallback renewal for %s: renewal wake issuance cap (1 per wake) reached", m.host)
+			return
+		}
+	}
+	// Fast path: if fallback storage already holds a usable cert, promote it
+	// without hitting the CA or consuming the renew-only wake issuance budget.
+	if fbNeedsRenew, fbErr := m.syncStoredCert(ctx, m.fallbackCfg, m.fallbackIss); fbErr == nil && (!fbNeedsRenew || (renewOnly && certValidForAtLeast(m.cfg.HomeTLSDir, m.cfg.FileBase, time.Hour))) {
+		m.evictCachedCert(m.primaryIss.IssuerKey())
+		return
+	}
+	if renewOnly {
+		m.renewWakeIssued = true
+	}
+	log.Printf("acme: primary renewal failed for %s; failing over to fallback CA", m.host)
+	if err := m.obtainOrRenewSync(ctx, m.fallbackCfg, m.fallbackIss, false); err != nil {
+		log.Printf("acme: fallback renewal failed for %s: %v", m.host, err)
+		return
+	}
+	m.evictCachedCert(m.primaryIss.IssuerKey())
+	if _, err := m.syncStoredCert(ctx, m.fallbackCfg, m.fallbackIss); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		log.Printf("acme: sync fallback certificate for %s: %v", m.host, err)
 	}
 }
 
@@ -934,14 +935,14 @@ func VerifyTLSFiles(dir, base string) error {
 		return err
 	}
 	if len(pair.Certificate) == 0 {
-		return errors.New("home.crt has no certificates")
+		return fmt.Errorf("%s.crt has no certificates", base)
 	}
 	leaf, err := x509.ParseCertificate(pair.Certificate[0])
 	if err != nil {
 		return err
 	}
 	if time.Now().After(leaf.NotAfter) {
-		return fmt.Errorf("home certificate expired at %s", leaf.NotAfter.UTC().Format(time.RFC3339))
+		return fmt.Errorf("%s certificate expired at %s", base, leaf.NotAfter.UTC().Format(time.RFC3339))
 	}
 	return nil
 }

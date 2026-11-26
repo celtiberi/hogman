@@ -120,29 +120,18 @@ func OpenStore(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("schema: %w", err)
 	}
-	if err := migrateNamesNote(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate names.note: %w", err)
-	}
-	if err := migrateNamesPrivate(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate names.private: %w", err)
-	}
-	if err := migrateDevicesNodeKey(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate devices.node_key: %w", err)
-	}
-	if err := migrateDevicesMachineKey(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate devices.machine_key: %w", err)
-	}
-	if err := migrateDevicesHSDeletePending(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate devices.hs_delete_pending: %w", err)
-	}
-	if err := migrateDeviceKeysBypassCap(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate device_keys.bypass_cap: %w", err)
+	for _, m := range []struct{ table, col, def string }{
+		{"names", "note", "TEXT NOT NULL DEFAULT ''"},
+		{"names", "private", "INTEGER NOT NULL DEFAULT 0"},
+		{"devices", "node_key", "TEXT NOT NULL DEFAULT ''"},
+		{"devices", "machine_key", "TEXT NOT NULL DEFAULT ''"},
+		{"devices", "hs_delete_pending", "INTEGER NOT NULL DEFAULT 0"},
+		{"device_keys", "bypass_cap", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := ensureColumn(db, m.table, m.col, m.def); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("migrate %s.%s: %w", m.table, m.col, err)
+		}
 	}
 	if err := migratePolicyTriggers(db); err != nil {
 		_ = db.Close()
@@ -205,51 +194,12 @@ func hasColumn(db *sql.DB, table, col string) (bool, error) {
 	return false, rows.Err()
 }
 
-func migrateNamesNote(db *sql.DB) error {
-	if has, err := hasColumn(db, "names", "note"); err != nil || has {
+func ensureColumn(db *sql.DB, table, col, def string) error {
+	if has, err := hasColumn(db, table, col); err != nil || has {
 		return err
 	}
-	if _, err := db.Exec(`ALTER TABLE names ADD COLUMN note TEXT NOT NULL DEFAULT ''`); err != nil {
-		if has, checkErr := hasColumn(db, "names", "note"); checkErr == nil && has {
-			return nil
-		}
-		return err
-	}
-	return nil
-}
-
-func migrateNamesPrivate(db *sql.DB) error {
-	if has, err := hasColumn(db, "names", "private"); err != nil || has {
-		return err
-	}
-	if _, err := db.Exec(`ALTER TABLE names ADD COLUMN private INTEGER NOT NULL DEFAULT 0`); err != nil {
-		if has, checkErr := hasColumn(db, "names", "private"); checkErr == nil && has {
-			return nil
-		}
-		return err
-	}
-	return nil
-}
-
-func migrateDevicesNodeKey(db *sql.DB) error {
-	if has, err := hasColumn(db, "devices", "node_key"); err != nil || has {
-		return err
-	}
-	if _, err := db.Exec(`ALTER TABLE devices ADD COLUMN node_key TEXT NOT NULL DEFAULT ''`); err != nil {
-		if has, checkErr := hasColumn(db, "devices", "node_key"); checkErr == nil && has {
-			return nil
-		}
-		return err
-	}
-	return nil
-}
-
-func migrateDevicesMachineKey(db *sql.DB) error {
-	if has, err := hasColumn(db, "devices", "machine_key"); err != nil || has {
-		return err
-	}
-	if _, err := db.Exec(`ALTER TABLE devices ADD COLUMN machine_key TEXT NOT NULL DEFAULT ''`); err != nil {
-		if has, checkErr := hasColumn(db, "devices", "machine_key"); checkErr == nil && has {
+	if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, col, def)); err != nil {
+		if has, checkErr := hasColumn(db, table, col); checkErr == nil && has {
 			return nil
 		}
 		return err
@@ -273,32 +223,6 @@ func withImmediateTx(db *sql.DB, fn func(*sql.Conn) error) error {
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		_, _ = conn.ExecContext(ctx, `ROLLBACK`)
-		return err
-	}
-	return nil
-}
-
-func migrateDevicesHSDeletePending(db *sql.DB) error {
-	if has, err := hasColumn(db, "devices", "hs_delete_pending"); err != nil || has {
-		return err
-	}
-	if _, err := db.Exec(`ALTER TABLE devices ADD COLUMN hs_delete_pending INTEGER NOT NULL DEFAULT 0`); err != nil {
-		if has, checkErr := hasColumn(db, "devices", "hs_delete_pending"); checkErr == nil && has {
-			return nil
-		}
-		return err
-	}
-	return nil
-}
-
-func migrateDeviceKeysBypassCap(db *sql.DB) error {
-	if has, err := hasColumn(db, "device_keys", "bypass_cap"); err != nil || has {
-		return err
-	}
-	if _, err := db.Exec(`ALTER TABLE device_keys ADD COLUMN bypass_cap INTEGER NOT NULL DEFAULT 0`); err != nil {
-		if has, checkErr := hasColumn(db, "device_keys", "bypass_cap"); checkErr == nil && has {
-			return nil
-		}
 		return err
 	}
 	return nil
@@ -1102,18 +1026,16 @@ func (s *Store) DeleteNamesOfDevice(deviceID int64) error {
 
 // MarkDeviceRemoved retires a device and unpoints any names aimed at it.
 func (s *Store) MarkDeviceRemoved(id int64) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE devices SET removed_at = ? WHERE id = ? AND removed_at IS NULL`, now(), id); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`UPDATE names SET device_id = NULL WHERE device_id = ?`, id); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return withImmediateTx(s.db, func(c *sql.Conn) error {
+		ctx := context.Background()
+		if _, err := c.ExecContext(ctx, `UPDATE devices SET removed_at = ? WHERE id = ? AND removed_at IS NULL`, now(), id); err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx, `UPDATE names SET device_id = NULL WHERE device_id = ?`, id); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 // CommitSelfDelete atomically commits a device's own removal in SQLite (before
@@ -1305,11 +1227,35 @@ func (s *Store) DeleteName(name string) error {
 	return err
 }
 
-// RetireName unpoints a single name and permanently retires it (D-21: random
-// private labels are never recycled once released).
+// RetireName unpoints a single name and permanently retires it (random private
+// labels are never recycled once released).
 func (s *Store) RetireName(name string) error {
 	_, err := s.db.Exec(`UPDATE names SET device_id = NULL, held_until = ?, note = '' WHERE name = ? AND held_until IS NULL`, now(), name)
 	return err
+}
+
+// ReleaseNames atomically releases a set of active names, permanently retiring
+// private random labels and deleting non-private names.
+func (s *Store) ReleaseNames(rows []*Name) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	return withImmediateTx(s.db, func(c *sql.Conn) error {
+		ctx := context.Background()
+		ts := now()
+		for _, x := range rows {
+			if x.Private {
+				if _, err := c.ExecContext(ctx, `UPDATE names SET device_id = NULL, held_until = ?, note = '' WHERE name = ? AND member_id = ? AND private != 0 AND held_until IS NULL`, ts, x.Name, x.MemberID); err != nil {
+					return err
+				}
+			} else {
+				if _, err := c.ExecContext(ctx, `DELETE FROM names WHERE name = ? AND member_id = ? AND private = 0 AND held_until IS NULL`, x.Name, x.MemberID); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
 }
 
 // RetireNames unpoints all of a member's names and retires them permanently.

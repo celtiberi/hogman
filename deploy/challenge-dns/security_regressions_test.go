@@ -70,7 +70,7 @@ func TestAuditPerCredEABCheckedBeforeGlobalAndHostExempt(t *testing.T) {
 	if rec := doAPI(t, h, "POST", "/v1/eab", tokA, nil); rec.Code != 201 {
 		t.Fatalf("penA first mint: %d %s", rec.Code, rec.Body)
 	}
-	// penA hammers /v1/eab 10 times; per-cred CheckEAB rejects before a.global.allow(),
+	// penA hammers /v1/eab 10 times; per-cred ReserveEAB rejects before a.global.reserve(),
 	// so the second global slot remains free for penB.
 	for i := 0; i < 10; i++ {
 		if rec := doAPI(t, h, "POST", "/v1/eab", tokA, nil); rec.Code != 429 {

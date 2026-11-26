@@ -1,0 +1,2 @@
+- Fix registrar ACME failover renewal concurrency and renew-only wake cap enforcement, check database errors in `/api/me`, CLI ID parsing, and name release, strip Unicode format characters from site notes, serialize `MarkDeviceRemoved` under `BEGIN IMMEDIATE`, and remove dead `FailoverIssuer`.
+- Fix `challenge-dns` `POST /v1/eab` so upstream fallback-key mint failures do not burn quota or mark a pen challenged, guard DNS apex slicing against non-FQDN query names, return `[]` on empty `/admin/creds` and proper 404/400/500 admin status codes, and remove dead helpers.

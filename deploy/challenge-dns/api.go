@@ -26,8 +26,40 @@ type API struct {
 	eab   EABMinter // nil when no GTS service account is configured
 	// contact is the operator's address for fallback CA accounts. Google refuses
 	// an account without one, so no key is minted (and none wasted) without it.
-	contact string
-	global  *windowLimiter
+	contact   string
+	global    *windowLimiter
+	failMu    sync.Mutex
+	credFails map[string]*windowLimiter // per-cred in-memory cooldown for failed upstream EAB mints
+}
+
+func (a *API) checkCredFailCooldown(credID string, now time.Time) bool {
+	a.failMu.Lock()
+	defer a.failMu.Unlock()
+	lim := a.credFails[credID]
+	if lim == nil {
+		return true
+	}
+	if lim.exceeded(now) {
+		return false
+	}
+	if lim.empty(now) {
+		delete(a.credFails, credID)
+	}
+	return true
+}
+
+func (a *API) recordCredFail(credID string, now time.Time) {
+	a.failMu.Lock()
+	defer a.failMu.Unlock()
+	if a.credFails == nil {
+		a.credFails = map[string]*windowLimiter{}
+	}
+	lim := a.credFails[credID]
+	if lim == nil {
+		lim = &windowLimiter{perMin: 5, perHour: 15}
+		a.credFails[credID] = lim
+	}
+	lim.record(now)
 }
 
 type txtReq struct {
@@ -144,52 +176,67 @@ func (a *API) Handler() http.Handler {
 			fail(w, http.StatusServiceUnavailable, "the fallback certificate authority has no contact address configured (CDNS_GTS_CONTACT)")
 			return
 		}
-		// Check per-credential EAB caps BEFORE consuming the shared global
-		// burst limiter so one exhausted pen cannot starve other pens or host failover.
-		if err := a.store.CheckEAB(c); err != nil {
-			var rle *rateLimitError
-			switch {
-			case errors.Is(err, errRevoked):
-				fail(w, http.StatusUnauthorized, "unauthorized")
-			case errors.As(err, &rle):
-				failRateLimit(w, rle)
-			default:
-				log.Printf("eab check for %s: %v", c.ID, err)
-				fail(w, http.StatusInternalServerError, "internal error")
-			}
+		// Reserve per-credential EAB cap BEFORE consuming the shared global
+		// burst limiter so one exhausted pen cannot starve other pens or host failover,
+		// and do not persist quota or EverChallenged until upstream Mint succeeds.
+		res, err := a.store.ReserveEAB(c)
+		if err != nil {
+			writeEABError(w, c.ID, "reserve", err)
+			return
+		}
+		defer res.Cancel()
+		now := a.store.now()
+		if c.Kind != "host" && !a.checkCredFailCooldown(c.ID, now) {
+			w.Header().Set("Retry-After", "60")
+			fail(w, http.StatusTooManyRequests, "fallback account key requests are cooling down after upstream errors; try later")
 			return
 		}
 		// Exempt the host gate-cert credential from the shared pen global limiter.
-		if c.Kind != "host" && !a.global.allow(a.store.now()) {
-			w.Header().Set("Retry-After", "60")
-			fail(w, http.StatusTooManyRequests, "fallback account keys are rate-limited; try later")
-			return
-		}
-		if err := a.store.AllowEAB(c); err != nil {
-			var rle *rateLimitError
-			switch {
-			case errors.Is(err, errRevoked):
-				fail(w, http.StatusUnauthorized, "unauthorized")
-			case errors.As(err, &rle):
-				failRateLimit(w, rle)
-			default:
-				log.Printf("eab allow for %s: %v", c.ID, err)
-				fail(w, http.StatusInternalServerError, "internal error")
+		var releaseGlobal func()
+		if c.Kind != "host" {
+			var ok bool
+			releaseGlobal, ok = a.global.reserve(now)
+			if !ok {
+				w.Header().Set("Retry-After", "60")
+				fail(w, http.StatusTooManyRequests, "fallback account keys are rate-limited; try later")
+				return
 			}
-			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 		kid, hmac, err := a.eab.Mint(ctx)
 		if err != nil {
+			if releaseGlobal != nil {
+				releaseGlobal()
+			}
+			if c.Kind != "host" {
+				a.recordCredFail(c.ID, a.store.now())
+			}
 			log.Printf("eab mint for %s: %v", c.ID, err)
 			fail(w, http.StatusBadGateway, "could not get a fallback account key")
+			return
+		}
+		if err := res.Commit(); err != nil {
+			writeEABError(w, c.ID, "commit", err)
 			return
 		}
 		log.Printf("eab minted for %s", c.ID)
 		writeJSON(w, http.StatusCreated, map[string]string{"kid": kid, "hmac_b64url": hmac, "contact": a.contact})
 	})
 	return mux
+}
+
+func writeEABError(w http.ResponseWriter, credID, op string, err error) {
+	var rle *rateLimitError
+	switch {
+	case errors.Is(err, errRevoked):
+		fail(w, http.StatusUnauthorized, "unauthorized")
+	case errors.As(err, &rle):
+		failRateLimit(w, rle)
+	default:
+		log.Printf("eab %s for %s: %v", op, credID, err)
+		fail(w, http.StatusInternalServerError, "internal error")
+	}
 }
 
 // AdminHandler manages credentials. Served only on the root-only socket.
@@ -203,8 +250,9 @@ func AdminHandler(s *Store) http.Handler {
 			Plan    string    `json:"plan,omitempty"`
 			Created time.Time `json:"created"`
 		}
-		var out []view
-		for _, c := range s.Creds() {
+		creds := s.Creds()
+		out := make([]view, 0, len(creds))
+		for _, c := range creds {
 			out = append(out, view{c.ID, c.Kind, c.PenID, c.Plan, c.Created})
 		}
 		writeJSON(w, http.StatusOK, out)
@@ -220,7 +268,12 @@ func AdminHandler(s *Store) http.Handler {
 		}
 		c, tok, err := s.AddCredWithPlan(in.Kind, in.PenID, in.Plan)
 		if err != nil {
-			fail(w, http.StatusBadRequest, err.Error())
+			if errors.Is(err, errInvalidInput) {
+				fail(w, http.StatusBadRequest, err.Error())
+			} else {
+				log.Printf("add cred %s/%s: %v", in.Kind, in.PenID, err)
+				fail(w, http.StatusInternalServerError, "internal error")
+			}
 			return
 		}
 		res := map[string]string{"id": c.ID, "token": tok}
@@ -238,11 +291,15 @@ func AdminHandler(s *Store) http.Handler {
 		}
 		c, err := s.SetCredPlan(r.PathValue("id"), in.Plan)
 		if err != nil {
-			code := http.StatusBadRequest
-			if strings.HasPrefix(err.Error(), "no pen credential ") {
-				code = http.StatusNotFound
+			switch {
+			case errors.Is(err, errNotFound):
+				fail(w, http.StatusNotFound, err.Error())
+			case errors.Is(err, errInvalidInput):
+				fail(w, http.StatusBadRequest, err.Error())
+			default:
+				log.Printf("set cred plan %s: %v", r.PathValue("id"), err)
+				fail(w, http.StatusInternalServerError, "internal error")
 			}
-			fail(w, code, err.Error())
 			return
 		}
 		plan := c.Plan
@@ -259,7 +316,12 @@ func AdminHandler(s *Store) http.Handler {
 		release := r.URL.Query().Get("release_if_unused") == "1"
 		released, err := s.RemoveCredWithOptions(r.PathValue("id"), release)
 		if err != nil {
-			fail(w, http.StatusNotFound, err.Error())
+			if errors.Is(err, errNotFound) {
+				fail(w, http.StatusNotFound, err.Error())
+			} else {
+				log.Printf("remove cred %s: %v", r.PathValue("id"), err)
+				fail(w, http.StatusInternalServerError, "internal error")
+			}
 			return
 		}
 		if released {
@@ -279,11 +341,8 @@ type windowLimiter struct {
 	events          []time.Time
 }
 
-func (l *windowLimiter) allow(now time.Time) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+func (l *windowLimiter) pruneLocked(now time.Time) (min int) {
 	kept := l.events[:0]
-	min := 0
 	for _, t := range l.events {
 		if now.Sub(t) < time.Hour {
 			kept = append(kept, t)
@@ -293,11 +352,58 @@ func (l *windowLimiter) allow(now time.Time) bool {
 		}
 	}
 	l.events = kept
-	if min >= l.perMin || len(kept) >= l.perHour {
-		return false
+	return min
+}
+
+func (l *windowLimiter) allow(now time.Time) bool {
+	_, ok := l.reserve(now)
+	return ok
+}
+
+func (l *windowLimiter) reserve(now time.Time) (release func(), ok bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	min := l.pruneLocked(now)
+	if min >= l.perMin || len(l.events) >= l.perHour {
+		return nil, false
 	}
 	l.events = append(l.events, now)
-	return true
+	released := false
+	return func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		if released {
+			return
+		}
+		released = true
+		for i := len(l.events) - 1; i >= 0; i-- {
+			if l.events[i].Equal(now) {
+				l.events = append(l.events[:i], l.events[i+1:]...)
+				return
+			}
+		}
+	}, true
+}
+
+func (l *windowLimiter) exceeded(now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	min := l.pruneLocked(now)
+	return min >= l.perMin || len(l.events) >= l.perHour
+}
+
+func (l *windowLimiter) empty(now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pruneLocked(now)
+	return len(l.events) == 0
+}
+
+func (l *windowLimiter) record(now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pruneLocked(now)
+	l.events = append(l.events, now)
 }
 
 // listenUnix listens on a socket path with the given mode and group.

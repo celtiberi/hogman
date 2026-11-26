@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-func TestPenDeleteViewAndTokenI24(t *testing.T) {
+func TestPenDeleteViewAndToken(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
 	cli := Actor{CLI: true}

@@ -49,7 +49,7 @@ func normalizePlan(raw string) (string, error) {
 	case planWork:
 		return planWork, nil
 	default:
-		return "", fmt.Errorf("unknown plan %q (want personal or work)", raw)
+		return "", fmt.Errorf("unknown plan %q (want personal or work): %w", raw, errInvalidInput)
 	}
 }
 
@@ -66,6 +66,8 @@ var (
 	errFull            = errors.New("too many live challenge values for this name")
 	errValue           = errors.New("challenge value must be 16-128 characters of A-Z a-z 0-9 _ -")
 	errRevoked         = errors.New("credential revoked")
+	errNotFound        = errors.New("not found")
+	errInvalidInput    = errors.New("invalid input")
 )
 
 // rateLimitError pairs a rate-limit sentinel with a Retry-After duration.
@@ -131,6 +133,7 @@ type Store struct {
 	zones                    Zones
 	st                       state
 	txt                      map[string][]txtValue // fqdn -> live values
+	inFlightEAB              map[string]int        // cred ID -> in-flight upstream EAB mints
 	now                      func() time.Time
 	hourlyCapNames           int                                  // 0 uses defaultHourlyCap (clamped to weeklyCap)
 	capNames                 int                                  // 0 uses defaultCapNames
@@ -238,7 +241,7 @@ type Zones struct {
 func (z Zones) gateTXT() string { return z.Gate }
 
 func OpenStore(path string, z Zones) (*Store, error) {
-	s := &Store{path: path, zones: z, txt: map[string][]txtValue{}, now: time.Now,
+	s := &Store{path: path, zones: z, txt: map[string][]txtValue{}, inFlightEAB: map[string]int{}, now: time.Now,
 		st: state{Seen: map[string]map[string]time.Time{}, EAB: map[string][]time.Time{}}}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -323,25 +326,25 @@ func (s *Store) AddCredWithPlan(kind, penID, rawPlan string) (Cred, string, erro
 	switch kind {
 	case "pen":
 		if !penRE.MatchString(penID) {
-			return Cred{}, "", fmt.Errorf("pen name must be 3-30 lowercase letters, digits and dashes, starting with a letter")
+			return Cred{}, "", fmt.Errorf("pen name must be 3-30 lowercase letters, digits and dashes, starting with a letter: %w", errInvalidInput)
 		}
 	case "host":
 		if plan != "" {
-			return Cred{}, "", fmt.Errorf("host credentials do not take a plan")
+			return Cred{}, "", fmt.Errorf("host credentials do not take a plan: %w", errInvalidInput)
 		}
 		penID = ""
 	default:
-		return Cred{}, "", fmt.Errorf("kind must be pen or host")
+		return Cred{}, "", fmt.Errorf("kind must be pen or host: %w", errInvalidInput)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, c := range s.st.Creds {
 		if kind == "pen" && c.Kind == "pen" && c.PenID == penID {
-			return Cred{}, "", fmt.Errorf("pen %s already has a credential (%s)", penID, c.ID)
+			return Cred{}, "", fmt.Errorf("pen %s already has a credential (%s): %w", penID, c.ID, errInvalidInput)
 		}
 	}
 	if kind == "pen" && s.usedLocked(penID) {
-		return Cred{}, "", fmt.Errorf("the pen name %s was used before and is never given out again", penID)
+		return Cred{}, "", fmt.Errorf("the pen name %s was used before and is never given out again: %w", penID, errInvalidInput)
 	}
 	tok := "hcd_" + newSecret(32)
 	c := Cred{ID: newSecret(6), Kind: kind, PenID: penID, Plan: plan, Hash: hashToken(tok), Created: s.now().UTC()}
@@ -372,7 +375,7 @@ func (s *Store) SetCredPlan(idOrPen, rawPlan string) (Cred, error) {
 		c := &s.st.Creds[i]
 		if c.ID == idOrPen || (c.Kind == "pen" && c.PenID == idOrPen) {
 			if c.Kind != "pen" {
-				return Cred{}, fmt.Errorf("credential %q is not a pen credential", idOrPen)
+				return Cred{}, fmt.Errorf("credential %q is not a pen credential: %w", idOrPen, errInvalidInput)
 			}
 			prev := c.Plan
 			c.Plan = plan
@@ -383,7 +386,7 @@ func (s *Store) SetCredPlan(idOrPen, rawPlan string) (Cred, error) {
 			return *c, nil
 		}
 	}
-	return Cred{}, fmt.Errorf("no pen credential %q", idOrPen)
+	return Cred{}, fmt.Errorf("no pen credential %q: %w", idOrPen, errNotFound)
 }
 
 func (s *Store) usedLocked(name string) bool {
@@ -423,7 +426,7 @@ func (s *Store) RemoveCredWithOptions(id string, releaseIfUnused bool) (bool, er
 			continue
 		}
 		canRelease := releaseIfUnused && c.Kind == "pen" && !c.EverChallenged &&
-			len(s.st.Seen[id]) == 0 && len(s.st.EAB[id]) == 0
+			len(s.st.Seen[id]) == 0 && len(s.st.EAB[id]) == 0 && s.inFlightEAB[id] == 0
 		prevCreds := append([]Cred(nil), s.st.Creds...)
 		prevSeen := s.st.Seen[id]
 		prevEAB := s.st.EAB[id]
@@ -460,7 +463,7 @@ func (s *Store) RemoveCredWithOptions(id string, releaseIfUnused bool) (bool, er
 		}
 		return canRelease, nil
 	}
-	return false, fmt.Errorf("no credential %q", id)
+	return false, fmt.Errorf("no credential %q: %w", id, errNotFound)
 }
 
 func (s *Store) credLocked(id string) (Cred, bool) {
@@ -734,20 +737,6 @@ func (s *Store) TXT(fqdn string) []string {
 	return vals
 }
 
-// HasNamesUnder reports whether any live challenge name sits at or below name.
-func (s *Store) HasNamesUnder(name string) bool {
-	name = normalize(name)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := s.now()
-	for n := range s.txt {
-		if len(s.liveLocked(n, now)) > 0 && (n == name || strings.HasSuffix(n, "."+name)) {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *Store) liveLocked(fqdn string, now time.Time) []txtValue {
 	vals := s.txt[fqdn]
 	out := vals[:0]
@@ -786,46 +775,124 @@ func (s *Store) checkEABLocked(id string, now time.Time) (Cred, []time.Time, err
 			}
 		}
 	}
-	if len(recent) >= s.weeklyCapFor(liveCred) {
+	inFlight := s.inFlightEAB[id]
+	weeklyCap := s.weeklyCapFor(liveCred)
+	if len(recent)+inFlight >= weeklyCap {
 		s.st.EAB[id] = recent
-		return Cred{}, nil, &rateLimitError{cause: errEABWeeklyCap, retryAfter: retryAfterFromOldest(oldestWeekly, now, capWindow)}
+		retry := retryAfterFromOldest(oldestWeekly, now, capWindow)
+		if inFlight > 0 && len(recent) < weeklyCap && retry > 30*time.Second {
+			retry = 30 * time.Second
+		}
+		return Cred{}, nil, &rateLimitError{cause: errEABWeeklyCap, retryAfter: retry}
 	}
-	if hourly >= s.hourlyCapFor(liveCred) {
+	hourlyCap := s.hourlyCapFor(liveCred)
+	if hourly+inFlight >= hourlyCap {
 		s.st.EAB[id] = recent
-		return Cred{}, nil, &rateLimitError{cause: errEABHourlyCap, retryAfter: retryAfterFromOldest(oldestHourly, now, hourlyWindow)}
+		retry := retryAfterFromOldest(oldestHourly, now, hourlyWindow)
+		if inFlight > 0 && hourly < hourlyCap && retry > 30*time.Second {
+			retry = 30 * time.Second
+		}
+		return Cred{}, nil, &rateLimitError{cause: errEABHourlyCap, retryAfter: retry}
 	}
 	return liveCred, recent, nil
 }
 
-// CheckEAB verifies that a credential is still active and within its per-cred
-// hourly/weekly EAB caps without recording a hit (so rejected callers do not
-// consume global burst capacity).
-func (s *Store) CheckEAB(c Cred) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, _, err := s.checkEABLocked(c.ID, s.now())
-	return err
+type eabReservationState int
+
+const (
+	eabPending eabReservationState = iota
+	eabCanceled
+	eabCommitted
+)
+
+// eabReservation holds an in-memory per-credential EAB cap slot while an
+// upstream EAB mint is in flight. Calling Cancel releases the slot without
+// burning quota or marking EverChallenged; calling Commit persists the mint.
+type eabReservation struct {
+	store  *Store
+	credID string
+	state  eabReservationState
 }
 
-// AllowEAB records an EAB mint for a credential, gated by the same per-pen
-// hourly and weekly caps as new certificate names.
-func (s *Store) AllowEAB(c Cred) error {
+// ReserveEAB validates that a credential is active and within its hourly/weekly
+// EAB caps, reserving one in-flight slot without writing to disk.
+func (s *Store) ReserveEAB(c Cred) (*eabReservation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := s.now()
-	liveCred, recent, err := s.checkEABLocked(c.ID, now)
-	if err != nil {
-		return err
+	if _, _, err := s.checkEABLocked(c.ID, s.now()); err != nil {
+		return nil, err
 	}
-	prevEAB := append([]time.Time(nil), s.st.EAB[c.ID]...)
+	if s.inFlightEAB == nil {
+		s.inFlightEAB = map[string]int{}
+	}
+	s.inFlightEAB[c.ID]++
+	return &eabReservation{store: s, credID: c.ID, state: eabPending}, nil
+}
+
+func (s *Store) releaseInFlightEABLocked(id string) {
+	if n := s.inFlightEAB[id]; n <= 1 {
+		delete(s.inFlightEAB, id)
+	} else {
+		s.inFlightEAB[id] = n - 1
+	}
+}
+
+// Cancel releases an uncommitted EAB reservation. Safe to call more than once
+// or after Commit.
+func (r *eabReservation) Cancel() {
+	if r == nil {
+		return
+	}
+	r.store.mu.Lock()
+	defer r.store.mu.Unlock()
+	if r.state != eabPending {
+		return
+	}
+	r.state = eabCanceled
+	r.store.releaseInFlightEABLocked(r.credID)
+}
+
+// Commit converts a reserved EAB slot into a persisted EAB usage entry and
+// marks the credential as EverChallenged. Because caps were already enforced
+// at ReserveEAB time, Commit checks only that the credential has not been
+// revoked while Mint was in flight.
+func (r *eabReservation) Commit() error {
+	if r == nil {
+		return errors.New("nil EAB reservation")
+	}
+	r.store.mu.Lock()
+	defer r.store.mu.Unlock()
+	if r.state == eabCommitted {
+		return nil
+	}
+	if r.state == eabCanceled {
+		return errors.New("EAB reservation already canceled")
+	}
+	r.state = eabCommitted
+	r.store.releaseInFlightEABLocked(r.credID)
+	return r.store.persistEABLocked(r.credID, r.store.now())
+}
+
+func (s *Store) persistEABLocked(id string, now time.Time) error {
+	liveCred, ok := s.credLocked(id)
+	if !ok {
+		return errRevoked
+	}
+	recent := make([]time.Time, 0, len(s.st.EAB[id])+1)
+	for _, t := range s.st.EAB[id] {
+		if now.Sub(t) < capWindow {
+			recent = append(recent, t)
+		}
+	}
+	prevEAB := append([]time.Time(nil), s.st.EAB[id]...)
 	prevChallenged := liveCred.EverChallenged
-	s.st.EAB[c.ID] = append(recent, now)
-	s.markChallengedLocked(c.ID)
+	s.st.EAB[id] = append(recent, now)
+	s.markChallengedLocked(id)
 	if err := s.saveLocked(); err != nil {
-		s.st.EAB[c.ID] = prevEAB
+		s.st.EAB[id] = prevEAB
 		if !prevChallenged {
 			for i := range s.st.Creds {
-				if s.st.Creds[i].ID == c.ID {
+				if s.st.Creds[i].ID == id {
 					s.st.Creds[i].EverChallenged = false
 					break
 				}
@@ -834,4 +901,16 @@ func (s *Store) AllowEAB(c Cred) error {
 		return err
 	}
 	return nil
+}
+
+// AllowEAB records an EAB mint for a credential, gated by the same per-pen
+// hourly and weekly caps as new certificate names.
+func (s *Store) AllowEAB(c Cred) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	if _, _, err := s.checkEABLocked(c.ID, now); err != nil {
+		return err
+	}
+	return s.persistEABLocked(c.ID, now)
 }

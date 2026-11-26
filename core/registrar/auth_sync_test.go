@@ -179,7 +179,7 @@ func TestVerifyDirectPeerSteadyStateExpiryAndActiveMember(t *testing.T) {
 	}
 }
 
-func TestVerifyDirectPeerKeyRotationOptionAPrime(t *testing.T) {
+func TestVerifyDirectPeerKeyRotation(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
 	cli := Actor{CLI: true}

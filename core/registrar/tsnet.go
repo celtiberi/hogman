@@ -193,13 +193,14 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("tsnet: mkdir %s: %w", stateDir, err)
 	}
-	configureTestCA()
 
 	var authKey string
 	if authKeyFile != "" {
-		if raw, err := os.ReadFile(authKeyFile); err == nil {
-			authKey = strings.TrimSpace(string(raw))
+		raw, err := os.ReadFile(authKeyFile)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("tsnet: read auth key %s: %w", authKeyFile, err)
 		}
+		authKey = strings.TrimSpace(string(raw))
 	}
 
 	var logMu sync.Mutex

@@ -15,7 +15,7 @@ import (
 
 var privateLabelFormatRE = regexp.MustCompile(`^[a-z][a-z0-9]{11}$`)
 
-func TestPrivateNameHTTPFlowRetryAndD21Retirement(t *testing.T) {
+func TestPrivateNameHTTPFlowRetryAndPermanentRetirement(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
 	cli := Actor{CLI: true}

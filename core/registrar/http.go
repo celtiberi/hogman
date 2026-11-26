@@ -236,15 +236,27 @@ func meshMux(s *Service) http.Handler {
 			})
 			return
 		}
-		devs, _ := s.st.MemberDevices(c.member.ID)
-		names, _ := s.st.Names()
+		devs, err := s.st.MemberDevices(c.member.ID)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		names, err := s.st.Names()
+		if err != nil {
+			fail(w, err)
+			return
+		}
 		mine := []*Name{}
 		for _, n := range names {
 			if n.MemberID == c.member.ID && n.RetiredAt == nil {
 				mine = append(mine, n)
 			}
 		}
-		invs, _ := s.st.Invites(&c.member.ID)
+		invs, err := s.st.Invites(&c.member.ID)
+		if err != nil {
+			fail(w, err)
+			return
+		}
 		a := c.actor()
 		resp := map[string]any{
 			"member": c.member, "this_device": c.device, "devices": devs, "names": mine,
@@ -255,8 +267,11 @@ func meshMux(s *Service) http.Handler {
 			// What `hogman share` needs to start a server of its own.
 			"network": s.NetworkInfo(),
 		}
-		// Owners and admins see the owner count (D-16 / I-22); omit for plain members.
-		if n, ok := ownerCount(s, a); ok {
+		// Owners and admins see the owner count; omit for plain members.
+		if n, ok, err := ownerCount(s, a); err != nil {
+			fail(w, err)
+			return
+		} else if ok {
 			resp["owners"] = n
 		}
 		if billing := readBillingStatus(s.cfg.BillingStatusPath); billing != nil {
@@ -275,7 +290,12 @@ func meshMux(s *Service) http.Handler {
 		}
 		if a.IsOwner() && c.member.Status == "active" {
 			if meta := readHostMeta(hostMetaPath(s.cfg.BillingStatusPath)); meta != nil && meta.Pen != "" && meta.DeleteURL != "" {
-				resp["pen_delete"] = buildPenDeleteView(s, c.member.Handle, meta)
+				delView, err := buildPenDeleteView(s, c.member.Handle, meta)
+				if err != nil {
+					fail(w, err)
+					return
+				}
+				resp["pen_delete"] = delView
 			}
 		}
 		writeJSON(w, 200, resp)
@@ -1048,32 +1068,36 @@ func readHostMeta(path string) *hostMeta {
 	return &m
 }
 
-func buildPenDeleteView(s *Service, callerHandle string, meta *hostMeta) penDeleteView {
+func buildPenDeleteView(s *Service, callerHandle string, meta *hostMeta) (penDeleteView, error) {
 	v := penDeleteView{
 		Pen:             meta.Pen,
 		CanDelete:       true,
 		HasSubscription: meta.HasSubscription,
 	}
-	if ms, err := s.st.Members(); err == nil {
-		var others []string
-		for _, m := range ms {
-			if m.Status == "removed" {
-				continue
-			}
-			v.MemberCount++
-			if m.Role == "owner" && m.Status == "active" && !strings.EqualFold(m.Handle, callerHandle) {
-				others = append(others, m.Handle)
-			}
+	ms, err := s.st.Members()
+	if err != nil {
+		return penDeleteView{}, err
+	}
+	var others []string
+	for _, m := range ms {
+		if m.Status == "removed" {
+			continue
 		}
-		if len(others) > 0 {
-			sort.Strings(others)
-			v.OtherOwners = others
+		v.MemberCount++
+		if m.Role == "owner" && m.Status == "active" && !strings.EqualFold(m.Handle, callerHandle) {
+			others = append(others, m.Handle)
 		}
 	}
-	if ds, err := s.st.LiveDevices(); err == nil {
-		v.DeviceCount = len(ds)
+	if len(others) > 0 {
+		sort.Strings(others)
+		v.OtherOwners = others
 	}
-	return v
+	ds, err := s.st.LiveDevices()
+	if err != nil {
+		return penDeleteView{}, err
+	}
+	v.DeviceCount = len(ds)
+	return v, nil
 }
 
 func loadOrCreateRenewKey(path string) ([]byte, error) {
@@ -1210,12 +1234,15 @@ func readBillingStatus(path string) *billingStatus {
 
 // ownerCount tells owners and admins how many owners the pen has; plain members
 // omit the field entirely.
-func ownerCount(s *Service, a Actor) (int, bool) {
+func ownerCount(s *Service, a Actor) (int, bool, error) {
 	if !a.IsAdmin() {
-		return 0, false
+		return 0, false, nil
 	}
-	n, _ := s.st.CountOwners()
-	return n, true
+	n, err := s.st.CountOwners()
+	if err != nil {
+		return 0, false, err
+	}
+	return n, true, nil
 }
 
 // The mesh API trusts X-Forwarded-For to say who is asking, so who can reach

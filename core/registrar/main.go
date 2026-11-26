@@ -492,12 +492,14 @@ const usage = `registrar: members, invites, devices and names for one Hogman net
 
   serve                                  run the server
   health                                 check mesh socket and home TLS readiness
+  derp-map                               print the embedded mesh DERP map as JSON
+  gate-cert [health]                     maintain (or check) the host front-door wildcard certificate
 
   member add <handle> [--role owner|admin|member]
   member list
   member suspend <handle> [reason...]    cut off all their devices; reversible
   member resume <handle>
-  member kick <handle> [reason...]       end the membership (DESIGN.md section 9)
+  member kick <handle> [reason...]       end the membership, delete devices, and retire names
   member role <handle> <role>
 
   invite create [--role member|admin] [--ttl 168h] [--note text]
@@ -651,7 +653,10 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		if err != nil {
 			return err
 		}
-		names := handles(s)
+		names, err := handles(s)
+		if err != nil {
+			return err
+		}
 		rows := [][]string{{"ID", "ROLE", "STATE", "MINTED BY", "REDEEMED BY", "EXPIRES", "NOTE"}}
 		for _, i := range invs {
 			rows = append(rows, []string{strconv.FormatInt(i.ID, 10), i.Role, i.State(),
@@ -662,7 +667,10 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		if err := need(rest, 1, "invite revoke <id>"); err != nil {
 			return err
 		}
-		id, _ := strconv.ParseInt(rest[0], 10, 64)
+		id, err := strconv.ParseInt(rest[0], 10, 64)
+		if err != nil || id <= 0 {
+			return bad("invalid invite id %q", rest[0])
+		}
 		if err := s.RevokeInvite(a, id); err != nil {
 			return err
 		}
@@ -693,7 +701,10 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		if err := need(rest, 1, "device rm <id>"); err != nil {
 			return err
 		}
-		id, _ := strconv.ParseInt(rest[0], 10, 64)
+		id, err := strconv.ParseInt(rest[0], 10, 64)
+		if err != nil || id <= 0 {
+			return bad("invalid device id %q", rest[0])
+		}
 		if err := s.RemoveDevice(ctx, a, id); err != nil {
 			return err
 		}
@@ -720,7 +731,10 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		if err := need(rest, 3, "name claim <handle> <name> <device-id> [--note text]"); err != nil {
 			return err
 		}
-		id, _ := strconv.ParseInt(rest[2], 10, 64)
+		id, err := strconv.ParseInt(rest[2], 10, 64)
+		if err != nil || id <= 0 {
+			return bad("invalid device id %q", rest[2])
+		}
 		var note *string
 		if v, ok := flags["note"]; ok {
 			note = &v
@@ -744,7 +758,11 @@ func cli(ctx context.Context, s *Service, args []string) error {
 		case "audit":
 			n := 50
 			if sub != "" {
-				n, _ = strconv.Atoi(sub)
+				var err error
+				n, err = strconv.Atoi(sub)
+				if err != nil || n <= 0 {
+					return bad("invalid audit count %q", sub)
+				}
 			}
 			log, err := s.st.AuditLog(n)
 			if err != nil {
@@ -770,13 +788,16 @@ func cli(ctx context.Context, s *Service, args []string) error {
 	return nil
 }
 
-func handles(s *Service) map[int64]string {
-	out := map[int64]string{}
-	ms, _ := s.st.Members()
+func handles(s *Service) (map[int64]string, error) {
+	ms, err := s.st.Members()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64]string, len(ms))
 	for _, m := range ms {
 		out[m.ID] = m.Handle
 	}
-	return out
+	return out, nil
 }
 
 func nameOr(names map[int64]string, id *int64, def string) string {
