@@ -1,6 +1,6 @@
 # How Hogman Works: Every Step and Why It Happens
 
-A plain-English reference map of every moving part in a Hogman pen, what talks to what, and *why* each step exists.
+A step-by-step reference map of every moving part in a Hogman pen, what talks to what, and *why* each step exists.
 
 ---
 
