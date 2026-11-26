@@ -60,7 +60,7 @@ export function initJoinPage({
   doc = document,
   loc = location,
   nav = navigator,
-  storage = sessionStorage,
+  storage,
   hist = history,
   fetchFn = fetch,
 } = {}) {
@@ -77,8 +77,11 @@ export function initJoinPage({
   const KEY = 'hogman-link';
   let hash = loc.hash.slice(1);
   try {
-    if (hash) storage.setItem(KEY, hash);
-    else hash = storage.getItem(KEY) || '';
+    const store = storage === undefined ? sessionStorage : storage;
+    if (store) {
+      if (hash) store.setItem(KEY, hash);
+      else hash = store.getItem(KEY) || '';
+    }
   } catch (_) {
     // sessionStorage can throw in restricted privacy contexts; continue with URL hash.
   }
