@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os/exec"
 	"strings"
-	"time"
 )
 
 // Tailscale drives the stock Tailscale client already on this machine.
@@ -52,32 +51,6 @@ func (t *Tailscale) Status() (*TSStatus, error) {
 // OnNetwork reports whether the active Tailscale profile is this network.
 func (s *TSStatus) OnNetwork(zone string) bool {
 	return s.CurrentTailnet != nil && s.CurrentTailnet.MagicDNSSuffix == "nodes."+zone
-}
-
-// OnOtherNetwork names another tailnet this device is currently using, if any.
-func (s *TSStatus) OnOtherNetwork(zone string) string {
-	if s.BackendState == "Running" && s.CurrentTailnet != nil && !s.OnNetwork(zone) {
-		return s.CurrentTailnet.Name
-	}
-	return ""
-}
-
-// Login joins as a new Tailscale profile, so any other network this device
-// was on is kept and can be switched back to with `tailscale switch`.
-func (t *Tailscale) Login(loginServer, key, hostname string) error {
-	args := []string{"login", "--login-server=" + loginServer, "--authkey=" + key,
-		"--accept-dns=true", "--accept-routes=false", "--timeout=60s"}
-	if hostname != "" {
-		args = append(args, "--hostname="+hostname)
-	}
-	out, err := run(t.bin, args...)
-	if err != nil {
-		if needsPrivilege(out) && !isRoot() {
-			return errorf("Tailscale needs operator permission to join without root (Hogman never runs sudo). Grant it once with:\n  sudo %s set --operator=$USER\nThen run this command again.\n%s", t.bin, redact(out, key))
-		}
-		return errorf("tailscale could not join: %v\n%s", err, redact(out, key))
-	}
-	return nil
 }
 
 func (t *Tailscale) Logout() error {
@@ -135,30 +108,4 @@ func needsPrivilege(out string) bool {
 	o := strings.ToLower(out)
 	return strings.Contains(o, "access denied") || strings.Contains(o, "permission denied") ||
 		strings.Contains(o, "operator") || strings.Contains(o, "must be root")
-}
-
-func redact(s, secret string) string {
-	if secret == "" {
-		return s
-	}
-	return strings.ReplaceAll(s, secret, "[key]")
-}
-
-// WaitRunning waits until this device is up on the network and has an address.
-func (t *Tailscale) WaitRunning(zone string, d time.Duration) (*TSStatus, error) {
-	deadline := time.Now().Add(d)
-	for {
-		s, err := t.Status()
-		if err == nil && s.BackendState == "Running" && s.OnNetwork(zone) && s.Self != nil && len(s.Self.TailscaleIPs) > 0 {
-			return s, nil
-		}
-		if time.Now().After(deadline) {
-			state := "unknown"
-			if s != nil {
-				state = s.BackendState
-			}
-			return nil, errorf("joined, but the device did not come online within %s (state: %s)", d, state)
-		}
-		time.Sleep(time.Second)
-	}
 }

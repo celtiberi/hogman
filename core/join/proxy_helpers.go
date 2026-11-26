@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/xml"
 	"fmt"
 	"net"
@@ -110,15 +108,6 @@ function FindProxyForURL(url, host) {
 	return b.String()
 }
 
-func pacVersion(pens []*agentConfig) string {
-	sum := sha256.Sum256([]byte(renderPAC(pens)))
-	return hex.EncodeToString(sum[:])[:8]
-}
-
-func pacURLWithVersion(host *agentConfig, pens []*agentConfig) string {
-	return host.pacURL() + "?v=" + pacVersion(pens)
-}
-
 func isHogmanPACURL(rawURL string, known []*agentConfig) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Scheme != "http" || u.Path != "/proxy.pac" {
@@ -141,35 +130,6 @@ func shouldLeaveAutoProxy(curURL string, enabled bool, known []*agentConfig) boo
 // isOurPAC: a running pen's rules file, or one a removed pen left behind.
 func isOurPAC(curURL string, known []*agentConfig) bool {
 	return isHogmanPACURL(curURL, known) || staleHogmanPAC(curURL)
-}
-
-func planAutoProxyAction(curURL string, enabled bool, known []*agentConfig, wantURL string) string {
-	if wantURL == "" {
-		if enabled && isOurPAC(curURL, known) {
-			return "off"
-		}
-		return "noop"
-	}
-	if shouldLeaveAutoProxy(curURL, enabled, known) {
-		return "leave"
-	}
-	if enabled && curURL == wantURL {
-		return "noop"
-	}
-	return "set"
-}
-
-func planClearAutoProxyAction(curURL string, enabled bool, known []*agentConfig, nextURL string) string {
-	if !enabled || !isOurPAC(curURL, known) {
-		return "noop"
-	}
-	if nextURL == "" {
-		return "off"
-	}
-	if curURL == nextURL {
-		return "noop"
-	}
-	return "set"
 }
 
 func penZoneNames(pens []*agentConfig) []string {

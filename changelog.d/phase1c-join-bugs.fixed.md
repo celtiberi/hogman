@@ -1,0 +1,2 @@
+- Fix `hogman doctor` reporting `127.0.0.1:0` for squatted pen ports, nil-guard `clearSystemProxy` on Linux and Windows, delegate Windows `startDetached` to `spawnDetached`, avoid redundant `stopAgent` / binary re-copy on healthy re-joins, add a timeout to post-update `--version` probing, and update browser-extension proxy instructions.
+- Remove dead Tailscale-app join, versioned auto-proxy planner, and pre-canonical updater helpers from `core/join`, and reorganize `core/join` test files by domain.

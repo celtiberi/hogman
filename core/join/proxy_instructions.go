@@ -122,7 +122,7 @@ func formatBrowserProxyInstructions(goos, pacURL, zone string, zones, services [
 				"         %s\n"+
 				"    3. Click OK, then open %s%s\n"+
 				"    (Using Firefox? Settings → Network Settings → Automatic proxy configuration URL works inside Firefox too.)\n"+
-				"    We're working on a signed Mac app and Chrome/Firefox extensions so this will be automatic soon.",
+				"    Tip: for Chrome, Brave, Edge, or Chromium, install the Hogman browser extension from the Chrome Web Store to route pens without changing system proxy settings (Firefox Add-ons is pending review).",
 			svcList, eachHint, pacURL, portal, multiNote,
 		)
 	case "windows":
@@ -132,7 +132,7 @@ func formatBrowserProxyInstructions(goos, pacURL, zone string, zones, services [
 				"    2. Turn on \"Use setup script\" and paste:\n"+
 				"         %s\n"+
 				"    3. Click Save, then open %s%s\n"+
-				"    We're working on Chrome/Firefox extensions so this will be automatic soon.",
+				"    Tip: for Chrome, Brave, Edge, or Chromium, install the Hogman browser extension from the Chrome Web Store to route pens without changing proxy settings (Firefox Add-ons is pending review).",
 			pacURL, portal, multiNote,
 		)
 	default: // linux and other unix desktops
@@ -141,7 +141,7 @@ func formatBrowserProxyInstructions(goos, pacURL, zone string, zones, services [
 				"    • Firefox: Settings → Network Settings → Automatic proxy configuration URL → %s\n"+
 				"    • System / Chrome (GNOME): Settings → Network → Network Proxy → Automatic → %s\n"+
 				"    Then open %s%s\n"+
-				"    We're working on Chrome/Firefox extensions so this will be automatic soon.",
+				"    Tip: for Chrome, Brave, Edge, or Chromium, install the Hogman browser extension from the Chrome Web Store to route pens without changing proxy settings (Firefox Add-ons is pending review).",
 			pacURL, pacURL, portal, multiNote,
 		)
 	}

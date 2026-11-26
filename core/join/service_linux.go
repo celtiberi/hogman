@@ -36,12 +36,12 @@ func haveUserSystemd() bool {
 // otherwise as a plain background process. Always stops any previous agent
 // (including a legacy hogman-join process holding the proxy port) first.
 func startAgent(dir string, c *agentConfig, o options) error {
+	if currentAgentHealthy(dir, c) {
+		return nil
+	}
 	bin, err := installedBinary(dir)
 	if err != nil {
 		return err
-	}
-	if currentAgentHealthy(dir, c) {
-		return nil
 	}
 	stopAgent(dir, c)
 	if o.noService || !haveUserSystemd() {
@@ -251,6 +251,10 @@ func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {
 	host := pickPACHost(remaining)
 	if host == nil {
 		return ""
+	}
+	if leaving == nil {
+		return "make sure your browser's automatic proxy configuration points to " + host.pacURL() +
+			" for your remaining pen(s): " + strings.Join(penZoneNames(remaining), ", ")
 	}
 	return "if your browser's automatic proxy configuration was pointing at " + leaving.pacURL() +
 		", update it to " + host.pacURL() + " for your remaining pen(s): " + strings.Join(penZoneNames(remaining), ", ")

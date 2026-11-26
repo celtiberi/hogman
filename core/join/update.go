@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -250,10 +249,6 @@ func fetchLatestReleaseTag(client *http.Client, releaseBase string) (ver, tag, d
 	return ver, tag, strings.TrimRight(releaseBase, "/") + "/download/" + tag, nil
 }
 
-func fetchExpectedSHA256(client *http.Client, baseURL, binName string) (string, error) {
-	return fetchExpectedSHA256URL(client, baseURL+"/join/dl/SHA256SUMS", binName)
-}
-
 func fetchExpectedSHA256URL(client *http.Client, urlStr, binName string) (string, error) {
 	resp, err := client.Get(urlStr)
 	if err != nil {
@@ -277,10 +272,6 @@ func digestEqualHex(a, b string) bool {
 	ab, errA := hex.DecodeString(a)
 	bb, errB := hex.DecodeString(b)
 	return errA == nil && errB == nil && len(ab) == sha256.Size && len(bb) == sha256.Size && subtle.ConstantTimeCompare(ab, bb) == 1
-}
-
-func downloadVerifiedBinary(client *http.Client, baseURL, binName, wantHex, tmpDir string) (string, error) {
-	return downloadVerifiedBinaryURL(client, baseURL+"/join/dl/"+binName, binName, wantHex, tmpDir)
 }
 
 func downloadVerifiedBinaryURL(client *http.Client, urlStr, binName, wantHex, tmpDir string) (string, error) {
@@ -649,7 +640,6 @@ type penUpdateOps struct {
 	hasService     func(zone string) bool
 	probeReachable func(p *penTarget, o options) error
 	stop           func(dir string, c *agentConfig)
-	stage          func(srcPath, dstPath, wantHex string) error
 	startNoWait    func(p *penTarget, binPath string, hadService bool, o options) error
 	restartNew     func(p *penTarget, binPath string, hadService bool, o options) error
 	restartOld     func(p *penTarget, binPath string, hadService bool, o options) error
@@ -677,7 +667,6 @@ func defaultPenUpdateOps() penUpdateOps {
 		hasService:     serviceConfigured,
 		probeReachable: probePenLoginServer,
 		stop:           stopAgent,
-		stage:          stageAndVerify,
 		startNoWait: func(p *penTarget, binPath string, hadService bool, o options) error {
 			return startExistingBinary(binPath, p.dir, p.cfg, o.noService || !hadService)
 		},
@@ -745,36 +734,10 @@ func restartOldPenAgent(p *penTarget, binPath string, hadService bool, o options
 	return err
 }
 
-func updatePenAgent(p *penTarget, binPath, verifiedSrc, wantHex string, o options, ops penUpdateOps) error {
-	running := ops.isRunning(p.dir, p.cfg)
-	hadService := ops.hasService(p.cfg.Zone)
-	if running {
-		step("Restarting %s agent", p.zone)
-		ops.stop(p.dir, p.cfg)
-	}
-	if err := ops.stage(verifiedSrc, binPath, wantHex); err != nil {
-		if running {
-			if rerr := ops.restartOld(p, binPath, hadService, o); rerr != nil {
-				return errorf("could not update %s agent binary (%v), and restarting the previous agent also failed (%v).\n"+
-					"  To get back on: run '%s agent %s', or re-run hogman with your link.",
-					p.zone, err, rerr, binPath, p.dir)
-			}
-			note("restarted the previous %s agent so you stay connected", p.zone)
-		}
-		return errorf("could not update %s agent binary: %v", p.zone, err)
-	}
-	note("updated %s", binPath)
-	if running {
-		return ops.restartNew(p, binPath, hadService, o)
-	}
-	return nil
-}
-
 type shareUpdateOps struct {
 	isRunning      func(dir string) bool
 	hasService     func(c *shareConfig) bool
 	stop           func(dir string, c *shareConfig)
-	stage          func(srcPath, dstPath, wantHex string) error
 	restartNew     func(s *shareTargetDir, binPath string, o options) error
 	restartOld     func(s *shareTargetDir, binPath string, o options) error
 	rewriteService func(binPath, dir string, c *shareConfig) error
@@ -785,7 +748,6 @@ func defaultShareUpdateOps() shareUpdateOps {
 		isRunning:  func(dir string) bool { return sharePID(dir) != 0 },
 		hasService: shareServiceConfigured,
 		stop:       stopShare,
-		stage:      stageAndVerify,
 		restartNew: func(s *shareTargetDir, binPath string, o options) error {
 			return restartShareService(s, binPath, o, true)
 		},
@@ -812,38 +774,6 @@ func restartShareService(s *shareTargetDir, binPath string, o options, updated b
 		note("%s share restarted", s.cfg.fqdn())
 	} else {
 		note("restarted the previous %s share so it stays online", s.cfg.fqdn())
-	}
-	return nil
-}
-
-func updateShareBinary(s *shareTargetDir, binPath, verifiedSrc, wantHex string, o options, ops shareUpdateOps) error {
-	running := ops.isRunning(s.dir)
-	managed := ops.hasService(s.cfg)
-	if running && managed {
-		step("Restarting %s share", s.cfg.fqdn())
-		ops.stop(s.dir, s.cfg)
-		if err := ops.stage(verifiedSrc, binPath, wantHex); err != nil {
-			if rerr := ops.restartOld(s, binPath, o); rerr != nil {
-				return errorf("could not update %s share binary (%v), and restarting the previous share also failed (%v).\n"+
-					"  To bring it back up: hogman share %s %s",
-					s.cfg.fqdn(), err, rerr, s.cfg.Name, s.cfg.Target)
-			}
-			return errorf("could not update %s share binary: %v", s.cfg.fqdn(), err)
-		}
-		note("updated %s", binPath)
-		if err := ops.restartNew(s, binPath, o); err != nil {
-			return errorf("updated %s share binary, but restarting it failed (%v).\n"+
-				"  To bring it back up: hogman share %s %s",
-				s.cfg.fqdn(), err, s.cfg.Name, s.cfg.Target)
-		}
-		return nil
-	}
-	if err := ops.stage(verifiedSrc, binPath, wantHex); err != nil {
-		return errorf("could not update share %s binary: %v", s.name, err)
-	}
-	note("updated %s", binPath)
-	if running {
-		note("share %s is still running the previous process in the foreground/background; restart it when ready", s.cfg.url())
 	}
 	return nil
 }
@@ -877,20 +807,42 @@ func detectPackageManager(exePath, goos string) (name, upgradeCmd string, ok boo
 
 const updatingMarkerName = ".updating"
 
-// queryBinaryVersion runs `<bin> --version` with a short timeout and extracts
-// its version token (e.g. "2026.11.24" from "hogman 2026.11.24 darwin/arm64").
-func queryBinaryVersion(binPath string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+var versionQueryTimeout = 5 * time.Second
+
+// queryBinaryVersionLine runs `<bin> --version` with a short timeout and
+// returns its first trimmed output line (e.g. "hogman 2026.11.24 darwin/arm64").
+func queryBinaryVersionLine(binPath string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), versionQueryTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, binPath, "--version").Output()
 	if err != nil {
 		return ""
 	}
-	fields := strings.Fields(strings.TrimSpace(string(out)))
+	return firstLine(string(out))
+}
+
+// queryBinaryVersion extracts the version token from `<bin> --version`
+// (e.g. "2026.11.24" from "hogman 2026.11.24 darwin/arm64").
+func queryBinaryVersion(binPath string) string {
+	fields := strings.Fields(queryBinaryVersionLine(binPath))
 	if len(fields) >= 2 {
 		return strings.TrimPrefix(fields[1], "v")
 	}
 	return ""
+}
+
+func pensOutsidePlan(configBase string, inPlan []penTarget) []string {
+	planned := make(map[string]bool, len(inPlan))
+	for _, p := range inPlan {
+		planned[p.zone] = true
+	}
+	var others []string
+	for _, p := range loadPenTargets(configBase) {
+		if !planned[p.zone] {
+			others = append(others, p.zone)
+		}
+	}
+	return others
 }
 
 // compareReleaseVersions compares two dot-separated numeric release versions
@@ -1367,17 +1319,7 @@ func updateCmd(args []string, o options) error {
 		// Prevent `hogman update --pen X` from silently downgrading the shared
 		// canonical binary used by other pens on this computer.
 		if !plan.fromRelease {
-			inPlanCheck := map[string]bool{}
-			for _, p := range plan.pens {
-				inPlanCheck[p.zone] = true
-			}
-			var otherPens []string
-			for _, p := range loadPenTargets(configBase) {
-				if !inPlanCheck[p.zone] {
-					otherPens = append(otherPens, p.zone)
-				}
-			}
-			if len(otherPens) > 0 {
+			if otherPens := pensOutsidePlan(configBase, plan.pens); len(otherPens) > 0 {
 				curVer := queryBinaryVersion(canonicalBin)
 				newVer := queryBinaryVersion(verifiedSrc)
 				if cmp, ok := compareReleaseVersions(newVer, curVer); ok && cmp < 0 {
@@ -1444,17 +1386,7 @@ func updateCmd(args []string, o options) error {
 
 	// Warn if other installed pens were not part of this update plan (e.g. --pen
 	// or an explicit host matching only one of several pens).
-	inPlan := map[string]bool{}
-	for _, p := range plan.pens {
-		inPlan[p.zone] = true
-	}
-	var skipped []string
-	for _, p := range loadPenTargets(configBase) {
-		if !inPlan[p.zone] {
-			skipped = append(skipped, p.zone)
-		}
-	}
-	if len(skipped) > 0 {
+	if skipped := pensOutsidePlan(configBase, plan.pens); len(skipped) > 0 {
 		note("shared binary %s updated from %s; other pens (%s) will use it on next restart (run 'hogman update' to update and restart all pens from GitHub Releases)",
 			canonicalBin, plan.host, strings.Join(skipped, ", "))
 	}
@@ -1470,11 +1402,7 @@ func updateCmd(args []string, o options) error {
 		return errorf("updated binary (%s), but %s did not come back online", wantHex[:12], strings.Join(parts, "; "))
 	}
 
-	verLine := ""
-	if out, err := exec.Command(selfPath, "--version").Output(); err == nil {
-		verLine = strings.TrimSpace(string(bytes.TrimSpace(out)))
-	}
-	if verLine != "" {
+	if verLine := queryBinaryVersionLine(selfPath); verLine != "" {
 		say("\n✓ Updated %s (SHA-256 %s).", verLine, wantHex[:12])
 	} else {
 		say("\n✓ Updated hogman (SHA-256 %s).", wantHex[:12])
