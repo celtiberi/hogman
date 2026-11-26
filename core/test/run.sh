@@ -319,6 +319,8 @@ portal_hdrs="$(run alice-laptop-tools curl -sI -m5 --cacert $ROOT "https://home.
 check "the portal sets anti-framing headers" bash -c "grep -iq '^x-frame-options: DENY' <<<\"\$1\" && grep -iq \"^content-security-policy:.*frame-ancestors 'none'\" <<<\"\$1\"" _ "$portal_hdrs"
 portal_assets_ok() {
   run alice-laptop-tools curl -sf -m5 --cacert $ROOT "https://home.$ZONE/portal.js" >/dev/null &&
+    run alice-laptop-tools curl -sf -m5 --cacert $ROOT "https://home.$ZONE/tokens.css" >/dev/null &&
+    run alice-laptop-tools curl -sf -m5 --cacert $ROOT "https://home.$ZONE/base.css" >/dev/null &&
     run alice-laptop-tools curl -sf -m5 --cacert $ROOT "https://home.$ZONE/portal.css" >/dev/null
 }
 check "portal external JS/CSS load" portal_assets_ok
@@ -533,6 +535,8 @@ portal_hdrs="$(run bob-tools curl -sfI --cacert $ROOT "https://home.$ZONE/" | tr
 check "the portal page sets Origin-Agent-Cluster" grep -iq '^origin-agent-cluster: ?1' <<<"$portal_hdrs"
 join_assets_ok() {
   from_internet "https://$PUBLIC_HOST/join/assets/join.js" >/dev/null &&
+    from_internet "https://$PUBLIC_HOST/join/assets/tokens.css" >/dev/null &&
+    from_internet "https://$PUBLIC_HOST/join/assets/base.css" >/dev/null &&
     from_internet "https://$PUBLIC_HOST/join/assets/join.css" >/dev/null
 }
 check "join page external JS/CSS load" join_assets_ok
