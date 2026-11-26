@@ -85,20 +85,25 @@ func TestDetectPackageManager(t *testing.T) {
 		path    string
 		goos    string
 		wantMgr string
+		wantCmd string
 		wantOK  bool
 	}{
-		{"/opt/homebrew/Cellar/hogman/2026.11.23/bin/hogman", "darwin", "Homebrew", true},
-		{"/usr/local/Cellar/hogman/1.0/bin/hogman", "darwin", "Homebrew", true},
-		{"/home/linuxbrew/.linuxbrew/Cellar/hogman/1.0/bin/hogman", "linux", "Homebrew", true},
-		{"/usr/bin/hogman", "linux", "your system package manager", true},
-		{`C:\Users\alice\scoop\apps\hogman\current\hogman.exe`, "windows", "Scoop", true},
-		{`C:\Users\alice\AppData\Local\Microsoft\WinGet\Packages\Galderwood.Hogman\hogman.exe`, "windows", "winget", true},
-		{"/tmp/hogman", "darwin", "", false},
-		{"/usr/local/bin/hogman", "linux", "", false},
+		{"/opt/homebrew/Cellar/hogman/2026.11.23/bin/hogman", "darwin", "Homebrew", "brew upgrade hogman", true},
+		{"/usr/local/Cellar/hogman/1.0/bin/hogman", "darwin", "Homebrew", "brew upgrade hogman", true},
+		{"/home/linuxbrew/.linuxbrew/Cellar/hogman/1.0/bin/hogman", "linux", "Homebrew", "brew upgrade hogman", true},
+		{"/usr/bin/hogman", "linux", "your system package manager", "upgrade via your OS package manager", true},
+		{`C:\Users\alice\scoop\apps\hogman\current\hogman.exe`, "windows", "Scoop", "scoop update hogman", true},
+		{`C:\Users\alice\AppData\Local\Microsoft\WinGet\Packages\Example.Hogman\hogman.exe`, "windows", "winget", "winget upgrade --id Example.Hogman", true},
+		{`C:\Users\alice\AppData\Local\Microsoft\WinGet\Packages\Example.Hogman_Microsoft.Winget.Source_8wekyb3d8bbwe\hogman.exe`, "windows", "winget", "winget upgrade --id Example.Hogman", true},
+		{`C:\Users\alice\AppData\Local\Microsoft\WinGet\Packages\bad folder!\hogman.exe`, "windows", "winget", "winget upgrade hogman", true},
+		{`C:\Users\alice\AppData\Local\Microsoft\WinGet\Packages\_onlysource\hogman.exe`, "windows", "winget", "winget upgrade hogman", true},
+		{`C:\Users\alice\AppData\Local\Microsoft\WinGet\Packages\hogman.exe`, "windows", "winget", "winget upgrade hogman", true},
+		{"/tmp/hogman", "darwin", "", "", false},
+		{"/usr/local/bin/hogman", "linux", "", "", false},
 	} {
-		mgr, _, ok := detectPackageManager(tc.path, tc.goos)
-		if ok != tc.wantOK || mgr != tc.wantMgr {
-			t.Errorf("detectPackageManager(%q, %q) = (%q, %v), want (%q, %v)", tc.path, tc.goos, mgr, ok, tc.wantMgr, tc.wantOK)
+		mgr, cmd, ok := detectPackageManager(tc.path, tc.goos)
+		if ok != tc.wantOK || mgr != tc.wantMgr || cmd != tc.wantCmd {
+			t.Errorf("detectPackageManager(%q, %q) = (%q, %q, %v), want (%q, %q, %v)", tc.path, tc.goos, mgr, cmd, ok, tc.wantMgr, tc.wantCmd, tc.wantOK)
 		}
 	}
 }

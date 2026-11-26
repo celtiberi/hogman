@@ -778,6 +778,28 @@ func restartShareService(s *shareTargetDir, binPath string, o options, updated b
 	return nil
 }
 
+var wingetPackageIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$`)
+
+// wingetPackageIDFromPath extracts the WinGet package ID from an install path
+// under ...\Microsoft\WinGet\Packages\<Id>\... or
+// ...\Microsoft\WinGet\Packages\<Id>_<SourceId>\..., returning "" when no
+// valid package folder ID can be parsed.
+func wingetPackageIDFromPath(slashPath string) string {
+	segs := strings.Split(slashPath, "/")
+	for i := 0; i+4 < len(segs); i++ {
+		if strings.EqualFold(segs[i], "microsoft") &&
+			strings.EqualFold(segs[i+1], "winget") &&
+			strings.EqualFold(segs[i+2], "packages") {
+			id, _, _ := strings.Cut(segs[i+3], "_")
+			if wingetPackageIDRe.MatchString(id) {
+				return id
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
 // detectPackageManager reports whether exePath appears to be installed and
 // managed by a system or user package manager (Homebrew, Scoop, WinGet, or OS
 // packages under /usr/bin) so `update` refuses to overwrite it in place.
@@ -799,7 +821,10 @@ func detectPackageManager(exePath, goos string) (name, upgradeCmd string, ok boo
 			return "Scoop", "scoop update hogman", true
 		}
 		if strings.Contains(lp, "/microsoft/winget/packages/") {
-			return "winget", "winget upgrade Galderwood.Hogman", true
+			if id := wingetPackageIDFromPath(p); id != "" {
+				return "winget", "winget upgrade --id " + id, true
+			}
+			return "winget", "winget upgrade hogman", true
 		}
 	}
 	return "", "", false
