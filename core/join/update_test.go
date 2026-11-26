@@ -283,7 +283,7 @@ func TestResolveUpdatePlan(t *testing.T) {
 }
 
 func TestGitHubReleaseFlowAndRedirects(t *testing.T) {
-	// Version tag validation matches deploy/install.sh.
+	// Version tag validation rejects traversal, whitespace, and shell metacharacters.
 	for _, bad := range []string{"", " ", "../evil", "2026.11.23/foo", "v..bad", "v1.0;rm"} {
 		if _, _, err := validateReleaseVersion(bad); err == nil {
 			t.Fatalf("validateReleaseVersion(%q) succeeded, want error", bad)
