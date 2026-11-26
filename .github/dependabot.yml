@@ -3,12 +3,12 @@
 version: 2
 updates:
   - package-ecosystem: gomod
-    directories: ["/core/join", "/core/registrar", "/deploy/signup", "/deploy/challenge-dns"]
+    directories: ["/core/join", "/core/registrar", "/deploy/challenge-dns"]
     schedule: { interval: weekly }
     groups:
       go: { patterns: ["*"] }
   - package-ecosystem: docker
-    directories: ["/core/join", "/core/registrar", "/deploy/signup", "/site"]
+    directories: ["/core/join", "/core/registrar"]
     schedule: { interval: weekly }
   # The pens' runtime images (Headscale, Caddy, Tailscale) in compose.
   - package-ecosystem: docker-compose

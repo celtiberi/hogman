@@ -25,8 +25,8 @@ on Earth, there is no public IP address to scan.
 
 Hogman runs pen control planes hosted-only on `hogman.network` (no self-hosted pen server support),
 while your sites, folders, and bridged local devices run on your own machines via
-`hogman share`. The entire codebase is open source under [AGPL-3.0](LICENSE) with
-SLSA-attested release binaries.
+`hogman share`. The core networking stack, client CLI, browser extension, and ACME DNS-01
+challenge server are open source under [AGPL-3.0](LICENSE) with SLSA-attested release binaries.
 
 ---
 
@@ -232,13 +232,10 @@ Built on [Headscale](https://github.com/juanfont/headscale), [Tailscale `tsnet`]
 | [`core/join`](core/join) | `hogman` client: enrolls devices, runs the loopback `:443` proxy, hosts `share` nodes, and provides `hogman-native-host` for the browser extension. |
 | [`browser-ext`](browser-ext) | Manifest V3 extension for Chrome, Brave, Edge, and Firefox (VPN coexistence + per-profile pen allowlists). |
 | [`deploy/challenge-dns`](deploy/challenge-dns) | Authoritative DNS-01 challenge server (`_acme-challenge.*` TXT, `SOA`, `NS`, `CAA`; never `A`/`AAAA`). |
-| [`deploy/hogman-host`](deploy/hogman-host) & [`deploy/signup`](deploy/signup) | Isolated hosted pens, shared `*.gate.hogman.network` front door, backups, monitoring (`hogman-watch.sh`), and web sign-ups. |
-| [`infra`](infra) | DNS configuration as code (`dnscontrol`). |
 | [`test-arena`](test-arena) | Disposable sandbox testing and automated red-team harness. |
 
-More developer & operator docs:
+More developer docs:
 - [`core/README.md`](core/README.md) — core stack and Docker e2e test harness
-- [`deploy/README.md`](deploy/README.md) — operator guide (hosted pens, `challenge-dns`, backups, monitoring)
 - [`browser-ext/README.md`](browser-ext/README.md) — extension architecture, build, and local install
 - [`docs/how-hogman-works.md`](docs/how-hogman-works.md) — step-by-step map of every moving part, packet flow, portal auth, revocation, and scaling
 - [`docs/security/`](docs/security/) — security design notes and public-certificate architecture
