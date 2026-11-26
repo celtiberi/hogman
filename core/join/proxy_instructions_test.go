@@ -58,11 +58,14 @@ func TestFormatBrowserProxyInstructionsByOS(t *testing.T) {
 		"Automatic proxy configuration",
 		pac,
 		"https://home.acme.pens.example",
-		"signed Mac app",
+		"Chrome Web Store",
 	} {
 		if !strings.Contains(macMulti, want) {
 			t.Fatalf("darwin multi-service instructions missing %q:\n%s", want, macMulti)
 		}
+	}
+	if strings.Contains(macMulti, "automatic soon") || strings.Contains(macMulti, "signed Mac app") {
+		t.Fatalf("darwin instructions contain stale or unbuilt promises:\n%s", macMulti)
 	}
 	if strings.Contains(macMulti, "even with a VPN on") {
 		t.Fatalf("darwin instructions should not make untested VPN claims:\n%s", macMulti)

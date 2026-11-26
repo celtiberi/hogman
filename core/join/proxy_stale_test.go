@@ -53,8 +53,8 @@ func TestStaleHogmanPAC(t *testing.T) {
 		return srv.URL + "/proxy.pac"
 	}
 	// Every header renderPAC writes, for 0, 1 and 2 pens.
-	p1 := &agentConfig{Zone: "farm2.pens.hogman.network", ProxyAddr: "127.0.0.1:17464"}
-	p2 := &agentConfig{Zone: "qa-piggy5.pens.hogman.network", ProxyAddr: "127.0.0.1:25148"}
+	p1 := &agentConfig{Zone: "home.pens.example.com", ProxyAddr: "127.0.0.1:17464"}
+	p2 := &agentConfig{Zone: "work.pens.example.com", ProxyAddr: "127.0.0.1:25148"}
 	for _, pens := range [][]*agentConfig{nil, {p1}, {p1, p2}} {
 		if !realStaleHogmanPAC(serve(renderPAC(pens))) {
 			t.Errorf("a live Hogman agent's PAC for %d pen(s) should count as ours", len(pens))
@@ -82,19 +82,18 @@ func TestStaleHogmanPAC(t *testing.T) {
 // The case from the operator's laptop: Thunderbolt Bridge and ProtonVPN still
 // pointed at a removed pen's dead port, so a new join left every connection
 // alone and leaving never cleared them.
-func TestStalePACIsReplacedAndCleared(t *testing.T) {
+func TestStalePACIsRecognizedAsOurs(t *testing.T) {
 	staleHogmanPAC = func(u string) bool { return u == "http://127.0.0.1:20441/proxy.pac" }
 	t.Cleanup(func() { staleHogmanPAC = func(string) bool { return false } })
-	p := &agentConfig{Zone: "qa-piggy5.pens.hogman.network", ProxyAddr: "127.0.0.1:25148"}
-	want := pacURLWithVersion(p, []*agentConfig{p})
-	if got := planAutoProxyAction("http://127.0.0.1:20441/proxy.pac", true, []*agentConfig{p}, want); got != "set" {
-		t.Errorf("join over a stale Hogman PAC: got %q, want set", got)
+	p := &agentConfig{Zone: "work.pens.example.com", ProxyAddr: "127.0.0.1:25148"}
+	if !isOurPAC("http://127.0.0.1:20441/proxy.pac", []*agentConfig{p}) {
+		t.Error("stale Hogman PAC should be recognized by isOurPAC")
 	}
-	if got := planClearAutoProxyAction("http://127.0.0.1:20441/proxy.pac", true, nil, ""); got != "off" {
-		t.Errorf("leave with a stale Hogman PAC: got %q, want off", got)
+	if shouldLeaveAutoProxy("http://127.0.0.1:20441/proxy.pac", true, []*agentConfig{p}) {
+		t.Error("stale Hogman PAC should not be treated as a foreign proxy to leave untouched")
 	}
-	if got := planAutoProxyAction("http://corp.example/proxy.pac", true, []*agentConfig{p}, want); got != "leave" {
-		t.Errorf("join over a company PAC: got %q, want leave", got)
+	if !shouldLeaveAutoProxy("http://corp.example/proxy.pac", true, []*agentConfig{p}) {
+		t.Error("company PAC must be left untouched")
 	}
 }
 

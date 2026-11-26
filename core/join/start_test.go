@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-func TestStartShAutoUpdateAndJoinBehaviorI9(t *testing.T) {
+func TestStartShAutoUpdateAndJoinBehavior(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("POSIX shell test")
 	}

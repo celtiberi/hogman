@@ -509,7 +509,7 @@ func TestInterruptedUpdateRecoveryAndVersionGuard(t *testing.T) {
 	}
 }
 
-func TestUpdateContinuesPastUnreachablePenAndLegacySHA256MessageI10(t *testing.T) {
+func TestUpdateContinuesPastUnreachablePenAndLegacySHA256Message(t *testing.T) {
 	// 1. Two legacy pens where the first pen's server is unreachable and the
 	// second pen is healthy: pen 1 rewrites its login item without waiting for
 	// restartNew, and pen 2 still migrates and restarts cleanly.

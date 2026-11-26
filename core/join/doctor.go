@@ -116,10 +116,14 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 		for _, p := range pens {
 			switch {
 			case p.Squatted:
+				port := p.configuredPort
+				if port == 0 {
+					port = p.Port
+				}
 				add(doctorCheck{
 					Name:   "pen:" + p.Zone,
 					Status: "fail",
-					Detail: fmt.Sprintf("local port 127.0.0.1:%d is squatted by another process (or pre-token agent)", p.Port),
+					Detail: fmt.Sprintf("local port 127.0.0.1:%d is squatted by another process (or pre-token agent)", port),
 					Fix:    cliBinaryName() + " update",
 				})
 			case p.Up:

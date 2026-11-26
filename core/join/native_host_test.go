@@ -205,17 +205,55 @@ func TestCollectNativePensStrictValidationLegacyAndSquatDetection(t *testing.T) 
 	if len(byZone) != 4 {
 		t.Fatalf("got %d pens (%+v), want 4", len(byZone), pens)
 	}
-	if p := byZone[zone1]; !p.Up || p.Port != port1 || !p.Hosted || p.Squatted || p.Legacy {
-		t.Fatalf("zone1 entry = %+v, want Up=true Port=%d Hosted=true Squatted=false Legacy=false", p, port1)
+	if p := byZone[zone1]; !p.Up || p.Port != port1 || p.configuredPort != port1 || !p.Hosted || p.Squatted {
+		t.Fatalf("zone1 entry = %+v, want Up=true Port=%d Hosted=true Squatted=false", p, port1)
 	}
-	if p := byZone[zone2]; p.Up || p.Port != 0 || !p.Squatted {
-		t.Fatalf("zone2 squatted entry = %+v, want Up=false Port=0 Squatted=true", p)
+	if p := byZone[zone2]; p.Up || p.Port != 0 || p.configuredPort != port2 || !p.Squatted {
+		t.Fatalf("zone2 squatted entry = %+v, want Up=false Port=0 configuredPort=%d Squatted=true", p, port2)
 	}
-	if p := byZone[zoneLeg]; p.Up || p.Port != 0 || !p.Hosted || p.Legacy || !p.Squatted {
-		t.Fatalf("zoneLeg missing-token entry = %+v, want Up=false Port=0 Hosted=true Legacy=false Squatted=true", p)
+	if p := byZone[zoneLeg]; p.Up || p.Port != 0 || p.configuredPort != portLeg || !p.Hosted || !p.Squatted {
+		t.Fatalf("zoneLeg missing-token entry = %+v, want Up=false Port=0 configuredPort=%d Hosted=true Squatted=true", p, portLeg)
 	}
-	if p := byZone[zone3]; p.Up || p.Port != port3 || p.Hosted || p.Squatted || p.Legacy {
+	if p := byZone[zone3]; p.Up || p.Port != port3 || p.configuredPort != port3 || p.Hosted || p.Squatted {
 		t.Fatalf("zone3 stopped entry = %+v, want Up=false Port=%d Hosted=false Squatted=false", p, port3)
+	}
+
+	// Verify runDoctor reports the real squatted port (never 127.0.0.1:0).
+	rep := runDoctor(base, filepath.Join(base, "shares"), "/usr/local/bin/hogman")
+	wantAddr := fmt.Sprintf("127.0.0.1:%d", port2)
+	foundSquatCheck := false
+	for _, chk := range rep.Checks {
+		if chk.Name == "pen:"+zone2 {
+			foundSquatCheck = true
+			if chk.Status != "fail" || !strings.Contains(chk.Detail, wantAddr) {
+				t.Fatalf("doctor squatted check = %+v, want fail naming %s", chk, wantAddr)
+			}
+		}
+	}
+	if !foundSquatCheck {
+		t.Fatalf("doctor missing check for squatted pen %s: %+v", zone2, rep.Checks)
+	}
+
+	// Verify JSON wire format never exposes configuredPort and emits port:0 for squatted entries.
+	rawWire, err := json.Marshal(nativeResponse{OK: true, Version: nativeHostProtocolVer, Pens: pens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rawWire), "configured") {
+		t.Fatalf("nativeResponse JSON leaked unexported configuredPort: %s", rawWire)
+	}
+	var decoded struct {
+		Pens []map[string]any `json:"pens"`
+	}
+	if err := json.Unmarshal(rawWire, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range decoded.Pens {
+		if p["zone"] == zone2 {
+			if portVal, _ := p["port"].(float64); portVal != 0 {
+				t.Fatalf("squatted pen wire port = %v, want 0 (%s)", portVal, rawWire)
+			}
+		}
 	}
 }
 

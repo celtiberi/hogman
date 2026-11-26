@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -136,13 +137,13 @@ func TestDownloadVerifiedBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gotHex, err := fetchExpectedSHA256(client, srv.URL, binName)
+	gotHex, err := fetchExpectedSHA256URL(client, srv.URL+"/join/dl/SHA256SUMS", binName)
 	if err != nil || gotHex != wantHex {
-		t.Fatalf("fetchExpectedSHA256: (%q, %v), want %q", gotHex, err, wantHex)
+		t.Fatalf("fetchExpectedSHA256URL: (%q, %v), want %q", gotHex, err, wantHex)
 	}
 
 	tmpDir := t.TempDir()
-	path, err := downloadVerifiedBinary(client, srv.URL, binName, wantHex, tmpDir)
+	path, err := downloadVerifiedBinaryURL(client, srv.URL+"/join/dl/"+binName, binName, wantHex, tmpDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,17 +153,17 @@ func TestDownloadVerifiedBinary(t *testing.T) {
 	}
 
 	failDir := t.TempDir()
-	if _, err := downloadVerifiedBinary(client, srv.URL, "bad-"+binName, wantHex, failDir); err == nil {
+	if _, err := downloadVerifiedBinaryURL(client, srv.URL+"/join/dl/bad-"+binName, "bad-"+binName, wantHex, failDir); err == nil {
 		t.Fatal("expected error on checksum mismatch")
 	}
 	if entries, _ := os.ReadDir(failDir); len(entries) != 0 {
 		t.Fatalf("failed download left temp files: %v", entries)
 	}
 
-	if _, err := downloadVerifiedBinary(client, srv.URL, "redir-"+binName, wantHex, failDir); err == nil {
+	if _, err := downloadVerifiedBinaryURL(client, srv.URL+"/join/dl/redir-"+binName, "redir-"+binName, wantHex, failDir); err == nil {
 		t.Fatal("expected error on cross-host redirect")
 	}
-	if _, err := downloadVerifiedBinary(client, srv.URL, "missing-"+binName, wantHex, failDir); err == nil {
+	if _, err := downloadVerifiedBinaryURL(client, srv.URL+"/join/dl/missing-"+binName, "missing-"+binName, wantHex, failDir); err == nil {
 		t.Fatal("expected error on HTTP 404")
 	}
 }
@@ -380,121 +381,177 @@ func TestParseCLIArgsUpdate(t *testing.T) {
 	}
 }
 
-func TestUpdatePenAgentRollbackAndRecovery(t *testing.T) {
-	pen := &penTarget{zone: "bobo.hogman", dir: "/tmp/pen", cfg: &agentConfig{Zone: "bobo.hogman"}}
-	binPath := "/tmp/pen/hogman"
+func TestMigrateAndRestartPenRollbackAndRecovery(t *testing.T) {
+	dir := t.TempDir()
+	canonBin := filepath.Join(dir, "canonical", "hogman")
+	legacyBin := filepath.Join(dir, "hogman-join")
+	if err := os.WriteFile(legacyBin, []byte("legacy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pen := &penTarget{zone: "bobo.hogman", dir: dir, cfg: &agentConfig{Zone: "bobo.hogman"}}
 
-	// 1. Stage fails while running -> old agent restarted, restartNew not called.
+	// 1. restartNew fails while running -> stops partial new agent, rolls back to legacyBin, keeps legacyBin.
 	var calls []string
 	ops := penUpdateOps{
 		isRunning:  func(string, *agentConfig) bool { return true },
 		hasService: func(string) bool { return true },
 		stop:       func(string, *agentConfig) { calls = append(calls, "stop") },
-		stage:      func(string, string, string) error { calls = append(calls, "stage"); return errors.New("disk full") },
-		restartNew: func(*penTarget, string, bool, options) error { calls = append(calls, "restartNew"); return nil },
-		restartOld: func(_ *penTarget, _ string, hadService bool, _ options) error {
-			if !hadService {
-				t.Fatal("expected hadService=true")
+		restartNew: func(*penTarget, string, bool, options) error {
+			calls = append(calls, "restartNew")
+			return errors.New("agent timeout")
+		},
+		restartOld: func(_ *penTarget, bin string, hadService bool, _ options) error {
+			if !hadService || bin != legacyBin {
+				t.Fatalf("restartOld got hadService=%v bin=%q, want true %q", hadService, bin, legacyBin)
 			}
 			calls = append(calls, "restartOld")
 			return nil
 		},
 	}
-	err := updatePenAgent(pen, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops)
-	if err == nil || !strings.Contains(err.Error(), "disk full") {
-		t.Fatalf("expected disk full error, got %v", err)
+	err := migrateAndRestartPen(pen, canonBin, legacyBin, "/tmp/self", options{}, ops)
+	if err == nil || !strings.Contains(err.Error(), "agent timeout") {
+		t.Fatalf("expected restartNew error, got %v", err)
 	}
-	if !slices.Equal(calls, []string{"stop", "stage", "restartOld"}) {
-		t.Fatalf("unexpected call sequence on stage failure: %v", calls)
+	if !slices.Equal(calls, []string{"stop", "restartNew", "stop", "restartOld"}) {
+		t.Fatalf("unexpected rollback sequence: %v", calls)
+	}
+	if _, statErr := os.Stat(legacyBin); statErr != nil {
+		t.Fatalf("legacyBin removed despite rollback: %v", statErr)
+	}
+	if present, _ := readUpdatingMarker(dir); present {
+		t.Fatal("updating marker should be cleared after successful rollback to legacyBin")
 	}
 
-	// 2. Stage fails AND restartOld fails -> error gives recovery instructions.
+	// 1b. restartNew fails AND restartOld fails -> updating marker remains on disk for recovery.
 	calls = nil
 	ops.restartOld = func(*penTarget, string, bool, options) error {
 		calls = append(calls, "restartOld")
-		return errors.New("launchd error")
+		return errors.New("rollback failed")
 	}
-	err = updatePenAgent(pen, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops)
-	if err == nil || !strings.Contains(err.Error(), "agent") || !strings.Contains(err.Error(), "link") {
-		t.Fatalf("expected recovery hint in error, got %v", err)
+	if err := migrateAndRestartPen(pen, canonBin, legacyBin, "/tmp/self", options{}, ops); err == nil {
+		t.Fatal("expected error when both restartNew and restartOld fail")
 	}
+	if present, hadSvc := readUpdatingMarker(dir); !present || !hadSvc {
+		t.Fatalf("updating marker after failed rollback = (%v, %v), want (true, true)", present, hadSvc)
+	}
+	clearUpdatingMarker(dir)
 
-	// 3. Stage fails while stopped -> no stop or restart attempted.
+	// 2. Stopped pen with service -> rewrites service and removes legacyBin without starting.
 	calls = nil
 	ops.isRunning = func(string, *agentConfig) bool { return false }
-	err = updatePenAgent(pen, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops)
-	if err == nil || !slices.Equal(calls, []string{"stage"}) {
-		t.Fatalf("expected only stage on stopped pen, got calls=%v err=%v", calls, err)
+	ops.rewriteService = func(bin, _ string, _ *agentConfig) error {
+		if bin != canonBin {
+			t.Fatalf("rewriteService bin=%q, want %q", bin, canonBin)
+		}
+		calls = append(calls, "rewriteService")
+		return nil
+	}
+	if err := migrateAndRestartPen(pen, canonBin, legacyBin, "/tmp/self", options{}, ops); err != nil {
+		t.Fatalf("stopped pen migrate: %v", err)
+	}
+	if !slices.Equal(calls, []string{"rewriteService"}) {
+		t.Fatalf("stopped pen sequence = %v, want [rewriteService]", calls)
+	}
+	if _, statErr := os.Stat(legacyBin); !os.IsNotExist(statErr) {
+		t.Fatalf("legacyBin should be removed after stopped migration (err=%v)", statErr)
 	}
 
-	// 4. Happy path while running -> stop, stage, restartNew in order.
+	// 3. Running pen happy path -> stop, restartNew, clear marker.
 	calls = nil
 	ops.isRunning = func(string, *agentConfig) bool { return true }
-	ops.stage = func(string, string, string) error { calls = append(calls, "stage"); return nil }
-	if err := updatePenAgent(pen, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops); err != nil {
-		t.Fatalf("unexpected error on happy path: %v", err)
+	ops.restartNew = func(*penTarget, string, bool, options) error { calls = append(calls, "restartNew"); return nil }
+	if err := migrateAndRestartPen(pen, canonBin, "", "/tmp/self", options{}, ops); err != nil {
+		t.Fatalf("happy-path migrate: %v", err)
 	}
-	if !slices.Equal(calls, []string{"stop", "stage", "restartNew"}) {
-		t.Fatalf("unexpected happy-path call sequence: %v", calls)
+	if !slices.Equal(calls, []string{"stop", "restartNew"}) {
+		t.Fatalf("happy-path sequence = %v, want [stop restartNew]", calls)
+	}
+	if present, _ := readUpdatingMarker(dir); present {
+		t.Fatal("updating marker should be cleared after successful pen migration")
 	}
 }
 
-func TestUpdateShareBinaryRestartAndRollback(t *testing.T) {
+func TestMigrateAndRestartShareRollbackAndRecovery(t *testing.T) {
 	dir := t.TempDir()
-	binPath := filepath.Join(dir, "hogman")
+	canonBin := filepath.Join(dir, "canonical", "hogman")
+	legacyBin := filepath.Join(dir, "hogman-join")
+	if err := os.WriteFile(legacyBin, []byte("legacy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	s := &shareTargetDir{
 		dir:  dir,
 		name: "blog",
 		cfg:  &shareConfig{Name: "blog", Zone: "bobo.hogman", Target: "http://127.0.0.1:3000"},
 	}
 
-	// 1. Running managed share + stage failure -> stops share, calls restartOld, returns error.
+	// 1. Running managed share + restartNew fails -> stops, rolls back to legacyBin, keeps legacyBin.
 	var calls []string
 	ops := shareUpdateOps{
 		isRunning:  func(string) bool { return true },
 		hasService: func(*shareConfig) bool { return true },
 		stop:       func(string, *shareConfig) { calls = append(calls, "stop") },
-		stage:      func(string, string, string) error { calls = append(calls, "stage"); return errors.New("disk full") },
-		restartNew: func(*shareTargetDir, string, options) error { calls = append(calls, "restartNew"); return nil },
-		restartOld: func(*shareTargetDir, string, options) error { calls = append(calls, "restartOld"); return nil },
+		restartNew: func(*shareTargetDir, string, options) error {
+			calls = append(calls, "restartNew")
+			return errors.New("share failed")
+		},
+		restartOld: func(_ *shareTargetDir, bin string, _ options) error {
+			if bin != legacyBin {
+				t.Fatalf("restartOld bin=%q, want %q", bin, legacyBin)
+			}
+			calls = append(calls, "restartOld")
+			return nil
+		},
+		rewriteService: func(string, string, *shareConfig) error {
+			calls = append(calls, "rewriteService")
+			return nil
+		},
 	}
-	err := updateShareBinary(s, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops)
-	if err == nil || !strings.Contains(err.Error(), "disk full") {
-		t.Fatalf("expected disk full error, got %v", err)
+	err := migrateAndRestartShare(s, canonBin, legacyBin, "/tmp/self", options{}, ops)
+	if err == nil || !strings.Contains(err.Error(), "share failed") {
+		t.Fatalf("expected restartNew error, got %v", err)
 	}
-	if !slices.Equal(calls, []string{"stop", "stage", "restartOld"}) {
-		t.Fatalf("managed stage failure sequence = %v, want [stop stage restartOld]", calls)
+	if !slices.Equal(calls, []string{"stop", "restartNew", "stop", "restartOld"}) {
+		t.Fatalf("managed rollback sequence = %v, want [stop restartNew stop restartOld]", calls)
+	}
+	if _, statErr := os.Stat(legacyBin); statErr != nil {
+		t.Fatalf("legacyBin removed despite rollback: %v", statErr)
 	}
 
-	// 2. Running managed share + stage success -> stops share, stages new binary, calls restartNew.
-	calls = nil
-	ops.stage = func(string, string, string) error { calls = append(calls, "stage"); return nil }
-	if err := updateShareBinary(s, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops); err != nil {
-		t.Fatalf("unexpected error on managed happy path: %v", err)
-	}
-	if !slices.Equal(calls, []string{"stop", "stage", "restartNew"}) {
-		t.Fatalf("managed happy-path sequence = %v, want [stop stage restartNew]", calls)
-	}
-
-	// 3. Running unmanaged (foreground/no-service) share -> stages without stopping or restarting.
+	// 2. Running unmanaged share -> leaves running without stopping or deleting legacyBin.
 	calls = nil
 	ops.hasService = func(*shareConfig) bool { return false }
-	if err := updateShareBinary(s, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops); err != nil {
-		t.Fatalf("unexpected error on unmanaged running share: %v", err)
+	if err := migrateAndRestartShare(s, canonBin, legacyBin, "/tmp/self", options{}, ops); err != nil {
+		t.Fatalf("unmanaged running share: %v", err)
 	}
-	if !slices.Equal(calls, []string{"stage"}) {
-		t.Fatalf("unmanaged running share sequence = %v, want [stage]", calls)
+	if len(calls) != 0 {
+		t.Fatalf("unmanaged running share sequence = %v, want empty", calls)
+	}
+	if _, statErr := os.Stat(legacyBin); statErr != nil {
+		t.Fatalf("legacyBin removed for unmanaged running share: %v", statErr)
 	}
 
-	// 4. Stopped share -> stages without stopping or starting.
+	// 3. Running managed share happy path -> stop, restartNew, remove legacyBin.
+	calls = nil
+	ops.hasService = func(*shareConfig) bool { return true }
+	ops.restartNew = func(*shareTargetDir, string, options) error { calls = append(calls, "restartNew"); return nil }
+	if err := migrateAndRestartShare(s, canonBin, legacyBin, "/tmp/self", options{}, ops); err != nil {
+		t.Fatalf("managed happy path: %v", err)
+	}
+	if !slices.Equal(calls, []string{"stop", "restartNew"}) {
+		t.Fatalf("managed happy-path sequence = %v, want [stop restartNew]", calls)
+	}
+	if _, statErr := os.Stat(legacyBin); !os.IsNotExist(statErr) {
+		t.Fatalf("legacyBin should be removed after managed migration (err=%v)", statErr)
+	}
+
+	// 4. Stopped managed share -> rewrites service without starting.
 	calls = nil
 	ops.isRunning = func(string) bool { return false }
-	ops.hasService = func(*shareConfig) bool { return true }
-	if err := updateShareBinary(s, binPath, "/tmp/src", strings.Repeat("aa", 32), options{}, ops); err != nil {
-		t.Fatalf("unexpected error on stopped share: %v", err)
+	if err := migrateAndRestartShare(s, canonBin, "", "/tmp/self", options{}, ops); err != nil {
+		t.Fatalf("stopped managed share: %v", err)
 	}
-	if !slices.Equal(calls, []string{"stage"}) {
-		t.Fatalf("stopped share sequence = %v, want [stage]", calls)
+	if !slices.Equal(calls, []string{"rewriteService"}) {
+		t.Fatalf("stopped managed share sequence = %v, want [rewriteService]", calls)
 	}
 }
 
@@ -546,5 +603,48 @@ func TestFindAndRetireLegacySameServerPens(t *testing.T) {
 	}
 	if _, err := os.Stat(otherDir); err != nil {
 		t.Fatalf("expected unrelated pen dir %s kept, err = %v", otherDir, err)
+	}
+}
+
+func TestQueryBinaryVersionLineAndPensOutsidePlan(t *testing.T) {
+	base := t.TempDir()
+	for _, z := range []string{"alpha.pens.example.com", "beta.pens.example.com", "gamma.pens.example.com"} {
+		d := filepath.Join(base, z)
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := (&agentConfig{Zone: z, LoginServer: "https://hs.example.com"}).save(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside := pensOutsidePlan(base, []penTarget{{zone: "beta.pens.example.com"}})
+	if !slices.Equal(outside, []string{"alpha.pens.example.com", "gamma.pens.example.com"}) {
+		t.Fatalf("pensOutsidePlan = %v, want [alpha gamma]", outside)
+	}
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	dir := t.TempDir()
+	multi := filepath.Join(dir, "multi")
+	if err := os.WriteFile(multi, []byte("#!/bin/sh\necho 'hogman 2026.11.26 darwin/arm64'\necho 'extra trailing line'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := queryBinaryVersionLine(multi); got != "hogman 2026.11.26 darwin/arm64" {
+		t.Fatalf("queryBinaryVersionLine(multi) = %q, want first line only", got)
+	}
+	if got := queryBinaryVersion(multi); got != "2026.11.26" {
+		t.Fatalf("queryBinaryVersion(multi) = %q, want 2026.11.26", got)
+	}
+
+	slow := filepath.Join(dir, "slow")
+	if err := os.WriteFile(slow, []byte("#!/bin/sh\nsleep 5\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prev := versionQueryTimeout
+	versionQueryTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { versionQueryTimeout = prev })
+	if got := queryBinaryVersionLine(slow); got != "" {
+		t.Fatalf("queryBinaryVersionLine(slow) = %q, want empty on timeout", got)
 	}
 }

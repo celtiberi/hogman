@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -10,12 +8,12 @@ import (
 // Windows: the agent runs as a plain background process for now. It does not
 // yet start by itself at login. Untested.
 func startAgent(dir string, c *agentConfig, o options) error {
+	if currentAgentHealthy(dir, c) {
+		return nil
+	}
 	bin, err := installedBinary(dir)
 	if err != nil {
 		return err
-	}
-	if currentAgentHealthy(dir, c) {
-		return nil
 	}
 	stopAgent(dir, c)
 	note("on Windows the pen connection does not yet restart by itself; run this command again after a restart")
@@ -45,13 +43,8 @@ func startShareServiceWithBinary(bin, dir string, _ *shareConfig, _ bool) (bool,
 func stopShareService(*shareConfig) {}
 
 func startDetached(bin, dir string) error {
-	logf, err := os.OpenFile(filepath.Join(dir, "agent.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(bin, "agent", dir)
-	cmd.Stdout, cmd.Stderr = logf, logf
-	return cmd.Start()
+	_, err := spawnDetached(filepath.Join(dir, "agent.log"), bin, "agent", dir)
+	return err
 }
 
 func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, bool, error) {
@@ -68,6 +61,10 @@ func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {
 	host := pickPACHost(remaining)
 	if host == nil {
 		return ""
+	}
+	if leaving == nil {
+		return "make sure Windows proxy \"Use setup script\" points to " + host.pacURL() +
+			" for your remaining pen(s): " + strings.Join(penZoneNames(remaining), ", ")
 	}
 	return "if Windows proxy \"Use setup script\" was pointing at " + leaving.pacURL() +
 		", update it to " + host.pacURL() + " for your remaining pen(s): " + strings.Join(penZoneNames(remaining), ", ")

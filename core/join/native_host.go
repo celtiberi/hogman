@@ -125,13 +125,13 @@ type nativeRequest struct {
 }
 
 type nativePenEntry struct {
-	Zone         string `json:"zone"`
-	Port         int    `json:"port"`
-	Up           bool   `json:"up"`
-	Hosted       bool   `json:"hosted"`
-	Legacy       bool   `json:"legacy,omitempty"`
-	Squatted     bool   `json:"squatted,omitempty"`
-	statusReason string
+	Zone           string `json:"zone"`
+	Port           int    `json:"port"`
+	Up             bool   `json:"up"`
+	Hosted         bool   `json:"hosted"`
+	Squatted       bool   `json:"squatted,omitempty"`
+	configuredPort int
+	statusReason   string
 }
 
 type nativeResponse struct {
@@ -385,11 +385,12 @@ func collectNativePens(configBase string) ([]nativePenEntry, []*agentConfig) {
 
 		state, detail := verifyAgentEndpointDetail(dir, cfg)
 		entry := nativePenEntry{
-			Zone:         cfg.Zone,
-			Port:         port,
-			Up:           state == agentEndpointUp,
-			Hosted:       isHostedPenZone(cfg.Zone),
-			statusReason: detail.reason,
+			Zone:           cfg.Zone,
+			Port:           port,
+			Up:             state == agentEndpointUp,
+			Hosted:         isHostedPenZone(cfg.Zone),
+			configuredPort: port,
+			statusReason:   detail.reason,
 		}
 		if state == agentEndpointSquatted {
 			// Never advertise a port answered by a non-Hogman / unverified listener.
@@ -775,7 +776,6 @@ type statusPenJSON struct {
 	Port     int    `json:"port"`
 	Up       bool   `json:"up"`
 	Hosted   bool   `json:"hosted"`
-	Legacy   bool   `json:"legacy,omitempty"`
 	Squatted bool   `json:"squatted,omitempty"`
 	State    string `json:"state"`
 }
@@ -809,8 +809,6 @@ func penStateLabel(p nativePenEntry) string {
 	switch {
 	case p.Squatted:
 		return "port squatted by another process"
-	case p.Legacy:
-		return "up (older agent; run hogman update to enable status verification)"
 	case p.Up:
 		return "up"
 	case p.statusReason != "":
@@ -829,7 +827,6 @@ func buildStatusOutput(base, sharesDir string) statusOutputJSON {
 			Port:     p.Port,
 			Up:       p.Up,
 			Hosted:   p.Hosted,
-			Legacy:   p.Legacy,
 			Squatted: p.Squatted,
 			State:    penStateLabel(p),
 		})

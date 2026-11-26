@@ -356,17 +356,8 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	defer stopSig()
 
 	step("Starting the pen connection as %q", cfg.Hostname)
-	needStart := false
-	if st, err := agentState(cfg); err != nil || !st.Up {
-		needStart = true
-	} else if hasLegacyPenBinary(dir) {
-		needStart = true
-	}
-	if needStart {
-		stopAgent(dir, cfg)
-		if err := startAgent(dir, cfg, o); err != nil {
-			return err
-		}
+	if err := startAgent(dir, cfg, o); err != nil {
+		return err
 	}
 	st, err := waitAgentUpCtx(ctx, cfg, 90*time.Second)
 	if err != nil {

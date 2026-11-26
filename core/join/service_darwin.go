@@ -20,12 +20,12 @@ func launchPlist(zone string) string {
 // previous agent (including a legacy hogman-join process holding the proxy
 // port) first.
 func startAgent(dir string, c *agentConfig, o options) error {
+	if currentAgentHealthy(dir, c) {
+		return nil
+	}
 	bin, err := installedBinary(dir)
 	if err != nil {
 		return err
-	}
-	if currentAgentHealthy(dir, c) {
-		return nil
 	}
 	stopAgent(dir, c)
 	if o.noService {

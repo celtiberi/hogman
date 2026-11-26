@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -689,49 +690,34 @@ func TestAgentServesCombinedPAC(t *testing.T) {
 	}
 }
 
-func TestPlanAutoProxyActions(t *testing.T) {
+func TestHogmanPACMatchingAndClearSystemProxyNilLeaving(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+
 	p1 := &agentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}
 	p2 := &agentConfig{Zone: "zebra.hogman", ProxyAddr: "127.0.0.1:18124"}
-	url1 := pacURLWithVersion(p1, []*agentConfig{p1})
-	url12OnP2 := pacURLWithVersion(p2, []*agentConfig{p1, p2})
-	url2Only := pacURLWithVersion(p2, []*agentConfig{p2})
-	if url12OnP2 == url2Only {
-		t.Fatalf("expected combined PAC version hash to differ from single pen: %s", url12OnP2)
+	known := []*agentConfig{p1, p2}
+
+	if !isHogmanPACURL(p1.pacURL(), known) {
+		t.Fatalf("expected %s to match known pens", p1.pacURL())
+	}
+	if !isHogmanPACURL(p2.pacURL()+"?v=deadbeef", known) {
+		t.Fatalf("expected versioned legacy PAC URL to still match known pens")
+	}
+	if isHogmanPACURL("http://corp.example/proxy.pac", known) {
+		t.Fatal("corporate PAC URL must not match Hogman pens")
 	}
 
-	if got := planAutoProxyAction("", false, []*agentConfig{p1}, url1); got != "set" {
-		t.Fatalf("join pen 1 (empty): got %q, want set", got)
-	}
-	if got := planAutoProxyAction(url1, true, []*agentConfig{p1}, url1); got != "noop" {
-		t.Fatalf("repeat pen 1: got %q, want noop", got)
-	}
-	if got := planAutoProxyAction(url1, true, []*agentConfig{p1, p2}, url12OnP2); got != "set" {
-		t.Fatalf("join pen 2 when pen 1 active: got %q, want set", got)
-	}
-	if got := planAutoProxyAction("http://corp.example/proxy.pac", true, []*agentConfig{p1, p2}, url12OnP2); got != "leave" {
-		t.Fatalf("join with corporate PAC active: got %q, want leave", got)
-	}
-	if got := planAutoProxyAction("http://127.0.0.1:19999/proxy.pac", false, []*agentConfig{p1}, url1); got != "set" {
-		t.Fatalf("join with disabled foreign PAC: got %q, want set", got)
-	}
-
-	if got := planClearAutoProxyAction("http://corp.example/proxy.pac", true, []*agentConfig{p1, p2}, url2Only); got != "noop" {
-		t.Fatalf("leave must ignore corporate PAC: got %q, want noop", got)
-	}
-	if got := planClearAutoProxyAction(url1, false, []*agentConfig{p1, p2}, url2Only); got != "noop" {
-		t.Fatalf("leave must ignore disabled PAC: got %q, want noop", got)
-	}
-	if got := planClearAutoProxyAction(url12OnP2, true, []*agentConfig{p1, p2}, url2Only); got != "set" {
-		t.Fatalf("leave pen 1 with pen 2 remaining: got %q, want set", got)
-	}
-	if got := planClearAutoProxyAction(url2Only, true, []*agentConfig{p1, p2}, url2Only); got != "noop" {
-		t.Fatalf("leave pen 1 when already on pen 2 URL: got %q, want noop", got)
-	}
-	if got := planClearAutoProxyAction(url1, true, []*agentConfig{p1}, ""); got != "off" {
-		t.Fatalf("leave last pen: got %q, want off", got)
-	}
-	if got := planClearAutoProxyAction(url1, true, []*agentConfig{p1}, url1); got != "noop" {
-		t.Fatalf("already matching nextURL: got %q, want noop", got)
+	// clearSystemProxy must handle leaving == nil cleanly without panicking.
+	if runtime.GOOS == "linux" || runtime.GOOS == "windows" {
+		if got := clearSystemProxy(nil, nil); got != "" {
+			t.Fatalf("clearSystemProxy(nil, nil) = %q, want empty", got)
+		}
+		got := clearSystemProxy(nil, []*agentConfig{p2})
+		if !strings.Contains(got, p2.pacURL()) || !strings.Contains(got, p2.Zone) {
+			t.Fatalf("clearSystemProxy(nil, [p2]) = %q, want %s and %s", got, p2.pacURL(), p2.Zone)
+		}
 	}
 }
 
