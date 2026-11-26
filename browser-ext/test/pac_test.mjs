@@ -149,4 +149,5 @@ test("resolveFirefoxProxy and isKnownPenHost handle active, disabled, apex, unkn
 
   assert.equal(isKnownPenHost("home.work.pens.hogman.network", routes), true);
   assert.equal(isKnownPenHost("home.other.pens.hogman.network", routes), false);
+  assert.equal(isKnownPenHost("custom.example.org", routes), false);
 });

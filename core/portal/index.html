@@ -69,7 +69,7 @@
 
   <section id="sites" class="panel" hidden>
     <div class="section-head">
-      <h2>Sites in this pen</h2>
+      <h2 id="sites-title">Sites in this pen</h2>
       <a class="section-link" id="sites-host-link" href="#host">Host a site &darr;</a>
     </div>
     <p class="muted hint" id="sites-empty" hidden>No sites yet. Follow the <a href="https://hogman.network/docs/share.html" target="_blank" rel="noopener noreferrer">Hosting guide</a> to put a folder or a web app you're already running into this pen.</p>
@@ -117,7 +117,7 @@
       <p class="muted hint">A link for one person. They open it, pick a name, and run one command.
         It works once and lasts a week.</p>
       <form id="invite-form" class="row">
-        <input id="invite-note" maxlength="200" placeholder="Who is it for? (a note for keepers)" autocomplete="off">
+        <input id="invite-note" maxlength="200" aria-label="Who is this invite for?" placeholder="Who is it for? (a note for keepers)" autocomplete="off">
         <button class="primary" id="invite-make" type="submit">Make an invite</button>
       </form>
       <div id="invite-new" class="link-reveal" hidden>
@@ -143,14 +143,14 @@
     </div>
     <p class="muted hint" id="herd-intro">Everyone in the pen. Suspending cuts all their devices off at once and can
       be undone. Kicking ends their membership for good and permanently retires their names.</p>
-    <p class="callout warn error" id="solo-owner" hidden><strong>You're the only owner.</strong> If you lose
+    <p class="callout warn" id="solo-owner" hidden><strong>You're the only owner.</strong> If you lose
       every device, nobody can manage this pen again — there is no account recovery. Make someone
       you trust completely an owner (make them an admin, then an owner).</p>
     <p class="muted hint" id="herd-recovery">Someone lost every device? There is no account recovery: invite them
       again as a new member, give them back their role, then kick the old account (an old owner
       account has to be made an admin first).</p>
     <form class="row search-row" id="herd-form" role="search">
-      <input id="herd-q" type="search" placeholder="Find someone by name" autocomplete="off" maxlength="32">
+      <input id="herd-q" type="search" aria-label="Find someone by name" placeholder="Find someone by name" autocomplete="off" maxlength="32">
     </form>
     <ul class="devices" id="members"></ul>
     <p class="more-row"><button id="herd-more" type="button" hidden>Show more</button></p>
@@ -167,7 +167,7 @@
     </div>
     <p class="muted hint" id="all-devices-intro">Every enrolled workstation and server node across this pen. Remove a lost laptop or stale server at any time.</p>
     <div class="filter-bar">
-      <input id="all-devices-q" type="search" placeholder="Filter by device, member, or mesh IP" autocomplete="off" maxlength="64">
+      <input id="all-devices-q" type="search" aria-label="Filter devices by name, member, or mesh IP" placeholder="Filter by device, member, or mesh IP" autocomplete="off" maxlength="64">
       <div class="seg-group" id="all-devices-kind" role="group" aria-label="Device type filter">
         <button type="button" class="seg active" data-kind="all" aria-pressed="true">All</button>
         <button type="button" class="seg" data-kind="personal" aria-pressed="false">Personal</button>

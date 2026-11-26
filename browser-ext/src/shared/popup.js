@@ -5,31 +5,28 @@ const HOST_PERMISSION_ORIGINS = [
   "*://pens.hogman.network/*",
 ];
 
-function sendMessage(msg) {
-  return new Promise((resolve) => {
-    const maybe = api.runtime.sendMessage(msg, (resp) => resolve(resp || {}));
-    if (maybe && typeof maybe.then === "function") {
-      maybe.then(resolve).catch(() => resolve({}));
-    }
-  });
+async function sendMessage(msg) {
+  try {
+    return (await api.runtime.sendMessage(msg)) || {};
+  } catch (_) {
+    return {};
+  }
 }
 
-function storageGet(keys) {
-  return new Promise((resolve) => {
-    const maybe = api.storage.local.get(keys, (res) => resolve(res || {}));
-    if (maybe && typeof maybe.then === "function") {
-      maybe.then(resolve).catch(() => resolve({}));
-    }
-  });
+async function storageGet(keys) {
+  try {
+    return (await api.storage.local.get(keys)) || {};
+  } catch (_) {
+    return {};
+  }
 }
 
-function storageSet(obj) {
-  return new Promise((resolve) => {
-    const maybe = api.storage.local.set(obj, () => resolve());
-    if (maybe && typeof maybe.then === "function") {
-      maybe.then(resolve).catch(() => resolve());
-    }
-  });
+async function storageSet(obj) {
+  try {
+    await api.storage.local.set(obj);
+  } catch (_) {
+    // ignore storage errors; load() will reflect current state
+  }
 }
 
 let currentState = null;
@@ -57,6 +54,9 @@ function render(st) {
   if (st.nativeError) {
     banner.textContent = `Could not reach hogman-native-host (${st.nativeError}). Run "hogman browser-setup" in a terminal.`;
     banner.hidden = false;
+  } else if (st.proxyError) {
+    banner.textContent = `Could not update browser proxy settings (${st.proxyError}).`;
+    banner.hidden = false;
   } else if (st.conflict === "other_extension" || st.conflict === "policy") {
     banner.textContent = st.conflictDetail;
     banner.hidden = false;
@@ -67,7 +67,7 @@ function render(st) {
 
   list.textContent = "";
   const entries = Array.isArray(st.entries) ? st.entries : [];
-  empty.hidden = entries.length > 0;
+  empty.hidden = entries.length > 0 || Boolean(st.nativeError || st.proxyError);
 
   for (const e of entries) {
     const li = document.createElement("li");
@@ -110,13 +110,19 @@ function render(st) {
     toggle.checked = Boolean(e.allowedByProfile);
     toggle.disabled = Boolean(e.squatted);
     toggle.title = `Allow ${e.zone} in this browser profile`;
+    toggle.setAttribute("aria-label", `Allow ${e.zone} in this browser profile`);
     toggle.onchange = async () => {
-      const prefs = await storageGet(["enabledZones"]);
-      const enabled = { ...(prefs.enabledZones || {}) };
-      if (toggle.checked) enabled[e.zone] = true;
-      else delete enabled[e.zone];
-      await storageSet({ enabledZones: enabled });
-      await load();
+      setControlsDisabled(true);
+      try {
+        const prefs = await storageGet(["enabledZones"]);
+        const enabled = { ...(prefs.enabledZones || {}) };
+        if (toggle.checked) enabled[e.zone] = true;
+        else delete enabled[e.zone];
+        await storageSet({ enabledZones: enabled });
+        await load();
+      } finally {
+        setControlsDisabled(false);
+      }
     };
 
     li.appendChild(main);
@@ -125,14 +131,41 @@ function render(st) {
   }
 }
 
+function setControlsDisabled(disabled) {
+  for (const el of document.querySelectorAll("#pen-list input[type=checkbox], #refresh, #pause, #override-btn")) {
+    if (disabled) {
+      el.dataset.prevDisabled = el.disabled ? "1" : "0";
+      el.disabled = true;
+    } else if (el.dataset.prevDisabled !== "1") {
+      el.disabled = false;
+    }
+  }
+}
+
+function renderIPCError() {
+  const banner = document.getElementById("banner");
+  const empty = document.getElementById("empty");
+  banner.textContent = "Could not communicate with the Hogman extension background worker. Click Refresh.";
+  banner.hidden = false;
+  empty.hidden = true;
+}
+
 async function load() {
   const resp = await sendMessage({ type: "get_state" });
   if (resp && resp.state) render(resp.state);
+  else renderIPCError();
 }
 
 document.getElementById("refresh").onclick = async () => {
-  const resp = await sendMessage({ type: "refresh" });
-  if (resp && resp.state) render(resp.state);
+  const btn = document.getElementById("refresh");
+  btn.disabled = true;
+  try {
+    const resp = await sendMessage({ type: "refresh" });
+    if (resp && resp.state) render(resp.state);
+    else renderIPCError();
+  } finally {
+    btn.disabled = false;
+  }
 };
 
 document.getElementById("pause").onclick = async () => {

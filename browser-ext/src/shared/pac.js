@@ -129,6 +129,7 @@ export function isKnownPenHost(rawHost, routes = {}) {
   const host = normalizeHost(rawHost);
   if (!host || !routes || typeof routes !== "object") return false;
   for (const z of Object.keys(routes)) {
+    if (!isHostedZone(z)) continue;
     if (host === z || host.endsWith("." + z)) return true;
   }
   return false;

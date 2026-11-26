@@ -1,17 +1,6 @@
 (() => {
   const $ = id => document.getElementById(id);
 
-  const setFavicon = href => {
-    document.querySelectorAll('link[rel="icon"]').forEach(el => el.remove());
-    const link = document.createElement('link');
-    link.rel = 'icon';
-    link.type = 'image/svg+xml';
-    link.href = href;
-    document.head.appendChild(link);
-    const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', '#14181f');
-  };
-
   const replaceLinks = (container, items, sep) => {
     if (!container) return;
     container.replaceChildren();
@@ -29,11 +18,11 @@
   const applyWorkTheme = (zone, forShare) => {
     document.documentElement.dataset.theme = 'work';
     document.title = (forShare ? 'Bridge · ' : 'Join · ') + 'Hogman for Work';
-    setFavicon('/join/assets/work-favicon.svg');
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', '#14181f');
 
     $('brand-link').href = 'https://work.hogman.network/';
     $('brand-link').setAttribute('aria-label', 'Hogman for Work');
-    $('brand-icon').src = '/join/assets/work-favicon.svg';
     $('brand-name').textContent = 'Hogman';
     $('brand-tag').hidden = false;
     $('gate-pill').textContent = 'Network gate';
@@ -47,11 +36,11 @@
 
     $('vpn-note').replaceChildren(
       Object.assign(document.createElement('strong'), { textContent: 'Using a corporate VPN (or WireGuard, ProtonVPN, Mullvad)? ' }),
-      document.createTextNode('macOS VPN apps override the system automatic proxy while connected. Pause the VPN while visiting pen dashboards, or set Firefox\u2019s built-in '),
+      document.createTextNode('macOS VPN apps override the system automatic proxy while connected. Use the Hogman browser extension, set Firefox\u2019s built-in '),
       Object.assign(document.createElement('em'), { textContent: 'Automatic proxy configuration URL' }),
       document.createTextNode(' to the address printed by '),
       Object.assign(document.createElement('code'), { textContent: 'hogman' }),
-      document.createTextNode('.')
+      document.createTextNode(', or pause the VPN while visiting pen dashboards in Safari.')
     );
 
     $('foot-tagline').textContent = 'Hogman for Work \u00b7 Private HTTPS access';
@@ -71,7 +60,12 @@
   // out of the address bar and browser history.
   const KEY = 'hogman-link';
   let hash = location.hash.slice(1);
-  if (hash) sessionStorage.setItem(KEY, hash); else hash = sessionStorage.getItem(KEY) || '';
+  try {
+    if (hash) sessionStorage.setItem(KEY, hash);
+    else hash = sessionStorage.getItem(KEY) || '';
+  } catch (_) {
+    // sessionStorage can throw in restricted privacy contexts; continue with URL hash.
+  }
   const q = new URLSearchParams(hash);
   const err = m => { const e = $('err'); e.textContent = m; e.hidden = false;
                      $('what').textContent = ''; };
@@ -118,10 +112,11 @@
   $('cmd').textContent = unixCmd;
   $('cmd-manual').textContent = longCmd;
   $('manual').hidden = forShare;
-  // Sharing doesn't touch the browser proxy, so no password or VPN proxy note there.
-  $('pw-note').hidden = forShare;
+  // Sharing doesn't need browser proxy setup or VPN coexistence steps.
+  $('proxy-note').hidden = forShare;
   $('vpn-note').hidden = forShare;
   if (forShare) {
+    $('expect-head').textContent = 'What to expect on macOS';
     $('lead').textContent =
       'Copy this into a terminal on the computer hosting your app or folder. It downloads hogman (no other software needed):';
   }
@@ -138,11 +133,19 @@
   document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => show(b.dataset.os));
   show(/Windows/.test(navigator.userAgent) ? 'win' : 'unix');
   $('copy').onclick = async () => {
-    await navigator.clipboard.writeText(unixCmd);
-    $('copied').textContent = 'Copied.';
+    try {
+      await navigator.clipboard.writeText(unixCmd);
+      $('copied').textContent = 'Copied.';
+    } catch (_) {
+      $('copied').textContent = 'Copy failed — select the command above.';
+    }
   };
   $('redeem').textContent = kind === 'invite' ? 'asks you to pick your name, validates' : 'verifies';
-  fetch('/hogman/v1/network').then(r => r.json()).then(n => {
+  fetch('/hogman/v1/network').then(r => {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(n => {
+    if (!n || !n.zone) throw new Error('missing zone');
     const isWork = n.theme === 'work';
     document.querySelectorAll('.zone').forEach(el => { el.textContent = '.' + n.zone; });
     $('title').textContent = (forShare ? 'Share into ' : 'Join ') + n.zone;

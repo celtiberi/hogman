@@ -18,6 +18,9 @@ const HOST_PERMISSION_ORIGINS = [
 
 let cachedSnapshot = null;
 let cachedRoutes = {};
+let prefsLoaded = false;
+let rebuildInFlight = null;
+let rebuildPending = false;
 let lastFetchAt = 0;
 let lastFailedFetchAt = 0;
 let lastUnknownRefreshAt = 0;
@@ -32,8 +35,6 @@ let state = {
   conflictDetail: "",
   osProxyConflict: false,
   osProxyKind: "",
-  vpnOverride: false,
-  vpnInterface: "",
   allowOSProxyOverride: false,
   entries: [],
   incognitoAllowed: false,
@@ -78,32 +79,55 @@ function updateBadge() {
   browser.action.setBadgeBackgroundColor({ color: "#15803d" });
 }
 
-async function rebuildRoutesFromCache() {
+function rebuildRoutesFromCache() {
+  if (rebuildInFlight) {
+    rebuildPending = true;
+    return rebuildInFlight;
+  }
+  rebuildInFlight = (async () => {
+    try {
+      do {
+        rebuildPending = false;
+        await rebuildRoutesFromCacheOnce();
+      } while (rebuildPending);
+    } finally {
+      rebuildInFlight = null;
+    }
+  })();
+  return rebuildInFlight;
+}
+
+async function rebuildRoutesFromCacheOnce() {
   const prefs = await loadPrefs();
-  state.paused = prefs.paused;
-  state.missingHostPermission = !(await checkHostPermission());
+  const missingHostPermission = !(await checkHostPermission());
+  let incognitoAllowed = state.incognitoAllowed;
   if (typeof browser.extension?.isAllowedIncognitoAccess === "function") {
     try {
-      state.incognitoAllowed = await browser.extension.isAllowedIncognitoAccess();
+      incognitoAllowed = await browser.extension.isAllowedIncognitoAccess();
     } catch (_) {
-      state.incognitoAllowed = false;
+      incognitoAllowed = false;
     }
   }
+  state.paused = prefs.paused;
+  state.missingHostPermission = missingHostPermission;
+  state.incognitoAllowed = incognitoAllowed;
   if (!cachedSnapshot) {
     cachedRoutes = {};
+    state.osProxyConflict = false;
+    state.osProxyKind = "";
     state.entries = [];
+    prefsLoaded = true;
     updateBadge();
     return;
   }
   const snap = sanitizeNativeSnapshot(cachedSnapshot);
   state.osProxyConflict = snap.osProxyConflict;
   state.osProxyKind = snap.osProxyKind;
-  state.vpnOverride = snap.vpnOverride;
-  state.vpnInterface = snap.vpnInterface;
 
   const { routes, entries } = computeEffectiveRoutes(snap.pens, prefs);
-  cachedRoutes = routes;
+  cachedRoutes = prefs.paused ? {} : routes;
   state.entries = entries;
+  prefsLoaded = true;
   updateBadge();
 }
 
@@ -112,10 +136,10 @@ async function rebuildRoutesFromCache() {
 // native-host error: unverified loopback ports must fail closed.
 function refreshSnapshot(force = false) {
   if (!force && cachedSnapshot && Date.now() - lastFetchAt < REFRESH_TTL_MS) {
-    return rebuildRoutesFromCache();
+    return prefsLoaded ? Promise.resolve() : rebuildRoutesFromCache();
   }
   if (!force && !cachedSnapshot && lastFailedFetchAt > 0 && Date.now() - lastFailedFetchAt < NATIVE_ERROR_BACKOFF_MS) {
-    return rebuildRoutesFromCache();
+    return prefsLoaded ? Promise.resolve() : rebuildRoutesFromCache();
   }
   if (inFlightRefresh) return inFlightRefresh;
   inFlightRefresh = (async () => {
@@ -143,43 +167,58 @@ function refreshSnapshot(force = false) {
       state.connected = false;
       state.nativeError = String(err && err.message ? err.message : err);
     } finally {
-      inFlightRefresh = null;
-      await rebuildRoutesFromCache();
+      try {
+        await rebuildRoutesFromCache();
+      } finally {
+        inFlightRefresh = null;
+      }
     }
   })();
   return inFlightRefresh;
 }
 
 async function handleProxyRequest(details) {
-  const prefs = await loadPrefs();
-  if (prefs.paused) {
-    // Fail closed when paused: this listener fires only for pen URLs, so
-    // non-pen browsing stays untouched while pen names never leak to public DNS.
-    return FAIL_CLOSED_FIREFOX;
-  }
-  let host = "";
   try {
-    host = normalizeHost(new URL(details.url).hostname);
+    if (!prefsLoaded) {
+      await rebuildRoutesFromCache();
+    }
+    if (state.paused) {
+      // Fail closed when paused: this listener fires only for pen URLs, so
+      // non-pen browsing stays untouched while pen names never leak to public DNS.
+      return FAIL_CLOSED_FIREFOX;
+    }
+    let host = "";
+    try {
+      host = normalizeHost(new URL(details.url).hostname);
+    } catch (_) {
+      return FAIL_CLOSED_FIREFOX;
+    }
+
+    if (!cachedSnapshot || Date.now() - lastFetchAt >= REFRESH_TTL_MS) {
+      await refreshSnapshot(false);
+    }
+    if (state.paused) return FAIL_CLOSED_FIREFOX;
+    let resolved = resolveFirefoxProxy(host, cachedRoutes);
+    // Only force-refresh for a genuinely unknown pen zone when connected (never
+    // bypass NATIVE_ERROR_BACKOFF_MS when !cachedSnapshot, and never respawn the
+    // native host for a pen already known disabled/squatted/down).
+    if (
+      cachedSnapshot &&
+      resolved === FAIL_CLOSED_FIREFOX &&
+      !isKnownPenHost(host, cachedRoutes) &&
+      Date.now() - lastUnknownRefreshAt >= UNKNOWN_REFRESH_COOLDOWN_MS
+    ) {
+      lastUnknownRefreshAt = Date.now();
+      await refreshSnapshot(true);
+      if (state.paused) return FAIL_CLOSED_FIREFOX;
+      resolved = resolveFirefoxProxy(host, cachedRoutes);
+    }
+    return resolved || FAIL_CLOSED_FIREFOX;
   } catch (_) {
+    // Never reject from proxy.onRequest: Firefox treats a rejected promise as
+    // DIRECT, which would fail open and leak pen hostnames to public DNS.
     return FAIL_CLOSED_FIREFOX;
   }
-
-  if (!cachedSnapshot || Date.now() - lastFetchAt >= REFRESH_TTL_MS) {
-    await refreshSnapshot(false);
-  }
-  let resolved = resolveFirefoxProxy(host, cachedRoutes);
-  // Only force-refresh for a genuinely unknown pen zone (never respawn the native
-  // host on every request to a pen that is already known disabled/squatted/down).
-  if (
-    resolved === FAIL_CLOSED_FIREFOX &&
-    !isKnownPenHost(host, cachedRoutes) &&
-    Date.now() - lastUnknownRefreshAt >= UNKNOWN_REFRESH_COOLDOWN_MS
-  ) {
-    lastUnknownRefreshAt = Date.now();
-    await refreshSnapshot(true);
-    resolved = resolveFirefoxProxy(host, cachedRoutes);
-  }
-  return resolved || FAIL_CLOSED_FIREFOX;
 }
 
 browser.proxy.onRequest.addListener(handleProxyRequest, {
@@ -194,7 +233,7 @@ if (browser.permissions?.onRemoved) {
 }
 
 browser.storage.onChanged.addListener((changes, area) => {
-  if (area === "local") {
+  if (area === "local" && (changes.paused || changes.enabledZones)) {
     rebuildRoutesFromCache().catch(() => {});
   }
 });
@@ -210,6 +249,4 @@ browser.runtime.onMessage.addListener((msg) => {
   return undefined;
 });
 
-// Clean up any stale snapshot persisted by earlier versions.
-browser.storage.local.remove("cachedSnapshot").catch(() => {});
-refreshSnapshot(true);
+refreshSnapshot(true).catch(() => {});

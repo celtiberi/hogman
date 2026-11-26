@@ -273,12 +273,6 @@ h1 {
   color: var(--bone);
 }
 
-.step-desc {
-  margin: 0 0 0.75rem;
-  color: var(--ash);
-  font-size: 0.93rem;
-}
-
 .action-row {
   display: flex;
   align-items: center;
@@ -469,7 +463,6 @@ html[data-theme="work"] {
   --line: #e2e0d8;
   --line-strong: #c9c5b8;
   --warm: #b45309;
-  --warm-soft: #fef3c7;
   --ok-w: #15803d;
   --warn-bg-w: #fffbeb;
   --warn-border-w: #fde68a;
@@ -501,13 +494,6 @@ html[data-theme="work"] pre {
   background: #14181f;
   border: 1px solid #27303f;
   border-left: 3px solid #d97706;
-  color: #f3f4f6;
-}
-
-html[data-theme="work"] pre code {
-  background: none;
-  border: 0;
-  padding: 0;
   color: #f3f4f6;
 }
 
@@ -563,7 +549,6 @@ html[data-theme="work"] ul.note strong {
 }
 
 html[data-theme="work"] .sub,
-html[data-theme="work"] .step-desc,
 html[data-theme="work"] .manual-box summary,
 html[data-theme="work"] .manual-body p,
 html[data-theme="work"] ul.note,

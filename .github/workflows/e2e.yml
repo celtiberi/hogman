@@ -72,8 +72,10 @@ jobs:
         run: |
           deploy/changelog-fold.sh --check
           deploy/test-changelog-fold.sh
-      - name: Test browser extension PAC & routing logic
-        run: node --test browser-ext/test/pac_test.mjs
+      - name: Test browser extension PAC & packager
+        run: |
+          node --test browser-ext/test/pac_test.mjs
+          python3 -I -m unittest discover -s browser-ext/test -p 'test_*.py' -v
 
   compose:
     name: public-certificate pen compose

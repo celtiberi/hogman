@@ -1,6 +1,5 @@
 :root {
   --night: #0e080c;
-  --night-2: #170e14;
   --panel: #1f131b;
   --panel-deep: #140c11;
   --border: #3a2a33;
@@ -59,27 +58,6 @@ code {
   color: var(--gold);
   border-radius: 4px;
   padding: 0.08em 0.38em;
-}
-
-pre {
-  margin: 0.85rem 0;
-  padding: 0.9rem 1.05rem;
-  background: #060305;
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--fire);
-  border-radius: 6px;
-  overflow-x: auto;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
-}
-
-pre code {
-  display: block;
-  background: none;
-  border: 0;
-  padding: 0;
-  color: var(--bone);
-  font: 0.88rem/1.6 var(--mono);
-  white-space: pre;
 }
 
 /* ---------- Top header ---------- */
@@ -403,14 +381,16 @@ button:disabled {
   filter: grayscale(0.4);
 }
 
-form.row {
+form.row,
+.delete-form .row {
   display: flex;
   gap: 0.6rem;
   flex-wrap: wrap;
   align-items: stretch;
 }
 
-form.row input {
+form.row input,
+.delete-form .row input {
   flex: 1;
   min-width: 12rem;
   font: 0.94rem var(--text);
@@ -421,8 +401,10 @@ form.row input {
   padding: 0.52rem 0.78rem;
 }
 
-form.row input::placeholder { color: #7e6c62; }
-form.row input:focus { border-color: var(--gold); }
+form.row input::placeholder,
+.delete-form .row input::placeholder { color: #7e6c62; }
+form.row input:focus,
+.delete-form .row input:focus { border-color: var(--gold); }
 
 .search-row { margin: 0.2rem 0 0.85rem; }
 .more-row { margin: 0.85rem 0 0; }
@@ -685,15 +667,19 @@ ul.devices.site-grid li > .muted.small {
 }
 
 /* ---------- Errors & warnings ---------- */
-.error {
+.error,
+.callout {
   margin: 0.75rem 0 0;
   padding: 0.65rem 0.85rem;
   border-radius: 6px;
+  font-size: 0.9rem;
+}
+
+.error {
   background: var(--danger-bg);
   border: 1px solid var(--danger-border);
   border-left: 3.5px solid var(--blood);
   color: var(--danger);
-  font-size: 0.9rem;
 }
 
 .callout.warn {
@@ -705,6 +691,9 @@ ul.devices.site-grid li > .muted.small {
 }
 
 .callout.warn strong { color: var(--gold); }
+
+#billing-banner p { margin: 0; }
+#billing-banner .error { margin-top: 0.75rem; }
 
 /* ---------- Footer ---------- */
 .foot {
@@ -841,7 +830,6 @@ a.stat-card:hover {
 
 .filter-bar input:focus {
   border-color: var(--gold);
-  outline: none;
 }
 
 .seg-group {
@@ -936,8 +924,10 @@ ul.devices li.audit-row {
   .stat-value { font-size: 1.25rem; }
   ul.devices.site-grid { grid-template-columns: minmax(0, 1fr); }
   .qr img { width: 168px; height: 168px; }
-  form.row input { min-width: 0; width: 100%; }
-  form.row button { width: 100%; }
+  form.row input,
+  .delete-form .row input { min-width: 0; width: 100%; }
+  form.row button,
+  .delete-form .row button { width: 100%; }
   .filter-bar input { min-width: 0; width: 100%; }
   .btn-row button { flex: 1 1 auto; }
   ul.devices li.audit-row { align-items: flex-start; flex-direction: column; gap: 0.25rem; }
@@ -981,20 +971,6 @@ html[data-theme="work"] code {
   background: var(--surface-alt);
   border: 1px solid var(--line);
   color: var(--ink);
-}
-
-html[data-theme="work"] pre {
-  background: #14181f;
-  border: 1px solid #27303f;
-  border-left: 3px solid #d97706;
-  box-shadow: none;
-}
-
-html[data-theme="work"] pre code {
-  background: none;
-  border: 0;
-  padding: 0;
-  color: #f3f4f6;
 }
 
 html[data-theme="work"] .top {
@@ -1173,15 +1149,18 @@ html[data-theme="work"] .member-drawer {
 
 html[data-theme="work"] .drawer-label { color: var(--muted); }
 
-html[data-theme="work"] form.row input {
+html[data-theme="work"] form.row input,
+html[data-theme="work"] .delete-form .row input {
   color: var(--ink);
   background: var(--surface);
   border: 1px solid var(--line-strong);
   border-radius: 8px;
 }
 
-html[data-theme="work"] form.row input::placeholder { color: #9ca3af; }
-html[data-theme="work"] form.row input:focus { border-color: var(--warm); }
+html[data-theme="work"] form.row input::placeholder,
+html[data-theme="work"] .delete-form .row input::placeholder { color: #9ca3af; }
+html[data-theme="work"] form.row input:focus,
+html[data-theme="work"] .delete-form .row input:focus { border-color: var(--warm); }
 
 html[data-theme="work"] ul.devices li {
   border-top-color: var(--line);
