@@ -248,8 +248,9 @@ node --test browser-ext/test/*_test.mjs core/test/web/*_test.mjs
 More developer docs:
 - [`core/README.md`](core/README.md) — core stack and Docker e2e test harness
 - [`browser-ext/README.md`](browser-ext/README.md) — extension architecture, build, and local install
-- [`docs/how-hogman-works.md`](docs/how-hogman-works.md) — step-by-step map of every moving part, packet flow, portal auth, revocation, and scaling
-- [`docs/security/`](docs/security/) — security design notes and public-certificate architecture
+- [`docs/how-hogman-works.md`](docs/how-hogman-works.md) — step-by-step map of every moving part, packet flow, portal auth, and revocation
+- [`docs/sealed-server.md`](docs/sealed-server.md) — running a sealed sidecar server behind a pen
+- [`docs/security/public-certificates.md`](docs/security/public-certificates.md) — public-certificate architecture, DNS-01 split-horizon, caps, and threat model
 
 ---
 

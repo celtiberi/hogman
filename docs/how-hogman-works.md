@@ -163,15 +163,5 @@ sequenceDiagram
 - **Registrar** = the **club manager** (members, invites, roles, human site names → `100.x` DNS, and the `home.<pen>` portal).
 - **Local `hogman`** = your **membership card + tunnel builder** (holds your WireGuard key, catches `*.<pen>.pens.hogman.network` from your browser, builds direct encrypted tunnels to servers).
 
----
-
-## How Scaling Works (Why One Headscale Per Pen, Not a Load Balancer)
-
-- **Multiple pens per Virtual Private Server (VPS):** One VPS already runs **many** separate Headscale + Registrar pairs side-by-side — **one pair per pen** — behind one shared front-door web proxy (Caddy). For example, 6 pens on one VPS = 6 isolated Headscale containers + 6 isolated Registrar containers. Pens share zero databases or keys, and each pen is its own isolated address space.
-- **Why you cannot put 20 Headscales behind a load balancer for the *same* pen:**
-  1. **Live streams live in memory (Random Access Memory / RAM):** Upstream Headscale holds every connected device's real-time update stream inside that single process's RAM and has **no clustering or multi-server sync layer**. If Bob connected to Headscale #1 and Alice connected to Headscale #2, Headscale #1 could not push a live kick or IP-roaming update to Alice. (Upstream Headscale explicitly states multi-instance / high-availability Headscale is unsupported.)
-  2. **Single-writer local SQLite database:** Both Headscale and Registrar store their state in local SQLite files, and Registrar owns one single `core` WireGuard identity (`home.<pen>` and `:53` DNS).
-- **How Hogman scales instead (without hacking Headscale):**
-  1. **Across customers (horizontally by pen):** Add more VPS servers (`host-1`, `host-2`, `host-3`, ...), each hosting dozens of isolated pens. Because pens share nothing, this scales by adding hosts.
-  2. **Within one large pen (vertically on a bigger machine, keeping the exact same pen name):** Free and Personal pens default to **25 members / 50 devices** and Work pens default to **500 members / 500 devices** (`MAX_MEMBERS` / `MAX_DEVICES` in `.env`, with owner personal-device lockout headroom under D-16 and a 3-key open unused device-key cap for regular members), monitored via per-pen `SetPolicy` push-latency telemetry (`>5 s` p95 alerts). When a pen grows beyond a shared host's share, move its folder (`pens/<name>`) to a larger or dedicated VPS, raise its container limits and `MAX_MEMBERS`/`MAX_DEVICES` in `.env`, and update its front-door DNS. Because normal site traffic goes directly peer-to-peer over WireGuard (never through Headscale), normal site traffic does not bottleneck on the Headscale control plane.
+Each pen has its own isolated Headscale and registrar; pens share no databases or keys.
 
