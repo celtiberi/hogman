@@ -43,8 +43,7 @@ front_svcs="$(jq -r '.services | keys | sort | join(",")' <<<"$front_cfg")"
 echo "public-certificate pen compose: ok"
 
 # Verify every shipped Dockerfile FROM and Compose image is explicitly pinned
-# (no untagged or :latest images) and covered by `hogman-host pull-images` so
-# the offline sign-up broker never needs container registry access.
+# by immutable @sha256 digest (no untagged or :latest images).
 REPO="$(cd .. && pwd)"
 shipped_from() {
   awk '
@@ -61,14 +60,12 @@ shipped_from() {
 }
 expected_all="$(
   {
-    grep -m1 '^CADDY_IMAGE=' "$REPO/deploy/hogman-host" | cut -d'"' -f2
     jq -r '.services[].image // empty' <<<"$cfg" | grep -v '^hogman/'
     shipped_from \
       "$REPO/core/registrar/Dockerfile" \
       "$REPO/core/registrar/Dockerfile.prebuilt" \
       "$REPO/core/join/Dockerfile" \
-      "$REPO/deploy/signup/Dockerfile" \
-      "$REPO/deploy/signup/Dockerfile.prebuilt"
+      "$REPO/core/join/Dockerfile.sidecar"
   } | sort -u
 )"
 [ -n "$expected_all" ] || fail "found no shipped container images"
@@ -78,52 +75,14 @@ done <<< "$expected_all"
 build_go_img="$(grep -m1 '^GO_IMAGE=' "$REPO/deploy/build-bins.sh" | cut -d'"' -f2)"
 [[ "$build_go_img" =~ @sha256:[0-9a-f]{64}$ ]] || fail "deploy/build-bins.sh GO_IMAGE is not pinned by immutable @sha256 digest: $build_go_img"
 
-tmp_home="$(mktemp -d)"
-trap 'rm -rf "$tmp_home"' EXIT
-ln -s "$REPO/core" "$tmp_home/src"
-ln -s "$REPO/deploy/signup" "$tmp_home/signup-src"
-got_all="$(HOGMAN_HOME="$tmp_home" "$REPO/deploy/hogman-host" pull-images --list --all)"
-if [ "$got_all" != "$expected_all" ]; then
-  echo "expected:" >&2; printf '  %s\n' $expected_all >&2
-  echo "got:" >&2; printf '  %s\n' $got_all >&2
-  fail "hogman-host pull-images --list --all mismatch"
-fi
-
-# Verify prebuilt-host mode covers every runtime + prebuilt base image without
-# pulling the source-build Go toolchain image.
-tmp_pre="$(mktemp -d)"
-trap 'rm -rf "$tmp_home" "$tmp_pre"' EXIT
-arch="$(uname -m)"; case "$arch" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; esac
-mkdir -p "$tmp_pre/src/registrar" "$tmp_pre/src/prebuilt/registrar" "$tmp_pre/src/prebuilt/join" "$tmp_pre/src/prebuilt/signup" "$tmp_pre/signup-src"
-cp "$REPO/core/compose.yaml" "$tmp_pre/src/compose.yaml"
-cp "$REPO/core/registrar/Dockerfile.prebuilt" "$tmp_pre/src/registrar/Dockerfile.prebuilt"
-cp "$REPO/core/registrar/Dockerfile" "$tmp_pre/src/registrar/Dockerfile"
-cp "$REPO/deploy/signup/Dockerfile.prebuilt" "$tmp_pre/signup-src/Dockerfile.prebuilt"
-cp "$REPO/deploy/signup/Dockerfile" "$tmp_pre/signup-src/Dockerfile"
-touch "$tmp_pre/src/prebuilt/registrar/registrar-linux-$arch" \
-      "$tmp_pre/src/prebuilt/join/SHA256SUMS" \
-      "$tmp_pre/src/prebuilt/signup/hogman-signup-linux-$arch"
-got_pre="$(HOGMAN_HOME="$tmp_pre" "$REPO/deploy/hogman-host" pull-images --list)"
-expected_pre="$(
-  {
-    grep -m1 '^CADDY_IMAGE=' "$REPO/deploy/hogman-host" | cut -d'"' -f2
-    jq -r '.services[].image // empty' <<<"$cfg" | grep -v '^hogman/'
-    shipped_from \
-      "$REPO/core/registrar/Dockerfile.prebuilt" \
-      "$REPO/deploy/signup/Dockerfile.prebuilt"
-  } | sort -u
-)"
-[ "$got_pre" = "$expected_pre" ] || fail "prebuilt pull-images list mismatch: got [$got_pre], want [$expected_pre]"
-grep -q '^golang:' <<<"$got_pre" && fail "prebuilt pull-images unexpectedly includes golang image"
-
-echo "pinned shipped images (pull-images --all):"
-printf '  %s\n' $got_all
+echo "pinned shipped images:"
+printf '  %s\n' $expected_all
 echo "shipped container images check: ok"
 
 # Verify non-root headscale/lib ownership migration in core/hogman uses an
 # absolute host path mounted on /hslib (never /lib) and fails loudly on error.
 tmp_mig="$(mktemp -d)"
-trap 'rm -rf "$tmp_home" "$tmp_pre" "$tmp_mig"' EXIT
+trap 'rm -rf "$tmp_mig"' EXIT
 mkdir -p "$tmp_mig/bin" "$tmp_mig/data/headscale/lib" "$tmp_mig/data/headscale/config" "$tmp_mig/data/join-dl"
 cat > "$tmp_mig/bin/id" <<'SH'
 #!/bin/sh

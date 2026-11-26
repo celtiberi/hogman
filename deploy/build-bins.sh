@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Compile Hogman's own programs, so servers don't spend half an hour building
-# them: the join tool for every platform, and the registrar and the sign-up
-# page for Linux servers (amd64, arm64). Needs Docker.
+# Compile Hogman's open-source binaries: the join client for every platform,
+# plus the registrar and challenge DNS server for Linux (amd64, arm64).
+# Needs Docker.
 #
 #   deploy/build-bins.sh <source-dir> <out-dir>
 #
-# <source-dir> holds core/join, core/registrar, deploy/signup and
-# deploy/challenge-dns (a checkout, or an extracted git archive). Writes
-# <out-dir>/{join,registrar,signup,challenge-dns}.
+# <source-dir> holds core/join, core/registrar, and deploy/challenge-dns
+# (a checkout, or an extracted git archive). Writes
+# <out-dir>/{join,registrar,challenge-dns}.
 # Used by release.sh when Docker is available, and by the GitHub build
 # workflow (.github/workflows/build.yml) otherwise.
 set -euo pipefail
 src="$(cd "$1" && pwd)"
 out="$2"
-mkdir -p "$out/join" "$out/registrar" "$out/signup" "$out/challenge-dns"
+mkdir -p "$out/join" "$out/registrar" "$out/challenge-dns"
 out="$(cd "$out" && pwd)"
 
 GO_IMAGE="golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280"
@@ -28,11 +28,11 @@ if [ -z "$version" ] && git -C "$src" rev-parse --verify HEAD >/dev/null 2>&1; t
 fi
 version="${version:-dev}"
 
-echo "building the join tool (5 platforms, version $version), the registrar and the sign-up page (linux amd64, arm64)..."
+echo "building the join tool (5 platforms, version $version), the registrar, and challenge-dns (linux amd64, arm64)..."
 
-# Compile all four modules sequentially in the pinned Go container sharing
+# Compile all three modules sequentially in the pinned Go container sharing
 # hogman-gomod and hogman-gocache (no concurrent writers to shared volumes, no
-# 4-way CPU/RAM oversubscription). core/join runs first so core/registrar reuses
+# CPU/RAM oversubscription). core/join runs first so core/registrar reuses
 # its compiled linux/amd64 and linux/arm64 tailscale/gvisor/certmagic objects
 # under the identical GOFLAGS="-tags=ts_omit_peerapiserver -trimpath".
 run_go_build() {
@@ -75,13 +75,6 @@ run_go_build "core/registrar" "$src/core/registrar" "$out/registrar" "-tags=ts_o
   test_out="$(CGO_ENABLED=0 go test ./... 2>&1)" || { printf "%s\n" "$test_out" >&2; exit 1; }
   for a in amd64 arm64; do
     CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -ldflags="-s -w" -o "/out/registrar-linux-$a" .
-  done
-'
-
-run_go_build "deploy/signup" "$src/deploy/signup" "$out/signup" "-trimpath" '
-  test_out="$(CGO_ENABLED=0 go test ./... 2>&1)" || { printf "%s\n" "$test_out" >&2; exit 1; }
-  for a in amd64 arm64; do
-    CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -ldflags="-s -w" -o "/out/hogman-signup-linux-$a" .
   done
 '
 

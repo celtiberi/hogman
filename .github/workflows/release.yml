@@ -96,7 +96,6 @@ jobs:
         with:
           subject-path: |
             ${{ runner.temp }}/out/hogman-*
-            ${{ runner.temp }}/out/install.sh
 
       - name: Publish
         env:

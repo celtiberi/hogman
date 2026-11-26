@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Publish a Hogman release to GitHub Releases on celtiberi/hogman, where
-# deploy/install.sh fetches it.
+# Publish a Hogman release to GitHub Releases on celtiberi/hogman.
 #
 #   deploy/release.sh [git-ref]      default: origin/main
 #
@@ -10,10 +9,10 @@
 #   PUBLISH_FROM=<dir> deploy/release.sh <ref>           publish exactly those files
 #
 # Packages committed code only (never the working folder):
-#   hogman-<version>.tar.gz, hogman-bin-<version>.tar.gz (compiled client CLI,
-#   registrar, sign-up page and challenge DNS), standalone hogman-* client
-#   binaries + hogman-SHA256SUMS (for `hogman update`), install.sh,
-#   SHA256SUMS and latest.
+#   hogman-<version>.tar.gz (core/, deploy/challenge-dns/, LICENSE, README.md),
+#   hogman-bin-<version>.tar.gz (compiled client CLI, registrar, and challenge
+#   DNS), standalone hogman-* client binaries + hogman-SHA256SUMS (for
+#   `hogman update`), SHA256SUMS, and latest.
 #
 # Creates the GitHub Release as a draft with every asset uploaded first, verifies
 # the asset list, then publishes it and marks it latest atomically (compatible
@@ -29,11 +28,6 @@ sha="${full:0:7}"
 commit_date="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d "$full")"
 ver="$commit_date-$sha"
 tag="v$ver"
-
-git cat-file -e "$REF:deploy/install.sh" 2>/dev/null || {
-  echo "commit $sha does not contain deploy/install.sh: not releasing" >&2
-  exit 1
-}
 
 tarball="hogman-$ver.tar.gz"
 bins="hogman-bin-$ver.tar.gz"
@@ -106,7 +100,7 @@ fi
 echo "client version checked: $got_ver_out"
 
 # Only now that the compiled parts check out, package release assets from $REF.
-git archive --format=tar --prefix= "$REF" core deploy/hogman-host deploy/bootstrap.sh deploy/README.md deploy/signup deploy/challenge-dns deploy/ops deploy/ops-snapshot.sh deploy/backup-b2/b2.py LICENSE README.md \
+git archive --format=tar --prefix= "$REF" core deploy/challenge-dns LICENSE README.md \
   | gzip -9n > "$out/$tarball"
 # No macOS file metadata in the bundle (Linux tar warns about it), and every
 # entry owned by root (0:0). Without that the archive carries the builder's
@@ -128,7 +122,6 @@ for a in "$out/$tarball" "$out/$bins"; do
     echo "$(basename "$a") contains this account's name: not releasing" >&2; exit 1
   fi
 done
-git show "$REF:deploy/install.sh" > "$out/install.sh"
 
 [ -f "$work/prebuilt/join/SHA256SUMS" ] || { echo "missing prebuilt/join/SHA256SUMS: not releasing" >&2; exit 1; }
 for cb in "${cli_bins[@]}"; do
@@ -145,9 +138,9 @@ cp "$work/prebuilt/join/SHA256SUMS" "$out/hogman-SHA256SUMS"
 
 ( cd "$out"
   if command -v sha256sum >/dev/null; then
-    sha256sum "$tarball" "$bins" install.sh
+    sha256sum "$tarball" "$bins"
   else
-    shasum -a 256 "$tarball" "$bins" install.sh
+    shasum -a 256 "$tarball" "$bins"
   fi > SHA256SUMS
   printf '%s\n' "$ver" > latest )
 
@@ -164,14 +157,14 @@ if [ -n "${PUBLISH_FROM:-}" ]; then
   out="$(cd "$PUBLISH_FROM" && pwd)"
   [ "$(tr -d '\r\n' < "$out/latest" 2>/dev/null)" = "$ver" ] \
     || { echo "$out was not packaged for $ver: not publishing" >&2; exit 1; }
-  for f in "$tarball" "$bins" install.sh SHA256SUMS hogman-SHA256SUMS latest "${cli_bins[@]}"; do
+  for f in "$tarball" "$bins" SHA256SUMS hogman-SHA256SUMS latest "${cli_bins[@]}"; do
     [ -f "$out/$f" ] && [ ! -L "$out/$f" ] || { echo "missing or not a regular file in $out: $f" >&2; exit 1; }
   done
   # `sha256sum -c` only checks the lines a checksum file has, so a shortened
   # file would leave an archive unchecked: each must list exactly its files.
   sums_names() { awk '{ sub(/^\*/, "", $2); print $2 }' "$1" | sort; }
-  [ "$(sums_names "$out/SHA256SUMS")" = "$(printf '%s\n' "$tarball" "$bins" install.sh | sort)" ] \
-    || { echo "$out/SHA256SUMS does not list exactly the two archives and install.sh: not publishing" >&2; exit 1; }
+  [ "$(sums_names "$out/SHA256SUMS")" = "$(printf '%s\n' "$tarball" "$bins" | sort)" ] \
+    || { echo "$out/SHA256SUMS does not list exactly the two archives: not publishing" >&2; exit 1; }
   [ "$(sums_names "$out/hogman-SHA256SUMS")" = "$(printf '%s\n' "${cli_bins[@]}" | sort)" ] \
     || { echo "$out/hogman-SHA256SUMS does not list exactly the client binaries: not publishing" >&2; exit 1; }
   ( cd "$out"
@@ -180,8 +173,6 @@ if [ -n "${PUBLISH_FROM:-}" ]; then
     else
       shasum -a 256 -c --quiet SHA256SUMS && shasum -a 256 -c --quiet hogman-SHA256SUMS
     fi ) || { echo "checksums in $out do not match its files: not publishing" >&2; exit 1; }
-  git show "$REF:deploy/install.sh" | cmp -s - "$out/install.sh" \
-    || { echo "$out/install.sh is not the committed installer for $sha: not publishing" >&2; exit 1; }
 else
   package
 fi
@@ -192,7 +183,7 @@ if [ "${NO_DEPLOY:-}" != 1 ]; then
     exit 1
   fi
   release_files=(
-    "$out/$tarball" "$out/$bins" "$out/SHA256SUMS" "$out/latest" "$out/install.sh"
+    "$out/$tarball" "$out/$bins" "$out/SHA256SUMS" "$out/latest"
     "$out/hogman-SHA256SUMS"
   )
   for cb in "${cli_bins[@]}"; do
@@ -218,7 +209,7 @@ if [ "${NO_DEPLOY:-}" != 1 ]; then
     --notes-file "$work/release-notes.md" \
     "${release_files[@]}"
 
-  want_assets="$(printf '%s\n' "$bins" "$tarball" "SHA256SUMS" "install.sh" "latest" "hogman-SHA256SUMS" "${cli_bins[@]}" | sort)"
+  want_assets="$(printf '%s\n' "$bins" "$tarball" "SHA256SUMS" "latest" "hogman-SHA256SUMS" "${cli_bins[@]}" | sort)"
   got_assets="$(gh release view "$tag" --repo "$repo" --json assets --jq '[.assets[].name] | sort | join("\n")')"
   if [ "$got_assets" != "$want_assets" ]; then
     echo "draft release $tag asset mismatch (leaving as draft): got '$got_assets'" >&2

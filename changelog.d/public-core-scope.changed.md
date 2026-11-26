@@ -1,0 +1,1 @@
+- `repo`: removed hosted server management, sign-up/billing, backup, and DNS-as-code operational scripts from this repository so it focuses on the open-source core (`core/`), `hogman` client, browser extension (`browser-ext/`), and `deploy/challenge-dns/`.

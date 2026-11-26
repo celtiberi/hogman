@@ -2,7 +2,7 @@
 
 The backbone of a Hogman pen: control plane, registrar, portal, and the `hogman` client.
 
-> **Hosted pens (D-24):** Production pens run behind [`deploy/hogman-host`](../deploy/hogman-host) on `hogman.network`. The standalone compose stack here (`edge`, `./hogman`, `test/run.sh`, `test/acme-pebble.sh`) is kept as the local and CI test harness rather than a supported self-hosted deployment.
+> **Hosted pens (D-24):** Production pens run behind the hosted front door on `hogman.network`. The standalone compose stack here (`edge`, `./hogman`, `test/run.sh`, `test/acme-pebble.sh`) is kept as the local and CI test harness rather than a supported self-hosted deployment.
 
 | Service | Image | Where it is reachable |
 |---|---|---|
