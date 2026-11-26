@@ -1,5 +1,7 @@
 import { buildJoinCommands, parseJoinHash } from './commands.js';
 
+const CHROME_EXTENSION_URL = 'https://chromewebstore.google.com/detail/hogman/mgokdogedagoejnjmjpmbcmicbmhplkk';
+
 function replaceLinks(doc, container, items, sep) {
   if (!container) return;
   container.replaceChildren();
@@ -36,7 +38,14 @@ function applyWorkTheme(doc, zone, forShare) {
 
   $('vpn-note').replaceChildren(
     Object.assign(doc.createElement('strong'), { textContent: 'Using a corporate VPN (or WireGuard, ProtonVPN, Mullvad)? ' }),
-    doc.createTextNode('macOS VPN apps override the system automatic proxy while connected. Use the Hogman browser extension, set Firefox\u2019s built-in '),
+    doc.createTextNode('macOS VPN apps override the system automatic proxy while connected. Use the '),
+    Object.assign(doc.createElement('a'), {
+      href: CHROME_EXTENSION_URL,
+      target: '_blank',
+      rel: 'noopener noreferrer',
+      textContent: 'Hogman browser extension',
+    }),
+    doc.createTextNode(' (Firefox: coming soon), set Firefox\u2019s built-in '),
     Object.assign(doc.createElement('em'), { textContent: 'Automatic proxy configuration URL' }),
     doc.createTextNode(' to the address printed by '),
     Object.assign(doc.createElement('code'), { textContent: 'hogman' }),

@@ -241,7 +241,7 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 				Name:   "vpn",
 				Status: "warn",
 				Detail: fmt.Sprintf("VPN override detected (%s): macOS hides system PAC while VPN is on", sys.VPNInterface),
-				Fix:    "install the Hogman browser extension and run: " + cliBinaryName() + " browser-setup",
+				Fix:    "install the Hogman browser extension (" + chromeExtensionStoreURL + "; Firefox: coming soon) and run: " + cliBinaryName() + " browser-setup",
 			})
 		}
 	} else if extInstalled {
