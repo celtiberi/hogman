@@ -1,18 +1,21 @@
-// Shared validation, per-profile allowlist (D-19), and fail-closed PAC builder.
+// Shared validation, per-profile allowlist, and fail-closed PAC builder.
 // Loaded as an ES module by Chrome/Firefox background workers, popup, and tests.
 
-export const HOSTED_ZONE_RE = /^[a-z][a-z0-9-]{1,28}[a-z0-9]\.pens\.hogman\.network$/;
-export const HOGMAN_PORT_MIN = 17000;
-export const HOGMAN_PORT_MAX = 26999;
+import {
+  FAIL_CLOSED_FIREFOX,
+  FAIL_CLOSED_PROXY,
+  HOGMAN_PORT_MAX,
+  HOGMAN_PORT_MIN,
+  HOSTED_ZONE_RE,
+} from "./constants.js";
 
-// Port 1 on 127.0.0.1 is used for fail-closed routing (never port 0, which
-// Chromium treats as invalid syntax and silently falls back to DIRECT).
-export const FAIL_CLOSED_PROXY = "PROXY 127.0.0.1:1";
-export const FAIL_CLOSED_FIREFOX = Object.freeze({
-  type: "http",
-  host: "127.0.0.1",
-  port: 1,
-});
+export {
+  FAIL_CLOSED_FIREFOX,
+  FAIL_CLOSED_PROXY,
+  HOGMAN_PORT_MAX,
+  HOGMAN_PORT_MIN,
+  HOSTED_ZONE_RE,
+};
 
 export function normalizeHost(host) {
   if (typeof host !== "string") return "";
@@ -46,7 +49,6 @@ export function sanitizeNativeSnapshot(raw) {
       port: validPort ? item.port : 0,
       up: Boolean(item.up) && validPort,
       hosted: true,
-      legacy: Boolean(item.legacy) && validPort,
       squatted,
     });
   }

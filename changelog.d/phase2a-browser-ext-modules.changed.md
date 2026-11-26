@@ -1,0 +1,3 @@
+- Extract shared `constants.js` and `state.js` modules in `browser-ext` (unifying native host/storage constants, badge state computation, async task serialization, and popup pen detail copy across Chrome and Firefox), isolate `popup.js` behind an injectable controller, remove the unused `legacy` pen field, and run all `browser-ext/test/*_test.mjs` suites in CI.
+- Fix a popup toggle regression where toggling an allowed pen could re-enable a squatted pen's disabled checkbox after re-render, and fail closed in Firefox if `storage.local` reads reject while rebuilding cached routes.
+- Restore `storage.local.remove("cachedSnapshot")` cleanup on Firefox background load for pre-0.1.1 installs.

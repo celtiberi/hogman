@@ -72,9 +72,9 @@ jobs:
         run: |
           deploy/changelog-fold.sh --check
           deploy/test-changelog-fold.sh
-      - name: Test browser extension PAC & packager
+      - name: Test browser extension PAC, state & packager
         run: |
-          node --test browser-ext/test/pac_test.mjs
+          node --test browser-ext/test/*_test.mjs
           python3 -I -m unittest discover -s browser-ext/test -p 'test_*.py' -v
 
   compose:

@@ -26,7 +26,7 @@ Ordinary browsing is never routed through Hogman: non-pen traffic returns `DIREC
 Requires Python 3 and Node.js (zero third-party runtime dependencies):
 
 ```bash
-node --test browser-ext/test/pac_test.mjs
+node --test browser-ext/test/*_test.mjs
 python3 browser-ext/build.py
 ```
 

@@ -32,7 +32,6 @@ test("sanitizeNativeSnapshot enforces hosted zones, integer port bounds, and squ
     os_proxy_kind: "http,pac",
     pens: [
       { zone: "farm2.pens.hogman.network.", port: 25148, up: true, hosted: true },
-      { zone: "legacy.pens.hogman.network", port: 25150, up: true, hosted: true, legacy: true },
       { zone: "squat.pens.hogman.network", port: 25149, up: true, squatted: true },
       { zone: "lowport.pens.hogman.network", port: 16999, up: true },
       { zone: "highport.pens.hogman.network", port: 27000, up: true },
@@ -47,11 +46,9 @@ test("sanitizeNativeSnapshot enforces hosted zones, integer port bounds, and squ
   assert.equal(snap.osProxyKind, "http,pac");
 
   const byZone = Object.fromEntries(snap.pens.map((p) => [p.zone, p]));
-  assert.equal(Object.keys(byZone).length, 7);
+  assert.equal(Object.keys(byZone).length, 6);
   assert.equal(byZone["farm2.pens.hogman.network"].port, 25148);
   assert.equal(byZone["farm2.pens.hogman.network"].up, true);
-  assert.equal(byZone["legacy.pens.hogman.network"].legacy, true);
-  assert.equal(byZone["legacy.pens.hogman.network"].port, 25150);
   assert.equal(byZone["squat.pens.hogman.network"].port, 0);
   assert.equal(byZone["squat.pens.hogman.network"].up, false);
   assert.equal(byZone["lowport.pens.hogman.network"].port, 0);

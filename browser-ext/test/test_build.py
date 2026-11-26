@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
@@ -63,6 +64,26 @@ class TestBuildExtension(unittest.TestCase):
     def test_repo_manifests_match(self) -> None:
         ver = build.verify_manifest_versions()
         self.assertRegex(ver, r"^\d+\.\d+\.\d+$")
+
+    def test_real_builds_include_all_local_module_imports(self) -> None:
+        import_re = re.compile(r"""from\s+["']\./([^"']+\.js)["']""")
+        script_re = re.compile(r"""<script[^>]+src=["']([^"']+\.js)["']""")
+        with tempfile.TemporaryDirectory() as td:
+            dist = pathlib.Path(td)
+            for target in ("chrome", "firefox"):
+                zip_path = build.build_target(target, dist_root=dist)
+                with zipfile.ZipFile(zip_path) as zf:
+                    names = set(zf.namelist())
+                    self.assertIn("manifest.json", names)
+                    for name in sorted(names):
+                        if name.endswith(".js"):
+                            body = zf.read(name).decode("utf-8")
+                            for imp in import_re.findall(body):
+                                self.assertIn(imp, names, f"{target} {name} imports missing ./{imp}")
+                        elif name.endswith(".html"):
+                            body = zf.read(name).decode("utf-8")
+                            for src in script_re.findall(body):
+                                self.assertIn(src, names, f"{target} {name} references missing {src}")
 
 
 if __name__ == "__main__":
