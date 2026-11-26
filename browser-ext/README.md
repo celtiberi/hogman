@@ -1,8 +1,8 @@
 # Hogman Browser Extension
 
-Minimal Manifest V3 browser extension for Chrome, Brave, Edge, and Firefox (128+) that routes your Hogman pen sites (`*.pens.hogman.network`) straight to your local `hogman` proxy — even while an OS VPN (ProtonVPN, Mullvad, corporate VPNs) is connected and overriding macOS system proxy settings.
+Minimal Manifest V3 browser extension for Chrome, Brave, Edge, Arc, Vivaldi, Chromium, Firefox (128+), and LibreWolf that routes your Hogman pen sites (`*.pens.hogman.network`) straight to your local `hogman` proxy — even while an OS VPN (ProtonVPN, Mullvad, corporate VPNs) is connected and overriding macOS system proxy settings.
 
-> **Status:** Developer preview — **not yet published** on the Chrome Web Store or Mozilla Add-ons (AMO). Until store listings are published, install manually from `browser-ext/dist/` using the steps below.
+> **Status:** Published on the Chrome Web Store (`mgokdogedagoejnjmjpmbcmicbmhplkk`), with Firefox Add-ons (AMO, `hogman-browser@hogman.network`) review pending. Developers can also build and load unpacked builds locally from `browser-ext/dist/` using the steps below.
 
 Ordinary browsing is never routed through Hogman: non-pen traffic returns `DIRECT` (on Chrome/Brave/Edge) or passes through untouched (on Firefox), so it continues riding through your VPN as normal.
 
@@ -42,10 +42,10 @@ python3 browser-ext/build.py
      ~/hogman browser-setup --chrome-id <32-char-id>
      ```
    - Open the Hogman extension popup and toggle ON the pen(s) you want in that browser profile.
-3. **Firefox (128+):**
-   - Register the Firefox add-on ID with the native host:
+3. **Firefox (128+) / LibreWolf:**
+   - Ensure the native messaging host is registered (`hogman-browser@hogman.network` is already included in `hogman`'s default Firefox allowlist):
      ```bash
-     ~/hogman browser-setup --firefox-id hogman-browser@hogman.network
+     ~/hogman browser-setup
      ```
    - Open `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on**, and select `browser-ext/dist/firefox/manifest.json`.
-   - Note: Firefox removes temporary add-ons when the browser restarts (until a signed AMO build is published). Open the Hogman popup and enable the pen(s) you want in that profile.
+   - Note: Firefox removes temporary add-ons when the browser restarts (until a signed AMO build is installed). Open the Hogman popup and enable the pen(s) you want in that profile.

@@ -107,4 +107,18 @@ cat > "$TMP/expected.md" <<'EOF'
 EOF
 
 diff -u "$TMP/expected.md" "$TMP/CHANGELOG.md"
+
+# 4. --notes rejects unknown git refs and malformed committed fragment names.
+if CHANGELOG_REPO="$TMP" "$SCRIPT" --notes refs/heads/does-not-exist >/dev/null 2>&1; then
+  echo "FAIL: unknown git ref passed --notes" >&2
+  exit 1
+fi
+printf -- '- bad\n' > "$TMP/changelog.d/bad.unknown.md"
+git -C "$TMP" add changelog.d/bad.unknown.md
+git -C "$TMP" commit -q -m "bad fragment"
+if CHANGELOG_REPO="$TMP" "$SCRIPT" --notes HEAD >/dev/null 2>&1; then
+  echo "FAIL: malformed fragment name passed --notes" >&2
+  exit 1
+fi
+
 echo "PASS: changelog-fold.sh tests OK"

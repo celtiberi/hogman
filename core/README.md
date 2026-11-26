@@ -7,7 +7,7 @@ The backbone of a Hogman pen: control plane, registrar, portal, and the `hogman`
 | Service | Image | Where it is reachable |
 |---|---|---|
 | `headscale` | Headscale 0.29.7 | Behind shared front door (or `edge` in local tests); STUN on udp/3478 |
-| `edge` | Caddy 2.11.9 | Standalone test harness only: `https://<PUBLIC_HOST>` (behind `hogman-host`, the shared front door serves these routes directly) |
+| `edge` | Caddy 2.11.9 | Standalone test harness only: `https://<PUBLIC_HOST>` (in hosted production, the shared front door serves these routes directly) |
 | `registrar` | built from [registrar/](registrar/) | Single unprivileged (`65532:65532`, `read_only`, `cap_drop: ALL`) container embedding the `core` (`tag:infra`) mesh node via `tsnet`: serves authoritative DNS (`:53` UDP/TCP), `https://home.<ZONE>:443` portal static files and `/api/*` (with direct WireGuard `WhoIs` caller identity, no `X-Forwarded-For`), `home.<ZONE>` ACME TLS, `/api/acme/{txt,eab}`, and public `/hogman/*` (`:8081`) |
 
 ## Test harness setup
@@ -36,15 +36,15 @@ Each invite prints a link like `https://<PUBLIC_HOST>/join#t=…`. Send it howev
 Opening it shows a page with one command to copy into a terminal:
 
 ```bash
-curl -fsSLo hogman "https://<PUBLIC_HOST>/join/dl/hogman-$(uname -s)-$(uname -m)" \
-  && chmod +x hogman && ./hogman '<the link>'
+curl -fsSL --proto '=https' --proto-redir '=https' https://<PUBLIC_HOST>/start \
+  | HOGMAN_EXPECTED_HOST='<PUBLIC_HOST>' sh -s -- '<the link>'
 ```
 
 The join tool ([join/](join/)) runs side by side as your own user (no root, no `TUN` device, no OS trust-store changes):
 
 1. fetches `/hogman/v1/network` over standard HTTPS, validates that `zone` is a valid public subdomain matching `PUBLIC_HOST`, and rejects legacy links carrying `fp=`;
 2. redeems the invite (asking you to choose a handle);
-3. runs its embedded `tsnet` node and local `:443`-only loopback proxy (`WhoIs`-pinned dialing so pen DNS cannot reach `127.0.0.1`, LAN, or other tailnets), serves `/proxy.pac` for all joined pens, and checks `https://home.<ZONE>` loads over HTTPS before configuring the system proxy.
+3. runs its embedded `tsnet` node and local `:443`-only loopback proxy (`WhoIs`-pinned dialing so pen DNS cannot reach `127.0.0.1`, LAN, or other tailnets), serves `/proxy.pac` for all joined pens, checks `https://home.<ZONE>` loads over HTTPS, and registers the local browser extension native messaging host (never asking for your Mac password or `sudo`).
 
 More devices: each member adds their own from the home page (`POST /api/devices`), which prints a
 device link (`https://<PUBLIC_HOST>/join#k=…`, or with `&for=share` for `hogman share`). Nobody can
@@ -75,8 +75,9 @@ Built for macOS (Apple silicon, Intel), Linux (x86-64, ARM64) and Windows (x86-6
 
 ## Members' API (on the mesh)
 
-Every request to `https://home.<ZONE>/api/` is identified by the mesh
-address it comes from (`X-Forwarded-For` over the Unix socket shared only with `portal`). No passwords: a device is its owner's identity.
+Every request to `https://home.<ZONE>/api/` is authenticated directly from the caller's WireGuard
+peer identity (`tsnet` `WhoIs` pinned to `HSNodeID`, `NodeKey`, `MachineKey`, and IPv4 — no
+`X-Forwarded-For`, no passwords). A device is its owner's identity.
 
 | Request | What it does |
 |---|---|
@@ -120,7 +121,7 @@ Nobody can suspend or kick the owner. Only the owner can suspend or kick an admi
 The registrar owns the Headscale access policy (Headscale runs in database policy
 mode). Every few seconds it rebuilds it from the ledger:
 
-- Devices of **active** members may reach the core (DNS, HTTP, HTTPS) and every server.
+- Devices of **active** members may reach the core (DNS `:53`, HTTPS `:443`); active personal devices may reach every server (`:443`).
 - Personal devices accept nothing.
 - Devices of suspended or removed members appear in no rule, so they reach nothing.
 - Devices that joined **around** the registrar (a key minted directly in Headscale)
@@ -128,9 +129,17 @@ mode). Every few seconds it rebuilds it from the ledger:
 
 ## Test locally
 
-Needs Docker and jq. Plays out a small network's life: invites redeemed from "the
-internet", devices joining, a server and its names, a device sneaking in around the
-registrar, a suspension and a kick.
+Unit tests (`core/join` and `core/registrar` require `-tags=ts_omit_peerapiserver` at compile time):
+
+```bash
+(cd core/join && GOFLAGS="-tags=ts_omit_peerapiserver" go test ./...)
+(cd core/registrar && GOFLAGS="-tags=ts_omit_peerapiserver" go test ./...)
+```
+
+End-to-end Docker suite (needs Docker, `jq`, and Linux for Unix-socket challenge DNS mounts). Plays
+out a pen's full life: invites redeemed from "the internet", devices joining side by side, HTTPS
+shares with Pebble ACME DNS-01 certificates, sealed sidecars, client updates, a device sneaking in
+around the registrar, suspension, renew-only mode, and kicking:
 
 ```bash
 test/run.sh            # add --keep to leave it running
@@ -140,17 +149,6 @@ test/run.sh            # add --keep to leave it running
 
 - `HOGMAN_DISABLE_NETNS=1` — **test-only, for isolated networks with no default route** (such as Docker `--internal` bridges). Disables Tailscale's `netns` `SO_BINDTODEVICE` hook (which otherwise binds unprivileged sockets to `lo` on Linux 5.7+ when no default gateway exists). Do **not** set this on ordinary laptops or desktops: it turns off `tsnet`'s VPN bypass.
 - `HOGMAN_ACME_CA_ROOT` / `HOGMAN_ACME_CA_URL` / `HOGMAN_ACME_RESOLVERS` — point `hogman` at a local Pebble test ACME CA during offline tests.
-
-Also covers the join page and downloads, and the join tool on two fresh Linux machines
-with only Tailscale installed: a tampered link refused before the invite is used, a full
-join, a second device via a device link, and leaving.
-
-Plus side-by-side mode on a machine with no Tailscale at all.
-
-About six minutes. Last result: **105 passed, 0 failed** (Docker Desktop on macOS, arm64).
-Suspension cut access in 3–5 seconds; resume restored it within 2 seconds; a kick cut
-access in 3 seconds. On the real Mac mini (direct connection over the LAN): suspend 2.0 s,
-resume 0.8 s, kick 2.1 s.
 
 What it does not cover: real phones and desktops (the simulated devices are Linux
 containers), a real public server with a Let's Encrypt cert, and real NAT.

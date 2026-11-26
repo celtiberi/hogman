@@ -104,8 +104,8 @@ git archive --format=tar --prefix= "$REF" core deploy/challenge-dns LICENSE READ
   | gzip -9n > "$out/$tarball"
 # No macOS file metadata in the bundle (Linux tar warns about it), and every
 # entry owned by root (0:0). Without that the archive carries the builder's
-# uid and account name: install.sh runs as root, so the files would land owned
-# by whichever local user has that uid, and the name would be public.
+# uid and account name: host unpackers run as root, so the files would land
+# owned by whichever local user has that uid, and the name would be public.
 if tar --version 2>/dev/null | grep -q bsdtar; then
   COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata --uid 0 --gid 0 --uname root --gname root \
     -C "$work" -czf "$out/$bins" prebuilt
@@ -192,7 +192,7 @@ if [ "${NO_DEPLOY:-}" != 1 ]; then
   {
     printf 'Release `%s` from commit `%s` (compiled binaries verified via GitHub build provenance).\n' "$ver" "$full"
     if [ -x "$REPO/deploy/changelog-fold.sh" ]; then
-      notes="$(CHANGELOG_REPO="$REPO" "$REPO/deploy/changelog-fold.sh" --notes "$REF" || true)"
+      notes="$(CHANGELOG_REPO="$REPO" "$REPO/deploy/changelog-fold.sh" --notes "$REF")"
       if [ -n "$notes" ]; then
         printf '\n%s\n' "$notes"
       fi

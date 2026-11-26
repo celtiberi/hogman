@@ -8,8 +8,8 @@
 # <source-dir> holds core/join, core/registrar, and deploy/challenge-dns
 # (a checkout, or an extracted git archive). Writes
 # <out-dir>/{join,registrar,challenge-dns}.
-# Used by release.sh when Docker is available, and by the GitHub build
-# workflow (.github/workflows/build.yml) otherwise.
+# Run by the GitHub build workflow (.github/workflows/build.yml) and for local
+# compilation checks. Releases only publish attested builds from build.yml.
 set -euo pipefail
 src="$(cd "$1" && pwd)"
 out="$2"
@@ -72,6 +72,7 @@ run_go_build "core/join" "$src/core/join" "$out/join" "-tags=ts_omit_peerapiserv
 '
 
 run_go_build "core/registrar" "$src/core/registrar" "$out/registrar" "-tags=ts_omit_peerapiserver -trimpath" '
+  CGO_ENABLED=0 go vet ./...
   test_out="$(CGO_ENABLED=0 go test ./... 2>&1)" || { printf "%s\n" "$test_out" >&2; exit 1; }
   for a in amd64 arm64; do
     CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -ldflags="-s -w" -o "/out/registrar-linux-$a" .
@@ -79,6 +80,7 @@ run_go_build "core/registrar" "$src/core/registrar" "$out/registrar" "-tags=ts_o
 '
 
 run_go_build "deploy/challenge-dns" "$src/deploy/challenge-dns" "$out/challenge-dns" "-trimpath" '
+  CGO_ENABLED=0 go vet ./...
   test_out="$(CGO_ENABLED=0 go test ./... 2>&1)" || { printf "%s\n" "$test_out" >&2; exit 1; }
   for a in amd64 arm64; do
     CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -ldflags="-s -w" -o "/out/challenge-dns-linux-$a" .

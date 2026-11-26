@@ -138,6 +138,8 @@ fi
 if [ "${1:-}" = "--notes" ]; then
   [ $# -eq 2 ] || usage
   ref="$2"
+  git -C "$REPO" rev-parse --verify "${ref}^{commit}" >/dev/null 2>&1 \
+    || { echo "changelog-fold: unknown git ref '$ref'" >&2; exit 2; }
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   for sec in security added changed fixed; do
@@ -152,7 +154,11 @@ if [ "${1:-}" = "--notes" ]; then
     base="$(basename "$path")"
     rc=0
     valid_fragment_name "$base" || rc=$?
-    [ "$rc" -eq 0 ] || continue
+    if [ "$rc" -eq 1 ]; then
+      continue
+    elif [ "$rc" -ne 0 ]; then
+      exit "$rc"
+    fi
     sec="${base%.md}"
     sec="${sec##*.}"
     git -C "$REPO" show "$ref:$path" | trim_blank_edges >> "$tmp/$sec"

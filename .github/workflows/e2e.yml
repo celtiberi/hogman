@@ -40,11 +40,40 @@ jobs:
         run: |
           code=true
           # Three dots: what changed on the branch since it left BASE.
+          # docs/sealed-server.md embeds the compose YAML verified by pen-sidecar.
           if [ -n "$BASE" ] && files="$(git diff --name-only "$BASE...$TIP" 2>/dev/null)"; then
-            if ! grep -qvE '^docs/|\.md$' <<<"$files"; then code=false; fi
+            if ! grep -qvE '^docs/|\.md$' <<<"$files" && ! grep -qx 'docs/sealed-server.md' <<<"$files"; then
+              code=false
+            fi
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "code changed: $code"
+
+  # Lightweight checks that must run on EVERY PR (including docs-only PRs,
+  # since zsh-commands.sh validates README.md and changelog-fold.sh validates
+  # changelog.d/*.md).
+  quick-checks:
+    name: quick checks (zsh, changelog, browser-ext)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Commands shown to users run under zsh
+        # macOS Terminal uses zsh, where an unquoted word starting with "="
+        # (like --proto =https) is replaced by a program path and fails with
+        # "zsh: https not found". Run the join page's and README's commands
+        # under zsh with the network and install steps replaced by no-ops.
+        run: |
+          command -v zsh >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq zsh >/dev/null; }
+          core/test/zsh-commands.sh
+      - name: Validate changelog fragments
+        run: |
+          deploy/changelog-fold.sh --check
+          deploy/test-changelog-fold.sh
+      - name: Test browser extension PAC & routing logic
+        run: node --test browser-ext/test/pac_test.mjs
 
   compose:
     name: public-certificate pen compose
@@ -60,7 +89,7 @@ jobs:
 
   images:
     name: docker image builds
-    needs: changes
+    needs: [changes, quick-checks]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -95,20 +124,6 @@ jobs:
             fi
           done
           exit "$rc"
-      - name: Commands shown to users run under zsh
-        # macOS Terminal uses zsh, where an unquoted word starting with "="
-        # (like --proto =https) is replaced by a program path and fails with
-        # "zsh: https not found". Run the join page's commands under zsh with
-        # the network and install steps replaced by no-ops.
-        run: |
-          sudo apt-get install -y -qq zsh >/dev/null
-          core/test/zsh-commands.sh
-      - name: Validate changelog fragments
-        run: |
-          if [ -x deploy/changelog-fold.sh ]; then
-            deploy/changelog-fold.sh --check
-            deploy/test-changelog-fold.sh
-          fi
 
   prebuilt:
     name: prebuild e2e binaries
@@ -131,7 +146,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-e2e-v2-ts_omit_peerapiserver-${{ runner.os }}-${{ hashFiles('core/join/go.mod', 'core/join/go.sum', 'core/registrar/go.sum', 'deploy/challenge-dns/go.sum') }}
+          key: go-e2e-v2-ts_omit_peerapiserver-${{ runner.os }}-${{ hashFiles('core/join/go.mod', 'core/join/go.sum', 'core/registrar/go.mod', 'core/registrar/go.sum', 'deploy/challenge-dns/go.mod', 'deploy/challenge-dns/go.sum') }}
           restore-keys: |
             go-e2e-v2-ts_omit_peerapiserver-${{ runner.os }}-
       - name: Compile E2E binaries
