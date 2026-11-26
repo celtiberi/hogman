@@ -17,17 +17,22 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"hogman/registrar/internal/acme"
+	"hogman/registrar/internal/api"
+	"hogman/registrar/internal/billing"
+	"hogman/registrar/internal/registrar"
 )
 
 func TestRenewOnlyPolicyAndHTTPEnforcement(t *testing.T) {
 	e := newTestEnv(t)
-	if _, err := e.svc.AddMember(context.Background(), Actor{CLI: true}, "owner1", "owner"); err != nil {
+	if _, err := e.svc.AddMember(context.Background(), registrar.Actor{CLI: true}, "owner1", "owner"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.AddMember(context.Background(), Actor{CLI: true}, "alice", "admin"); err != nil {
+	if _, err := e.svc.AddMember(context.Background(), registrar.Actor{CLI: true}, "alice", "admin"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.AddMember(context.Background(), Actor{CLI: true}, "bob", "member"); err != nil {
+	if _, err := e.svc.AddMember(context.Background(), registrar.Actor{CLI: true}, "bob", "member"); err != nil {
 		t.Fatal(err)
 	}
 	e.addDevice(t, "owner1", "personal", "owner-laptop", "100.64.0.9", "")
@@ -37,10 +42,10 @@ func TestRenewOnlyPolicyAndHTTPEnforcement(t *testing.T) {
 
 	dir := t.TempDir()
 	billingPath := filepath.Join(dir, "billing-status.json")
-	e.svc.cfg.BillingStatusPath = billingPath
+	e.svc.SetBillingStatusPath(billingPath)
 
 	// Normal mode: everyone + servers grant present.
-	normalPol, _, err := e.svc.buildPolicy()
+	normalPol, _, err := e.svc.BuildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +57,7 @@ func TestRenewOnlyPolicyAndHTTPEnforcement(t *testing.T) {
 	if err := os.WriteFile(billingPath, []byte(`{"pen":"bobo","state":"renew_only","wake_until":"2027-12-25T00:10:00Z","renew_url":"https://get.example.com"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	renewPol, _, err := e.svc.buildPolicy()
+	renewPol, _, err := e.svc.BuildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,8 +82,8 @@ func TestRenewOnlyPolicyAndHTTPEnforcement(t *testing.T) {
 	}
 
 	// HTTP enforcement during renew_only:
-	mesh := MeshHandler(e.svc)
-	pub := PublicHandler(e.svc)
+	mesh := api.MeshHandler(e.svc)
+	pub := api.PublicHandler(e.svc)
 	js := map[string]string{"Content-Type": "application/json"}
 
 	// Active owner/admin personal devices can call GET /api/me and POST /api/billing/renew-token.
@@ -127,7 +132,7 @@ func TestRenewOnlyPolicyAndHTTPEnforcement(t *testing.T) {
 	if err := os.Remove(billingPath); err != nil {
 		t.Fatal(err)
 	}
-	restoredPol, _, err := e.svc.buildPolicy()
+	restoredPol, _, err := e.svc.BuildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,10 +146,10 @@ func TestRenewOnlyPolicyAndHTTPEnforcement(t *testing.T) {
 	if err := os.WriteFile(markerPath, []byte("renew_only\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !e.svc.isRenewOnly() {
+	if !e.svc.IsRenewOnly() {
 		t.Fatal("marker alone must force isRenewOnly() = true")
 	}
-	markerPol, _, err := e.svc.buildPolicy()
+	markerPol, _, err := e.svc.BuildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +168,7 @@ func TestRenewOnlyPolicyAndHTTPEnforcement(t *testing.T) {
 	if err := os.WriteFile(billingPath, []byte(`{corrupt json`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !e.svc.isRenewOnly() {
+	if !e.svc.IsRenewOnly() {
 		t.Fatal("corrupt billing-status.json must fail closed into renew_only")
 	}
 	if rec := doMeshReq(mesh, "GET", "/api/directory", "100.64.0.10", "", nil); rec.Code != http.StatusForbidden {
@@ -174,7 +179,7 @@ func TestRenewOnlyPolicyAndHTTPEnforcement(t *testing.T) {
 	if err := os.WriteFile(billingPath, []byte(strings.Repeat(" ", 5000)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !e.svc.isRenewOnly() {
+	if !e.svc.IsRenewOnly() {
 		t.Fatal("oversized billing-status.json must fail closed into renew_only")
 	}
 	_ = os.Remove(billingPath)
@@ -216,17 +221,17 @@ func TestHomeCertManagerRenewOnlyReuseAndCap(t *testing.T) {
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	if err := writeHomeTLSAtomic(tlsDir, certPEM, keyPEM); err != nil {
+	if err := acme.WriteTLSFilesAtomic(tlsDir, "home", certPEM, keyPEM); err != nil {
 		t.Fatal(err)
 	}
 
-	mgr, err := NewHomeCertManager(HomeConfig{
-		Zone:              "bobo.example.test",
-		HomeTLSDir:        tlsDir,
-		StorageDir:        storageDir,
-		PrimaryCA:         "https://127.0.0.1:1/unreachable-ca",
-		Backend:           noopACMEBackend{},
-		BillingStatusPath: billingPath,
+	mgr, err := acme.NewHomeCertManager(acme.HomeConfig{
+		Zone:        "bobo.example.test",
+		HomeTLSDir:  tlsDir,
+		StorageDir:  storageDir,
+		PrimaryCA:   "https://127.0.0.1:1/unreachable-ca",
+		Backend:     &stubACMEBackend{},
+		IsRenewOnly: billing.NewPolicy(billingPath).IsRenewOnly,
 	})
 	if err != nil {
 		t.Fatal(err)

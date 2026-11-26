@@ -1,0 +1,9 @@
+# Allowlist build context for Dockerfile (COPY . ./) and Dockerfile.prebuilt
+# (COPY registrar.bin ...) so stray local files are never baked into image layers.
+*
+!go.mod
+!go.sum
+!*.go
+!internal/
+!internal/**/*.go
+!registrar.bin

@@ -9,12 +9,18 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
+
+	"hogman/registrar/internal/acme"
+	"hogman/registrar/internal/api"
+	"hogman/registrar/internal/dns"
+	"hogman/registrar/internal/registrar"
 )
 
 func healthCmd() error {
@@ -40,7 +46,7 @@ func healthCmd() error {
 		return nil
 	}
 	if homeTLSDir := strings.TrimSpace(os.Getenv("HOME_TLS_DIR")); homeTLSDir != "" {
-		if err := VerifyHomeTLS(homeTLSDir); err != nil {
+		if err := acme.VerifyHomeTLS(homeTLSDir); err != nil {
 			return err
 		}
 	}
@@ -82,11 +88,11 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	}
 }
 
-func waitForInitialSync(ctx context.Context, s *Service, logger *slog.Logger) bool {
+func waitForInitialSync(ctx context.Context, s *registrar.Service, logger *slog.Logger) bool {
 	backoff := time.Second
 	for {
 		if err := s.Sync(ctx); err == nil {
-			logger.Info("in sync with headscale", "zone", s.cfg.Zone)
+			logger.Info("in sync with headscale", "zone", s.Zone())
 			return true
 		} else {
 			logger.Warn("waiting for headscale", "err", err)
@@ -105,7 +111,7 @@ func waitForInitialSync(ctx context.Context, s *Service, logger *slog.Logger) bo
 	}
 }
 
-func runSyncLoop(ctx context.Context, s *Service, logger *slog.Logger) {
+func runSyncLoop(ctx context.Context, s *registrar.Service, logger *slog.Logger) {
 	fastInterval := durEnv("SYNC_INTERVAL", 3*time.Second)
 	if fastInterval <= 0 {
 		fastInterval = 3 * time.Second
@@ -121,7 +127,7 @@ func runSyncLoop(ctx context.Context, s *Service, logger *slog.Logger) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if !s.NeedsFastSync() && s.clock().Sub(s.LastSyncAt()) < idleInterval {
+			if !s.NeedsFastSync() && s.Clock().Sub(s.LastSyncAt()) < idleInterval {
 				continue
 			}
 			if err := s.Sync(ctx); err != nil {
@@ -131,7 +137,7 @@ func runSyncLoop(ctx context.Context, s *Service, logger *slog.Logger) {
 	}
 }
 
-func watchHomeCertRenewal(ctx context.Context, homeMgr *HomeCertManager, logger *slog.Logger) func() {
+func watchHomeCertRenewal(ctx context.Context, homeMgr *acme.HomeCertManager, logger *slog.Logger) func() {
 	hupCh := make(chan os.Signal, 1)
 	signal.Notify(hupCh, syscall.SIGHUP)
 	go func() {
@@ -140,11 +146,11 @@ func watchHomeCertRenewal(ctx context.Context, homeMgr *HomeCertManager, logger 
 			case <-ctx.Done():
 				return
 			case <-hupCh:
-				logger.Info("SIGHUP received, forcing certificate renewal", "host", homeMgr.host)
+				logger.Info("SIGHUP received, forcing certificate renewal", "host", homeMgr.Host())
 				if err := homeMgr.ForceRenew(ctx); err != nil {
-					logger.Error("forced certificate renewal failed", "host", homeMgr.host, "err", err)
+					logger.Error("forced certificate renewal failed", "host", homeMgr.Host(), "err", err)
 				} else {
-					logger.Info("forced certificate renewal succeeded", "host", homeMgr.host)
+					logger.Info("forced certificate renewal succeeded", "host", homeMgr.Host())
 				}
 			}
 		}
@@ -153,14 +159,14 @@ func watchHomeCertRenewal(ctx context.Context, homeMgr *HomeCertManager, logger 
 	return func() { signal.Stop(hupCh) }
 }
 
-func serve(s *Service, logger *slog.Logger) {
+func serve(s *registrar.Service, logger *slog.Logger) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	// Keep detached background workers (especially already-accepted 202
-	// ScheduleSelfDelete jobs) alive during graceful HTTP shutdown so SIGTERM
+	// SelfRemoveDevice jobs) alive during graceful HTTP shutdown so SIGTERM
 	// does not abort committed self-removals mid-flight.
 	workerCtx, cancelWorkers := context.WithCancel(context.Background())
 	defer cancelWorkers()
@@ -184,20 +190,24 @@ func serve(s *Service, logger *slog.Logger) {
 	if legacySocket {
 		logger.Warn("REGISTRAR_LEGACY_MESH_SOCKET=1 enabled (test/migration only; trusting X-Forwarded-For)", "addr", legacyMeshAddr)
 		if dnsAddr := env("DNS_ADDR", ":53"); dnsAddr != "" && dnsAddr != "off" {
-			dnsSrv, err := NewDNSServer(s)
+			coreV4, err := netip.ParseAddr(strings.TrimSpace(s.CoreIP()))
+			if err != nil || !coreV4.Is4() {
+				log.Fatalf("dns: invalid CORE_MESH_IP %q", s.CoreIP())
+			}
+			dnsSrv, err := dns.NewServer(s.Zone(), coreV4, s)
 			if err != nil {
 				log.Fatalf("dns: %v", err)
 			}
 			if err := dnsSrv.Start(ctx, dnsAddr); err != nil {
 				log.Fatalf("dns on %s: %v", dnsAddr, err)
 			}
-			logger.Info("dns listening", "addr", dnsAddr, "zone", s.cfg.Zone)
+			logger.Info("dns listening", "addr", dnsAddr, "zone", s.Zone())
 		}
 	}
 
-	var homeMgr *HomeCertManager
+	var homeMgr *acme.HomeCertManager
 	if homeTLSDir := strings.TrimSpace(os.Getenv("HOME_TLS_DIR")); homeTLSDir != "" {
-		mgr, err := NewHomeCertManager(loadHomeCertConfig(s, homeTLSDir))
+		mgr, err := acme.NewHomeCertManager(loadHomeCertConfig(s, homeTLSDir, logger))
 		if err != nil {
 			log.Fatalf("acme home manager: %v", err)
 		}
@@ -207,16 +217,16 @@ func serve(s *Service, logger *slog.Logger) {
 
 	// Phase 1 of embedded tsnet startup: bring up the core node, write mesh-ip,
 	// and start DNS + /healthz (returning 503 not-ready) BEFORE initial Headscale
-	// Sync(), so s.cfg.CoreIP is populated and ./hogman up can read mesh-ip,
+	// Sync(), so s.CoreIP() is populated and ./hogman up can read mesh-ip,
 	// while the :443 portal stays closed until Sync() completes.
 	var em *embeddedMesh
 	if tsnetStateDir != "" {
-		controlURL := env("TSNET_CONTROL_URL", "https://"+s.cfg.PublicHost)
+		controlURL := env("TSNET_CONTROL_URL", "https://"+s.PublicHost())
 		hostname := env("TSNET_HOSTNAME", "core")
 		authKeyFile := env("TSNET_AUTH_KEY_FILE", filepath.Join(tsnetStateDir, ".authkey"))
 		portalDir := env("PORTAL_DIR", "/srv/portal")
 		var err error
-		em, err = startEmbeddedMesh(ctx, s, homeMgr, tsnetStateDir, controlURL, hostname, authKeyFile, portalDir)
+		em, err = startEmbeddedMesh(ctx, s, homeMgr, tsnetStateDir, controlURL, hostname, authKeyFile, portalDir, logger)
 		if err != nil {
 			log.Fatalf("embedded mesh: %v", err)
 		}
@@ -248,7 +258,7 @@ func serve(s *Service, logger *slog.Logger) {
 		defer stopHUP()
 	}
 
-	pub := newHTTPServer(env("PUBLIC_ADDR", ":8081"), PublicHandler(s))
+	pub := newHTTPServer(env("PUBLIC_ADDR", ":8081"), api.PublicHandler(s))
 	go func() {
 		logger.Info("public API listening", "addr", pub.Addr)
 		if err := pub.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -258,9 +268,9 @@ func serve(s *Service, logger *slog.Logger) {
 
 	var mesh *http.Server
 	if legacySocket {
-		mesh = newHTTPServer(legacyMeshAddr, MeshHandler(s))
-		mesh.ConnContext = markSocketConn
-		ln, err := listenMesh(mesh.Addr)
+		mesh = newHTTPServer(legacyMeshAddr, api.MeshHandler(s))
+		mesh.ConnContext = api.MarkSocketConn
+		ln, err := api.ListenMesh(mesh.Addr)
 		if err != nil {
 			log.Fatal(err)
 		}

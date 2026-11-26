@@ -2,15 +2,16 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+
+	"hogman/registrar/internal/api"
+	"hogman/registrar/internal/registrar"
 )
 
 var privateLabelFormatRE = regexp.MustCompile(`^[a-z][a-z0-9]{11}$`)
@@ -18,7 +19,7 @@ var privateLabelFormatRE = regexp.MustCompile(`^[a-z][a-z0-9]{11}$`)
 func TestPrivateNameHTTPFlowRetryAndPermanentRetirement(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	if _, err := e.svc.AddMember(ctx, cli, "alice", "owner"); err != nil {
 		t.Fatal(err)
@@ -29,7 +30,7 @@ func TestPrivateNameHTTPFlowRetryAndPermanentRetirement(t *testing.T) {
 	e.addDevice(t, "alice", "server", "manager", "100.64.0.13", "")
 	e.addDevice(t, "alice", "server", "named-srv", "100.64.0.14", "")
 
-	h := MeshHandler(e.svc)
+	h := api.MeshHandler(e.svc)
 	jsonHdr := map[string]string{"Content-Type": "application/json"}
 
 	// Reject passing both name and private: true.
@@ -53,7 +54,7 @@ func TestPrivateNameHTTPFlowRetryAndPermanentRetirement(t *testing.T) {
 	if !resp1.Private {
 		t.Fatalf("expected private=true in response, got %s", rec.Body.String())
 	}
-	label1 := strings.TrimSuffix(resp1.Name, "."+e.svc.cfg.Zone)
+	label1 := strings.TrimSuffix(resp1.Name, "."+e.svc.Zone())
 	if !privateLabelFormatRE.MatchString(label1) {
 		t.Fatalf("private label %q does not match ^[a-z][a-z0-9]{11}$", label1)
 	}
@@ -113,18 +114,18 @@ func TestPrivateNameHTTPFlowRetryAndPermanentRetirement(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("manager GET /api/directory: status=%d want 200 body=%s", rec.Code, rec.Body.String())
 	}
-	var dir []directoryEntry
+	var dir []api.DirectoryEntry
 	if err := json.Unmarshal(rec.Body.Bytes(), &dir); err != nil {
 		t.Fatal(err)
 	}
-	byName := map[string]directoryEntry{}
+	byName := map[string]api.DirectoryEntry{}
 	for _, d := range dir {
 		byName[d.Name] = d
 	}
 	if d, ok := byName[resp1.Name]; !ok || !d.Private || d.Note != "Cooler 1 - Final" || d.Member != "alice" {
 		t.Fatalf("unexpected directory entry for server1: %+v (ok=%v)", d, ok)
 	}
-	if d, ok := byName["blog."+e.svc.cfg.Zone]; !ok || d.Private {
+	if d, ok := byName["blog."+e.svc.Zone()]; !ok || d.Private {
 		t.Fatalf("unexpected directory entry for named blog: %+v (ok=%v)", d, ok)
 	}
 
@@ -174,7 +175,7 @@ func TestPrivateNameHTTPFlowRetryAndPermanentRetirement(t *testing.T) {
 func TestPrivateNameCollisionRetryAndExhaustion(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	if _, err := e.svc.AddMember(ctx, cli, "alice", "owner"); err != nil {
 		t.Fatal(err)
@@ -182,7 +183,7 @@ func TestPrivateNameCollisionRetryAndExhaustion(t *testing.T) {
 	_, srv1 := e.addDevice(t, "alice", "server", "srv1", "100.64.0.11", "")
 	_, srv2 := e.addDevice(t, "alice", "server", "srv2", "100.64.0.12", "")
 	alice, _ := e.st.MemberByHandle("alice")
-	actor := Actor{Member: alice}
+	actor := registrar.Actor{Member: alice}
 
 	// Pre-populate one active and one retired label.
 	if _, err := e.svc.Claim(actor, "alice", "aaaaaaaaaaaa", srv1.ID, nil); err != nil {
@@ -198,65 +199,38 @@ func TestPrivateNameCollisionRetryAndExhaustion(t *testing.T) {
 	// Sequence: reserved ("home"), active ("aaaaaaaaaaaa"), retired ("bbbbbbbbbbbb"), then free ("c1d2e3f4g5h6").
 	seq := []string{"home", "aaaaaaaaaaaa", "bbbbbbbbbbbb", "c1d2e3f4g5h6"}
 	idx := 0
-	e.svc.privateLabelFn = func() (string, error) {
+	e.svc.SetPrivateLabelGenerator(func() (string, error) {
 		out := seq[idx]
 		idx++
 		return out, nil
-	}
+	})
 	fqdn, err := e.svc.ServerClaimPrivate(actor, srv2, nil)
 	if err != nil {
 		t.Fatalf("expected retry to succeed on 4th candidate, got err=%v", err)
 	}
-	if fqdn != "c1d2e3f4g5h6."+e.svc.cfg.Zone {
-		t.Fatalf("got %q, want c1d2e3f4g5h6.%s", fqdn, e.svc.cfg.Zone)
+	if fqdn != "c1d2e3f4g5h6."+e.svc.Zone() {
+		t.Fatalf("got %q, want c1d2e3f4g5h6.%s", fqdn, e.svc.Zone())
 	}
 
 	// Exhaust all 8 attempts -> clean 503 error and no row added.
 	_, srv3 := e.addDevice(t, "alice", "server", "srv3", "100.64.0.13", "")
 	attempts := 0
-	e.svc.privateLabelFn = func() (string, error) {
+	e.svc.SetPrivateLabelGenerator(func() (string, error) {
 		attempts++
 		return "aaaaaaaaaaaa", nil
-	}
+	})
 	_, err = e.svc.ServerClaimPrivate(actor, srv3, nil)
 	if err == nil {
 		t.Fatalf("expected error when all 8 attempts collide")
 	}
-	var prob *Problem
-	if !errors.As(err, &prob) || prob.Status != 503 {
-		t.Fatalf("expected 503 Problem, got %v", err)
+	var de *registrar.Error
+	if !errors.As(err, &de) || de.Kind != registrar.KindUnavailable {
+		t.Fatalf("expected KindUnavailable registrar.Error, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "after 8 attempts") {
 		t.Fatalf("unexpected error message: %v", err)
 	}
 	if attempts != 8 {
 		t.Fatalf("attempts = %d, want 8", attempts)
-	}
-}
-
-func TestMigrateNamesPrivateColumn(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "legacy.db")
-	db, err := sql.Open("sqlite", "file:"+p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = db.Exec(`
-		CREATE TABLE members (id INTEGER PRIMARY KEY, handle TEXT UNIQUE NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, invited_by INTEGER, hs_user_id TEXT NOT NULL, created_at INTEGER NOT NULL, removed_at INTEGER);
-		CREATE TABLE devices (id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, hs_node_id TEXT NOT NULL, ipv4 TEXT NOT NULL DEFAULT '', ipv6 TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, removed_at INTEGER);
-		CREATE TABLE names (name TEXT PRIMARY KEY, member_id INTEGER NOT NULL, device_id INTEGER, note TEXT NOT NULL DEFAULT '', held_until INTEGER, created_at INTEGER NOT NULL);
-	`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = db.Close()
-
-	st, err := OpenStore(p)
-	if err != nil {
-		t.Fatalf("OpenStore on legacy DB failed: %v", err)
-	}
-	defer st.Close()
-	has, err := hasColumn(st.db, "names", "private")
-	if err != nil || !has {
-		t.Fatalf("expected names.private column after migration, has=%v err=%v", has, err)
 	}
 }

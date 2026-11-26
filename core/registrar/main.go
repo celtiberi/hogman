@@ -13,6 +13,8 @@ import (
 	"log"
 	"log/slog"
 	"os"
+
+	"hogman/registrar/internal/registrar"
 )
 
 func main() {
@@ -46,19 +48,19 @@ func main() {
 		}
 		return
 	case "serve":
-		s := setup()
-		defer s.st.Close()
+		s, closeStore := setup()
+		defer closeStore()
 		serve(s, logger)
 		return
 	}
 
-	s := setup()
+	s, closeStore := setup()
 	err := cli(context.Background(), s, args)
-	_ = s.st.Close()
+	_ = closeStore()
 	if err != nil {
-		var p *Problem
-		if errors.As(err, &p) {
-			fmt.Fprintln(os.Stderr, "error:", p.Msg)
+		var de *registrar.Error
+		if errors.As(err, &de) {
+			fmt.Fprintln(os.Stderr, "error:", de.Msg)
 			os.Exit(1)
 		}
 		fmt.Fprintln(os.Stderr, "error:", err)

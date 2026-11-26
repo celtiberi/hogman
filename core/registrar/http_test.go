@@ -15,6 +15,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"hogman/registrar/internal/api"
+	"hogman/registrar/internal/headscale"
+	"hogman/registrar/internal/ratelimit"
+	"hogman/registrar/internal/registrar"
+	"hogman/registrar/internal/store"
 )
 
 func doMeshReq(h http.Handler, method, path, srcIP, body string, headers map[string]string) *httptest.ResponseRecorder {
@@ -32,7 +38,7 @@ func doMeshReq(h http.Handler, method, path, srcIP, body string, headers map[str
 func TestMeshCSRFProtection(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	if _, err := e.svc.AddMember(ctx, cli, "root", "owner"); err != nil {
 		t.Fatal(err)
@@ -43,7 +49,7 @@ func TestMeshCSRFProtection(t *testing.T) {
 	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
 	_, bobSrv := e.addDevice(t, "bob", "server", "bob-srv", "100.64.0.12", "")
 
-	h := MeshHandler(e.svc)
+	h := api.MeshHandler(e.svc)
 
 	// Non-JSON Content-Type and missing Content-Type must be rejected with 415.
 	cases415 := []struct {
@@ -129,14 +135,14 @@ func TestMeshCSRFProtection(t *testing.T) {
 func TestMeshServerNamesItself(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 	if _, err := e.svc.AddMember(ctx, cli, "bob", "member"); err != nil {
 		t.Fatal(err)
 	}
 	_, laptop := e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.10", "")
 	_, srvA := e.addDevice(t, "bob", "server", "a", "100.64.0.11", "")
 	_, srvB := e.addDevice(t, "bob", "server", "b", "100.64.0.12", "")
-	h := MeshHandler(e.svc)
+	h := api.MeshHandler(e.svc)
 	js := map[string]string{"Content-Type": "application/json"}
 	want := func(code int, method, path, src, body string) {
 		t.Helper()
@@ -148,7 +154,7 @@ func TestMeshServerNamesItself(t *testing.T) {
 			t.Fatalf("%s %s from %s: status=%d want %d body=%s", method, path, src, rec.Code, code, rec.Body.String())
 		}
 	}
-	id := func(d *Device) string { return strconv.FormatInt(d.ID, 10) }
+	id := func(d *store.Device) string { return strconv.FormatInt(d.ID, 10) }
 
 	want(201, "POST", "/api/names", "100.64.0.11", `{"name":"blog"}`)                       // names itself
 	want(201, "POST", "/api/names", "100.64.0.11", `{"name":"blog"}`)                       // again: still its own
@@ -176,14 +182,14 @@ func TestMeshServerNamesItself(t *testing.T) {
 func TestMeshOwnerServerNameCap(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	if _, err := e.svc.AddMember(ctx, Actor{CLI: true}, "root", "owner"); err != nil {
+	if _, err := e.svc.AddMember(ctx, registrar.Actor{CLI: true}, "root", "owner"); err != nil {
 		t.Fatal(err)
 	}
 	e.addDevice(t, "root", "server", "srv", "100.64.0.11", "")
-	h := MeshHandler(e.svc)
+	h := api.MeshHandler(e.svc)
 	js := map[string]string{"Content-Type": "application/json"}
 	got409 := false
-	for i := 0; i <= e.svc.cfg.MaxNamesPerMember; i++ {
+	for i := 0; i <= e.svc.Config().MaxNamesPerMember; i++ {
 		rec := doMeshReq(h, "POST", "/api/names", "100.64.0.11", `{"name":"n`+strconv.Itoa(i)+`"}`, js)
 		if rec.Code == http.StatusConflict {
 			got409 = true
@@ -194,14 +200,14 @@ func TestMeshOwnerServerNameCap(t *testing.T) {
 		}
 	}
 	if !got409 {
-		t.Fatalf("the owner's server claimed more than %d names", e.svc.cfg.MaxNamesPerMember)
+		t.Fatalf("the owner's server claimed more than %d names", e.svc.Config().MaxNamesPerMember)
 	}
 }
 
 func TestMeshServerDeviceRestricted(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	if _, err := e.svc.AddMember(ctx, cli, "root", "owner"); err != nil {
 		t.Fatal(err)
@@ -212,7 +218,7 @@ func TestMeshServerDeviceRestricted(t *testing.T) {
 	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
 	e.addDevice(t, "root", "server", "root-srv", "100.64.0.11", "")
 
-	h := MeshHandler(e.svc)
+	h := api.MeshHandler(e.svc)
 
 	// Server device can reach GET /api/me (trimmed payload) and GET /api/directory.
 	rec := doMeshReq(h, "GET", "/api/me", "100.64.0.11", "", nil)
@@ -272,7 +278,7 @@ func TestMeshServerDeviceRestricted(t *testing.T) {
 func TestIPReuseBlockedBeforeSync(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	if _, err := e.svc.AddMember(ctx, cli, "root", "owner"); err != nil {
 		t.Fatal(err)
@@ -285,7 +291,7 @@ func TestIPReuseBlockedBeforeSync(t *testing.T) {
 
 	// Case 1: owner's device logged out and Headscale reassigned 100.64.0.10 to a stray/new node before Sync runs.
 	e.hs.mu.Lock()
-	e.hs.nodes = []HSNode{{
+	e.hs.nodes = []headscale.Node{{
 		ID:          "node-reassigned-stray",
 		Name:        "bob-new",
 		GivenName:   "bob-new",
@@ -293,7 +299,7 @@ func TestIPReuseBlockedBeforeSync(t *testing.T) {
 	}}
 	e.hs.mu.Unlock()
 
-	h := MeshHandler(e.svc)
+	h := api.MeshHandler(e.svc)
 	rec := doMeshReq(h, "POST", "/api/admin/members/bob/role", "100.64.0.10", `{"role":"owner"}`, map[string]string{
 		"Content-Type": "application/json",
 	})
@@ -319,12 +325,12 @@ func TestIPReuseBlockedBeforeSync(t *testing.T) {
 	// Reset root-laptop row as if another owner device still had 100.64.0.10 in stale SQLite.
 	e.addDevice(t, "root", "personal", "root-stale", "100.64.0.10", "")
 	e.hs.mu.Lock()
-	e.hs.nodes = []HSNode{{
+	e.hs.nodes = []headscale.Node{{
 		ID:          "node-bob-legit",
 		Name:        "bob-laptop",
 		GivenName:   "bob-laptop",
 		IPAddresses: []string{"100.64.0.10"},
-		PreAuthKey:  &HSPreAuthKey{ID: keys[0].HSKeyID},
+		PreAuthKey:  &headscale.PreAuthKey{ID: keys[0].HSKeyID},
 	}}
 	e.hs.mu.Unlock()
 
@@ -343,7 +349,7 @@ func TestIPReuseBlockedBeforeSync(t *testing.T) {
 func TestEmptyXFFDoesNotMatchIPv4OnlyDevice(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 
 	if _, err := e.svc.AddMember(ctx, cli, "root", "owner"); err != nil {
 		t.Fatal(err)
@@ -351,7 +357,7 @@ func TestEmptyXFFDoesNotMatchIPv4OnlyDevice(t *testing.T) {
 	// IPv4-only device has ipv6 = "" in SQLite.
 	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
 
-	h := MeshHandler(e.svc)
+	h := api.MeshHandler(e.svc)
 	for _, xff := range []string{"", "100.64.0.10, ", "not-an-ip"} {
 		rec := doMeshReq(h, "GET", "/api/me", xff, "", nil)
 		if rec.Code != http.StatusForbidden {
@@ -362,7 +368,7 @@ func TestEmptyXFFDoesNotMatchIPv4OnlyDevice(t *testing.T) {
 
 func TestPublicRedeemRateLimit(t *testing.T) {
 	e := newTestEnv(t)
-	h := PublicHandlerWithRateLimit(e.svc, 2, time.Minute)
+	h := api.PublicHandlerWithRateLimit(e.svc, 2, time.Minute)
 
 	send := func(remoteAddr, xff, token string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("POST", "/hogman/v1/redeem", strings.NewReader(`{"token":"`+token+`","handle":"alice"}`))
@@ -398,7 +404,7 @@ func TestPublicRedeemRateLimit(t *testing.T) {
 func TestKeeperPageAPI(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 	for h, r := range map[string]string{"root": "owner", "bob": "member"} {
 		if _, err := e.svc.AddMember(ctx, cli, h, r); err != nil {
 			t.Fatal(err)
@@ -406,7 +412,7 @@ func TestKeeperPageAPI(t *testing.T) {
 	}
 	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
 	e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.11", "")
-	h := MeshHandler(e.svc)
+	h := api.MeshHandler(e.svc)
 	js := map[string]string{"Content-Type": "application/json"}
 
 	var me struct {
@@ -446,7 +452,7 @@ func TestKeeperPageAPI(t *testing.T) {
 func TestHerdPagedAndSearched(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 	if _, err := e.svc.AddMember(ctx, cli, "root", "owner"); err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +472,7 @@ func TestHerdPagedAndSearched(t *testing.T) {
 	if _, err := e.svc.Kick(ctx, cli, "pig101", "test"); err != nil {
 		t.Fatal(err)
 	}
-	h := MeshHandler(e.svc)
+	h := api.MeshHandler(e.svc)
 	type page struct {
 		Members []struct {
 			Handle  string `json:"handle"`
@@ -516,7 +522,7 @@ func TestHerdPagedAndSearched(t *testing.T) {
 func TestNameDirectoryNoteAndMigration(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 	for h, r := range map[string]string{"root": "owner", "alice": "member", "bob": "member"} {
 		if _, err := e.svc.AddMember(ctx, cli, h, r); err != nil {
 			t.Fatal(err)
@@ -527,7 +533,7 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 	_, bobSrv := e.addDevice(t, "bob", "server", "bobSrv", "100.64.0.12", "")
 	_, srvA2 := e.addDevice(t, "alice", "server", "srvA2", "100.64.0.13", "")
 	_, rootSrv := e.addDevice(t, "root", "server", "rootSrv", "100.64.0.14", "")
-	h := MeshHandler(e.svc)
+	h := api.MeshHandler(e.svc)
 	js := map[string]string{"Content-Type": "application/json"}
 
 	// Control characters, invisible fillers, Unicode bidi overrides, and newlines
@@ -597,7 +603,7 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 	}
 	rec := doMeshReq(h, "GET", "/api/me", "100.64.0.10", "", nil)
 	var me struct {
-		Names []Name `json:"names"`
+		Names []store.Name `json:"names"`
 	}
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &me) != nil || len(me.Names) != 1 ||
 		me.Names[0].Note != "updated note" || me.Names[0].DeviceID == nil || *me.Names[0].DeviceID != srvA2.ID {
@@ -640,7 +646,7 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 	const openers = 8
 	start := make(chan struct{})
 	type openRes struct {
-		st  *Store
+		st  *store.Store
 		err error
 	}
 	resCh := make(chan openRes, openers)
@@ -650,7 +656,7 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			st, err := OpenStore(legacyPath)
+			st, err := store.Open(legacyPath)
 			resCh <- openRes{st: st, err: err}
 		}()
 	}
@@ -660,17 +666,17 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 	for res := range resCh {
 		if res.st != nil {
 			st := res.st
-			t.Cleanup(func() { _ = st.db.Close() })
+			t.Cleanup(func() { _ = st.DB().Close() })
 		}
 		if res.err != nil {
 			t.Fatalf("concurrent OpenStore legacy migrate: %v", res.err)
 		}
 	}
-	st, err := OpenStore(legacyPath)
+	st, err := store.Open(legacyPath)
 	if err != nil {
 		t.Fatalf("OpenStore after concurrent migrate: %v", err)
 	}
-	defer st.db.Close()
+	defer st.DB().Close()
 	gotOld, err := st.NameByName("old")
 	if err != nil || gotOld.Note != "" {
 		t.Fatalf("legacy row after migrate: %+v err=%v", gotOld, err)
@@ -685,7 +691,7 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 func TestRemoveDeviceFreesItsNames(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 	if _, err := e.svc.AddMember(ctx, cli, "bob", "member"); err != nil {
 		t.Fatal(err)
 	}
@@ -696,8 +702,8 @@ func TestRemoveDeviceFreesItsNames(t *testing.T) {
 	if err := e.svc.RemoveDevice(ctx, cli, srv.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.st.NameByName("photos"); err != ErrNotFound {
-		t.Fatalf("name after device removal: err=%v, want ErrNotFound", err)
+	if _, err := e.st.NameByName("photos"); err != store.ErrNotFound {
+		t.Fatalf("name after device removal: err=%v, want store.ErrNotFound", err)
 	}
 }
 
@@ -707,7 +713,7 @@ func TestRemoveDeviceFreesItsNames(t *testing.T) {
 func TestOwnerCount(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 	for _, m := range []struct{ handle, role string }{
 		{"root", "owner"}, {"carol", "owner"}, {"ann", "admin"}, {"bob", "member"},
 	} {
@@ -718,7 +724,7 @@ func TestOwnerCount(t *testing.T) {
 	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
 	e.addDevice(t, "ann", "personal", "ann-laptop", "100.64.0.12", "")
 	e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.14", "")
-	h := MeshHandler(e.svc)
+	h := api.MeshHandler(e.svc)
 	owners := func(ip string) (float64, bool) {
 		rec := doMeshReq(h, "GET", "/api/me", ip, "", nil)
 		var me map[string]any
@@ -744,17 +750,17 @@ func TestOwnerCount(t *testing.T) {
 }
 
 func TestIPRateLimiterIPv6AndBoundedEviction(t *testing.T) {
-	if a, b := rateLimitKey("2001:db8:cafe:1::1"), rateLimitKey("2001:db8:cafe:1:9999::2"); a != b {
+	if a, b := ratelimit.Key("2001:db8:cafe:1::1"), ratelimit.Key("2001:db8:cafe:1:9999::2"); a != b {
 		t.Fatalf("same IPv6 /64 should map identically: %q != %q", a, b)
 	}
-	if a, b := rateLimitKey("2001:db8:cafe:1::1"), rateLimitKey("2001:db8:cafe:2::1"); a == b {
+	if a, b := ratelimit.Key("2001:db8:cafe:1::1"), ratelimit.Key("2001:db8:cafe:2::1"); a == b {
 		t.Fatalf("different IPv6 /64 should map differently: %q == %q", a, b)
 	}
-	if a, b := rateLimitKey("::ffff:192.0.2.10"), rateLimitKey("192.0.2.10"); a != b {
+	if a, b := ratelimit.Key("::ffff:192.0.2.10"), ratelimit.Key("192.0.2.10"); a != b {
 		t.Fatalf("v4-mapped IPv6 should match IPv4: %q != %q", a, b)
 	}
 
-	l := newSlidingWindow[string](2, time.Minute, 3)
+	l := ratelimit.NewWindow[string](2, time.Minute, 3)
 	t0 := time.Now()
 	if ok1, _ := l.Allow("abuser", t0); !ok1 {
 		t.Fatal("abuser first hit should pass")
@@ -792,7 +798,7 @@ func TestIPRateLimiterIPv6AndBoundedEviction(t *testing.T) {
 func TestMeshAPIOverUnixSocket(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	if _, err := e.svc.AddMember(ctx, Actor{CLI: true}, "root", "owner"); err != nil {
+	if _, err := e.svc.AddMember(ctx, registrar.Actor{CLI: true}, "root", "owner"); err != nil {
 		t.Fatal(err)
 	}
 	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
@@ -804,14 +810,14 @@ func TestMeshAPIOverUnixSocket(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 	path := filepath.Join(dir, "mesh.sock")
-	ln, err := listenMesh("unix:" + path)
+	ln, err := api.ListenMesh("unix:" + path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("socket mode: %v %v", fi, err)
 	}
-	srv := &http.Server{Handler: MeshHandler(e.svc), ConnContext: markSocketConn}
+	srv := &http.Server{Handler: api.MeshHandler(e.svc), ConnContext: api.MarkSocketConn}
 	go srv.Serve(ln)
 	defer srv.Close()
 
@@ -837,7 +843,7 @@ func TestMeshAPIOverUnixSocket(t *testing.T) {
 
 	// A stale socket from a previous run is replaced, not an error.
 	srv.Close()
-	ln2, err := listenMesh("unix:" + path)
+	ln2, err := api.ListenMesh("unix:" + path)
 	if err != nil {
 		t.Fatalf("relisten over a stale socket: %v", err)
 	}
@@ -848,7 +854,7 @@ func TestNetworkInfoTheme(t *testing.T) {
 	// Default ("", "default") omits "theme" from JSON; "work" (case-insensitive)
 	// exposes "theme":"work" on both /hogman/v1/network and /api/me; anything else fails.
 	e := newTestEnv(t)
-	if _, err := e.svc.AddMember(context.Background(), Actor{CLI: true}, "alice", "owner"); err != nil {
+	if _, err := e.svc.AddMember(context.Background(), registrar.Actor{CLI: true}, "alice", "owner"); err != nil {
 		t.Fatal(err)
 	}
 	e.addDevice(t, "alice", "personal", "laptop", "100.64.0.10", "")
@@ -856,50 +862,50 @@ func TestNetworkInfoTheme(t *testing.T) {
 	// Empty theme omits field on both public and mesh endpoints.
 	req, _ := http.NewRequest("GET", "/hogman/v1/network", nil)
 	rec := httptest.NewRecorder()
-	PublicHandler(e.svc).ServeHTTP(rec, req)
+	api.PublicHandler(e.svc).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"theme"`) {
 		t.Fatalf("default /hogman/v1/network: %d %s", rec.Code, rec.Body.String())
 	}
-	rec = doMeshReq(MeshHandler(e.svc), "GET", "/api/me", "100.64.0.10", "", nil)
+	rec = doMeshReq(api.MeshHandler(e.svc), "GET", "/api/me", "100.64.0.10", "", nil)
 	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"theme"`) {
 		t.Fatalf("default /api/me: %d %s", rec.Code, rec.Body.String())
 	}
 
 	// Normalisation & invalid value check on NewService.
-	cfg := e.svc.cfg
+	cfg := e.svc.Config()
 	cfg.Theme = "default"
-	svcDef, err := NewService(cfg, e.svc.st, e.svc.hs)
+	svcDef, err := registrar.NewService(cfg, e.st, e.hsClient)
 	if err != nil || svcDef.NetworkInfo().Theme != "" {
 		t.Fatalf("theme=default: svc=%v err=%v", svcDef, err)
 	}
 	cfg.Theme = "  WORK "
-	svcWork, err := NewService(cfg, e.svc.st, e.svc.hs)
+	svcWork, err := registrar.NewService(cfg, e.st, e.hsClient)
 	if err != nil || svcWork.NetworkInfo().Theme != "work" {
 		t.Fatalf("theme=WORK: svc=%v err=%v", svcWork, err)
 	}
 	req, _ = http.NewRequest("GET", "/hogman/v1/network", nil)
 	rec = httptest.NewRecorder()
-	PublicHandler(svcWork).ServeHTTP(rec, req)
+	api.PublicHandler(svcWork).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"theme":"work"`) {
 		t.Fatalf("work /hogman/v1/network: %d %s", rec.Code, rec.Body.String())
 	}
-	rec = doMeshReq(MeshHandler(svcWork), "GET", "/api/me", "100.64.0.10", "", nil)
+	rec = doMeshReq(api.MeshHandler(svcWork), "GET", "/api/me", "100.64.0.10", "", nil)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"theme":"work"`) {
 		t.Fatalf("work /api/me: %d %s", rec.Code, rec.Body.String())
 	}
 
 	cfg.Theme = "neon"
-	if _, err := NewService(cfg, e.svc.st, e.svc.hs); err == nil {
+	if _, err := registrar.NewService(cfg, e.st, e.hsClient); err == nil {
 		t.Fatal("invalid theme accepted by NewService")
 	}
 }
 
 func TestBillingStatusInMeAndRenewToken(t *testing.T) {
 	e := newTestEnv(t)
-	if _, err := e.svc.AddMember(context.Background(), Actor{CLI: true}, "alice", "admin"); err != nil {
+	if _, err := e.svc.AddMember(context.Background(), registrar.Actor{CLI: true}, "alice", "admin"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.AddMember(context.Background(), Actor{CLI: true}, "bob", "member"); err != nil {
+	if _, err := e.svc.AddMember(context.Background(), registrar.Actor{CLI: true}, "bob", "member"); err != nil {
 		t.Fatal(err)
 	}
 	e.addDevice(t, "alice", "personal", "alice-laptop", "100.64.0.10", "")
@@ -908,8 +914,8 @@ func TestBillingStatusInMeAndRenewToken(t *testing.T) {
 
 	dir := t.TempDir()
 	billingPath := filepath.Join(dir, "billing-status.json")
-	e.svc.cfg.BillingStatusPath = billingPath
-	h := MeshHandler(e.svc)
+	e.svc.SetBillingStatusPath(billingPath)
+	h := api.MeshHandler(e.svc)
 
 	// Absent file -> no billing field in /api/me.
 	rec := doMeshReq(h, "GET", "/api/me", "100.64.0.10", "", nil)
@@ -973,7 +979,7 @@ func TestBillingStatusInMeAndRenewToken(t *testing.T) {
 func TestPortalPresenceDirectoryAndAdminDevices(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	cli := Actor{CLI: true}
+	cli := registrar.Actor{CLI: true}
 	if _, err := e.svc.AddMember(ctx, cli, "alice", "owner"); err != nil {
 		t.Fatal(err)
 	}
@@ -1027,7 +1033,7 @@ func TestPortalPresenceDirectoryAndAdminDevices(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := MeshHandler(e.svc)
+	h := api.MeshHandler(e.svc)
 
 	// Regular member reads GET /api/directory: server sites include live online/last_seen,
 	// offline server serializes explicit online:false with zero timestamp omitted, missing node
@@ -1114,17 +1120,21 @@ func TestPortalPresenceDirectoryAndAdminDevices(t *testing.T) {
 func TestMeHelpersPropagateStoreErrors(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	owner, err := e.svc.AddMember(ctx, Actor{CLI: true}, "alice", "owner")
-	if err != nil {
+	if _, err := e.svc.AddMember(ctx, registrar.Actor{CLI: true}, "alice", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	e.svc.SetBillingStatusPath(filepath.Join(dir, "billing-status.json"))
+	if err := os.WriteFile(filepath.Join(dir, "host-meta.json"), []byte(`{"pen":"bobo","delete_url":"https://example.test"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.st.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := ownerCount(e.svc, Actor{Member: owner}); err == nil {
-		t.Fatal("ownerCount on closed store = nil, want error")
+	if _, err := e.svc.CountOwners(); err == nil {
+		t.Fatal("CountOwners on closed store = nil, want error")
 	}
-	if _, err := buildPenDeleteView(e.svc, "alice", &hostMeta{Pen: "bobo", DeleteURL: "https://example.test"}); err == nil {
-		t.Fatal("buildPenDeleteView on closed store = nil, want error")
+	if _, err := e.svc.PenDeleteView("alice"); err == nil {
+		t.Fatal("PenDeleteView on closed store = nil, want error")
 	}
 }

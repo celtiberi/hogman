@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -20,14 +20,19 @@ import (
 
 	"tailscale.com/client/local"
 	"tailscale.com/tsnet"
+
+	"hogman/registrar/internal/acme"
+	"hogman/registrar/internal/api"
+	"hogman/registrar/internal/dns"
+	"hogman/registrar/internal/registrar"
 )
 
 const embeddedHealthAddr = "127.0.0.1:8089"
 
 type embeddedMesh struct {
 	srv       *tsnet.Server
-	dns       *DNSServer
-	homeMgr   *HomeCertManager
+	dns       *dns.Server
+	homeMgr   *acme.HomeCertManager
 	portal    *http.Server
 	health    *http.Server
 	reqCancel context.CancelFunc
@@ -35,6 +40,7 @@ type embeddedMesh struct {
 	stateDir  string
 	zone      string
 	portalDir string
+	logger    *slog.Logger
 	ready     atomic.Bool
 	portalOn  atomic.Bool
 	shutOnce  sync.Once
@@ -59,10 +65,14 @@ func (e *embeddedMesh) StartPortal(ctx context.Context) error {
 	}
 	tlsLn := tls.NewListener(ln443, tlsCfg)
 	e.ready.Store(true)
+	logger := e.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	go func() {
-		log.Printf("tsnet: portal + API listening on https://home.%s:443 (dir=%s)", e.zone, e.portalDir)
+		logger.Info("tsnet: portal + API listening", "url", "https://home."+e.zone+":443", "dir", e.portalDir)
 		if err := e.portal.Serve(tlsLn); err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
-			log.Printf("tsnet portal serve error: %v", err)
+			logger.Error("tsnet portal serve error", "err", err)
 		}
 	}()
 	return nil
@@ -89,7 +99,7 @@ func (e *embeddedMesh) Shutdown(ctx context.Context) {
 	})
 }
 
-func embeddedHealthzHandler(ready *atomic.Bool, dnsSrv *DNSServer) http.HandlerFunc {
+func embeddedHealthzHandler(ready *atomic.Bool, dnsSrv *dns.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !ready.Load() {
 			http.Error(w, "not-ready: waiting for initial headscale sync", http.StatusServiceUnavailable)
@@ -102,7 +112,7 @@ func embeddedHealthzHandler(ready *atomic.Bool, dnsSrv *DNSServer) http.HandlerF
 			}
 		}
 		if homeTLSDir := strings.TrimSpace(os.Getenv("HOME_TLS_DIR")); homeTLSDir != "" {
-			if err := VerifyHomeTLS(homeTLSDir); err != nil {
+			if err := acme.VerifyHomeTLS(homeTLSDir); err != nil {
 				http.Error(w, "tls: "+err.Error(), http.StatusServiceUnavailable)
 				return
 			}
@@ -112,8 +122,8 @@ func embeddedHealthzHandler(ready *atomic.Bool, dnsSrv *DNSServer) http.HandlerF
 	}
 }
 
-func whoIsPeer(lc *local.Client) func(ctx context.Context, remoteAddr string) (*PeerIdentity, error) {
-	return func(ctx context.Context, remoteAddr string) (*PeerIdentity, error) {
+func whoIsPeer(lc *local.Client) func(ctx context.Context, remoteAddr string) (*registrar.PeerIdentity, error) {
+	return func(ctx context.Context, remoteAddr string) (*registrar.PeerIdentity, error) {
 		host, _, err := net.SplitHostPort(remoteAddr)
 		if err != nil {
 			return nil, err
@@ -149,7 +159,7 @@ func whoIsPeer(lc *local.Client) func(ctx context.Context, remoteAddr string) (*
 		if !matched {
 			return nil, fmt.Errorf("whois node addresses did not match peer %s", want)
 		}
-		return &PeerIdentity{
+		return &registrar.PeerIdentity{
 			IP:        want.String(),
 			HSNodeID:  strconv.FormatInt(int64(who.Node.ID), 10),
 			NodeKey:   who.Node.Key.String(),
@@ -180,7 +190,10 @@ func configureTestCA() {
 // startEmbeddedMesh brings up the pen's core Tailscale node inside the
 // registrar process via tsnet, binds IPv4-only authoritative DNS (:53 UDP on
 // coreV4 + :53 TCP), and serves the portal + direct API on :443 over TLS.
-func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager, stateDir, controlURL, hostname, authKeyFile, portalDir string) (*embeddedMesh, error) {
+func startEmbeddedMesh(ctx context.Context, s *registrar.Service, homeMgr *acme.HomeCertManager, stateDir, controlURL, hostname, authKeyFile, portalDir string, logger *slog.Logger) (*embeddedMesh, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	if strings.TrimSpace(stateDir) == "" {
 		return nil, nil
 	}
@@ -252,31 +265,23 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 		return nil, errors.New("tsnet Up succeeded but returned no IPv4 address; refusing to serve without DNS IPv4")
 	}
 
-	if s.cfg.CoreIP != "" && s.cfg.CoreIP != coreV4.String() {
-		log.Printf("tsnet: live IPv4 %s differs from CORE_MESH_IP %s; using live IPv4", coreV4, s.cfg.CoreIP)
+	if prevIP := s.CoreIP(); prevIP != "" && prevIP != coreV4.String() {
+		logger.Warn("tsnet: live IPv4 differs from CORE_MESH_IP; using live IPv4", "live", coreV4.String(), "configured", prevIP)
 	}
-	s.cfg.CoreIP = coreV4.String()
+	s.SetCoreIP(coreV4.String())
 
 	// Publish live IPv4 atomically so ./hogman up and health checks can read it.
 	ipPath := filepath.Join(stateDir, "mesh-ip")
-	tmpPath := ipPath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(coreV4.String()+"\n"), 0o600); err != nil {
+	if err := acme.WriteFileAtomic(ipPath, []byte(coreV4.String()+"\n"), 0o600); err != nil {
 		_ = srv.Close()
 		return nil, fmt.Errorf("tsnet: write mesh-ip: %w", err)
 	}
-	if err := os.Rename(tmpPath, ipPath); err != nil {
-		_ = os.Remove(tmpPath)
-		_ = srv.Close()
-		return nil, fmt.Errorf("tsnet: rename mesh-ip: %w", err)
-	}
 
-	dnsSrv, err := NewDNSServerWithIP(s, coreV4)
+	dnsSrv, err := dns.NewServer(s.Zone(), coreV4, s)
 	if err != nil {
 		_ = srv.Close()
 		return nil, err
 	}
-	// tsnet.ListenPacket requires an explicit IP address (":53" is rejected).
-	// Mesh policy and split-DNS are IPv4-only, so bind UDP :53 on coreV4 only.
 	udp4Addr := net.JoinHostPort(coreV4.String(), "53")
 	udp4, err := srv.ListenPacket("udp", udp4Addr)
 	if err != nil {
@@ -293,7 +298,7 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 		return nil, fmt.Errorf("tsnet Listen(tcp, :53): %w", err)
 	}
 	dnsSrv.Serve(ctx, udpConns, tcp53)
-	log.Printf("tsnet: core=%s dns listening on :53 (udp/tcp) for %s", coreV4, s.cfg.Zone)
+	logger.Info("tsnet: DNS listening", "core", coreV4.String(), "zone", s.Zone())
 
 	lc, err := srv.LocalClient()
 	if err != nil {
@@ -304,10 +309,10 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 		_ = srv.Close()
 		return nil, errors.New("tsnet: HOME_TLS_DIR is required to serve https://home.<zone>:443")
 	}
-	apiHandler := MeshHandlerDirect(s, whoIsPeer(lc))
+	apiHandler := api.MeshHandlerDirect(s, whoIsPeer(lc))
 	reqCtx, reqCancel := context.WithCancel(context.Background())
 	portalSrv := &http.Server{
-		Handler:           PortalHandler(s.cfg.Zone, portalDir, apiHandler),
+		Handler:           api.PortalHandler(s.Zone(), portalDir, apiHandler),
 		BaseContext:       func(net.Listener) context.Context { return reqCtx },
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -323,12 +328,11 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 		reqCancel: reqCancel,
 		coreV4:    coreV4,
 		stateDir:  stateDir,
-		zone:      s.cfg.Zone,
+		zone:      s.Zone(),
 		portalDir: portalDir,
+		logger:    logger,
 	}
 
-	// Internal loopback health server queried by `registrar health`.
-	// Returns 503 not-ready until StartPortal() runs after the initial Headscale Sync().
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("/healthz", embeddedHealthzHandler(&em.ready, dnsSrv))
 	healthMux.HandleFunc("/derp-map", func(w http.ResponseWriter, r *http.Request) {
@@ -353,7 +357,7 @@ func startEmbeddedMesh(ctx context.Context, s *Service, homeMgr *HomeCertManager
 	em.health = healthSrv
 	go func() {
 		if err := healthSrv.Serve(healthLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("tsnet health serve error: %v", err)
+			logger.Error("tsnet health serve error", "err", err)
 		}
 	}()
 
