@@ -300,10 +300,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func done(w http.ResponseWriter, err error) {
-	doneWithLogger(slog.Default(), w, err)
-}
-
 func doneWithLogger(logger *slog.Logger, w http.ResponseWriter, err error) {
 	if err != nil {
 		failWithLogger(logger, w, err)

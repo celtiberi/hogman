@@ -87,3 +87,26 @@ func TestSlidingWindowZeroLimitDisabled(t *testing.T) {
 		t.Fatalf("zero-limit limiter should not track keys, len=%d", lim.Len())
 	}
 }
+
+func TestStrictSlidingWindowFailsClosedInsteadOfEvictingActiveKeys(t *testing.T) {
+	lim := newStrictSlidingWindow[int64](1, time.Minute, 2)
+	t0 := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+
+	if ok, _ := lim.Allow(10, t0); !ok {
+		t.Fatal("key 10 should pass")
+	}
+	if ok, _ := lim.Allow(20, t0.Add(10*time.Second)); !ok {
+		t.Fatal("key 20 should pass")
+	}
+	// Cap reached with active buckets: key 30 must fail closed (never evict active key 10).
+	if ok, retry := lim.Check(30, t0.Add(20*time.Second)); ok || retry != 40 {
+		t.Fatalf("full strict limiter Check(30) = (%v, %d), want (false, 40)", ok, retry)
+	}
+	if ok, _ := lim.Check(10, t0.Add(25*time.Second)); ok {
+		t.Fatal("active key 10 must remain throttled")
+	}
+	// Once key 10 expires (+61s), sweep frees its slot and key 30 is admitted.
+	if ok, _ := lim.Allow(30, t0.Add(61*time.Second)); !ok {
+		t.Fatal("key 30 should pass after expired key 10 is swept")
+	}
+}

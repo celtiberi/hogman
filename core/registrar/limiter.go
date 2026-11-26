@@ -21,11 +21,12 @@ type windowBucket struct {
 // Empty keys are pruned on lookup and expired keys are swept before LRU
 // eviction whenever the key cap is reached.
 type slidingWindow[K comparable] struct {
-	mu      sync.Mutex
-	limit   int
-	window  time.Duration
-	maxKeys int
-	entries map[K]*windowBucket
+	mu          sync.Mutex
+	limit       int
+	window      time.Duration
+	maxKeys     int
+	evictOnFull bool
+	entries     map[K]*windowBucket
 }
 
 func newSlidingWindow[K comparable](limit int, window time.Duration, maxKeys int) *slidingWindow[K] {
@@ -33,11 +34,21 @@ func newSlidingWindow[K comparable](limit int, window time.Duration, maxKeys int
 		maxKeys = defaultLimiterMaxKeys
 	}
 	return &slidingWindow[K]{
-		limit:   limit,
-		window:  window,
-		maxKeys: maxKeys,
-		entries: map[K]*windowBucket{},
+		limit:       limit,
+		window:      window,
+		maxKeys:     maxKeys,
+		evictOnFull: true,
+		entries:     map[K]*windowBucket{},
 	}
+}
+
+// newStrictSlidingWindow returns a bounded sliding-window limiter that sweeps
+// expired entries when full and fails closed (instead of evicting an active
+// throttled key) if maxKeys active buckets are already present.
+func newStrictSlidingWindow[K comparable](limit int, window time.Duration, maxKeys int) *slidingWindow[K] {
+	w := newSlidingWindow[K](limit, window, maxKeys)
+	w.evictOnFull = false
+	return w
 }
 
 // Check prunes expired hits for key and reports whether another hit is
@@ -100,9 +111,39 @@ func (w *slidingWindow[K]) pruneBucket(b *windowBucket, now time.Time) {
 	b.hits = kept
 }
 
+func (w *slidingWindow[K]) sweepExpiredLocked(now time.Time) {
+	for k, b := range w.entries {
+		w.pruneBucket(b, now)
+		if len(b.hits) == 0 {
+			delete(w.entries, k)
+		}
+	}
+}
+
 func (w *slidingWindow[K]) checkLocked(key K, limit int, now time.Time) (bool, int) {
 	b, ok := w.entries[key]
 	if !ok {
+		if !w.evictOnFull && len(w.entries) >= w.maxKeys {
+			w.sweepExpiredLocked(now)
+			if len(w.entries) >= w.maxKeys {
+				// Fail closed when all slots hold active buckets rather than
+				// evicting an active throttled key (e.g. server-churn bypass).
+				var earliest time.Time
+				for _, existing := range w.entries {
+					if len(existing.hits) > 0 && (earliest.IsZero() || existing.hits[0].Before(earliest)) {
+						earliest = existing.hits[0]
+					}
+				}
+				secs := 1
+				if !earliest.IsZero() {
+					rem := earliest.Add(w.window).Sub(now)
+					if s := int((rem + time.Second - 1) / time.Second); s > 1 {
+						secs = s
+					}
+				}
+				return false, secs
+			}
+		}
 		return true, 0
 	}
 	w.pruneBucket(b, now)
@@ -136,14 +177,12 @@ func (w *slidingWindow[K]) recordLocked(key K, now time.Time) {
 		maxKeys = defaultLimiterMaxKeys
 	}
 	if len(w.entries) >= maxKeys {
-		for k, b := range w.entries {
-			w.pruneBucket(b, now)
-			if len(b.hits) == 0 {
-				delete(w.entries, k)
-			}
-		}
+		w.sweepExpiredLocked(now)
 	}
 	if len(w.entries) >= maxKeys {
+		if !w.evictOnFull {
+			return
+		}
 		var oldestKey K
 		var oldestAt time.Time
 		first := true

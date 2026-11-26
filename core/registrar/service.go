@@ -329,9 +329,9 @@ func NewService(cfg Config, st *Store, hs *Headscale) (*Service, error) {
 		rotateFlight:       map[string]*rotateCall{},
 		rotateSem:          make(chan struct{}, keyRotateMaxConc),
 		deferredPendingDel: map[int64]bool{},
-		serverEABLim:       newSlidingWindow[int64](cfg.MaxServerEABPerDay, 24*time.Hour, defaultLimiterMaxKeys),
-		memberEABLim:       newSlidingWindow[int64](cfg.MaxMemberEABPerDay, 24*time.Hour, defaultLimiterMaxKeys),
-		memberTXTLim:       newSlidingWindow[int64](cfg.MaxMemberACMETXTPerHour, time.Hour, defaultLimiterMaxKeys),
+		serverEABLim:       newStrictSlidingWindow[int64](cfg.MaxServerEABPerDay, 24*time.Hour, defaultLimiterMaxKeys),
+		memberEABLim:       newStrictSlidingWindow[int64](cfg.MaxMemberEABPerDay, 24*time.Hour, defaultLimiterMaxKeys),
+		memberTXTLim:       newStrictSlidingWindow[int64](cfg.MaxMemberACMETXTPerHour, time.Hour, defaultLimiterMaxKeys),
 		logger:             logger,
 	}, nil
 }
