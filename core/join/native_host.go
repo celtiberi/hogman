@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -14,7 +13,6 @@ import (
 	"io"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -353,42 +351,22 @@ func serveNativeWatch(in io.Reader, out io.Writer, sess *nativeHostSession, poll
 // equal config.json's canonical zone, ProxyAddr must be 127.0.0.1:17000-26999,
 // and live ports are cryptographically verified via status.token challenge-response.
 func collectNativePens(configBase string) ([]nativePenEntry, []*agentConfig) {
-	entries, err := os.ReadDir(configBase)
-	if err != nil {
-		return []nativePenEntry{}, nil
-	}
-	seen := map[string]bool{}
-	pens := make([]nativePenEntry, 0)
+	scanned := scanInstalledPens(configBase)
+	pens := make([]nativePenEntry, 0, len(scanned.Pens))
 	var configs []*agentConfig
-	for _, ent := range entries {
-		if !ent.IsDir() {
-			continue
-		}
-		name := ent.Name()
-		if name == "bin" || name == "shares" || strings.HasPrefix(name, ".") {
-			continue
-		}
-		dir := filepath.Join(configBase, name)
-		cfg, err := loadAgentConfig(dir)
-		if err != nil {
-			continue
-		}
-		if cfg.Zone != name || !validPACZone(cfg.Zone) || seen[cfg.Zone] {
-			continue
-		}
-		port, ok := parseStrictHogmanPort(cfg.ProxyAddr)
+	for _, p := range scanned.Pens {
+		port, ok := parseStrictHogmanPort(p.Config.ProxyAddr)
 		if !ok {
 			continue
 		}
-		seen[cfg.Zone] = true
-		configs = append(configs, cfg)
+		configs = append(configs, p.Config)
 
-		state, detail := verifyAgentEndpointDetail(dir, cfg)
+		state, detail := verifyAgentEndpointDetail(p.Dir, p.Config)
 		entry := nativePenEntry{
-			Zone:           cfg.Zone,
+			Zone:           p.Zone,
 			Port:           port,
 			Up:             state == agentEndpointUp,
-			Hosted:         isHostedPenZone(cfg.Zone),
+			Hosted:         isHostedPenZone(p.Zone),
 			configuredPort: port,
 			statusReason:   detail.reason,
 		}
@@ -408,92 +386,6 @@ func collectNativePens(configBase string) ([]nativePenEntry, []*agentConfig) {
 	return pens, configs
 }
 
-type agentEndpointState int
-
-const (
-	agentEndpointDown agentEndpointState = iota
-	agentEndpointUp
-	agentEndpointSquatted
-)
-
-type agentEndpointDetail struct {
-	reason     string
-	needsLogin bool
-	verified   bool // true only when status.token HMAC proof matched
-}
-
-func verifyAgentEndpoint(dir string, cfg *agentConfig) agentEndpointState {
-	state, _ := verifyAgentEndpointDetail(dir, cfg)
-	return state
-}
-
-// loopbackStatusTransport disables keep-alive pooling so frequent 1-second
-// loopback /status probes never accumulate idle sockets or readLoop/writeLoop
-// goroutines in hogman-native-host or hogman agent.
-var loopbackStatusTransport = &http.Transport{
-	Proxy:             nil,
-	DisableKeepAlives: true,
-}
-
-func verifyAgentEndpointDetail(dir string, cfg *agentConfig) (agentEndpointState, agentEndpointDetail) {
-	tokBytes, tokErr := os.ReadFile(filepath.Join(dir, statusTokenFilename))
-	token := strings.TrimSpace(string(tokBytes))
-
-	nonce, err := generateHexToken(16)
-	if err != nil {
-		return agentEndpointDown, agentEndpointDetail{}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+cfg.ProxyAddr+"/status", nil)
-	if err != nil {
-		return agentEndpointDown, agentEndpointDetail{}
-	}
-	req.Header.Set("X-Hogman-Challenge", nonce)
-	client := &http.Client{
-		Timeout:       400 * time.Millisecond,
-		Transport:     loopbackStatusTransport,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return agentEndpointDown, agentEndpointDetail{}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return agentEndpointSquatted, agentEndpointDetail{}
-	}
-
-	var st agentStatus
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 16*1024)).Decode(&st); err != nil {
-		return agentEndpointSquatted, agentEndpointDetail{}
-	}
-	if st.Zone != cfg.Zone {
-		return agentEndpointSquatted, agentEndpointDetail{}
-	}
-
-	// Fail closed whenever status.token is missing, unreadable, empty, or the
-	// listener fails the challenge-response HMAC proof: an unauthenticated
-	// loopback process must never be trusted as a Hogman agent.
-	if tokErr != nil || token == "" {
-		return agentEndpointSquatted, agentEndpointDetail{}
-	}
-	gotProof := strings.TrimSpace(resp.Header.Get("X-Hogman-Proof"))
-	wantProof := computeStatusProof(token, nonce, cfg.Zone)
-	if gotProof == "" || !hmac.Equal([]byte(gotProof), []byte(wantProof)) {
-		return agentEndpointSquatted, agentEndpointDetail{}
-	}
-	if !st.Up {
-		return agentEndpointDown, agentEndpointDetail{
-			reason:     strings.TrimSpace(st.Error),
-			needsLogin: st.NeedsLogin,
-			verified:   true,
-		}
-	}
-	return agentEndpointUp, agentEndpointDetail{verified: true}
-}
-
 type extensionHeartbeat struct {
 	LastSeen int64 `json:"last_seen"`
 }
@@ -503,7 +395,7 @@ func recordExtensionHeartbeat(configBase string) {
 		return
 	}
 	b, _ := json.Marshal(extensionHeartbeat{LastSeen: time.Now().Unix()})
-	_ = os.WriteFile(filepath.Join(configBase, extensionHeartbeatFile), b, 0o600)
+	_ = writeFileAtomic(filepath.Join(configBase, extensionHeartbeatFile), b, 0o600)
 }
 
 func extensionRecentlySeen(configBase string, maxAge time.Duration) bool {
@@ -538,14 +430,11 @@ func loadSavedBrowserIDs(configBase string) savedBrowserIDs {
 }
 
 func saveBrowserIDs(configBase string, ids savedBrowserIDs) error {
-	if err := os.MkdirAll(configBase, 0o700); err != nil {
-		return err
-	}
 	b, err := json.MarshalIndent(ids, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(configBase, browserIDsFile), append(b, '\n'), 0o600)
+	return writeFileAtomic(filepath.Join(configBase, browserIDsFile), append(b, '\n'), 0o600)
 }
 
 func mergeUniqueIDs(groups ...[]string) []string {
@@ -757,18 +646,7 @@ func browserSetupCmd(args []string, o options) error {
 }
 
 func corruptPenConfigs(configBase string) []string {
-	var bad []string
-	m, _ := filepath.Glob(filepath.Join(configBase, "*", "config.json"))
-	sort.Strings(m)
-	for _, f := range m {
-		dir := filepath.Dir(f)
-		zoneDir := filepath.Base(dir)
-		c, err := loadAgentConfig(dir)
-		if err != nil || c.Zone == "" || c.Zone != zoneDir || !validPACZone(c.Zone) {
-			bad = append(bad, zoneDir)
-		}
-	}
-	return bad
+	return scanInstalledPens(configBase).Corrupt
 }
 
 type statusPenJSON struct {

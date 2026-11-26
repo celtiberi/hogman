@@ -1,9 +1,6 @@
 package main
 
-import (
-	"os"
-	"path/filepath"
-)
+import "os"
 
 func serviceConfigured(zone string) bool {
 	_, err := os.Stat(unitPath(zone))
@@ -19,53 +16,14 @@ func startExistingBinary(bin, dir string, c *agentConfig, noService bool) error 
 		return startDetached(bin, dir)
 	}
 	unit := renderSystemdUnit(c.Zone, bin, dir)
-	path := unitPath(c.Zone)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		note("could not write user service for %s (%v); running in the background until restart", c.Zone, err)
-		return startDetached(bin, dir)
-	}
-	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
-		note("could not write user service for %s (%v); running in the background until restart", c.Zone, err)
-		return startDetached(bin, dir)
-	}
-	sc := systemctlBin()
-	_, _ = run(sc, "--user", "daemon-reload")
-	if out, err := run(sc, "--user", "enable", "--now", unitName(c.Zone)); err != nil {
-		note("could not start user service for %s (%s); running in the background until restart", c.Zone, firstLine(out))
-		return startDetached(bin, dir)
-	}
-	return nil
-}
-
-func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".hogman-unit-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	keep := false
-	defer func() {
-		_ = tmp.Close()
-		if !keep {
-			_ = os.Remove(tmpPath)
+	if out, err := installSystemdUnit(unitName(c.Zone), unitPath(c.Zone), unit, false); err != nil {
+		if out != "" {
+			note("could not start user service for %s (%s); running in the background until restart", c.Zone, firstLine(out))
+		} else {
+			note("could not write user service for %s (%v); running in the background until restart", c.Zone, err)
 		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		return err
+		return startDetached(bin, dir)
 	}
-	if err := tmp.Chmod(mode); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	keep = true
 	return nil
 }
 

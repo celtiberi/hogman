@@ -1,0 +1,1 @@
+- Unified `core/join` atomic file writes, pen directory scanning, HMAC `/status` endpoint probing, mesh home-API JSON client, self-delete confirmation flow, process termination (`stopProcess`), launchd/systemd install helpers, and structured `slog` daemon logging with isolated unit tests.

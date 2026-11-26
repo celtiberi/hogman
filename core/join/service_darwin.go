@@ -6,13 +6,28 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
 func launchPlist(zone string) string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "LaunchAgents", launchLabel(zone)+".plist")
+}
+
+// installLaunchAgent writes plist atomically and loads it into the current
+// user's launchd GUI domain, removing the plist if bootstrap fails.
+func installLaunchAgent(label, path, plist string) (string, error) {
+	if err := writeFileAtomic(path, []byte(plist), 0o644); err != nil {
+		return "", err
+	}
+	domain := "gui/" + strconv.Itoa(os.Getuid())
+	_, _ = run("/bin/launchctl", "bootout", domain+"/"+label)
+	out, err := run("/bin/launchctl", "bootstrap", domain, path)
+	if err != nil {
+		_ = os.Remove(path)
+		return out, err
+	}
+	return out, nil
 }
 
 // startAgent runs the agent as a per-user LaunchAgent, so it starts at login
@@ -35,18 +50,11 @@ func startAgent(dir string, c *agentConfig, o options) error {
 	if err != nil {
 		return err
 	}
-	path := launchPlist(c.Zone)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
-		return err
-	}
-	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_, _ = run("/bin/launchctl", "bootout", domain+"/"+launchLabel(c.Zone))
-	if out, err := run("/bin/launchctl", "bootstrap", domain, path); err != nil {
+	if out, err := installLaunchAgent(launchLabel(c.Zone), launchPlist(c.Zone), plist); err != nil {
+		if out == "" {
+			return err
+		}
 		// No desktop session (for example over SSH): fall back to a plain background process.
-		_ = os.Remove(path)
 		note("could not register a login item (%s); running in the background until restart", firstLine(out))
 		return startDetached(bin, dir)
 	}
@@ -102,24 +110,7 @@ func stopOrphanAgentForDir(dir string) {
 		if !strings.HasPrefix(exeBase, "hogman") {
 			continue
 		}
-		if p, err := os.FindProcess(pid); err == nil {
-			_ = p.Signal(syscall.SIGTERM)
-			for i := 0; i < 20; i++ {
-				if !processAlive(pid) {
-					break
-				}
-				time.Sleep(150 * time.Millisecond)
-			}
-			if processAlive(pid) {
-				_ = p.Kill()
-				for i := 0; i < 10; i++ {
-					if !processAlive(pid) {
-						break
-					}
-					time.Sleep(100 * time.Millisecond)
-				}
-			}
-		}
+		stopProcess(pid, 3*time.Second)
 	}
 }
 
@@ -151,17 +142,10 @@ func startShareServiceWithBinary(bin, dir string, c *shareConfig, noService bool
 	if err != nil {
 		return false, 0, err
 	}
-	path := sharePlist(c)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return false, 0, err
-	}
-	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
-		return false, 0, err
-	}
-	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_, _ = run("/bin/launchctl", "bootout", domain+"/"+shareLaunchLabel(c))
-	if out, err := run("/bin/launchctl", "bootstrap", domain, path); err != nil {
-		_ = os.Remove(path)
+	if out, err := installLaunchAgent(shareLaunchLabel(c), sharePlist(c), plist); err != nil {
+		if out == "" {
+			return false, 0, err
+		}
 		note("could not register a login item (%s); running in the background until restart", firstLine(out))
 		pid, serr := spawnDetached(logPath, bin, "__share-run", dir)
 		return false, pid, serr

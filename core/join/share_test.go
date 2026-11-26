@@ -303,9 +303,9 @@ func TestWaitShareBackgroundCleansUpOnErrorAndTimeout(t *testing.T) {
 }
 
 func TestFormatFreshShareCertErrorRateLimit(t *testing.T) {
-	// Wrapped *meshAPIError 429 with Retry-After -> shows verbatim message + human hint.
+	// Wrapped *homeAPIError 429 with Retry-After -> shows verbatim message + human hint.
 	wrappedHourly := fmt.Errorf("certmagic: %w", dnsStepError{
-		err: &meshAPIError{
+		err: &homeAPIError{
 			Status:     http.StatusTooManyRequests,
 			Msg:        "too many new certificate names for this pen in the last hour",
 			RetryAfter: 45 * time.Minute,
@@ -323,7 +323,7 @@ func TestFormatFreshShareCertErrorRateLimit(t *testing.T) {
 	}
 
 	// Global hourly cap with short Retry-After.
-	wrappedGlobal := &meshAPIError{
+	wrappedGlobal := &homeAPIError{
 		Status:     http.StatusTooManyRequests,
 		Msg:        "the network is busy; too many new certificate names in the last hour",
 		RetryAfter: 30 * time.Second,
@@ -334,7 +334,7 @@ func TestFormatFreshShareCertErrorRateLimit(t *testing.T) {
 	}
 
 	// Weekly cap (~6 days).
-	wrappedWeekly := &meshAPIError{
+	wrappedWeekly := &homeAPIError{
 		Status:     http.StatusTooManyRequests,
 		Msg:        "this pen's weekly limit on new certificate names is reached",
 		RetryAfter: 6 * 24 * time.Hour,
