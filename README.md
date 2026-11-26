@@ -240,7 +240,7 @@ More developer & operator docs:
 - [`core/README.md`](core/README.md) — core stack and Docker e2e test harness
 - [`deploy/README.md`](deploy/README.md) — operator guide (hosted pens, `challenge-dns`, backups, monitoring)
 - [`browser-ext/README.md`](browser-ext/README.md) — extension architecture, build, and local install
-- [`docs/how-hogman-works.md`](docs/how-hogman-works.md) — plain-English step-by-step map of every moving part, packet flow, portal auth, revocation, and scaling
+- [`docs/how-hogman-works.md`](docs/how-hogman-works.md) — step-by-step map of every moving part, packet flow, portal auth, revocation, and scaling
 - [`docs/security/`](docs/security/) — security design notes and public-certificate architecture
 - [`DESIGN.md`](DESIGN.md) — initial design spec and decision history
 
