@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 
 import { buildJoinCommands, buildManualCommand, buildStartCommand, parseJoinHash } from '../../join-page/commands.js';
@@ -92,7 +93,7 @@ test('initJoinPage tolerates a throwing sessionStorage getter when storage is om
     return el;
   };
   for (const id of [
-    'err', 'what', 'cmd', 'cmd-manual', 'manual', 'proxy-note', 'vpn-note',
+    'err', 'what', 'cmd', 'cmd-manual', 'manual', 'proxy-note', 'proxy-zone', 'vpn-note', 'vpn-zone',
     'expect-head', 'lead', 'unix-panel', 'win-panel', 'join-details',
     'share-details', 'sums-line', 'copy', 'copied', 'redeem', 'title', 'main',
   ]) {
@@ -139,4 +140,13 @@ test('initJoinPage tolerates a throwing sessionStorage getter when storage is om
   assert.equal(elems.get('main').hidden, false);
   assert.ok(elems.get('cmd').textContent.includes(`https://${HOST}/join#t=abc123`));
   assert.equal(elems.get('title').textContent, 'Join demo.pens.hogman.network');
+  assert.equal(elems.get('proxy-zone').textContent, 'demo.pens.hogman.network');
+  assert.equal(elems.get('vpn-zone').textContent, 'demo.pens.hogman.network');
+});
+
+test('join-page extension copy instructs opening the popup to turn on the pen', () => {
+  const html = fs.readFileSync(new URL('../../join-page/index.html', import.meta.url), 'utf8');
+  assert.ok(!html.includes('nothing else to set'), 'join-page must not claim nothing else to set');
+  assert.ok(html.includes('open its popup and turn on <code id="proxy-zone">this pen</code>. No proxy settings needed'));
+  assert.ok(html.includes('open its popup and turn on <code id="vpn-zone">this pen</code>'));
 });

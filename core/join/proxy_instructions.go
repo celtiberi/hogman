@@ -116,11 +116,11 @@ func formatBrowserProxyInstructions(goos, pacURL, zone string, zones, services [
 		multiNote = fmt.Sprintf("\n    (This same setup covers all %d pens: %s.)", len(zones), strings.Join(zones, ", "))
 	}
 	extLead := fmt.Sprintf(
-		"Using Chrome, Brave, Edge, Arc, or Vivaldi? Install the Hogman browser extension: nothing else to set.\n"+
+		"Using Chrome, Brave, Edge, Arc, or Vivaldi? Install the Hogman browser extension, then open its popup and turn on %s. No proxy settings needed.\n"+
 			"    Chrome Web Store: %s\n"+
 			"    (Firefox: coming soon.)\n"+
 			"    Then open %s%s",
-		chromeExtensionStoreURL, portal, multiNote,
+		zone, chromeExtensionStoreURL, portal, multiNote,
 	)
 	switch goos {
 	case "darwin":

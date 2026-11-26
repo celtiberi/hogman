@@ -45,7 +45,9 @@ function applyWorkTheme(doc, zone, forShare) {
       rel: 'noopener noreferrer',
       textContent: 'Hogman browser extension',
     }),
-    doc.createTextNode(' (Firefox: coming soon), set Firefox\u2019s built-in '),
+    doc.createTextNode(' (open its popup and turn on '),
+    Object.assign(doc.createElement('code'), { textContent: zone }),
+    doc.createTextNode('; Firefox: coming soon), set Firefox\u2019s built-in '),
     Object.assign(doc.createElement('em'), { textContent: 'Automatic proxy configuration URL' }),
     doc.createTextNode(' to the address printed by '),
     Object.assign(doc.createElement('code'), { textContent: 'hogman' }),
@@ -154,6 +156,8 @@ export function initJoinPage({
     if (!n || !n.zone) throw new Error('missing zone');
     const isWork = n.theme === 'work';
     doc.querySelectorAll('.zone').forEach(el => { el.textContent = '.' + n.zone; });
+    if ($('proxy-zone')) $('proxy-zone').textContent = n.zone;
+    if ($('vpn-zone')) $('vpn-zone').textContent = n.zone;
     $('title').textContent = (forShare ? 'Share into ' : 'Join ') + n.zone;
     if (isWork) {
       applyWorkTheme(doc, n.zone, forShare);

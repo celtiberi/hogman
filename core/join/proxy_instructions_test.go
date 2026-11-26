@@ -52,9 +52,12 @@ func TestFormatBrowserProxyInstructionsByOS(t *testing.T) {
 	pac := "http://127.0.0.1:18123/proxy.pac"
 
 	macMulti := formatBrowserProxyInstructions("darwin", pac, "acme.pens.example", []string{"acme.pens.example"}, []string{"Wi-Fi", "USB 10/100/1000 LAN"})
-	const extLead = "Using Chrome, Brave, Edge, Arc, or Vivaldi? Install the Hogman browser extension: nothing else to set."
+	const extLead = "Using Chrome, Brave, Edge, Arc, or Vivaldi? Install the Hogman browser extension, then open its popup and turn on acme.pens.example. No proxy settings needed."
 	if !strings.HasPrefix(macMulti, extLead) {
 		t.Fatalf("darwin instructions should open with extension lead:\n%s", macMulti)
+	}
+	if strings.Contains(macMulti, "nothing else to set") {
+		t.Fatalf("darwin instructions must not claim nothing else to set (empty allowlist requires popup toggle):\n%s", macMulti)
 	}
 	for _, want := range []string{
 		chromeExtensionStoreURL,
