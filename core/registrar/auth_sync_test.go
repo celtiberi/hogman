@@ -1148,10 +1148,8 @@ func TestDetachedSingleFlightSyncAndPresence(t *testing.T) {
 	}
 	e.hs.mu.Unlock()
 
-	// Clearing/poisoning presenceByID has ZERO effect on VerifyDirectPeer.
-	e.svc.presenceMu.Lock()
-	e.svc.presenceByID = map[string]HSNode{}
-	e.svc.presenceMu.Unlock()
+	// Clearing/poisoning presence cache has ZERO effect on VerifyDirectPeer.
+	e.svc.presence.Clear()
 	if _, _, err := e.svc.VerifyDirectPeer(context.Background(), &PeerIdentity{
 		IP: "100.64.0.10", HSNodeID: aliceLaptop.HSNodeID, NodeKey: aliceLaptop.NodeKey,
 	}); err != nil {
