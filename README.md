@@ -242,7 +242,7 @@ PeerAPI server is never linked in:
 (cd core/join && GOFLAGS="-tags=ts_omit_peerapiserver" go test ./...)
 (cd core/registrar && GOFLAGS="-tags=ts_omit_peerapiserver" go test ./...)
 (cd deploy/challenge-dns && go test ./...)
-node --test browser-ext/test/*_test.mjs
+node --test browser-ext/test/*_test.mjs core/test/web/*_test.mjs
 ```
 
 More developer docs:
