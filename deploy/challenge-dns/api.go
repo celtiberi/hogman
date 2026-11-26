@@ -54,6 +54,11 @@ func (a *API) recordCredFail(credID string, now time.Time) {
 	if a.credFails == nil {
 		a.credFails = map[string]*windowLimiter{}
 	}
+	for id, existing := range a.credFails {
+		if id != credID && existing.empty(now) {
+			delete(a.credFails, id)
+		}
+	}
 	lim := a.credFails[credID]
 	if lim == nil {
 		lim = &windowLimiter{perMin: 5, perHour: 15}

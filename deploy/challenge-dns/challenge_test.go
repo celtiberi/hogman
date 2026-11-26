@@ -1300,6 +1300,45 @@ func TestAPIEABMintFailureDoesNotBurnQuotaOrEverChallenged(t *testing.T) {
 	}
 }
 
+func TestEABCredFailCooldownPrunesExpiredEntries(t *testing.T) {
+	s, now := newTestStore(t)
+	c1, tok1 := mustCred(t, s, "pen", penA)
+	c2, tok2 := mustCred(t, s, "pen", penB)
+	api := &API{
+		store:   s,
+		global:  &windowLimiter{perMin: 20, perHour: 90},
+		eab:     eabFunc(func() (string, string, error) { return "", "", errors.New("upstream 502") }),
+		contact: "ops@example.com",
+	}
+	h := api.Handler()
+
+	if rec := doAPI(t, h, "POST", "/v1/eab", tok1, nil); rec.Code != http.StatusBadGateway {
+		t.Fatalf("c1 failed mint = %d, want 502", rec.Code)
+	}
+	if _, ok := api.credFails[c1.ID]; !ok {
+		t.Fatalf("expected c1 %q recorded in credFails", c1.ID)
+	}
+
+	// Simulate c1 being deleted/revoked so it never calls /v1/eab again.
+	if err := s.RemoveCred(c1.ID); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(time.Hour + time.Minute)
+
+	// Recording a failure for another credential sweeps expired entries.
+	if rec := doAPI(t, h, "POST", "/v1/eab", tok2, nil); rec.Code != http.StatusBadGateway {
+		t.Fatalf("c2 failed mint = %d, want 502", rec.Code)
+	}
+	api.failMu.Lock()
+	_, hasC1 := api.credFails[c1.ID]
+	_, hasC2 := api.credFails[c2.ID]
+	total := len(api.credFails)
+	api.failMu.Unlock()
+	if hasC1 || !hasC2 || total != 1 {
+		t.Fatalf("credFails not pruned after expiry: hasC1=%v hasC2=%v len=%d", hasC1, hasC2, total)
+	}
+}
+
 func TestAdminCredsEmptyJSONArrayAndErrorCodes(t *testing.T) {
 	s, _ := newTestStore(t)
 	admin := AdminHandler(s)
