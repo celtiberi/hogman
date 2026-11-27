@@ -22,6 +22,11 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+
+	"hogman/join/internal/fsutil"
+	"hogman/join/internal/link"
+	"hogman/join/internal/penapi"
+	"hogman/join/internal/state"
 )
 
 func TestRedTeamLoopbackStatusTransportNoLeak(t *testing.T) {
@@ -30,21 +35,21 @@ func TestRedTeamLoopbackStatusTransportNoLeak(t *testing.T) {
 	}
 	dir := t.TempDir()
 	zone := "bobo.pens.example.com"
-	token, err := writeStatusToken(dir)
+	token, err := state.WriteStatusToken(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nonce := strings.TrimSpace(r.Header.Get("X-Hogman-Challenge"))
 		if nonce != "" {
-			w.Header().Set("X-Hogman-Proof", computeStatusProof(token, nonce, zone))
+			w.Header().Set("X-Hogman-Proof", state.ComputeStatusProof(token, nonce, zone))
 		}
 		_ = json.NewEncoder(w).Encode(agentStatus{Zone: zone, Up: true, IPs: []string{"100.64.0.1"}})
 	}))
 	defer srv.Close()
 
 	u, _ := url.Parse(srv.URL)
-	cfg := &agentConfig{Zone: zone, ProxyAddr: u.Host}
+	cfg := &state.AgentConfig{Zone: zone, ProxyAddr: u.Host}
 
 	// Warm up runtime goroutines, then run 40 status probes.
 	if _, err := agentStateInDir(dir, cfg); err != nil {
@@ -194,7 +199,7 @@ func TestRedTeamShareHandlerRejectsOpaqueURIAndHidesDotfiles(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, closeH, err := shareHandler(&shareConfig{
+	h, closeH, err := shareHandler(&state.ShareConfig{
 		Name:   "app",
 		Zone:   "farm.pens.example.com",
 		Target: upstream.URL,
@@ -232,7 +237,7 @@ func TestRedTeamShareHandlerRejectsOpaqueURIAndHidesDotfiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	fh, closeFH, err := shareHandler(&shareConfig{Name: "site", Zone: "farm.pens.example.com", Target: dir, Folder: true})
+	fh, closeFH, err := shareHandler(&state.ShareConfig{Name: "site", Zone: "farm.pens.example.com", Target: dir, Folder: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,8 +283,8 @@ func TestRedTeamJoinRollbackAndReenrollPreserveInvite(t *testing.T) {
 	// 1. Unspent authkey on disk: existingPenNeedsReenroll is false (retry existing key),
 	//    and shouldRollbackFreshJoin is false on Ctrl-C / timeout so invite is never burned.
 	dir := t.TempDir()
-	cfg := &agentConfig{Zone: "bobo.pens.example.com", LoginServer: "https://bobo.gate.example.com", ProxyAddr: "127.0.0.1:18123"}
-	_ = cfg.save(dir)
+	cfg := &state.AgentConfig{Zone: "bobo.pens.example.com", LoginServer: "https://bobo.gate.example.com", ProxyAddr: "127.0.0.1:18123"}
+	_ = cfg.Save(dir)
 	_ = os.WriteFile(filepath.Join(dir, "authkey"), []byte("unspent-key"), 0o600)
 
 	if existingPenNeedsReenroll(dir, cfg) {
@@ -303,10 +308,10 @@ func TestRedTeamJoinRollbackAndReenrollPreserveInvite(t *testing.T) {
 	_ = os.MkdirAll(filepath.Dir(nodeMarker), 0o700)
 	_ = os.WriteFile(nodeMarker, []byte("keep"), 0o600)
 	stopped := false
-	n := &networkInfo{Zone: cfg.Zone, LoginServer: cfg.LoginServer, DNSServer: "100.64.0.1"}
+	n := &penapi.NetworkInfo{Zone: cfg.Zone, LoginServer: cfg.LoginServer, DNSServer: "100.64.0.1"}
 	_, _, err := reenrollExistingPen(dir, cfg, n, "laptop", options{},
 		func() (string, string, error) { return "", "", errorf("invite claimed") },
-		func(string, *agentConfig) { stopped = true },
+		func(string, *state.AgentConfig) { stopped = true },
 	)
 	if err == nil {
 		t.Fatal("expected redeem error")
@@ -321,7 +326,7 @@ func TestRedTeamJoinRollbackAndReenrollPreserveInvite(t *testing.T) {
 	// 3. When redeem succeeds, reenrollExistingPen stops old agent, clears node/, writes new authkey.
 	newCfg, handle, err := reenrollExistingPen(dir, cfg, n, "laptop", options{},
 		func() (string, string, error) { return "fresh-key", "alice", nil },
-		func(string, *agentConfig) { stopped = true },
+		func(string, *state.AgentConfig) { stopped = true },
 	)
 	if err != nil || !stopped || handle != "alice" || newCfg.ProxyAddr != cfg.ProxyAddr {
 		t.Fatalf("reenrollExistingPen success: cfg=%+v handle=%q stopped=%v err=%v", newCfg, handle, stopped, err)
@@ -362,15 +367,15 @@ func TestRedTeamCopyExecutableAtomicAndSymlinkSafe(t *testing.T) {
 	if err := os.WriteFile(src, want, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(dir, "link")
-	if err := os.Symlink(src, link); err != nil {
+	symLink := filepath.Join(dir, "link")
+	if err := os.Symlink(src, symLink); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	if !sameFilePath(src, link) {
-		t.Fatal("sameFilePath should recognize symlink to same file")
+	if !fsutil.SameFilePath(src, symLink) {
+		t.Fatal("SameFilePath should recognize symlink to same file")
 	}
 	dst := filepath.Join(dir, "copy")
-	if err := copyExecutableAtomic(link, dst); err != nil {
+	if err := fsutil.CopyExecutableAtomic(symLink, dst); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(dst)
@@ -380,12 +385,12 @@ func TestRedTeamCopyExecutableAtomicAndSymlinkSafe(t *testing.T) {
 }
 
 func TestRedTeamParseLinkAndUpdateSourceNormalization(t *testing.T) {
-	l, err := ParseLink("  'https://BOBO.GATE.EXAMPLE.COM/join#t=abc'  ")
+	l, err := link.Parse("  'https://BOBO.GATE.EXAMPLE.COM/join#t=abc'  ")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if l.Host != "bobo.gate.example.com" || l.InviteToken != "abc" {
-		t.Fatalf("ParseLink normalized = %+v", l)
+		t.Fatalf("link.Parse normalized = %+v", l)
 	}
 	base, host, err := parseUpdateSourceURL(`"HTTPS://BOBO.GATE.EXAMPLE.COM"`)
 	if err != nil {
@@ -547,29 +552,29 @@ func TestRedTeamTailscaleStatusNonJSONNoPanic(t *testing.T) {
 }
 
 func TestRedTeamHostnameAndPenTargetValidation(t *testing.T) {
-	if got, err := sanitizeHostname("My MacBook Pro.local"); err != nil || got != "my-macbook-pro" {
-		t.Fatalf("sanitizeHostname = (%q, %v), want my-macbook-pro", got, err)
+	if got, err := link.SanitizeHostname("My MacBook Pro.local"); err != nil || got != "my-macbook-pro" {
+		t.Fatalf("SanitizeHostname = (%q, %v), want my-macbook-pro", got, err)
 	}
-	if got, err := sanitizeHostname("!!!"); err != nil || got != "" {
-		t.Fatalf("sanitizeHostname(!!!) = (%q, %v), want empty, nil", got, err)
+	if got, err := link.SanitizeHostname("!!!"); err != nil || got != "" {
+		t.Fatalf("SanitizeHostname(!!!) = (%q, %v), want empty, nil", got, err)
 	}
-	if got, err := sanitizeHostname(strings.Repeat("a", 63)); err != nil || len(got) != 63 {
-		t.Fatalf("sanitizeHostname(63 chars) = (%q, %v), want 63-char name", got, err)
+	if got, err := link.SanitizeHostname(strings.Repeat("a", 63)); err != nil || len(got) != 63 {
+		t.Fatalf("SanitizeHostname(63 chars) = (%q, %v), want 63-char name", got, err)
 	}
-	if got, err := sanitizeHostname(strings.Repeat("a", 64)); err == nil || !strings.Contains(err.Error(), "--hostname") {
-		t.Fatalf("sanitizeHostname(64 chars) = (%q, %v), want error mentioning --hostname", got, err)
+	if got, err := link.SanitizeHostname(strings.Repeat("a", 64)); err == nil || !strings.Contains(err.Error(), "--hostname") {
+		t.Fatalf("SanitizeHostname(64 chars) = (%q, %v), want error mentioning --hostname", got, err)
 	}
 
 	base := t.TempDir()
 	// Valid pen dir
 	validDir := filepath.Join(base, "bobo.pens.example.com")
 	_ = os.MkdirAll(validDir, 0o700)
-	_ = (&agentConfig{Zone: "bobo.pens.example.com", LoginServer: "https://bobo.gate.example.com", ProxyAddr: "127.0.0.1:18000"}).save(validDir)
+	_ = (&state.AgentConfig{Zone: "bobo.pens.example.com", LoginServer: "https://bobo.gate.example.com", ProxyAddr: "127.0.0.1:18000"}).Save(validDir)
 
 	// Mismatched Zone vs dir name
 	badDir := filepath.Join(base, "other.pens.example.com")
 	_ = os.MkdirAll(badDir, 0o700)
-	_ = (&agentConfig{Zone: "evil.pens.example.com", LoginServer: "https://evil.gate.example.com", ProxyAddr: "127.0.0.1:18001"}).save(badDir)
+	_ = (&state.AgentConfig{Zone: "evil.pens.example.com", LoginServer: "https://evil.gate.example.com", ProxyAddr: "127.0.0.1:18001"}).Save(badDir)
 
 	// Corrupt JSON
 	corruptDir := filepath.Join(base, "broken.pens.example.com")
@@ -580,9 +585,9 @@ func TestRedTeamHostnameAndPenTargetValidation(t *testing.T) {
 	if len(pens) != 1 || pens[0].zone != "bobo.pens.example.com" {
 		t.Fatalf("loadPenTargets = %+v, want only bobo.pens.example.com", pens)
 	}
-	bad := corruptPenConfigs(base)
+	bad := state.CorruptPenConfigs(base)
 	if len(bad) != 2 {
-		t.Fatalf("corruptPenConfigs = %v, want 2 bad entries", bad)
+		t.Fatalf("CorruptPenConfigs = %v, want 2 bad entries", bad)
 	}
 }
 

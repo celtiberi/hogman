@@ -1,4 +1,4 @@
-package main
+package bridge
 
 import (
 	"context"
@@ -12,94 +12,102 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"hogman/join/internal/link"
 )
 
-type bridgeOptions struct {
-	listenUnix string
-	forwardTCP string
-	checkUnix  string
-	maxConns   int
+type closeWriter interface{ CloseWrite() error }
+
+// Options configures the Unix-socket <-> loopback-TCP bridge command.
+type Options struct {
+	ListenUnix string
+	ForwardTCP string
+	CheckUnix  string
+	MaxConns   int
 }
 
-func validateLoopbackTCPTarget(addr string) (string, error) {
+// ValidateLoopbackTCPTarget enforces a loopback IP literal (127.0.0.1 or [::1])
+// and valid TCP port for --forward-tcp.
+func ValidateLoopbackTCPTarget(addr string) (string, error) {
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
-		return "", errorf("invalid --forward-tcp address %q (expected 127.0.0.1:<port> or [::1]:<port>)", addr)
+		return "", link.Errorf("invalid --forward-tcp address %q (expected 127.0.0.1:<port> or [::1]:<port>)", addr)
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 {
-		return "", errorf("invalid --forward-tcp port %q", portStr)
+		return "", link.Errorf("invalid --forward-tcp port %q", portStr)
 	}
 	ip, err := netip.ParseAddr(host)
 	if err != nil || ip.Zone() != "" || !ip.Unmap().IsLoopback() {
-		return "", errorf("--forward-tcp %q must be a loopback IP literal (127.0.0.1 or [::1])", addr)
+		return "", link.Errorf("--forward-tcp %q must be a loopback IP literal (127.0.0.1 or [::1])", addr)
 	}
 	return net.JoinHostPort(ip.Unmap().String(), portStr), nil
 }
 
-// bridgeCmd runs a minimal Unix-domain-socket to loopback-TCP forwarder for
-// sealed Docker deployments (`network_mode: none` bridge container sharing lo
-// with an unmodified app container).
-func bridgeCmd(bo bridgeOptions) error {
-	if bo.checkUnix != "" {
-		sockPath, err := validateUnixSocketPath(bo.checkUnix)
+// RunCommand runs a minimal Unix-domain-socket to loopback-TCP forwarder (or
+// socket healthcheck) for sealed container deployments.
+func RunCommand(bo Options) error {
+	if bo.CheckUnix != "" {
+		sockPath, err := ValidateUnixSocketPath(bo.CheckUnix)
 		if err != nil {
 			return err
 		}
-		if err := verifyUnixSocketNoSymlink(sockPath); err != nil {
+		if err := VerifyUnixSocketNoSymlink(sockPath); err != nil {
 			return err
 		}
 		d := &net.Dialer{Timeout: 2 * time.Second}
 		conn, err := d.Dial("unix", sockPath)
 		if err != nil {
-			return errorf("bridge socket %s is not accepting connections: %v", sockPath, err)
+			return link.Errorf("bridge socket %s is not accepting connections: %v", sockPath, err)
 		}
 		_ = conn.Close()
 		return nil
 	}
 
-	sockPath, err := validateUnixSocketPath(bo.listenUnix)
+	sockPath, err := ValidateUnixSocketPath(bo.ListenUnix)
 	if err != nil {
 		return err
 	}
-	targetAddr, err := validateLoopbackTCPTarget(bo.forwardTCP)
+	targetAddr, err := ValidateLoopbackTCPTarget(bo.ForwardTCP)
 	if err != nil {
 		return err
 	}
-	maxConns := bo.maxConns
+	maxConns := bo.MaxConns
 	if maxConns <= 0 {
 		maxConns = 256
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runBridge(ctx, sockPath, targetAddr, maxConns, nil)
+	return Run(ctx, sockPath, targetAddr, maxConns, nil)
 }
 
-func runBridge(ctx context.Context, sockPath, targetAddr string, maxConns int, onReady func()) error {
+// Run listens on sockPath (mode 0600, refusing symlinks or non-socket files)
+// and forwards up to maxConns concurrent streams to targetAddr until ctx ends.
+func Run(ctx context.Context, sockPath, targetAddr string, maxConns int, onReady func()) error {
 	parent := filepath.Dir(sockPath)
 	if err := os.MkdirAll(parent, 0o700); err != nil {
-		return errorf("cannot create socket directory %s: %v", parent, err)
+		return link.Errorf("cannot create socket directory %s: %v", parent, err)
 	}
 	// Remove an old stale socket ONLY if it is actually a socket (never follow
 	// symlinks or delete a regular file).
 	if fi, err := os.Lstat(sockPath); err == nil {
 		if fi.Mode()&os.ModeSymlink != 0 || fi.Mode()&os.ModeSocket == 0 {
-			return errorf("refusing to overwrite non-socket path %s", sockPath)
+			return link.Errorf("refusing to overwrite non-socket path %s", sockPath)
 		}
 		if err := os.Remove(sockPath); err != nil {
-			return errorf("cannot remove stale socket %s: %v", sockPath, err)
+			return link.Errorf("cannot remove stale socket %s: %v", sockPath, err)
 		}
 	}
 
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
-		return errorf("cannot listen on Unix socket %s: %v", sockPath, err)
+		return link.Errorf("cannot listen on Unix socket %s: %v", sockPath, err)
 	}
 	if err := os.Chmod(sockPath, 0o600); err != nil {
 		_ = ln.Close()
 		_ = os.Remove(sockPath)
-		return errorf("cannot chmod Unix socket %s: %v", sockPath, err)
+		return link.Errorf("cannot chmod Unix socket %s: %v", sockPath, err)
 	}
 	defer func() {
 		_ = ln.Close()
@@ -150,7 +158,7 @@ func runBridge(ctx context.Context, sockPath, targetAddr string, maxConns int, o
 				_ = outConn.Close()
 			})
 			defer stopClose()
-			proxyBidirectional(c, outConn)
+			ProxyBidirectional(c, outConn)
 		}(inConn)
 	}
 
@@ -166,7 +174,8 @@ func runBridge(ctx context.Context, sockPath, targetAddr string, maxConns int, o
 	return nil
 }
 
-func proxyBidirectional(a, b net.Conn) {
+// ProxyBidirectional copies full-duplex streams between a and b, propagating half-closes.
+func ProxyBidirectional(a, b net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	copyOne := func(dst, src net.Conn) {

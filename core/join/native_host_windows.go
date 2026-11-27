@@ -7,6 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"hogman/join/internal/fsutil"
+	"hogman/join/internal/link"
 )
 
 func isolateNativeStdout() (*os.File, error) {
@@ -26,10 +29,10 @@ var windowsNativeRegKeys = []struct {
 }
 
 func installNativeHostBinary(canonicalBin, hostPath string) error {
-	if sameFilePath(canonicalBin, hostPath) {
+	if fsutil.SameFilePath(canonicalBin, hostPath) {
 		return nil
 	}
-	return copyExecutableAtomic(canonicalBin, hostPath)
+	return fsutil.CopyExecutableAtomic(canonicalBin, hostPath)
 }
 
 func registerNativeManifests(configBase, hostPath string, chromeIDs, firefoxIDs []string) (int, error) {
@@ -79,7 +82,7 @@ func registerNativeManifests(configBase, hostPath string, chromeIDs, firefoxIDs 
 			manifestPath = firefoxPath
 		}
 		if out, err := exec.Command(winSystem32("reg.exe"), "add", rk.key, "/ve", "/t", "REG_SZ", "/d", manifestPath, "/f").CombinedOutput(); err != nil {
-			return written, fmt.Errorf("register %s: %v (%s)", rk.key, err, firstLine(string(out)))
+			return written, fmt.Errorf("register %s: %v (%s)", rk.key, err, link.FirstLine(string(out)))
 		}
 		written++
 	}

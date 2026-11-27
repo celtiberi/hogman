@@ -1,24 +1,26 @@
 package main
 
-import "os"
+import (
+	"os"
+
+	"hogman/join/internal/fsutil"
+	"hogman/join/internal/link"
+	"hogman/join/internal/state"
+)
 
 func serviceConfigured(zone string) bool {
 	_, err := os.Stat(unitPath(zone))
 	return err == nil
 }
 
-func replaceExecutable(tmpPath, dstPath string) error {
-	return os.Rename(tmpPath, dstPath)
-}
-
-func startExistingBinary(bin, dir string, c *agentConfig, noService bool) error {
+func startExistingBinary(bin, dir string, c *state.AgentConfig, noService bool) error {
 	if noService || !haveUserSystemd() {
 		return startDetached(bin, dir)
 	}
 	unit := renderSystemdUnit(c.Zone, bin, dir)
 	if out, err := installSystemdUnit(unitName(c.Zone), unitPath(c.Zone), unit, false); err != nil {
 		if out != "" {
-			note("could not start user service for %s (%s); running in the background until restart", c.Zone, firstLine(out))
+			note("could not start user service for %s (%s); running in the background until restart", c.Zone, link.FirstLine(out))
 		} else {
 			note("could not write user service for %s (%v); running in the background until restart", c.Zone, err)
 		}
@@ -27,9 +29,9 @@ func startExistingBinary(bin, dir string, c *agentConfig, noService bool) error 
 	return nil
 }
 
-func rewriteAgentService(bin, dir string, c *agentConfig) error {
+func rewriteAgentService(bin, dir string, c *state.AgentConfig) error {
 	unit := renderSystemdUnit(c.Zone, bin, dir)
-	if err := writeFileAtomic(unitPath(c.Zone), []byte(unit), 0o644); err != nil {
+	if err := fsutil.WriteFileAtomic(unitPath(c.Zone), []byte(unit), 0o644); err != nil {
 		return err
 	}
 	if haveUserSystemd() {
@@ -38,9 +40,9 @@ func rewriteAgentService(bin, dir string, c *agentConfig) error {
 	return nil
 }
 
-func rewriteShareService(bin, dir string, c *shareConfig) error {
+func rewriteShareService(bin, dir string, c *state.ShareConfig) error {
 	unit := renderShareSystemdUnit(c, bin, dir)
-	if err := writeFileAtomic(shareUnitPath(c), []byte(unit), 0o644); err != nil {
+	if err := fsutil.WriteFileAtomic(shareUnitPath(c), []byte(unit), 0o644); err != nil {
 		return err
 	}
 	if haveUserSystemd() {

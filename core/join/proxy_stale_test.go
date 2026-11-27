@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
+
+	"hogman/join/internal/state"
 )
 
 // Other tests reason about pure rules; keep them off the network. Tests here
@@ -52,17 +54,17 @@ func TestStaleHogmanPAC(t *testing.T) {
 		t.Cleanup(srv.Close)
 		return srv.URL + "/proxy.pac"
 	}
-	// Every header renderPAC writes, for 0, 1 and 2 pens.
-	p1 := &agentConfig{Zone: "home.pens.example.com", ProxyAddr: "127.0.0.1:17464"}
-	p2 := &agentConfig{Zone: "work.pens.example.com", ProxyAddr: "127.0.0.1:25148"}
-	for _, pens := range [][]*agentConfig{nil, {p1}, {p1, p2}} {
-		if !realStaleHogmanPAC(serve(renderPAC(pens))) {
+	// Every header RenderPAC writes, for 0, 1 and 2 pens.
+	p1 := &state.AgentConfig{Zone: "home.pens.example.com", ProxyAddr: "127.0.0.1:17464"}
+	p2 := &state.AgentConfig{Zone: "work.pens.example.com", ProxyAddr: "127.0.0.1:25148"}
+	for _, pens := range [][]*state.AgentConfig{nil, {p1}, {p1, p2}} {
+		if !realStaleHogmanPAC(serve(state.RenderPAC(pens))) {
 			t.Errorf("a live Hogman agent's PAC for %d pen(s) should count as ours", len(pens))
 		}
 	}
 	// A redirect is judged as it stands, never followed.
 	redir := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, serve(renderPAC([]*agentConfig{p1})), http.StatusFound)
+		http.Redirect(w, r, serve(state.RenderPAC([]*state.AgentConfig{p1})), http.StatusFound)
 	}))
 	redir.Listener.Close()
 	redir.Listener = listenHogmanPort(t)
@@ -85,14 +87,14 @@ func TestStaleHogmanPAC(t *testing.T) {
 func TestStalePACIsRecognizedAsOurs(t *testing.T) {
 	staleHogmanPAC = func(u string) bool { return u == "http://127.0.0.1:20441/proxy.pac" }
 	t.Cleanup(func() { staleHogmanPAC = func(string) bool { return false } })
-	p := &agentConfig{Zone: "work.pens.example.com", ProxyAddr: "127.0.0.1:25148"}
-	if !isOurPAC("http://127.0.0.1:20441/proxy.pac", []*agentConfig{p}) {
+	p := &state.AgentConfig{Zone: "work.pens.example.com", ProxyAddr: "127.0.0.1:25148"}
+	if !isOurPAC("http://127.0.0.1:20441/proxy.pac", []*state.AgentConfig{p}) {
 		t.Error("stale Hogman PAC should be recognized by isOurPAC")
 	}
-	if shouldLeaveAutoProxy("http://127.0.0.1:20441/proxy.pac", true, []*agentConfig{p}) {
+	if shouldLeaveAutoProxy("http://127.0.0.1:20441/proxy.pac", true, []*state.AgentConfig{p}) {
 		t.Error("stale Hogman PAC should not be treated as a foreign proxy to leave untouched")
 	}
-	if !shouldLeaveAutoProxy("http://corp.example/proxy.pac", true, []*agentConfig{p}) {
+	if !shouldLeaveAutoProxy("http://corp.example/proxy.pac", true, []*state.AgentConfig{p}) {
 		t.Error("company PAC must be left untouched")
 	}
 }
@@ -101,7 +103,7 @@ func TestStalePACIsRecognizedAsOurs(t *testing.T) {
 // agents use (17000-26999), so stale-PAC checks treat it as Hogman-shaped.
 func listenHogmanPort(t *testing.T) net.Listener {
 	t.Helper()
-	for p := hogmanPortMin + 7919%1000; p <= hogmanPortMax; p += 37 {
+	for p := state.PortMin + 7919%1000; p <= state.PortMax; p += 37 {
 		if l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(p)); err == nil {
 			return l
 		}

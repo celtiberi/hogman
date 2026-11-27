@@ -12,6 +12,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"hogman/join/internal/fsutil"
+	"hogman/join/internal/state"
 )
 
 func TestCanonicalBinaryConsolidationAndMigration(t *testing.T) {
@@ -24,33 +27,33 @@ func TestCanonicalBinaryConsolidationAndMigration(t *testing.T) {
 
 	// installedBinary installs once to the canonical <configBase>/bin/ path,
 	// regardless of which pen or share dir is passed.
-	binA, err := installedBinary(stateDir("alpha.pens.example.com"))
+	binA, err := installedBinary(state.StateDir("alpha.pens.example.com"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	binB, err := installedBinary(stateDir("beta.pens.example.com"))
+	binB, err := installedBinary(state.StateDir("beta.pens.example.com"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantCanon := canonicalBinaryPath(hogmanConfigBase())
+	wantCanon := state.CanonicalBinaryPath(state.ConfigBase())
 	if binA != wantCanon || binB != wantCanon {
 		t.Fatalf("installedBinary returned (%q, %q), want single canonical %q", binA, binB, wantCanon)
 	}
 
 	// Atomic migration: legacy per-pen binary is KEPT if restartNew fails,
 	// and REMOVED only after restartNew succeeds on canonicalBin.
-	penDir := stateDir("alpha.pens.example.com")
+	penDir := state.StateDir("alpha.pens.example.com")
 	_ = os.MkdirAll(penDir, 0o700)
-	legacy := filepath.Join(penDir, installedBinaryName(runtime.GOOS))
+	legacy := filepath.Join(penDir, state.InstalledBinaryName(runtime.GOOS))
 	if err := os.WriteFile(legacy, []byte("legacy-bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	p := &penTarget{zone: "alpha.pens.example.com", dir: penDir, cfg: &agentConfig{Zone: "alpha.pens.example.com"}}
+	p := &penTarget{zone: "alpha.pens.example.com", dir: penDir, cfg: &state.AgentConfig{Zone: "alpha.pens.example.com"}}
 
 	failOps := penUpdateOps{
-		isRunning:  func(string, *agentConfig) bool { return true },
+		isRunning:  func(string, *state.AgentConfig) bool { return true },
 		hasService: func(string) bool { return true },
-		stop:       func(string, *agentConfig) {},
+		stop:       func(string, *state.AgentConfig) {},
 		restartNew: func(_ *penTarget, bin string, _ bool, _ options) error {
 			if bin != wantCanon {
 				t.Errorf("restartNew got bin=%q, want canonical %q", bin, wantCanon)
@@ -129,7 +132,7 @@ func TestInstallNativeHostBinarySymlinkOnUnix(t *testing.T) {
 	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("expected symlink at %s, got mode=%v err=%v", hostPath, fi.Mode(), err)
 	}
-	if !sameFilePath(canon, hostPath) {
+	if !fsutil.SameFilePath(canon, hostPath) {
 		t.Fatalf("symlink %s does not resolve to %s", hostPath, canon)
 	}
 }
@@ -210,9 +213,9 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 		t.Setenv("AppData", filepath.Join(home, "AppData"))
 	}
 
-	cfgBase := hogmanConfigBase()
-	legacyName := legacyBinaryName(runtime.GOOS)
-	canonBin := canonicalBinaryPath(cfgBase)
+	cfgBase := state.ConfigBase()
+	legacyName := state.LegacyBinaryName(runtime.GOOS)
+	canonBin := state.CanonicalBinaryPath(cfgBase)
 
 	// 1. Seed a full legacy hogman-join device layout:
 	//    - Running pen "alpha" with per-pen hogman-join binary + registered login item
@@ -221,29 +224,29 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 	//    - Legacy regular-file copy at <configBase>/bin/hogman-native-host
 	alphaZone := "alpha.pens.example.com"
 	betaZone := "beta.pens.example.com"
-	alphaDir := stateDir(alphaZone)
-	betaDir := stateDir(betaZone)
-	shareCfg := &shareConfig{
+	alphaDir := state.StateDir(alphaZone)
+	betaDir := state.StateDir(betaZone)
+	shareCfg := &state.ShareConfig{
 		Name:        "blog",
 		Zone:        alphaZone,
 		LoginServer: "https://alpha.gate.example.com",
 		Target:      "http://127.0.0.1:3000",
 	}
-	blogDir := shareDir(alphaZone, "blog")
+	blogDir := state.ShareDir(alphaZone, "blog")
 	for _, d := range []string{alphaDir, betaDir, blogDir, filepath.Dir(canonBin)} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	alphaCfg := &agentConfig{Zone: alphaZone, LoginServer: "https://alpha.gate.example.com"}
-	betaCfg := &agentConfig{Zone: betaZone, LoginServer: "https://beta.gate.example.com"}
-	if err := alphaCfg.save(alphaDir); err != nil {
+	alphaCfg := &state.AgentConfig{Zone: alphaZone, LoginServer: "https://alpha.gate.example.com"}
+	betaCfg := &state.AgentConfig{Zone: betaZone, LoginServer: "https://beta.gate.example.com"}
+	if err := alphaCfg.Save(alphaDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := betaCfg.save(betaDir); err != nil {
+	if err := betaCfg.Save(betaDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := shareCfg.save(blogDir); err != nil {
+	if err := shareCfg.Save(blogDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -296,7 +299,7 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 	if err := os.WriteFile(srcPath, newPayload, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	wantHex, err := fileSHA256(srcPath)
+	wantHex, err := fsutil.FileSHA256(srcPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,9 +316,9 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 	var rolledBackBin string
 	var rollbackSeq []string
 	rollbackOps := penUpdateOps{
-		isRunning:  func(string, *agentConfig) bool { return true },
+		isRunning:  func(string, *state.AgentConfig) bool { return true },
 		hasService: func(string) bool { return true },
-		stop:       func(string, *agentConfig) { rollbackSeq = append(rollbackSeq, "stop") },
+		stop:       func(string, *state.AgentConfig) { rollbackSeq = append(rollbackSeq, "stop") },
 		restartNew: func(*penTarget, string, bool, options) error {
 			rollbackSeq = append(rollbackSeq, "restartNew")
 			return errors.New("boom")
@@ -342,21 +345,21 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 	if _, err := os.Stat(alphaLegacyBin); err != nil {
 		t.Fatalf("legacy binary should be preserved after rollback: %v", err)
 	}
-	if interrupted, _ := readUpdatingMarker(alphaDir); interrupted {
+	if interrupted, _ := state.ReadUpdatingMarker(alphaDir); interrupted {
 		t.Fatal("updating marker should be cleared after successful rollback")
 	}
 
 	// 3. Now run the full upgrade migration for running alpha, stopped beta, and running blog share.
 	var restartedPens []string
 	penOps := penUpdateOps{
-		isRunning: func(dir string, _ *agentConfig) bool { return dir == alphaDir },
+		isRunning: func(dir string, _ *state.AgentConfig) bool { return dir == alphaDir },
 		hasService: func(zone string) bool {
 			if runtime.GOOS == "windows" {
 				return false
 			}
 			return serviceConfigured(zone)
 		},
-		stop: func(string, *agentConfig) {},
+		stop: func(string, *state.AgentConfig) {},
 		restartNew: func(p *penTarget, bin string, hadService bool, _ options) error {
 			if bin != canonBin {
 				return errors.New("expected canonical binary")
@@ -375,13 +378,13 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 	var restartedShares []string
 	shOps := shareUpdateOps{
 		isRunning: func(dir string) bool { return dir == blogDir },
-		hasService: func(c *shareConfig) bool {
+		hasService: func(c *state.ShareConfig) bool {
 			if runtime.GOOS == "windows" {
 				return true
 			}
 			return shareServiceConfigured(c)
 		},
-		stop: func(string, *shareConfig) {},
+		stop: func(string, *state.ShareConfig) {},
 		restartNew: func(s *shareTargetDir, bin string, _ options) error {
 			if bin != canonBin {
 				return errors.New("expected canonical binary")
@@ -391,7 +394,7 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 					return err
 				}
 			}
-			restartedShares = append(restartedShares, s.cfg.fqdn()+":"+bin)
+			restartedShares = append(restartedShares, s.cfg.FQDN()+":"+bin)
 			return nil
 		},
 		restartOld:     func(*shareTargetDir, string, options) error { return nil },
@@ -426,7 +429,7 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 	// Assert native host is now a symlink to canonical hogman on Unix.
 	if runtime.GOOS != "windows" {
 		fi, err := os.Lstat(nhBin)
-		if err != nil || fi.Mode()&os.ModeSymlink == 0 || !sameFilePath(canonBin, nhBin) {
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 || !fsutil.SameFilePath(canonBin, nhBin) {
 			t.Fatalf("native host %s not migrated to symlink -> %s (err=%v)", nhBin, canonBin, err)
 		}
 
@@ -456,19 +459,19 @@ func TestInterruptedUpdateRecoveryAndVersionGuard(t *testing.T) {
 	//    after stopAgent removed the login item and the process died before
 	//    restartNew, re-running migrateAndRestartPen restores the agent & service.
 	dir := t.TempDir()
-	cfg := &agentConfig{Zone: "interrupted.pens.example.com"}
-	legacy := filepath.Join(dir, legacyBinaryName(runtime.GOOS))
+	cfg := &state.AgentConfig{Zone: "interrupted.pens.example.com"}
+	legacy := filepath.Join(dir, state.LegacyBinaryName(runtime.GOOS))
 	if err := os.WriteFile(legacy, []byte("old"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeUpdatingMarker(dir, true)
+	state.WriteUpdatingMarker(dir, true)
 
 	var restarted bool
 	var restoredService bool
 	ops := penUpdateOps{
-		isRunning:  func(string, *agentConfig) bool { return false },
+		isRunning:  func(string, *state.AgentConfig) bool { return false },
 		hasService: func(string) bool { return false },
-		stop:       func(string, *agentConfig) {},
+		stop:       func(string, *state.AgentConfig) {},
 		restartNew: func(_ *penTarget, _ string, hadService bool, _ options) error {
 			restarted = true
 			restoredService = hadService
@@ -482,7 +485,7 @@ func TestInterruptedUpdateRecoveryAndVersionGuard(t *testing.T) {
 	if !restarted || !restoredService {
 		t.Fatalf("restarted=%v restoredService=%v, want true/true", restarted, restoredService)
 	}
-	if interrupted, _ := readUpdatingMarker(dir); interrupted {
+	if interrupted, _ := state.ReadUpdatingMarker(dir); interrupted {
 		t.Fatal(".updating marker was not cleared after recovery")
 	}
 	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
@@ -529,12 +532,12 @@ func TestUpdateContinuesPastUnreachablePenAndLegacySHA256Message(t *testing.T) {
 	_ = os.WriteFile(goodLegacy, []byte("old"), 0o755)
 
 	pens := []penTarget{
-		{zone: "aaa-dead.example.test", dir: deadDir, cfg: &agentConfig{Zone: "aaa-dead.example.test", LoginServer: "https://dead.example.test"}},
-		{zone: "zzz-good.example.test", dir: goodDir, cfg: &agentConfig{Zone: "zzz-good.example.test", LoginServer: "https://good.example.test"}},
+		{zone: "aaa-dead.example.test", dir: deadDir, cfg: &state.AgentConfig{Zone: "aaa-dead.example.test", LoginServer: "https://dead.example.test"}},
+		{zone: "zzz-good.example.test", dir: goodDir, cfg: &state.AgentConfig{Zone: "zzz-good.example.test", LoginServer: "https://good.example.test"}},
 	}
 	var stopped, startedNoWait, restarted []string
 	ops := penUpdateOps{
-		isRunning:  func(string, *agentConfig) bool { return true },
+		isRunning:  func(string, *state.AgentConfig) bool { return true },
 		hasService: func(string) bool { return true },
 		probeReachable: func(p *penTarget, _ options) error {
 			if p.zone == "aaa-dead.example.test" {
@@ -542,7 +545,7 @@ func TestUpdateContinuesPastUnreachablePenAndLegacySHA256Message(t *testing.T) {
 			}
 			return nil
 		},
-		stop: func(_ string, c *agentConfig) { stopped = append(stopped, c.Zone) },
+		stop: func(_ string, c *state.AgentConfig) { stopped = append(stopped, c.Zone) },
 		startNoWait: func(p *penTarget, bin string, _ bool, _ options) error {
 			startedNoWait = append(startedNoWait, p.zone+":"+bin)
 			return nil
@@ -607,7 +610,7 @@ func TestUpdateContinuesPastUnreachablePenAndLegacySHA256Message(t *testing.T) {
 	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ts.Certificate().Raw})
 	probeTarget := &penTarget{
 		zone: "lab.example.test",
-		cfg:  &agentConfig{Zone: "lab.example.test", LoginServer: ts.URL, ControlCA: string(caPEM)},
+		cfg:  &state.AgentConfig{Zone: "lab.example.test", LoginServer: ts.URL, ControlCA: string(caPEM)},
 	}
 	if err := probePenLoginServer(probeTarget, options{}); err != nil {
 		t.Fatalf("probePenLoginServer against live /hogman/v1/network failed: %v (path=%q)", err, gotPath)
@@ -630,7 +633,7 @@ func TestInstallNativeHostRespectsCanonicalBinaryDowngradeGuard(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 
-	canon := canonicalBinaryPath(configBase)
+	canon := state.CanonicalBinaryPath(configBase)
 	if err := os.MkdirAll(filepath.Dir(canon), 0o700); err != nil {
 		t.Fatal(err)
 	}

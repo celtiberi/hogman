@@ -9,7 +9,7 @@ WORKDIR /src
 ENV GOFLAGS=-tags=ts_omit_peerapiserver
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
-COPY *.go ./
+COPY . ./
 ARG VERSION=dev
 ARG TARGETOS
 ARG TARGETARCH

@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"hogman/join/internal/state"
 )
 
 // extractPlistProgramArgs parses a generated macOS LaunchAgent plist and returns
@@ -121,7 +123,7 @@ func TestCLIInstalledServiceGoldenCommands(t *testing.T) {
 	agentDir := "/tmp/hogman state/bobo.pens.example.com"
 	shareDirPath := "/tmp/hogman shares/bobo.pens.example.com/blog"
 	bin := "/tmp/hogman bin/hogman"
-	sc := &shareConfig{Name: "blog", Zone: "bobo.pens.example.com"}
+	sc := &state.ShareConfig{Name: "blog", Zone: "bobo.pens.example.com"}
 
 	agentPlist, err := renderLaunchPlist(launchLabel("bobo.pens.example.com"), bin, agentDir, filepath.Join(agentDir, "agent.log"))
 	if err != nil {
@@ -319,7 +321,7 @@ func TestUnifiedPenResolver(t *testing.T) {
 	} {
 		d := filepath.Join(cfgBase, z.zone)
 		_ = os.MkdirAll(d, 0o700)
-		_ = (&agentConfig{Zone: z.zone, LoginServer: z.ls}).save(d)
+		_ = (&state.AgentConfig{Zone: z.zone, LoginServer: z.ls}).Save(d)
 	}
 	plan, err := resolveUpdatePlan(nil, options{pen: "solo"}, cfgBase, filepath.Join(root, "shares"))
 	if err != nil || plan.baseURL != "https://solo.gate.a.example" {

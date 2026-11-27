@@ -21,6 +21,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"hogman/join/internal/fsutil"
+	"hogman/join/internal/link"
+	"hogman/join/internal/penapi"
+	"hogman/join/internal/state"
 )
 
 const updateUsage = `hogman update: update hogman from GitHub Releases (or a pen's server)
@@ -103,27 +108,13 @@ func platformBinaryName(goos, goarch string) (string, error) {
 	}
 }
 
-func installedBinaryName(goos string) string {
-	if goos == "windows" {
-		return "hogman.exe"
-	}
-	return "hogman"
-}
-
-func legacyBinaryName(goos string) string {
-	if goos == "windows" {
-		return "hogman-join.exe"
-	}
-	return "hogman-join"
-}
-
 func parseUpdateSourceURL(raw string) (baseURL, host string, err error) {
-	raw = trimMatchingQuotes(raw)
+	raw = link.TrimMatchingQuotes(raw)
 	if raw == "" {
 		return "", "", errorf("empty update source")
 	}
-	if link, err := ParseLink(raw); err == nil {
-		return "https://" + link.Host, link.Host, nil
+	if parsed, err := link.Parse(raw); err == nil {
+		return "https://" + parsed.Host, parsed.Host, nil
 	}
 	if !strings.Contains(raw, "://") {
 		raw = "https://" + raw
@@ -193,7 +184,7 @@ func parseSHA256SUMS(data []byte, wantFile string) (string, error) {
 func updateHTTPClient(caFile, caPEM, expectedHost string, timeout time.Duration) (*http.Client, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	if caFile != "" {
-		c, err := controlClient(caFile)
+		c, err := penapi.ControlClient(caFile)
 		if err != nil {
 			return nil, err
 		}
@@ -318,19 +309,6 @@ func downloadVerifiedBinaryURL(client *http.Client, urlStr, binName, wantHex, tm
 	return tmpPath, nil
 }
 
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return strings.ToLower(hex.EncodeToString(h.Sum(nil))), nil
-}
-
 func stageAndVerify(srcPath, dstPath, wantHex string) error {
 	src, err := os.Open(srcPath)
 	if err != nil {
@@ -370,7 +348,7 @@ func stageAndVerify(srcPath, dstPath, wantHex string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := replaceExecutable(tmpPath, dstPath); err != nil {
+	if err := fsutil.ReplaceExecutable(tmpPath, dstPath); err != nil {
 		return err
 	}
 	keep = true
@@ -390,14 +368,14 @@ func checkDirWritable(dir string) error {
 type penTarget struct {
 	zone string
 	dir  string
-	cfg  *agentConfig
+	cfg  *state.AgentConfig
 }
 
 type shareTargetDir struct {
 	zone string
 	name string
 	dir  string
-	cfg  *shareConfig
+	cfg  *state.ShareConfig
 }
 
 type updatePlan struct {
@@ -411,7 +389,7 @@ type updatePlan struct {
 }
 
 func loadPenTargets(configBase string) []penTarget {
-	scanned := scanInstalledPens(configBase)
+	scanned := state.ScanInstalledPens(configBase)
 	var pens []penTarget
 	for _, p := range scanned.Pens {
 		if p.Config.LoginServer != "" {
@@ -428,7 +406,7 @@ func loadLocalTargets(configBase, sharesDir string) ([]penTarget, []shareTargetD
 		sort.Strings(pattern)
 		for _, f := range pattern {
 			dir := filepath.Dir(f)
-			if c, err := loadShare(dir); err == nil && c.LoginServer != "" &&
+			if c, err := state.LoadShare(dir); err == nil && c.LoginServer != "" &&
 				c.Zone != "" && c.Name != "" &&
 				c.Zone == filepath.Base(filepath.Dir(dir)) && c.Name == filepath.Base(dir) {
 				shares = append(shares, shareTargetDir{zone: c.Zone, name: c.Name, dir: dir, cfg: c})
@@ -443,7 +421,7 @@ func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (
 	penFilter := ""
 	if strings.TrimSpace(o.pen) != "" {
 		var err error
-		penFilter, err = validatePenQuery(o.pen)
+		penFilter, err = link.ValidatePenQuery(o.pen)
 		if err != nil {
 			return nil, err
 		}
@@ -474,7 +452,7 @@ func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (
 		var matchedZones []string
 		seenZone := map[string]bool{}
 		for _, p := range allPens {
-			if penFilter != "" && !penMatchesQuery(p.zone, p.cfg.LoginServer, penFilter) {
+			if penFilter != "" && !link.PenMatchesQuery(p.zone, p.cfg.LoginServer, penFilter) {
 				continue
 			}
 			if !seenZone[p.zone] {
@@ -492,7 +470,7 @@ func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (
 			}
 		}
 		for _, s := range allSharesList {
-			if penFilter != "" && !penMatchesQuery(s.zone, s.cfg.LoginServer, penFilter) {
+			if penFilter != "" && !link.PenMatchesQuery(s.zone, s.cfg.LoginServer, penFilter) {
 				continue
 			}
 			if !seenZone[s.zone] {
@@ -529,7 +507,7 @@ func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (
 	var matchedShares []shareTargetDir
 
 	for _, p := range allPens {
-		if penFilter != "" && !penMatchesQuery(p.zone, p.cfg.LoginServer, penFilter) {
+		if penFilter != "" && !link.PenMatchesQuery(p.zone, p.cfg.LoginServer, penFilter) {
 			continue
 		}
 		matchedPens = append(matchedPens, p)
@@ -542,7 +520,7 @@ func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (
 		sources[p.cfg.LoginServer] = cur
 	}
 	for _, s := range allSharesList {
-		if penFilter != "" && !penMatchesQuery(s.zone, s.cfg.LoginServer, penFilter) {
+		if penFilter != "" && !link.PenMatchesQuery(s.zone, s.cfg.LoginServer, penFilter) {
 			continue
 		}
 		matchedShares = append(matchedShares, s)
@@ -595,30 +573,10 @@ func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (
 	}, nil
 }
 
-func resolvedExePath() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	if realPath, err := filepath.EvalSymlinks(exe); err == nil {
-		return filepath.Clean(realPath), nil
-	}
-	return filepath.Clean(exe), nil
-}
-
-func sameFilePath(a, b string) bool {
-	if filepath.Clean(a) == filepath.Clean(b) {
-		return true
-	}
-	fa, errA := os.Stat(a)
-	fb, errB := os.Stat(b)
-	return errA == nil && errB == nil && os.SameFile(fa, fb)
-}
-
 // agentRunning reports whether this pen's agent process is alive: either its
 // local /status endpoint answers for this zone (whether online, still
 // connecting, or holding a startup error) or its recorded agent.pid is alive.
-func agentRunning(dir string, c *agentConfig) bool {
+func agentRunning(dir string, c *state.AgentConfig) bool {
 	if _, err := agentState(c); err == nil {
 		return true
 	}
@@ -631,15 +589,15 @@ func agentRunning(dir string, c *agentConfig) bool {
 }
 
 type penUpdateOps struct {
-	isRunning      func(dir string, c *agentConfig) bool
+	isRunning      func(dir string, c *state.AgentConfig) bool
 	runningStale   func(p *penTarget) bool
 	hasService     func(zone string) bool
 	probeReachable func(p *penTarget, o options) error
-	stop           func(dir string, c *agentConfig)
+	stop           func(dir string, c *state.AgentConfig)
 	startNoWait    func(p *penTarget, binPath string, hadService bool, o options) error
 	restartNew     func(p *penTarget, binPath string, hadService bool, o options) error
 	restartOld     func(p *penTarget, binPath string, hadService bool, o options) error
-	rewriteService func(binPath, dir string, c *agentConfig) error
+	rewriteService func(binPath, dir string, c *state.AgentConfig) error
 }
 
 // agentRunningStaleBinary reports whether p's running agent is executing a
@@ -732,11 +690,11 @@ func restartOldPenAgent(p *penTarget, binPath string, hadService bool, o options
 
 type shareUpdateOps struct {
 	isRunning      func(dir string) bool
-	hasService     func(c *shareConfig) bool
-	stop           func(dir string, c *shareConfig)
+	hasService     func(c *state.ShareConfig) bool
+	stop           func(dir string, c *state.ShareConfig)
 	restartNew     func(s *shareTargetDir, binPath string, o options) error
 	restartOld     func(s *shareTargetDir, binPath string, o options) error
-	rewriteService func(binPath, dir string, c *shareConfig) error
+	rewriteService func(binPath, dir string, c *state.ShareConfig) error
 }
 
 func defaultShareUpdateOps() shareUpdateOps {
@@ -767,9 +725,9 @@ func restartShareService(s *shareTargetDir, binPath string, o options, updated b
 		return err
 	}
 	if updated {
-		note("%s share restarted", s.cfg.fqdn())
+		note("%s share restarted", s.cfg.FQDN())
 	} else {
-		note("restarted the previous %s share so it stays online", s.cfg.fqdn())
+		note("restarted the previous %s share so it stays online", s.cfg.FQDN())
 	}
 	return nil
 }
@@ -826,8 +784,6 @@ func detectPackageManager(exePath, goos string) (name, upgradeCmd string, ok boo
 	return "", "", false
 }
 
-const updatingMarkerName = ".updating"
-
 var versionQueryTimeout = 5 * time.Second
 
 // queryBinaryVersionLine runs `<bin> --version` with a short timeout and
@@ -839,7 +795,7 @@ func queryBinaryVersionLine(binPath string) string {
 	if err != nil {
 		return ""
 	}
-	return firstLine(string(out))
+	return link.FirstLine(string(out))
 }
 
 // queryBinaryVersion extracts the version token from `<bin> --version`
@@ -931,26 +887,6 @@ func compareReleaseVersions(a, b string) (int, bool) {
 	return 0, true
 }
 
-func readUpdatingMarker(dir string) (present bool, hadService bool) {
-	b, err := os.ReadFile(filepath.Join(dir, updatingMarkerName))
-	if err != nil {
-		return false, false
-	}
-	return true, strings.TrimSpace(string(b)) == "service"
-}
-
-func writeUpdatingMarker(dir string, hadService bool) {
-	val := "detached\n"
-	if hadService {
-		val = "service\n"
-	}
-	_ = writeFileAtomic(filepath.Join(dir, updatingMarkerName), []byte(val), 0o600)
-}
-
-func clearUpdatingMarker(dir string) {
-	_ = os.Remove(filepath.Join(dir, updatingMarkerName))
-}
-
 // migrateAndRestartPen atomically transitions a pen's agent service to
 // canonicalBin (rewriting its LaunchAgent/systemd unit and waiting for it to
 // come online) and removes any legacy per-pen duplicate copy only after success.
@@ -960,7 +896,7 @@ func clearUpdatingMarker(dir string) {
 func migrateAndRestartPen(p *penTarget, canonicalBin, legacyBin, selfPath string, o options, ops penUpdateOps) error {
 	running := ops.isRunning(p.dir, p.cfg)
 	hadService := ops.hasService(p.cfg.Zone)
-	interrupted, prevService := readUpdatingMarker(p.dir)
+	interrupted, prevService := state.ReadUpdatingMarker(p.dir)
 	if interrupted {
 		running = true
 		if prevService {
@@ -968,7 +904,7 @@ func migrateAndRestartPen(p *penTarget, canonicalBin, legacyBin, selfPath string
 		}
 	}
 	removeLegacy := func() {
-		if legacyBin != "" && !sameFilePath(legacyBin, selfPath) && !sameFilePath(legacyBin, canonicalBin) {
+		if legacyBin != "" && !fsutil.SameFilePath(legacyBin, selfPath) && !fsutil.SameFilePath(legacyBin, canonicalBin) {
 			if _, err := os.Stat(legacyBin); err == nil {
 				if err := os.Remove(legacyBin); err == nil {
 					note("consolidated %s -> %s", legacyBin, canonicalBin)
@@ -983,7 +919,7 @@ func migrateAndRestartPen(p *penTarget, canonicalBin, legacyBin, selfPath string
 				// or flaky Wi-Fi — start the new canonical agent normally so it
 				// reconnects on its own, and skip only the 60s online wait.
 				ops.stop(p.dir, p.cfg)
-				clearUpdatingMarker(p.dir)
+				state.ClearUpdatingMarker(p.dir)
 				if ops.startNoWait != nil {
 					if serr := ops.startNoWait(p, canonicalBin, hadService, o); serr != nil {
 						return errorf("%s is unreachable (%v), and starting its new agent failed: %v.\n"+
@@ -1002,7 +938,7 @@ func migrateAndRestartPen(p *penTarget, canonicalBin, legacyBin, selfPath string
 			}
 		}
 		step("Restarting %s agent", p.zone)
-		writeUpdatingMarker(p.dir, hadService)
+		state.WriteUpdatingMarker(p.dir, hadService)
 		ops.stop(p.dir, p.cfg)
 		if err := ops.restartNew(p, canonicalBin, hadService, o); err != nil {
 			// Stop any partially started new agent before rolling back so
@@ -1011,14 +947,14 @@ func migrateAndRestartPen(p *penTarget, canonicalBin, legacyBin, selfPath string
 			if legacyBin != "" && ops.restartOld != nil {
 				if _, serr := os.Stat(legacyBin); serr == nil {
 					if rerr := ops.restartOld(p, legacyBin, hadService, o); rerr == nil {
-						clearUpdatingMarker(p.dir)
+						state.ClearUpdatingMarker(p.dir)
 						note("restarted the previous %s agent so you stay connected", p.zone)
 					}
 				}
 			}
 			return errorf("%v\n  If this pen no longer exists, remove it with: hogman leave %s", err, p.zone)
 		}
-		clearUpdatingMarker(p.dir)
+		state.ClearUpdatingMarker(p.dir)
 	} else if hadService && ops.rewriteService != nil {
 		if err := ops.rewriteService(canonicalBin, p.dir, p.cfg); err != nil {
 			return errorf("could not update login item for %s: %v", p.zone, err)
@@ -1044,7 +980,7 @@ func migratePensForUpdate(pens []penTarget, serviceBin, selfPath string, legacyC
 		if legacyCopyIn != nil {
 			legacy = legacyCopyIn(p.dir)
 		}
-		interrupted, _ := readUpdatingMarker(p.dir)
+		interrupted, _ := state.ReadUpdatingMarker(p.dir)
 		stale := ops.runningStale != nil && ops.runningStale(p)
 		if !forceAll && legacy == "" && !interrupted && !stale {
 			continue
@@ -1065,38 +1001,38 @@ func migratePensForUpdate(pens []penTarget, serviceBin, selfPath string, legacyC
 func migrateAndRestartShare(s *shareTargetDir, canonicalBin, legacyBin, selfPath string, o options, ops shareUpdateOps) error {
 	running := ops.isRunning(s.dir)
 	managed := ops.hasService(s.cfg)
-	interrupted, prevManaged := readUpdatingMarker(s.dir)
+	interrupted, prevManaged := state.ReadUpdatingMarker(s.dir)
 	if interrupted && prevManaged {
 		running = true
 		managed = true
 	}
 	if running && managed {
-		step("Restarting %s share", s.cfg.fqdn())
-		writeUpdatingMarker(s.dir, true)
+		step("Restarting %s share", s.cfg.FQDN())
+		state.WriteUpdatingMarker(s.dir, true)
 		ops.stop(s.dir, s.cfg)
 		if err := ops.restartNew(s, canonicalBin, o); err != nil {
 			ops.stop(s.dir, s.cfg)
 			if legacyBin != "" && ops.restartOld != nil {
 				if _, serr := os.Stat(legacyBin); serr == nil {
 					if rerr := ops.restartOld(s, legacyBin, o); rerr == nil {
-						clearUpdatingMarker(s.dir)
+						state.ClearUpdatingMarker(s.dir)
 					}
 				}
 			}
 			return errorf("updated share binary, but restarting %s failed (%v).\n"+
 				"  To bring it back up: hogman share %s %s",
-				s.cfg.fqdn(), err, s.cfg.Name, s.cfg.Target)
+				s.cfg.FQDN(), err, s.cfg.Name, s.cfg.Target)
 		}
-		clearUpdatingMarker(s.dir)
+		state.ClearUpdatingMarker(s.dir)
 	} else if running {
-		note("share %s is still running the previous process; restart it when ready", s.cfg.url())
+		note("share %s is still running the previous process; restart it when ready", s.cfg.URL())
 		return nil
 	} else if managed && ops.rewriteService != nil {
 		if err := ops.rewriteService(canonicalBin, s.dir, s.cfg); err != nil {
-			return errorf("could not update login item for share %s: %v", s.cfg.fqdn(), err)
+			return errorf("could not update login item for share %s: %v", s.cfg.FQDN(), err)
 		}
 	}
-	if legacyBin != "" && !sameFilePath(legacyBin, selfPath) && !sameFilePath(legacyBin, canonicalBin) {
+	if legacyBin != "" && !fsutil.SameFilePath(legacyBin, selfPath) && !fsutil.SameFilePath(legacyBin, canonicalBin) {
 		if _, err := os.Stat(legacyBin); err == nil {
 			if err := os.Remove(legacyBin); err == nil {
 				note("consolidated %s -> %s", legacyBin, canonicalBin)
@@ -1114,13 +1050,13 @@ func updateCmd(args []string, o options) error {
 	if err != nil {
 		return err
 	}
-	selfPath, err := resolvedExePath()
+	selfPath, err := fsutil.ResolvedExePath()
 	if err != nil {
 		return err
 	}
 
-	configBase := filepath.Dir(stateDir("x"))
-	plan, err := resolveUpdatePlan(args, o, configBase, sharesBase())
+	configBase := state.ConfigBase()
+	plan, err := resolveUpdatePlan(args, o, configBase, state.SharesBase())
 	if err != nil {
 		return err
 	}
@@ -1150,7 +1086,7 @@ func updateCmd(args []string, o options) error {
 	}
 	note("expected SHA-256: %s", wantHex)
 
-	selfHash, _ := fileSHA256(selfPath)
+	selfHash, _ := fsutil.FileSHA256(selfPath)
 	selfNeedsUpdate := !digestEqualHex(selfHash, wantHex)
 
 	pkgMgr, pkgUpgradeCmd, pkgManaged := detectPackageManager(selfPath, runtime.GOOS)
@@ -1160,9 +1096,9 @@ func updateCmd(args []string, o options) error {
 			selfPath, pkgMgr, pkgUpgradeCmd, cliBinaryName())
 	}
 
-	instName := installedBinaryName(runtime.GOOS)
-	oldInstName := legacyBinaryName(runtime.GOOS)
-	canonicalBin := canonicalBinaryPath(configBase)
+	instName := state.InstalledBinaryName(runtime.GOOS)
+	oldInstName := state.LegacyBinaryName(runtime.GOOS)
+	canonicalBin := state.CanonicalBinaryPath(configBase)
 	canonicalNeeded := len(plan.pens) > 0 || len(plan.shares) > 0
 	if _, err := os.Stat(canonicalBin); err == nil {
 		canonicalNeeded = true
@@ -1172,19 +1108,19 @@ func updateCmd(args []string, o options) error {
 		canonicalNeeded = true
 	}
 	canonicalNeedsUpdate := false
-	if canonicalNeeded && !sameFilePath(selfPath, canonicalBin) {
-		h, _ := fileSHA256(canonicalBin)
+	if canonicalNeeded && !fsutil.SameFilePath(selfPath, canonicalBin) {
+		h, _ := fsutil.FileSHA256(canonicalBin)
 		canonicalNeedsUpdate = !digestEqualHex(h, wantHex)
 	}
 
 	nhNeedsUpdate := false
-	if !sameFilePath(selfPath, nhBin) {
+	if !fsutil.SameFilePath(selfPath, nhBin) {
 		if fi, err := os.Lstat(nhBin); err == nil {
 			if runtime.GOOS != "windows" {
 				// On Unix, convert any old regular-file copy to a symlink to canonicalBin.
-				nhNeedsUpdate = fi.Mode()&os.ModeSymlink == 0 || !sameFilePath(canonicalBin, nhBin)
+				nhNeedsUpdate = fi.Mode()&os.ModeSymlink == 0 || !fsutil.SameFilePath(canonicalBin, nhBin)
 			} else {
-				h, _ := fileSHA256(nhBin)
+				h, _ := fsutil.FileSHA256(nhBin)
 				nhNeedsUpdate = !digestEqualHex(h, wantHex)
 			}
 		}
@@ -1193,7 +1129,7 @@ func updateCmd(args []string, o options) error {
 	legacyCopyIn := func(dir string) string {
 		for _, name := range []string{instName, oldInstName} {
 			p := filepath.Join(dir, name)
-			if sameFilePath(p, selfPath) || sameFilePath(p, canonicalBin) {
+			if fsutil.SameFilePath(p, selfPath) || fsutil.SameFilePath(p, canonicalBin) {
 				continue
 			}
 			if _, err := os.Stat(p); err == nil {
@@ -1206,7 +1142,7 @@ func updateCmd(args []string, o options) error {
 
 	oldBinCanonical := filepath.Join(configBase, "bin", oldInstName)
 	hasOldBinCanonical := false
-	if !sameFilePath(oldBinCanonical, selfPath) && !sameFilePath(oldBinCanonical, canonicalBin) {
+	if !fsutil.SameFilePath(oldBinCanonical, selfPath) && !fsutil.SameFilePath(oldBinCanonical, canonicalBin) {
 		if _, err := os.Stat(oldBinCanonical); err == nil {
 			hasOldBinCanonical = true
 		}
@@ -1219,7 +1155,7 @@ func updateCmd(args []string, o options) error {
 		if hasLegacyCopy(plan.pens[i].dir) {
 			anyLegacy = true
 		}
-		if interrupted, _ := readUpdatingMarker(plan.pens[i].dir); interrupted {
+		if interrupted, _ := state.ReadUpdatingMarker(plan.pens[i].dir); interrupted {
 			anyInterrupted = true
 		}
 		if agentRunningStaleBinary(&plan.pens[i], wantHex) {
@@ -1230,7 +1166,7 @@ func updateCmd(args []string, o options) error {
 		if hasLegacyCopy(plan.shares[i].dir) {
 			anyLegacy = true
 		}
-		if interrupted, _ := readUpdatingMarker(plan.shares[i].dir); interrupted {
+		if interrupted, _ := state.ReadUpdatingMarker(plan.shares[i].dir); interrupted {
 			anyInterrupted = true
 		}
 	}
@@ -1239,7 +1175,7 @@ func updateCmd(args []string, o options) error {
 	if !anyUpdate {
 		say("\n✓ %s is already up to date (%s).", cliBinaryName(), wantHex)
 		if !o.dryRun {
-			warnMissingSystemProxyServices(loadInstalledPenConfigs(configBase))
+			warnMissingSystemProxyServices(state.LoadInstalledPenConfigs(configBase))
 		}
 		return nil
 	}
@@ -1353,7 +1289,7 @@ func updateCmd(args []string, o options) error {
 	// Atomically migrate and restart running pen agents and managed shares onto
 	// canonicalBin, deleting legacy per-pen/share copies only after health checks pass.
 	serviceBin := canonicalBin
-	if sameFilePath(selfPath, canonicalBin) || !canonicalNeeded {
+	if fsutil.SameFilePath(selfPath, canonicalBin) || !canonicalNeeded {
 		serviceBin = selfPath
 	}
 	ops := defaultPenUpdateOps()
@@ -1371,15 +1307,15 @@ func updateCmd(args []string, o options) error {
 	for i := range plan.shares {
 		s := &plan.shares[i]
 		legacy := legacyCopyIn(s.dir)
-		interrupted, _ := readUpdatingMarker(s.dir)
+		interrupted, _ := state.ReadUpdatingMarker(s.dir)
 		if !forceAll && legacy == "" && !interrupted {
 			continue
 		}
 		if err := migrateAndRestartShare(s, serviceBin, legacy, selfPath, o, shareOps); err != nil {
-			note("✗ share %s: %v", s.cfg.fqdn(), err)
-			failedShares = append(failedShares, s.cfg.fqdn())
+			note("✗ share %s: %v", s.cfg.FQDN(), err)
+			failedShares = append(failedShares, s.cfg.FQDN())
 		} else {
-			note("✓ share %s migrated to %s", s.cfg.fqdn(), serviceBin)
+			note("✓ share %s migrated to %s", s.cfg.FQDN(), serviceBin)
 		}
 	}
 	if hasOldBinCanonical && len(failedZones) == 0 && len(failedShares) == 0 {
@@ -1411,11 +1347,11 @@ func updateCmd(args []string, o options) error {
 	} else {
 		say("\n✓ Updated hogman (SHA-256 %s).", wantHex)
 	}
-	warnMissingSystemProxyServices(loadInstalledPenConfigs(configBase))
+	warnMissingSystemProxyServices(state.LoadInstalledPenConfigs(configBase))
 	return nil
 }
 
-func warnMissingSystemProxyServices(configs []*agentConfig) {
+func warnMissingSystemProxyServices(configs []*state.AgentConfig) {
 	if len(configs) == 0 {
 		return
 	}
@@ -1427,7 +1363,7 @@ func warnMissingSystemProxyServices(configs []*agentConfig) {
 		svcList := formatServiceList(sys.MissingProxyServices)
 		say("\n! Automatic proxy configuration is not set on: %s", svcList)
 		say("  In System Settings → Network → %s → Details… → Proxies, turn on \"Automatic proxy configuration\" and paste:", svcList)
-		say("    %s", host.pacURL())
+		say("    %s", host.PACURL())
 	}
 }
 

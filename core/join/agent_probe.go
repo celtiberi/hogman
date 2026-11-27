@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"hogman/join/internal/state"
 )
 
 type agentEndpointState int
@@ -46,17 +48,17 @@ type agentProbeResult struct {
 // against a pen agent's loopback /status endpoint. It fails closed whenever
 // status.token is missing, the response is non-200 or malformed, the zone
 // mismatches, or the HMAC proof does not match.
-func probeAgentStatus(dir string, cfg *agentConfig, timeout time.Duration) agentProbeResult {
-	tokBytes, tokErr := os.ReadFile(filepath.Join(dir, statusTokenFilename))
+func probeAgentStatus(dir string, cfg *state.AgentConfig, timeout time.Duration) agentProbeResult {
+	tokBytes, tokErr := os.ReadFile(filepath.Join(dir, state.StatusTokenFilename))
 	token := strings.TrimSpace(string(tokBytes))
 
-	nonce, err := generateHexToken(16)
+	nonce, err := state.GenerateHexToken(16)
 	if err != nil {
 		return agentProbeResult{state: agentEndpointDown, err: err}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.proxyURL()+"/status", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.ProxyURL()+"/status", nil)
 	if err != nil {
 		return agentProbeResult{state: agentEndpointDown, err: err}
 	}
@@ -100,7 +102,7 @@ func probeAgentStatus(dir string, cfg *agentConfig, timeout time.Duration) agent
 		}
 	}
 	gotProof := strings.TrimSpace(resp.Header.Get("X-Hogman-Proof"))
-	wantProof := computeStatusProof(token, nonce, cfg.Zone)
+	wantProof := state.ComputeStatusProof(token, nonce, cfg.Zone)
 	if gotProof == "" || !hmac.Equal([]byte(gotProof), []byte(wantProof)) {
 		return agentProbeResult{
 			state: agentEndpointSquatted,
@@ -121,11 +123,11 @@ func probeAgentStatus(dir string, cfg *agentConfig, timeout time.Duration) agent
 	}
 }
 
-func agentState(c *agentConfig) (*agentStatus, error) {
-	return agentStateInDir(stateDir(c.Zone), c)
+func agentState(c *state.AgentConfig) (*agentStatus, error) {
+	return agentStateInDir(state.StateDir(c.Zone), c)
 }
 
-func agentStateInDir(dir string, c *agentConfig) (*agentStatus, error) {
+func agentStateInDir(dir string, c *state.AgentConfig) (*agentStatus, error) {
 	res := probeAgentStatus(dir, c, 2*time.Second)
 	if !res.verified {
 		if res.err != nil {
@@ -136,12 +138,12 @@ func agentStateInDir(dir string, c *agentConfig) (*agentStatus, error) {
 	return res.status, nil
 }
 
-func verifyAgentEndpoint(dir string, cfg *agentConfig) agentEndpointState {
+func verifyAgentEndpoint(dir string, cfg *state.AgentConfig) agentEndpointState {
 	state, _ := verifyAgentEndpointDetail(dir, cfg)
 	return state
 }
 
-func verifyAgentEndpointDetail(dir string, cfg *agentConfig) (agentEndpointState, agentEndpointDetail) {
+func verifyAgentEndpointDetail(dir string, cfg *state.AgentConfig) (agentEndpointState, agentEndpointDetail) {
 	res := probeAgentStatus(dir, cfg, 400*time.Millisecond)
 	if !res.verified {
 		return res.state, agentEndpointDetail{}

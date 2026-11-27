@@ -7,6 +7,9 @@ import (
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/types/key"
 	"tailscale.com/types/views"
+
+	"hogman/join/internal/link"
+	"hogman/join/internal/mesh"
 )
 
 func tagsPtr(tags ...string) *views.Slice[string] {
@@ -35,9 +38,9 @@ func TestResolvePenDNSIPAndLiveStatusFollowsInfraPeer(t *testing.T) {
 				},
 			},
 		}
-		got, ok := resolvePenDNSIP(st, "100.64.0.9")
+		got, ok := mesh.ResolvePenDNSIP(st, "100.64.0.9")
 		if !ok || got.String() != "100.64.0.9" {
-			t.Fatalf("resolvePenDNSIP = (%v, %v), want (100.64.0.9, true)", got, ok)
+			t.Fatalf("ResolvePenDNSIP = (%v, %v), want (100.64.0.9, true)", got, ok)
 		}
 	})
 
@@ -67,13 +70,13 @@ func TestResolvePenDNSIPAndLiveStatusFollowsInfraPeer(t *testing.T) {
 				},
 			},
 		}
-		got, ok := resolvePenDNSIP(st, "100.64.0.1")
+		got, ok := mesh.ResolvePenDNSIP(st, "100.64.0.1")
 		if !ok || got.String() != "100.64.0.7" {
-			t.Fatalf("resolvePenDNSIP = (%v, %v), want (100.64.0.7, true)", got, ok)
+			t.Fatalf("ResolvePenDNSIP = (%v, %v), want (100.64.0.7, true)", got, ok)
 		}
-		up, needsLogin, reason := evaluateLiveNodeStatus(st, "100.64.0.1")
+		up, needsLogin, reason := mesh.EvaluateLiveNodeStatus(st, "100.64.0.1")
 		if !up || needsLogin || reason != "" {
-			t.Fatalf("evaluateLiveNodeStatus = (%v, %v, %q), want (true, false, \"\")", up, needsLogin, reason)
+			t.Fatalf("EvaluateLiveNodeStatus = (%v, %v, %q), want (true, false, \"\")", up, needsLogin, reason)
 		}
 	})
 
@@ -93,9 +96,9 @@ func TestResolvePenDNSIPAndLiveStatusFollowsInfraPeer(t *testing.T) {
 				},
 			},
 		}
-		got, ok := resolvePenDNSIP(st, "100.64.0.1")
+		got, ok := mesh.ResolvePenDNSIP(st, "100.64.0.1")
 		if !ok || got.String() != "100.64.0.8" {
-			t.Fatalf("resolvePenDNSIP = (%v, %v), want (100.64.0.8, true)", got, ok)
+			t.Fatalf("ResolvePenDNSIP = (%v, %v), want (100.64.0.8, true)", got, ok)
 		}
 	})
 
@@ -110,12 +113,12 @@ func TestResolvePenDNSIPAndLiveStatusFollowsInfraPeer(t *testing.T) {
 				},
 			},
 		}
-		if got, ok := resolvePenDNSIP(st, "100.64.0.1"); ok {
+		if got, ok := mesh.ResolvePenDNSIP(st, "100.64.0.1"); ok {
 			t.Fatalf("expected fail-closed false, got (%v, true)", got)
 		}
-		up, needsLogin, reason := evaluateLiveNodeStatus(st, "100.64.0.1")
+		up, needsLogin, reason := mesh.EvaluateLiveNodeStatus(st, "100.64.0.1")
 		if up || needsLogin || reason != "not connected to pen" {
-			t.Fatalf("evaluateLiveNodeStatus = (%v, %v, %q), want (false, false, \"not connected to pen\")", up, needsLogin, reason)
+			t.Fatalf("EvaluateLiveNodeStatus = (%v, %v, %q), want (false, false, \"not connected to pen\")", up, needsLogin, reason)
 		}
 	})
 
@@ -130,14 +133,14 @@ func TestResolvePenDNSIPAndLiveStatusFollowsInfraPeer(t *testing.T) {
 				},
 			},
 		}
-		if got, ok := resolvePenDNSIP(st, "fd7a:115c:a1e0::1"); ok {
+		if got, ok := mesh.ResolvePenDNSIP(st, "fd7a:115c:a1e0::1"); ok {
 			t.Fatalf("expected IPv6-only DNS peer to fail closed, got (%v, true)", got)
 		}
-		if inMeshRanges(netip.MustParseAddr("fd7a:115c:a1e0::1")) {
-			t.Fatal("inMeshRanges must reject mesh IPv6 addresses")
+		if link.InMeshRanges(netip.MustParseAddr("fd7a:115c:a1e0::1")) {
+			t.Fatal("InMeshRanges must reject mesh IPv6 addresses")
 		}
-		if !inMeshRanges(netip.MustParseAddr("100.64.0.1")) {
-			t.Fatal("inMeshRanges must accept mesh IPv4 addresses")
+		if !link.InMeshRanges(netip.MustParseAddr("100.64.0.1")) {
+			t.Fatal("InMeshRanges must accept mesh IPv4 addresses")
 		}
 	})
 }

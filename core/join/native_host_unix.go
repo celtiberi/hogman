@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"syscall"
+
+	"hogman/join/internal/fsutil"
 )
 
 // isolateNativeStdout duplicates fd 1 for exclusive Native Messaging framing
@@ -76,7 +78,7 @@ func dirExists(path string) bool {
 // canonical hogman binary in the same directory so the native host stays in
 // sync automatically without duplicating ~25 MiB on disk.
 func installNativeHostBinary(canonicalBin, hostPath string) error {
-	if sameFilePath(canonicalBin, hostPath) {
+	if fsutil.SameFilePath(canonicalBin, hostPath) {
 		// Already pointing at canonicalBin (check it is actually a symlink, not an old copy).
 		if fi, err := os.Lstat(hostPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 			return nil

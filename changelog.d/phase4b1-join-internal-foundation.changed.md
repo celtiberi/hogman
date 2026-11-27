@@ -1,0 +1,1 @@
+- `hogman` CLI: extracted foundational internal packages (`fsutil`, `link`, `bridge`, `state`, `mesh`, `penapi`) with clean acyclic boundaries and standalone unit tests, and moved status reporting out of `native_host.go` into `status.go`.

@@ -5,9 +5,11 @@ package main
 import (
 	"os/exec"
 	"strings"
+
+	"hogman/join/internal/state"
 )
 
-func detectSystemProxyState(known []*agentConfig) systemProxyState {
+func detectSystemProxyState(known []*state.AgentConfig) systemProxyState {
 	proxyOut, err := exec.Command("/usr/sbin/scutil", "--proxy").Output()
 	if err != nil {
 		return systemProxyState{}
@@ -25,7 +27,7 @@ func detectSystemProxyState(known []*agentConfig) systemProxyState {
 	for _, svc := range hardwareNetworkServices() {
 		seen[svc] = true
 		cur, enabled := autoProxyState(svc)
-		if enabled && isHogmanPACURL(cur, known) {
+		if enabled && state.IsHogmanPACURL(cur, known) {
 			serviceHasHogmanPAC = true
 		} else if len(known) > 0 && !shouldLeaveAutoProxy(cur, enabled, known) {
 			missing = append(missing, svc)
@@ -37,7 +39,7 @@ func detectSystemProxyState(known []*agentConfig) systemProxyState {
 				continue
 			}
 			cur, enabled := autoProxyState(svc)
-			if enabled && isHogmanPACURL(cur, known) {
+			if enabled && state.IsHogmanPACURL(cur, known) {
 				serviceHasHogmanPAC = true
 				break
 			}

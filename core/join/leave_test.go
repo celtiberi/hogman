@@ -7,6 +7,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"hogman/join/internal/penapi"
+	"hogman/join/internal/state"
 )
 
 func TestLeaveKey(t *testing.T) {
@@ -63,12 +66,12 @@ func TestLocalLeaveTargetsFromDisk(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write(filepath.Join(stateDir("a.pens.example.network"), "config.json"),
-		agentConfig{Zone: "a.pens.example.network", LoginServer: "https://a.gate.example.network"})
-	write(filepath.Join(shareDir("a.pens.example.network", "blog"), "share.json"),
-		shareConfig{Name: "blog", Zone: "a.pens.example.network", LoginServer: "https://a.gate.example.network"})
-	write(filepath.Join(shareDir("s.pens.example.network", "cooler"), "share.json"),
-		shareConfig{Name: "cooler", Zone: "s.pens.example.network", LoginServer: "https://s.gate.example.network"})
+	write(filepath.Join(state.StateDir("a.pens.example.network"), "config.json"),
+		state.AgentConfig{Zone: "a.pens.example.network", LoginServer: "https://a.gate.example.network"})
+	write(filepath.Join(state.ShareDir("a.pens.example.network", "blog"), "share.json"),
+		state.ShareConfig{Name: "blog", Zone: "a.pens.example.network", LoginServer: "https://a.gate.example.network"})
+	write(filepath.Join(state.ShareDir("s.pens.example.network", "cooler"), "share.json"),
+		state.ShareConfig{Name: "cooler", Zone: "s.pens.example.network", LoginServer: "https://s.gate.example.network"})
 
 	got := localLeaveTargets()
 	if len(got) != 2 {
@@ -122,11 +125,11 @@ func newLeaveFixture(t *testing.T) *leaveFixture {
 	}
 	for _, p := range []string{"own", "mem"} {
 		zone := p + ".pens.example.network"
-		write(filepath.Join(stateDir(zone), "config.json"),
-			agentConfig{Zone: zone, LoginServer: "https://" + p + ".gate.example.network"})
+		write(filepath.Join(state.StateDir(zone), "config.json"),
+			state.AgentConfig{Zone: zone, LoginServer: "https://" + p + ".gate.example.network"})
 	}
-	write(filepath.Join(shareDir("shr.pens.example.network", "cooler"), "share.json"),
-		shareConfig{Name: "cooler", Zone: "shr.pens.example.network", LoginServer: "https://shr.gate.example.network"})
+	write(filepath.Join(state.ShareDir("shr.pens.example.network", "cooler"), "share.json"),
+		state.ShareConfig{Name: "cooler", Zone: "shr.pens.example.network", LoginServer: "https://shr.gate.example.network"})
 
 	oldRisk, oldConfirm, oldLeave, oldSweep, oldTTY := leaveRiskFn, confirmFn, leaveOneFn, sweepStaleProxyFn, isTerminalFn
 	t.Cleanup(func() {
@@ -134,7 +137,7 @@ func newLeaveFixture(t *testing.T) *leaveFixture {
 	})
 	sweepStaleProxyFn = func() { f.swept++ }
 	isTerminalFn = func() bool { return f.terminal }
-	leaveRiskFn = func(c *agentConfig) leaveRisk {
+	leaveRiskFn = func(c *state.AgentConfig) leaveRisk {
 		if f.unknown[c.Zone] {
 			return leaveRiskUnknown
 		}
@@ -158,7 +161,7 @@ func newLeaveFixture(t *testing.T) *leaveFixture {
 }
 
 func (f *leaveFixture) settingsExist() bool {
-	_, err := os.Stat(hogmanConfigBase())
+	_, err := os.Stat(state.ConfigBase())
 	return err == nil
 }
 
@@ -479,10 +482,10 @@ func TestUninstallForceAsksOnceAndNeverRemovesForAKeptPen(t *testing.T) {
 // uninstall with no pens still asks first, and clears a stale proxy setting.
 func TestUninstallWithNoPensAsksAndSweeps(t *testing.T) {
 	f := newLeaveFixture(t)
-	for _, d := range []string{hogmanConfigBase(), sharesBase()} {
+	for _, d := range []string{state.ConfigBase(), state.SharesBase()} {
 		_ = os.RemoveAll(d)
 	}
-	if err := os.MkdirAll(hogmanConfigBase(), 0o700); err != nil {
+	if err := os.MkdirAll(state.ConfigBase(), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	f.answer = false
@@ -509,24 +512,24 @@ func TestLeaveRiskFromMe(t *testing.T) {
 	removedAt := int64(1700000000)
 
 	// Missing is_owner (older registrar) -> unknown (fail closed).
-	if got := leaveRiskFromMe(meView{}); got != leaveRiskUnknown {
+	if got := leaveRiskFromMe(penapi.MeView{}); got != leaveRiskUnknown {
 		t.Fatalf("missing is_owner = %v, want leaveRiskUnknown", got)
 	}
 	// Non-owner -> safe.
-	if got := leaveRiskFromMe(meView{IsOwner: &no}); got != leaveRiskNone {
+	if got := leaveRiskFromMe(penapi.MeView{IsOwner: &no}); got != leaveRiskNone {
 		t.Fatalf("non-owner = %v, want leaveRiskNone", got)
 	}
 	// Owner with a second owner -> safe (even with only one device).
-	meTwoOwners := meView{IsOwner: &yes, Owners: &two}
+	meTwoOwners := penapi.MeView{IsOwner: &yes, Owners: &two}
 	meTwoOwners.ThisDevice.ID = 1
-	meTwoOwners.Devices = []meDeviceView{{ID: 1, Kind: "personal"}}
+	meTwoOwners.Devices = []penapi.MeDeviceView{{ID: 1, Kind: "personal"}}
 	if got := leaveRiskFromMe(meTwoOwners); got != leaveRiskNone {
 		t.Fatalf("owner with 2 owners = %v, want leaveRiskNone", got)
 	}
 	// Sole owner with another active personal device -> safe.
-	meTwoDevs := meView{IsOwner: &yes, Owners: &one}
+	meTwoDevs := penapi.MeView{IsOwner: &yes, Owners: &one}
 	meTwoDevs.ThisDevice.ID = 1
-	meTwoDevs.Devices = []meDeviceView{
+	meTwoDevs.Devices = []penapi.MeDeviceView{
 		{ID: 1, Kind: "personal"},
 		{ID: 2, Kind: "personal"},
 	}
@@ -534,9 +537,9 @@ func TestLeaveRiskFromMe(t *testing.T) {
 		t.Fatalf("sole owner with 2 personal devices = %v, want leaveRiskNone", got)
 	}
 	// Sole owner with only a server device or removed personal device -> risky!
-	meOnlyServerAndRemoved := meView{IsOwner: &yes, Owners: &one}
+	meOnlyServerAndRemoved := penapi.MeView{IsOwner: &yes, Owners: &one}
 	meOnlyServerAndRemoved.ThisDevice.ID = 1
-	meOnlyServerAndRemoved.Devices = []meDeviceView{
+	meOnlyServerAndRemoved.Devices = []penapi.MeDeviceView{
 		{ID: 1, Kind: "personal"},
 		{ID: 2, Kind: "server"},
 		{ID: 3, Kind: "personal", RemovedAt: &removedAt},
@@ -545,7 +548,7 @@ func TestLeaveRiskFromMe(t *testing.T) {
 		t.Fatalf("sole owner with only server/removed other devices = %v, want leaveRiskSoleOwnerLastDevice", got)
 	}
 	// Older registrar returning is_owner=true without owners/devices -> fail closed as sole owner.
-	if got := leaveRiskFromMe(meView{IsOwner: &yes}); got != leaveRiskSoleOwnerLastDevice {
+	if got := leaveRiskFromMe(penapi.MeView{IsOwner: &yes}); got != leaveRiskSoleOwnerLastDevice {
 		t.Fatalf("is_owner=true without owners/devices = %v, want leaveRiskSoleOwnerLastDevice", got)
 	}
 }
@@ -578,7 +581,7 @@ func TestLeftoverHogmanBinariesListsHomeCopies(t *testing.T) {
 	other := t.TempDir()
 	self := filepath.Join(other, cliBinaryName())
 	homeCopy := filepath.Join(home, cliBinaryName())
-	legacyCopy := filepath.Join(home, legacyBinaryName(runtime.GOOS))
+	legacyCopy := filepath.Join(home, state.LegacyBinaryName(runtime.GOOS))
 	for _, p := range []string{self, homeCopy, legacyCopy} {
 		if err := os.WriteFile(p, []byte("bin"), 0o700); err != nil {
 			t.Fatal(err)

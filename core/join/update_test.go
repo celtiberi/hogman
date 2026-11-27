@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"hogman/join/internal/state"
 )
 
 func hexSHA256(b []byte) string {
@@ -223,7 +225,7 @@ func TestResolveUpdatePlan(t *testing.T) {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := (&agentConfig{Zone: zone, LoginServer: login, ControlCA: ca}).save(d); err != nil {
+		if err := (&state.AgentConfig{Zone: zone, LoginServer: login, ControlCA: ca}).Save(d); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -232,7 +234,7 @@ func TestResolveUpdatePlan(t *testing.T) {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := (&shareConfig{Zone: zone, Name: name, LoginServer: login}).save(d); err != nil {
+		if err := (&state.ShareConfig{Zone: zone, Name: name, LoginServer: login}).Save(d); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -274,7 +276,7 @@ func TestResolveUpdatePlan(t *testing.T) {
 	if err := os.MkdirAll(d, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&shareConfig{Zone: "gamma.hogman", Name: "blog", LoginServer: "https://gamma.example", ControlCA: "CA-GAMMA"}).save(d); err != nil {
+	if err := (&state.ShareConfig{Zone: "gamma.hogman", Name: "blog", LoginServer: "https://gamma.example", ControlCA: "CA-GAMMA"}).Save(d); err != nil {
 		t.Fatal(err)
 	}
 	pShareOnly, err := resolveUpdatePlan(nil, options{pen: "gamma.hogman"}, filepath.Join(t.TempDir(), "none"), onlyShares)
@@ -388,14 +390,14 @@ func TestMigrateAndRestartPenRollbackAndRecovery(t *testing.T) {
 	if err := os.WriteFile(legacyBin, []byte("legacy"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	pen := &penTarget{zone: "bobo.hogman", dir: dir, cfg: &agentConfig{Zone: "bobo.hogman"}}
+	pen := &penTarget{zone: "bobo.hogman", dir: dir, cfg: &state.AgentConfig{Zone: "bobo.hogman"}}
 
 	// 1. restartNew fails while running -> stops partial new agent, rolls back to legacyBin, keeps legacyBin.
 	var calls []string
 	ops := penUpdateOps{
-		isRunning:  func(string, *agentConfig) bool { return true },
+		isRunning:  func(string, *state.AgentConfig) bool { return true },
 		hasService: func(string) bool { return true },
-		stop:       func(string, *agentConfig) { calls = append(calls, "stop") },
+		stop:       func(string, *state.AgentConfig) { calls = append(calls, "stop") },
 		restartNew: func(*penTarget, string, bool, options) error {
 			calls = append(calls, "restartNew")
 			return errors.New("agent timeout")
@@ -418,7 +420,7 @@ func TestMigrateAndRestartPenRollbackAndRecovery(t *testing.T) {
 	if _, statErr := os.Stat(legacyBin); statErr != nil {
 		t.Fatalf("legacyBin removed despite rollback: %v", statErr)
 	}
-	if present, _ := readUpdatingMarker(dir); present {
+	if present, _ := state.ReadUpdatingMarker(dir); present {
 		t.Fatal("updating marker should be cleared after successful rollback to legacyBin")
 	}
 
@@ -431,15 +433,15 @@ func TestMigrateAndRestartPenRollbackAndRecovery(t *testing.T) {
 	if err := migrateAndRestartPen(pen, canonBin, legacyBin, "/tmp/self", options{}, ops); err == nil {
 		t.Fatal("expected error when both restartNew and restartOld fail")
 	}
-	if present, hadSvc := readUpdatingMarker(dir); !present || !hadSvc {
+	if present, hadSvc := state.ReadUpdatingMarker(dir); !present || !hadSvc {
 		t.Fatalf("updating marker after failed rollback = (%v, %v), want (true, true)", present, hadSvc)
 	}
-	clearUpdatingMarker(dir)
+	state.ClearUpdatingMarker(dir)
 
 	// 2. Stopped pen with service -> rewrites service and removes legacyBin without starting.
 	calls = nil
-	ops.isRunning = func(string, *agentConfig) bool { return false }
-	ops.rewriteService = func(bin, _ string, _ *agentConfig) error {
+	ops.isRunning = func(string, *state.AgentConfig) bool { return false }
+	ops.rewriteService = func(bin, _ string, _ *state.AgentConfig) error {
 		if bin != canonBin {
 			t.Fatalf("rewriteService bin=%q, want %q", bin, canonBin)
 		}
@@ -458,7 +460,7 @@ func TestMigrateAndRestartPenRollbackAndRecovery(t *testing.T) {
 
 	// 3. Running pen happy path -> stop, restartNew, clear marker.
 	calls = nil
-	ops.isRunning = func(string, *agentConfig) bool { return true }
+	ops.isRunning = func(string, *state.AgentConfig) bool { return true }
 	ops.restartNew = func(*penTarget, string, bool, options) error { calls = append(calls, "restartNew"); return nil }
 	if err := migrateAndRestartPen(pen, canonBin, "", "/tmp/self", options{}, ops); err != nil {
 		t.Fatalf("happy-path migrate: %v", err)
@@ -466,7 +468,7 @@ func TestMigrateAndRestartPenRollbackAndRecovery(t *testing.T) {
 	if !slices.Equal(calls, []string{"stop", "restartNew"}) {
 		t.Fatalf("happy-path sequence = %v, want [stop restartNew]", calls)
 	}
-	if present, _ := readUpdatingMarker(dir); present {
+	if present, _ := state.ReadUpdatingMarker(dir); present {
 		t.Fatal("updating marker should be cleared after successful pen migration")
 	}
 }
@@ -481,15 +483,15 @@ func TestMigrateAndRestartShareRollbackAndRecovery(t *testing.T) {
 	s := &shareTargetDir{
 		dir:  dir,
 		name: "blog",
-		cfg:  &shareConfig{Name: "blog", Zone: "bobo.hogman", Target: "http://127.0.0.1:3000"},
+		cfg:  &state.ShareConfig{Name: "blog", Zone: "bobo.hogman", Target: "http://127.0.0.1:3000"},
 	}
 
 	// 1. Running managed share + restartNew fails -> stops, rolls back to legacyBin, keeps legacyBin.
 	var calls []string
 	ops := shareUpdateOps{
 		isRunning:  func(string) bool { return true },
-		hasService: func(*shareConfig) bool { return true },
-		stop:       func(string, *shareConfig) { calls = append(calls, "stop") },
+		hasService: func(*state.ShareConfig) bool { return true },
+		stop:       func(string, *state.ShareConfig) { calls = append(calls, "stop") },
 		restartNew: func(*shareTargetDir, string, options) error {
 			calls = append(calls, "restartNew")
 			return errors.New("share failed")
@@ -501,7 +503,7 @@ func TestMigrateAndRestartShareRollbackAndRecovery(t *testing.T) {
 			calls = append(calls, "restartOld")
 			return nil
 		},
-		rewriteService: func(string, string, *shareConfig) error {
+		rewriteService: func(string, string, *state.ShareConfig) error {
 			calls = append(calls, "rewriteService")
 			return nil
 		},
@@ -519,7 +521,7 @@ func TestMigrateAndRestartShareRollbackAndRecovery(t *testing.T) {
 
 	// 2. Running unmanaged share -> leaves running without stopping or deleting legacyBin.
 	calls = nil
-	ops.hasService = func(*shareConfig) bool { return false }
+	ops.hasService = func(*state.ShareConfig) bool { return false }
 	if err := migrateAndRestartShare(s, canonBin, legacyBin, "/tmp/self", options{}, ops); err != nil {
 		t.Fatalf("unmanaged running share: %v", err)
 	}
@@ -532,7 +534,7 @@ func TestMigrateAndRestartShareRollbackAndRecovery(t *testing.T) {
 
 	// 3. Running managed share happy path -> stop, restartNew, remove legacyBin.
 	calls = nil
-	ops.hasService = func(*shareConfig) bool { return true }
+	ops.hasService = func(*state.ShareConfig) bool { return true }
 	ops.restartNew = func(*shareTargetDir, string, options) error { calls = append(calls, "restartNew"); return nil }
 	if err := migrateAndRestartShare(s, canonBin, legacyBin, "/tmp/self", options{}, ops); err != nil {
 		t.Fatalf("managed happy path: %v", err)
@@ -565,13 +567,13 @@ func TestFindAndRetireLegacySameServerPens(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := (&agentConfig{Zone: "bobo.hogman", LoginServer: "https://hs.example.com"}).save(oldDir); err != nil {
+	if err := (&state.AgentConfig{Zone: "bobo.hogman", LoginServer: "https://hs.example.com"}).Save(oldDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&agentConfig{Zone: "bobo.pens.example.com", LoginServer: "https://hs.example.com"}).save(newDir); err != nil {
+	if err := (&state.AgentConfig{Zone: "bobo.pens.example.com", LoginServer: "https://hs.example.com"}).Save(newDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&agentConfig{Zone: "other.hogman", LoginServer: "https://other.example.com"}).save(otherDir); err != nil {
+	if err := (&state.AgentConfig{Zone: "other.hogman", LoginServer: "https://other.example.com"}).Save(otherDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -582,7 +584,7 @@ func TestFindAndRetireLegacySameServerPens(t *testing.T) {
 
 	var steps []string
 	retireLegacySameServerPens(found, legacyRetireOps{
-		stop: func(_ string, c *agentConfig) {
+		stop: func(_ string, c *state.AgentConfig) {
 			steps = append(steps, "stop:"+c.Zone)
 		},
 		logout: func(dir string) {
@@ -613,7 +615,7 @@ func TestQueryBinaryVersionLineAndPensOutsidePlan(t *testing.T) {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := (&agentConfig{Zone: z, LoginServer: "https://hs.example.com"}).save(d); err != nil {
+		if err := (&state.AgentConfig{Zone: z, LoginServer: "https://hs.example.com"}).Save(d); err != nil {
 			t.Fatal(err)
 		}
 	}

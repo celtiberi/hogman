@@ -16,11 +16,13 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"hogman/join/internal/state"
 )
 
 func listenInHogmanRange(t *testing.T) (net.Listener, int) {
 	t.Helper()
-	for port := hogmanPortMin + 500; port <= hogmanPortMax; port++ {
+	for port := state.PortMin + 500; port <= state.PortMax; port++ {
 		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err == nil {
 			t.Cleanup(func() { _ = ln.Close() })
@@ -53,9 +55,9 @@ func TestParseStrictHogmanPort(t *testing.T) {
 		{"127.0.0.1:26999", 26999},
 	}
 	for _, tc := range good {
-		got, ok := parseStrictHogmanPort(tc.addr)
+		got, ok := state.ParseStrictHogmanPort(tc.addr)
 		if !ok || got != tc.want {
-			t.Fatalf("parseStrictHogmanPort(%q) = (%d, %v), want (%d, true)", tc.addr, got, ok, tc.want)
+			t.Fatalf("state.ParseStrictHogmanPort(%q) = (%d, %v), want (%d, true)", tc.addr, got, ok, tc.want)
 		}
 	}
 	bad := []string{
@@ -70,8 +72,8 @@ func TestParseStrictHogmanPort(t *testing.T) {
 		"not-a-host",
 	}
 	for _, addr := range bad {
-		if port, ok := parseStrictHogmanPort(addr); ok {
-			t.Fatalf("parseStrictHogmanPort(%q) = (%d, true), want rejected", addr, port)
+		if port, ok := state.ParseStrictHogmanPort(addr); ok {
+			t.Fatalf("state.ParseStrictHogmanPort(%q) = (%d, true), want rejected", addr, port)
 		}
 	}
 }
@@ -110,12 +112,12 @@ func TestCollectNativePensStrictValidationLegacyAndSquatDetection(t *testing.T) 
 	if err := os.MkdirAll(dir1, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cfg1 := &agentConfig{Zone: zone1, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port1)}
-	if err := cfg1.save(dir1); err != nil {
+	cfg1 := &state.AgentConfig{Zone: zone1, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port1)}
+	if err := cfg1.Save(dir1); err != nil {
 		t.Fatal(err)
 	}
 	tok1 := "0123456789abcdef0123456789abcdef"
-	if err := os.WriteFile(filepath.Join(dir1, statusTokenFilename), []byte(tok1), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir1, state.StatusTokenFilename), []byte(tok1), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	a1 := newAgent(cfg1, nil)
@@ -132,11 +134,11 @@ func TestCollectNativePensStrictValidationLegacyAndSquatDetection(t *testing.T) 
 	if err := os.MkdirAll(dir2, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cfg2 := &agentConfig{Zone: zone2, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port2)}
-	if err := cfg2.save(dir2); err != nil {
+	cfg2 := &state.AgentConfig{Zone: zone2, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port2)}
+	if err := cfg2.Save(dir2); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir2, statusTokenFilename), []byte("real-secret-token"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir2, state.StatusTokenFilename), []byte("real-secret-token"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fakeSrv := &httptest.Server{
@@ -157,8 +159,8 @@ func TestCollectNativePensStrictValidationLegacyAndSquatDetection(t *testing.T) 
 	if err := os.MkdirAll(dirLeg, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cfgLeg := &agentConfig{Zone: zoneLeg, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", portLeg)}
-	if err := cfgLeg.save(dirLeg); err != nil {
+	cfgLeg := &state.AgentConfig{Zone: zoneLeg, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", portLeg)}
+	if err := cfgLeg.Save(dirLeg); err != nil {
 		t.Fatal(err)
 	}
 	legAgent := newAgent(cfgLeg, nil)
@@ -175,7 +177,7 @@ func TestCollectNativePensStrictValidationLegacyAndSquatDetection(t *testing.T) 
 	if err := os.MkdirAll(dir3, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&agentConfig{Zone: zone3, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port3)}).save(dir3); err != nil {
+	if err := (&state.AgentConfig{Zone: zone3, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port3)}).Save(dir3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -184,7 +186,7 @@ func TestCollectNativePensStrictValidationLegacyAndSquatDetection(t *testing.T) 
 	if err := os.MkdirAll(spoofDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&agentConfig{Zone: zone1, ProxyAddr: "127.0.0.1:26000"}).save(spoofDir); err != nil {
+	if err := (&state.AgentConfig{Zone: zone1, ProxyAddr: "127.0.0.1:26000"}).Save(spoofDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -193,7 +195,7 @@ func TestCollectNativePensStrictValidationLegacyAndSquatDetection(t *testing.T) 
 	if err := os.MkdirAll(badPortDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&agentConfig{Zone: "badport.pens.hogman.network", ProxyAddr: "127.0.0.1:8080"}).save(badPortDir); err != nil {
+	if err := (&state.AgentConfig{Zone: "badport.pens.hogman.network", ProxyAddr: "127.0.0.1:8080"}).Save(badPortDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -265,7 +267,7 @@ func TestServeNativeHostListWatchCachingAndPrivacy(t *testing.T) {
 	sess := &nativeHostSession{
 		configBase: base,
 		now:        time.Now,
-		detectProxy: func(_ []*agentConfig) systemProxyState {
+		detectProxy: func(_ []*state.AgentConfig) systemProxyState {
 			proxyCalls.Add(1)
 			return systemProxyState{
 				OSProxyConflict: true,
@@ -308,7 +310,7 @@ func TestServeNativeHostListWatchCachingAndPrivacy(t *testing.T) {
 	watchSess := &nativeHostSession{
 		configBase: base,
 		now:        time.Now,
-		detectProxy: func(_ []*agentConfig) systemProxyState {
+		detectProxy: func(_ []*state.AgentConfig) systemProxyState {
 			watchProxyCalls.Add(1)
 			return systemProxyState{}
 		},
@@ -341,7 +343,7 @@ func TestServeNativeHostListWatchCachingAndPrivacy(t *testing.T) {
 	if err := os.MkdirAll(newDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&agentConfig{Zone: newZone, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port)}).save(newDir); err != nil {
+	if err := (&state.AgentConfig{Zone: newZone, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port)}).Save(newDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -421,7 +423,7 @@ func TestSavedBrowserIDsPersistence(t *testing.T) {
 }
 
 func TestEvaluateDarwinProxyState(t *testing.T) {
-	known := []*agentConfig{{Zone: "farm2.pens.hogman.network", ProxyAddr: "127.0.0.1:25148"}}
+	known := []*state.AgentConfig{{Zone: "farm2.pens.hogman.network", ProxyAddr: "127.0.0.1:25148"}}
 
 	// ProtonVPN active: utun4 primary interface, scutil --proxy has no PAC, Wi-Fi service has Hogman PAC.
 	pVPN := parseScutilProxy("<dictionary> {\n  HTTPEnable : 0\n  ProxyAutoConfigEnable : 0\n}\n")
@@ -453,11 +455,11 @@ func TestEvaluateDarwinProxyState(t *testing.T) {
 }
 
 func TestRenderPACNormalizesTrailingDots(t *testing.T) {
-	single := renderPAC([]*agentConfig{{Zone: "farm2.pens.hogman.network", ProxyAddr: "127.0.0.1:25148"}})
+	single := state.RenderPAC([]*state.AgentConfig{{Zone: "farm2.pens.hogman.network", ProxyAddr: "127.0.0.1:25148"}})
 	if !strings.Contains(single, `.replace(/\.+$/, "")`) {
 		t.Fatalf("single-pen PAC missing trailing-dot normalization:\n%s", single)
 	}
-	multi := renderPAC([]*agentConfig{
+	multi := state.RenderPAC([]*state.AgentConfig{
 		{Zone: "farm2.pens.hogman.network", ProxyAddr: "127.0.0.1:25148"},
 		{Zone: "qa-piggy5.pens.hogman.network", ProxyAddr: "127.0.0.1:25149"},
 	})
@@ -474,12 +476,12 @@ func TestVerifyAgentEndpointReportsRemovedReason(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &agentConfig{Zone: zone, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port)}
-	if err := cfg.save(dir); err != nil {
+	cfg := &state.AgentConfig{Zone: zone, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port)}
+	if err := cfg.Save(dir); err != nil {
 		t.Fatal(err)
 	}
 	tok := "0123456789abcdef0123456789abcdef"
-	if err := os.WriteFile(filepath.Join(dir, statusTokenFilename), []byte(tok), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, state.StatusTokenFilename), []byte(tok), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	a := newAgent(cfg, nil)
@@ -492,9 +494,9 @@ func TestVerifyAgentEndpointReportsRemovedReason(t *testing.T) {
 	srv.Start()
 	defer srv.Close()
 
-	state, detail := verifyAgentEndpointDetail(dir, cfg)
-	if state != agentEndpointDown || !detail.verified || !detail.needsLogin || detail.reason != "device removed from pen" {
-		t.Fatalf("verifyAgentEndpointDetail = (%v, %+v), want (down, verified=true, needsLogin=true)", state, detail)
+	epState, detail := verifyAgentEndpointDetail(dir, cfg)
+	if epState != agentEndpointDown || !detail.verified || !detail.needsLogin || detail.reason != "device removed from pen" {
+		t.Fatalf("verifyAgentEndpointDetail = (%v, %+v), want (down, verified=true, needsLogin=true)", epState, detail)
 	}
 	pens, _ := collectNativePens(base)
 	if len(pens) != 1 || pens[0].Up || pens[0].Squatted || pens[0].statusReason != "device removed from pen" {
@@ -508,11 +510,11 @@ func TestVerifyAgentEndpointReportsRemovedReason(t *testing.T) {
 	if err := os.MkdirAll(dirBad, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cfgBad := &agentConfig{Zone: zoneBad, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", portBad)}
-	if err := cfgBad.save(dirBad); err != nil {
+	cfgBad := &state.AgentConfig{Zone: zoneBad, ProxyAddr: fmt.Sprintf("127.0.0.1:%d", portBad)}
+	if err := cfgBad.Save(dirBad); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dirBad, statusTokenFilename), []byte(tok), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dirBad, state.StatusTokenFilename), []byte(tok), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	badSrv := &httptest.Server{

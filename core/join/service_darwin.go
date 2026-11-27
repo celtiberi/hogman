@@ -7,6 +7,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"hogman/join/internal/fsutil"
+	"hogman/join/internal/link"
+	"hogman/join/internal/state"
 )
 
 func launchPlist(zone string) string {
@@ -17,7 +21,7 @@ func launchPlist(zone string) string {
 // installLaunchAgent writes plist atomically and loads it into the current
 // user's launchd GUI domain, removing the plist if bootstrap fails.
 func installLaunchAgent(label, path, plist string) (string, error) {
-	if err := writeFileAtomic(path, []byte(plist), 0o644); err != nil {
+	if err := fsutil.WriteFileAtomic(path, []byte(plist), 0o644); err != nil {
 		return "", err
 	}
 	domain := "gui/" + strconv.Itoa(os.Getuid())
@@ -34,7 +38,7 @@ func installLaunchAgent(label, path, plist string) (string, error) {
 // and restarts if it stops. No administrator rights needed. Always stops any
 // previous agent (including a legacy hogman-join process holding the proxy
 // port) first.
-func startAgent(dir string, c *agentConfig, o options) error {
+func startAgent(dir string, c *state.AgentConfig, o options) error {
 	if currentAgentHealthy(dir, c) {
 		return nil
 	}
@@ -55,14 +59,14 @@ func startAgent(dir string, c *agentConfig, o options) error {
 			return err
 		}
 		// No desktop session (for example over SSH): fall back to a plain background process.
-		note("could not register a login item (%s); running in the background until restart", firstLine(out))
+		note("could not register a login item (%s); running in the background until restart", link.FirstLine(out))
 		return startDetached(bin, dir)
 	}
 	note("it will start by itself when you log in")
 	return nil
 }
 
-func stopAgent(dir string, c *agentConfig) {
+func stopAgent(dir string, c *state.AgentConfig) {
 	domain := "gui/" + strconv.Itoa(os.Getuid())
 	_, _ = run("/bin/launchctl", "bootout", domain+"/"+launchLabel(c.Zone))
 	_ = os.Remove(launchPlist(c.Zone))
@@ -114,17 +118,17 @@ func stopOrphanAgentForDir(dir string) {
 	}
 }
 
-func sharePlist(c *shareConfig) string {
+func sharePlist(c *state.ShareConfig) string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "LaunchAgents", shareLaunchLabel(c)+".plist")
 }
 
-func shareServiceConfigured(c *shareConfig) bool {
+func shareServiceConfigured(c *state.ShareConfig) bool {
 	_, err := os.Stat(sharePlist(c))
 	return err == nil
 }
 
-func startShareBackground(dir string, c *shareConfig, o options) (bool, int, error) {
+func startShareBackground(dir string, c *state.ShareConfig, o options) (bool, int, error) {
 	bin, err := installedBinary(dir)
 	if err != nil {
 		return false, 0, err
@@ -132,7 +136,7 @@ func startShareBackground(dir string, c *shareConfig, o options) (bool, int, err
 	return startShareServiceWithBinary(bin, dir, c, o.noService)
 }
 
-func startShareServiceWithBinary(bin, dir string, c *shareConfig, noService bool) (bool, int, error) {
+func startShareServiceWithBinary(bin, dir string, c *state.ShareConfig, noService bool) (bool, int, error) {
 	logPath := filepath.Join(dir, "share.log")
 	if noService {
 		pid, err := spawnDetached(logPath, bin, "__share-run", dir)
@@ -146,7 +150,7 @@ func startShareServiceWithBinary(bin, dir string, c *shareConfig, noService bool
 		if out == "" {
 			return false, 0, err
 		}
-		note("could not register a login item (%s); running in the background until restart", firstLine(out))
+		note("could not register a login item (%s); running in the background until restart", link.FirstLine(out))
 		pid, serr := spawnDetached(logPath, bin, "__share-run", dir)
 		return false, pid, serr
 	}
@@ -154,7 +158,7 @@ func startShareServiceWithBinary(bin, dir string, c *shareConfig, noService bool
 	return true, 0, nil
 }
 
-func stopShareService(c *shareConfig) {
+func stopShareService(c *state.ShareConfig) {
 	domain := "gui/" + strconv.Itoa(os.Getuid())
 	_, _ = run("/bin/launchctl", "bootout", domain+"/"+shareLaunchLabel(c))
 	_ = os.Remove(sharePlist(c))
@@ -202,11 +206,11 @@ func autoProxyState(svc string) (string, bool) {
 // it, it names those exact services and gives step-by-step System Settings
 // instructions using the stable local PAC URL so Hogman never asks for the
 // user's Mac password or administrator privileges (D-41).
-func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, bool, error) {
-	known := normalizePenConfigs(pens, c)
-	stableURL := c.pacURL()
+func setSystemProxy(c *state.AgentConfig, pens []*state.AgentConfig) (string, bool, error) {
+	known := state.NormalizePenConfigs(pens, c)
+	stableURL := c.PACURL()
 	if host := pickPACHost(known); host != nil {
-		stableURL = host.pacURL()
+		stableURL = host.PACURL()
 	}
 
 	var configured, missing, left []string
@@ -215,7 +219,7 @@ func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, bool, error) {
 	for _, svc := range hardwareNetworkServices() {
 		seen[svc] = true
 		cur, enabled := autoProxyState(svc)
-		if enabled && cur != "" && isHogmanPACURL(cur, known) {
+		if enabled && cur != "" && state.IsHogmanPACURL(cur, known) {
 			configured = append(configured, svc)
 			if configuredURL == "" {
 				configuredURL = cur
@@ -233,7 +237,7 @@ func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, bool, error) {
 				continue
 			}
 			cur, enabled := autoProxyState(svc)
-			if enabled && cur != "" && isHogmanPACURL(cur, known) {
+			if enabled && cur != "" && state.IsHogmanPACURL(cur, known) {
 				configured = append(configured, svc)
 				if configuredURL == "" {
 					configuredURL = cur
@@ -246,19 +250,19 @@ func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, bool, error) {
 		note("another automatic proxy is already set on %s (left untouched)", strings.Join(left, ", "))
 	}
 	if len(configured) > 0 {
-		return formatDarwinProxySummary(configured, missing, configuredURL, stableURL, c.Zone, penZoneNames(known)), true, nil
+		return formatDarwinProxySummary(configured, missing, configuredURL, stableURL, c.Zone, state.PenZoneNames(known)), true, nil
 	}
-	return formatBrowserProxyInstructions("darwin", stableURL, c.Zone, penZoneNames(known), missing), false, nil
+	return formatBrowserProxyInstructions("darwin", stableURL, c.Zone, state.PenZoneNames(known), missing), false, nil
 }
 
 // clearSystemProxy checks (read-only, no password) whether macOS still points
 // at a leaving or orphaned Hogman automatic proxy URL and returns clear steps
 // to update or turn it off in System Settings (D-41).
-func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {
-	known := normalizePenConfigs(remaining, leaving)
+func clearSystemProxy(leaving *state.AgentConfig, remaining []*state.AgentConfig) string {
+	known := state.NormalizePenConfigs(remaining, leaving)
 	nextURL := ""
 	if host := pickPACHost(remaining); host != nil {
-		nextURL = host.pacURL()
+		nextURL = host.PACURL()
 	}
 	var matching []string
 	for _, svc := range networkServices() {
@@ -267,11 +271,11 @@ func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {
 			continue
 		}
 		if leaving != nil {
-			if isHogmanPACURL(cur, []*agentConfig{leaving}) {
+			if state.IsHogmanPACURL(cur, []*state.AgentConfig{leaving}) {
 				matching = append(matching, svc)
 			}
 		} else if isOurPAC(cur, known) {
-			if nextURL == "" || !isHogmanPACURL(cur, remaining) {
+			if nextURL == "" || !state.IsHogmanPACURL(cur, remaining) {
 				matching = append(matching, svc)
 			}
 		}
@@ -281,7 +285,7 @@ func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {
 	}
 	if nextURL != "" {
 		return fmt.Sprintf("in System Settings → Network → %s → Details… → Proxies, update \"Automatic proxy configuration\" to %s for your remaining pen(s): %s",
-			strings.Join(matching, " / "), nextURL, strings.Join(penZoneNames(remaining), ", "))
+			strings.Join(matching, " / "), nextURL, strings.Join(state.PenZoneNames(remaining), ", "))
 	}
 	return fmt.Sprintf("turn off \"Automatic proxy configuration\" in System Settings → Network → %s → Details… → Proxies (the local proxy.pac server is now stopped)",
 		strings.Join(matching, " / "))

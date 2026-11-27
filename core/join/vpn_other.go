@@ -2,6 +2,8 @@
 
 package main
 
-func detectSystemProxyState(_ []*agentConfig) systemProxyState {
+import "hogman/join/internal/state"
+
+func detectSystemProxyState(_ []*state.AgentConfig) systemProxyState {
 	return systemProxyState{}
 }

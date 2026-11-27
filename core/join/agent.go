@@ -2,12 +2,9 @@ package main
 
 import (
 	"context"
-	"crypto/x509"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -20,326 +17,22 @@ import (
 	"syscall"
 	"time"
 
-	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
-	"tailscale.com/net/netns"
 	"tailscale.com/tsnet"
+
+	"hogman/join/internal/fsutil"
+	"hogman/join/internal/link"
+	"hogman/join/internal/mesh"
+	"hogman/join/internal/state"
 )
-
-// Side-by-side mode.
-//
-// Instead of borrowing the computer's Tailscale app (which can only be on one
-// network at a time), the agent carries its own connection to the pen and
-// offers it to this computer as a local proxy that handles pen names only.
-// Whatever else the computer is connected to, another Tailscale network
-// included, is left alone.
-
-type agentConfig struct {
-	Zone        string `json:"zone"`
-	LoginServer string `json:"login_server"`
-	DNSServer   string `json:"dns_server"` // mesh address of the pen's DNS
-	Hostname    string `json:"hostname"`
-	ProxyAddr   string `json:"proxy_addr"` // 127.0.0.1:<port>
-	// ControlCA is set only for test networks whose public control host has a
-	// self-signed certificate (the --control-ca option). The agent then trusts
-	// exactly this certificate for its connection to the control host.
-	ControlCA string `json:"control_ca,omitempty"`
-}
-
-// trustControlCA makes this process trust the test network's control
-// certificate, and nothing else, for TLS. Must run before any TLS is used.
-func (c *agentConfig) trustControlCA() {
-	if c.ControlCA == "" {
-		return
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM([]byte(c.ControlCA)) {
-		return
-	}
-	gd := os.Getenv("GODEBUG")
-	if gd != "" {
-		gd += ","
-	}
-	os.Setenv("GODEBUG", gd+"x509usefallbackroots=1")
-	x509.SetFallbackRoots(pool)
-}
-
-func loadAgentConfig(dir string) (*agentConfig, error) {
-	b, err := os.ReadFile(filepath.Join(dir, "config.json"))
-	if err != nil {
-		return nil, err
-	}
-	var c agentConfig
-	if err := json.Unmarshal(b, &c); err != nil {
-		return nil, err
-	}
-	return &c, nil
-}
-
-func (c *agentConfig) save(dir string) error {
-	b, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(filepath.Join(dir, "config.json"), b, 0o600)
-}
-
-func (c *agentConfig) proxyURL() string { return "http://" + c.ProxyAddr }
-func (c *agentConfig) pacURL() string   { return "http://" + c.ProxyAddr + "/proxy.pac" }
-
-// pac tells browsers: pen names go through the agent, everything else direct.
-func (c *agentConfig) pac() string { return renderPAC([]*agentConfig{c}) }
-
-func loadInstalledPenConfigs(configBase string) []*agentConfig {
-	scanned := scanInstalledPens(configBase)
-	pens := make([]*agentConfig, 0, len(scanned.Pens))
-	for _, p := range scanned.Pens {
-		pens = append(pens, p.Config)
-	}
-	return normalizePenConfigs(pens, nil)
-}
-
-func (c *agentConfig) inZone(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	return host == c.Zone || strings.HasSuffix(host, "."+c.Zone)
-}
-
-var meshRanges = []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10")}
-
-func inMeshRanges(ip netip.Addr) bool {
-	for _, r := range meshRanges {
-		if r.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-func newNode(dir string, c *agentConfig, authKey string) *tsnet.Server {
-	// On Linux 5.7+ inside containers or isolated networks with no default
-	// route (such as Docker --internal bridges), tailscale's netns bindToDevice
-	// falls back to SO_BINDTODEVICE("lo") unprivileged and blackholes outbound
-	// dials. Opting out via HOGMAN_DISABLE_NETNS=1 keeps isolated test harnesses
-	// working without weakening container network isolation or changing normal
-	// host VPN bypass behavior.
-	if os.Getenv("HOGMAN_DISABLE_NETNS") == "1" {
-		netns.SetEnabled(false)
-	}
-	s := &tsnet.Server{
-		Dir:        filepath.Join(dir, "node"),
-		Hostname:   c.Hostname,
-		ControlURL: c.LoginServer,
-		AuthKey:    authKey,
-		Logf:       func(string, ...any) {},
-		UserLogf:   func(string, ...any) {},
-	}
-	if os.Getenv("HOGMAN_DEBUG") != "" {
-		dbgLogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-		s.Logf = slogLogf(dbgLogger, "tsnet")
-		s.UserLogf = slogLogf(dbgLogger, "tsnet.user")
-	}
-	return s
-}
-
-var errDeviceRemoved = errors.New("device is no longer authorized on this pen (NeedsLogin)")
-
-// upNode brings node up and returns its status. For already-enrolled nodes
-// (hasAuthKey == false), it fails fast with errDeviceRemoved if the control
-// server rejects the device and requests interactive login, instead of
-// blocking until ctx expires as tsnet.Server.Up does.
-func upNode(ctx context.Context, node *tsnet.Server, hasAuthKey bool) (*ipnstate.Status, error) {
-	if hasAuthKey {
-		return node.Up(ctx)
-	}
-	lc, err := node.LocalClient()
-	if err != nil {
-		return nil, fmt.Errorf("tsnet.Up: %w", err)
-	}
-	watcher, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState)
-	if err != nil {
-		return nil, fmt.Errorf("tsnet.Up: %w", err)
-	}
-	defer watcher.Close()
-
-	sawStarting := false
-	for {
-		n, err := watcher.Next()
-		if err != nil {
-			return nil, fmt.Errorf("tsnet.Up: %w", err)
-		}
-		if n.ErrMessage != nil && *n.ErrMessage != "" {
-			return nil, fmt.Errorf("tsnet.Up: backend: %s", *n.ErrMessage)
-		}
-		if n.BrowseToURL != nil && *n.BrowseToURL != "" {
-			return nil, errDeviceRemoved
-		}
-		if n.State == nil {
-			continue
-		}
-		switch *n.State {
-		case ipn.Starting:
-			sawStarting = true
-		case ipn.Running:
-			sawStarting = true
-			st, err := lc.Status(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("tsnet.Up: %w", err)
-			}
-			if len(st.TailscaleIPs) > 0 {
-				return st, nil
-			}
-		case ipn.NeedsLogin:
-			if sawStarting {
-				return nil, errDeviceRemoved
-			}
-			if st, err := lc.StatusWithoutPeers(ctx); err == nil && st != nil && st.AuthURL != "" {
-				return nil, errDeviceRemoved
-			}
-		}
-	}
-}
-
-func statusHasPeerIP(st *ipnstate.Status, want netip.Addr) bool {
-	if st == nil {
-		return false
-	}
-	want = want.Unmap()
-	if st.Self != nil {
-		for _, ip := range st.Self.TailscaleIPs {
-			if ip.Unmap() == want {
-				return true
-			}
-		}
-	}
-	for _, p := range st.Peer {
-		if p == nil {
-			continue
-		}
-		for _, ip := range p.TailscaleIPs {
-			if ip.Unmap() == want {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func peerHasTag(p *ipnstate.PeerStatus, want string) bool {
-	if p == nil || p.Tags == nil {
-		return false
-	}
-	for _, t := range p.Tags.All() {
-		if t == want {
-			return true
-		}
-	}
-	return false
-}
-
-// resolvePenDNSIP returns the IPv4 mesh IP of the pen's DNS server from st.
-// It prefers the configured IPv4 DNSServer when that peer is still in the
-// tailnet, and falls back to an active tag:infra peer (preferring online IPv4,
-// then any IPv4, sorted deterministically) if the pen's core node moved IP.
-// Only tag:infra peers are eligible as fallback — members and tag:server nodes
-// can never claim tag:infra.
-func resolvePenDNSIP(st *ipnstate.Status, configured string) (netip.Addr, bool) {
-	if st == nil {
-		return netip.Addr{}, false
-	}
-	if configured != "" {
-		if ip, err := netip.ParseAddr(configured); err == nil {
-			ip = ip.Unmap()
-			if ip.Is4() && statusHasPeerIP(st, ip) {
-				return ip, true
-			}
-		}
-	}
-	var onlineV4, anyV4 []netip.Addr
-	for _, p := range st.Peer {
-		if !peerHasTag(p, "tag:infra") {
-			continue
-		}
-		for _, raw := range p.TailscaleIPs {
-			ip := raw.Unmap()
-			if !ip.Is4() {
-				continue
-			}
-			if p.Online {
-				onlineV4 = append(onlineV4, ip)
-			} else {
-				anyV4 = append(anyV4, ip)
-			}
-		}
-	}
-	pick := func(list []netip.Addr) (netip.Addr, bool) {
-		if len(list) == 0 {
-			return netip.Addr{}, false
-		}
-		best := list[0]
-		for _, ip := range list[1:] {
-			if ip.Less(best) {
-				best = ip
-			}
-		}
-		return best, true
-	}
-	for _, bucket := range [][]netip.Addr{onlineV4, anyV4} {
-		if ip, ok := pick(bucket); ok {
-			return ip, true
-		}
-	}
-	return netip.Addr{}, false
-}
-
-// evaluateLiveNodeStatus translates a running tsnet node's current Status into
-// (up, needsLogin, reason). needsLogin is true only when the control plane
-// explicitly reports BackendState == "NeedsLogin"; missing peers or other
-// transient states report down without claiming the device was removed.
-func evaluateLiveNodeStatus(st *ipnstate.Status, dnsServer string) (up bool, needsLogin bool, reason string) {
-	if st == nil {
-		return false, false, "no node status"
-	}
-	switch st.BackendState {
-	case "Running":
-		if st.Self != nil && st.Self.Expired {
-			return false, false, "device session expired"
-		}
-		if dnsServer != "" {
-			if _, ok := resolvePenDNSIP(st, dnsServer); !ok {
-				return false, false, "not connected to pen"
-			}
-		}
-		return true, false, ""
-	case "NeedsLogin":
-		return false, true, "device removed from pen"
-	case "":
-		return false, false, "not connected"
-	default:
-		return false, false, "not connected (" + st.BackendState + ")"
-	}
-}
-
-// writeStatusToken atomically writes a fresh 128-bit status authentication
-// token to dir/status.token (mode 0600) so the file is never missing or
-// half-written across agent restarts.
-func writeStatusToken(dir string) (string, error) {
-	tok, err := generateHexToken(16)
-	if err != nil {
-		return "", err
-	}
-	if err := writeFileAtomic(filepath.Join(dir, statusTokenFilename), []byte(tok), 0o600); err != nil {
-		return "", err
-	}
-	return tok, nil
-}
 
 // runAgent is the long-running process: connect to the pen, serve the proxy.
 func runAgent(dir string) error {
-	c, err := loadAgentConfig(dir)
+	c, err := state.LoadAgentConfig(dir)
 	if err != nil {
 		return fmt.Errorf("agent config: %w", err)
 	}
-	c.trustControlCA()
+	c.TrustControlCA()
 
 	// Bind the proxy port BEFORE writing agent.pid or rotating status.token so
 	// a duplicate agent that fails to bind never invalidates a running agent's
@@ -355,7 +48,7 @@ func runAgent(dir string) error {
 
 	// Rotate status.token atomically on startup and intentionally keep it on
 	// exit so a crashed or stopped agent never leaves status.token missing.
-	statusTok, err := writeStatusToken(dir)
+	statusTok, err := state.WriteStatusToken(dir)
 	if err != nil {
 		return fmt.Errorf("status token: %w", err)
 	}
@@ -363,25 +56,25 @@ func runAgent(dir string) error {
 	keyFile := filepath.Join(dir, "authkey")
 	key, _ := os.ReadFile(keyFile)
 	authKey := strings.TrimSpace(string(key))
-	node := newNode(dir, c, authKey)
+	node := mesh.NewNode(dir, c, authKey)
 	defer node.Close()
 
 	a := newAgent(c, node)
 	a.configBase = filepath.Dir(dir)
 	a.statusToken = statusTok
-	if exe, err := resolvedExePath(); err == nil {
-		a.binSHA256, _ = fileSHA256(exe)
+	if exe, err := fsutil.ResolvedExePath(); err == nil {
+		a.binSHA256, _ = fsutil.FileSHA256(exe)
 	}
 
 	// Serve the proxy straight away, so the setup step can watch us come up.
 	srv := &http.Server{Handler: a, ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
 
-	logger := daemonLogger()
+	logger := fsutil.DaemonLogger()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		st, err := upNode(ctx, node, authKey != "")
+		st, err := mesh.UpNode(ctx, node, authKey != "")
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		if err != nil {
@@ -418,7 +111,7 @@ func runAgent(dir string) error {
 }
 
 type agent struct {
-	cfg         *agentConfig
+	cfg         *state.AgentConfig
 	configBase  string
 	statusToken string
 	binSHA256   string
@@ -441,7 +134,7 @@ type agent struct {
 	server bool
 }
 
-func newAgent(c *agentConfig, node *tsnet.Server) *agent {
+func newAgent(c *state.AgentConfig, node *tsnet.Server) *agent {
 	a := &agent{cfg: c, node: node}
 	if node != nil {
 		a.resolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
@@ -458,7 +151,7 @@ func newAgent(c *agentConfig, node *tsnet.Server) *agent {
 				if serr != nil {
 					return nil, errOutside
 				}
-				found, ok := resolvePenDNSIP(st, c.DNSServer)
+				found, ok := mesh.ResolvePenDNSIP(st, c.DNSServer)
 				if !ok || !a.allowed(ctx, found) {
 					return nil, errOutside
 				}
@@ -515,7 +208,7 @@ func newAgent(c *agentConfig, node *tsnet.Server) *agent {
 			if err != nil {
 				return false, false, "", false
 			}
-			up, needsLogin, reason := evaluateLiveNodeStatus(st, c.DNSServer)
+			up, needsLogin, reason := mesh.EvaluateLiveNodeStatus(st, c.DNSServer)
 			return up, needsLogin, reason, true
 		}
 	}
@@ -593,7 +286,7 @@ func (a *agent) dial(ctx context.Context, hostport string) (net.Conn, error) {
 		}
 		return nil, errOutside
 	}
-	if !a.cfg.inZone(host) {
+	if !a.cfg.InZone(host) {
 		return nil, errOutside
 	}
 	var ips []string
@@ -641,7 +334,7 @@ func webPort(hostport string) bool {
 // as in tests, the mesh ranges alone).
 func (a *agent) allowed(ctx context.Context, ip netip.Addr) bool {
 	ip = ip.Unmap()
-	if !inMeshRanges(ip) {
+	if !link.InMeshRanges(ip) {
 		return false
 	}
 	if a.isPeer == nil {
@@ -652,9 +345,9 @@ func (a *agent) allowed(ctx context.Context, ip netip.Addr) bool {
 
 func (a *agent) pac() string {
 	if a.configBase != "" {
-		return renderPAC(normalizePenConfigs(loadInstalledPenConfigs(a.configBase), a.cfg))
+		return state.RenderPAC(state.NormalizePenConfigs(state.LoadInstalledPenConfigs(a.configBase), a.cfg))
 	}
-	return a.cfg.pac()
+	return a.cfg.PAC()
 }
 
 // rejectBrowserProbe applies Fetch Metadata resource isolation to the local
@@ -726,7 +419,7 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if a.statusToken != "" {
 			if nonce := strings.TrimSpace(r.Header.Get("X-Hogman-Challenge")); nonce != "" && len(nonce) <= 128 {
-				w.Header().Set("X-Hogman-Proof", computeStatusProof(a.statusToken, nonce, a.cfg.Zone))
+				w.Header().Set("X-Hogman-Proof", state.ComputeStatusProof(a.statusToken, nonce, a.cfg.Zone))
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -812,7 +505,7 @@ func (a *agent) forward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	host := r.URL.Hostname()
-	if !a.cfg.inZone(host) {
+	if !a.cfg.InZone(host) {
 		http.Error(w, errOutside.Error(), http.StatusForbidden)
 		return
 	}
@@ -826,18 +519,18 @@ func (a *agent) forward(w http.ResponseWriter, r *http.Request) {
 }
 
 // agentLogout tells the pen this device is leaving. Best effort. Runs in its
-// own process (see main) so trustControlCA can take effect.
+// own process (see main) so TrustControlCA can take effect.
 func agentLogout(dir string) {
-	c, err := loadAgentConfig(dir)
+	c, err := state.LoadAgentConfig(dir)
 	if err != nil {
 		return
 	}
-	c.trustControlCA()
-	node := newNode(dir, c, "")
+	c.TrustControlCA()
+	node := mesh.NewNode(dir, c, "")
 	defer node.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := upNode(ctx, node, false); err != nil {
+	if _, err := mesh.UpNode(ctx, node, false); err != nil {
 		return
 	}
 	if lc, err := node.LocalClient(); err == nil {

@@ -8,10 +8,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"hogman/join/internal/penapi"
+	"hogman/join/internal/state"
 )
 
 func TestAuditAgentBlocksBrowserProbesAndSetsSecurityHeaders(t *testing.T) {
-	cfg := &agentConfig{Zone: "farm.pens.hogman.network", ProxyAddr: "127.0.0.1:22111"}
+	cfg := &state.AgentConfig{Zone: "farm.pens.hogman.network", ProxyAddr: "127.0.0.1:22111"}
 	a := newAgent(cfg, nil)
 	a.up = true
 	a.statusToken = "abcdef0123456789abcdef0123456789"
@@ -80,11 +83,11 @@ func TestAuditAgentBlocksBrowserProbesAndSetsSecurityHeaders(t *testing.T) {
 func TestAuditDuplicateAgentBindFailurePreservesRunningToken(t *testing.T) {
 	dir := t.TempDir()
 	ln, port := listenInHogmanRange(t)
-	cfg := &agentConfig{Zone: "dup.pens.hogman.network", ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port)}
-	if err := cfg.save(dir); err != nil {
+	cfg := &state.AgentConfig{Zone: "dup.pens.hogman.network", ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port)}
+	if err := cfg.Save(dir); err != nil {
 		t.Fatal(err)
 	}
-	tok, err := writeStatusToken(dir)
+	tok, err := state.WriteStatusToken(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,15 +107,15 @@ func TestAuditDuplicateAgentBindFailurePreservesRunningToken(t *testing.T) {
 	if err != nil || !st.Up {
 		t.Fatalf("running agent failed verification after duplicate bind failure: st=%+v err=%v", st, err)
 	}
-	if state := verifyAgentEndpoint(dir, cfg); state != agentEndpointUp {
-		t.Fatalf("verifyAgentEndpoint after duplicate bind failure = %v, want agentEndpointUp", state)
+	if ep := verifyAgentEndpoint(dir, cfg); ep != agentEndpointUp {
+		t.Fatalf("verifyAgentEndpoint after duplicate bind failure = %v, want agentEndpointUp", ep)
 	}
 }
 
 func TestAuditAgentStateVerifiesStatusTokenHMAC(t *testing.T) {
 	dir := t.TempDir()
 	ln, port := listenInHogmanRange(t)
-	cfg := &agentConfig{Zone: "verify.pens.hogman.network", ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port)}
+	cfg := &state.AgentConfig{Zone: "verify.pens.hogman.network", ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port)}
 	a := newAgent(cfg, nil)
 	a.up = true
 	srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: a}}
@@ -124,11 +127,11 @@ func TestAuditAgentStateVerifiesStatusTokenHMAC(t *testing.T) {
 		t.Fatal("agentStateInDir succeeded with missing status.token")
 	}
 
-	tok, err := writeStatusToken(dir)
+	tok, err := state.WriteStatusToken(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(filepath.Join(dir, statusTokenFilename))
+	info, err := os.Stat(filepath.Join(dir, state.StatusTokenFilename))
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("status.token mode = %v (err=%v), want 0600", info.Mode(), err)
 	}
@@ -154,7 +157,7 @@ func TestAuditShareSubpathBlocksTraversal(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, closeH, err := shareHandler(&shareConfig{
+	h, closeH, err := shareHandler(&state.ShareConfig{
 		Name:   "app",
 		Zone:   "farm.pens.hogman.network",
 		Target: upstream.URL + "/sub",
@@ -201,7 +204,7 @@ func TestAuditControlClientBlocksCrossHostRedirect(t *testing.T) {
 	}))
 	defer redir.Close()
 
-	c, err := controlClient("")
+	c, err := penapi.ControlClient("")
 	if err != nil {
 		t.Fatal(err)
 	}

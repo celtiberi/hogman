@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"strings"
+
+	"hogman/join/internal/state"
 )
 
 type systemProxyState struct {
@@ -76,7 +78,7 @@ func isTunnelInterface(iface string) bool {
 // evaluateDarwinProxyState computes VPN-override and non-Hogman OS proxy
 // conflicts purely from parsed scutil outputs and whether any macOS service has
 // a Hogman PAC configured.
-func evaluateDarwinProxyState(proxy scutilProxyInfo, primaryIface string, serviceHasHogmanPAC bool, known []*agentConfig) systemProxyState {
+func evaluateDarwinProxyState(proxy scutilProxyInfo, primaryIface string, serviceHasHogmanPAC bool, known []*state.AgentConfig) systemProxyState {
 	var st systemProxyState
 	var conflicts []string
 	var kinds []string
@@ -92,7 +94,7 @@ func evaluateDarwinProxyState(proxy scutilProxyInfo, primaryIface string, servic
 		conflicts = append(conflicts, "SOCKS proxy")
 		kinds = append(kinds, "socks")
 	}
-	if proxy.PACOn && proxy.PACURL != "" && !isHogmanPACURL(proxy.PACURL, known) {
+	if proxy.PACOn && proxy.PACURL != "" && !state.IsHogmanPACURL(proxy.PACURL, known) {
 		if staleHogmanPAC(proxy.PACURL) {
 			st.StalePAC = proxy.PACURL
 		} else {
@@ -105,7 +107,7 @@ func evaluateDarwinProxyState(proxy scutilProxyInfo, primaryIface string, servic
 		st.OSProxyKind = strings.Join(kinds, ",")
 		st.OSProxyDetail = strings.Join(conflicts, ", ")
 	}
-	hogmanPACActive := proxy.PACOn && isHogmanPACURL(proxy.PACURL, known)
+	hogmanPACActive := proxy.PACOn && state.IsHogmanPACURL(proxy.PACURL, known)
 	if !hogmanPACActive && serviceHasHogmanPAC && isTunnelInterface(primaryIface) {
 		st.VPNOverride = true
 		st.VPNInterface = primaryIface
