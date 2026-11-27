@@ -26,13 +26,25 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 function Say([string]$Message) {
-    Write-Output $Message
+    [Console]::Out.WriteLine($Message)
 }
 
 function Die([string]$Message) {
     [Console]::Error.WriteLine("")
     [Console]::Error.WriteLine("ERROR: $Message")
     exit 1
+}
+
+function Get-FileSHA256Hex([string]$Path) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $hash = $sha.ComputeHash($stream)
+        return ([System.BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
+    } finally {
+        $stream.Dispose()
+        $sha.Dispose()
+    }
 }
 
 function Have-InteractiveConsole {
@@ -152,16 +164,16 @@ function Download-AndInstall([string]$SrcLabel, [string]$SumsUrl, [string]$BinUr
         $sumsPath = Join-Path $tmpDir "SHA256SUMS"
         $binPath = Join-Path $tmpDir "hogman.exe"
 
-        & $curlExe -fsSL --proto '=https' --proto-redir '=https' -o $sumsPath $SumsUrl
+        & $curlExe -fsSL --proto '=https' --proto-redir '=https' -o $sumsPath $SumsUrl | Out-Null
         if ($LASTEXITCODE -ne 0) { return 1 }
 
         $want = Parse-ExpectedSHA256 -SumsPath $sumsPath -TargetFile $file
         if ([string]::IsNullOrWhiteSpace($want)) { return 2 }
 
-        & $curlExe -fsSL --proto '=https' --proto-redir '=https' -o $binPath $BinUrl
+        & $curlExe -fsSL --proto '=https' --proto-redir '=https' -o $binPath $BinUrl | Out-Null
         if ($LASTEXITCODE -ne 0) { return 3 }
 
-        $got = (Get-FileHash -LiteralPath $binPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $got = Get-FileSHA256Hex -Path $binPath
         if ($got -ne $want) {
             Die "the download doesn't match its published SHA-256 (want $want, got $got); not running it"
         }
@@ -192,9 +204,8 @@ if (Test-Path -LiteralPath $configBase) {
         if (-not (Test-Path -LiteralPath $cfgPath)) { continue }
         $hasPens = $true
         try {
-            $cfg = Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json
-            $ls = ($cfg.login_server + "").Trim()
-            if ($ls -match '^https://([a-zA-Z0-9.:-]+)(?:/|$)') {
+            $rawCfg = [System.IO.File]::ReadAllText($cfgPath)
+            if ($rawCfg -match '"login_server"\s*:\s*"https://([a-zA-Z0-9.:-]+)(?:/|")') {
                 $lsHost = $Matches[1]
                 if ($firstPenHost -eq "") { $firstPenHost = $lsHost }
                 if ($ExpectedHost -ne "" -and $lsHost.ToLowerInvariant() -eq $ExpectedHost.ToLowerInvariant()) {

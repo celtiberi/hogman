@@ -182,10 +182,36 @@ func TestStartPs1BehaviorAndSecurity(t *testing.T) {
 		t.Fatal("neither powershell.exe nor pwsh.exe found on Windows runner")
 	}
 
+	mergeEnv := func(base []string, overrides map[string]string, dropKeys ...string) []string {
+		drop := make(map[string]bool, len(overrides)+len(dropKeys))
+		for k := range overrides {
+			drop[strings.ToUpper(k)] = true
+		}
+		for _, k := range dropKeys {
+			drop[strings.ToUpper(k)] = true
+		}
+		out := make([]string, 0, len(base)+len(overrides))
+		for _, kv := range base {
+			if k, _, ok := strings.Cut(kv, "="); ok && drop[strings.ToUpper(k)] {
+				continue
+			}
+			out = append(out, kv)
+		}
+		for k, v := range overrides {
+			out = append(out, k+"="+v)
+		}
+		return out
+	}
+
 	for _, shellExe := range shells {
 		shellName := filepath.Base(shellExe)
 		t.Run(shellName, func(t *testing.T) {
-			runStart := func(home string, extraEnv []string, psArgs ...string) (string, string, error) {
+			dropForShell := []string{}
+			if strings.EqualFold(shellName, "powershell.exe") {
+				// Prevent a parent pwsh (PS 7) PSModulePath from poisoning Windows PowerShell 5.1.
+				dropForShell = append(dropForShell, "PSModulePath")
+			}
+			runStart := func(home string, extraEnv map[string]string, psArgs ...string) (string, string, error) {
 				curlLog := filepath.Join(home, "curl.log")
 				_ = os.Remove(curlLog)
 				appData := filepath.Join(home, "AppData", "Roaming")
@@ -196,19 +222,20 @@ func TestStartPs1BehaviorAndSecurity(t *testing.T) {
 				args := append([]string{"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath}, psArgs...)
 				cmd := exec.Command(shellExe, args...)
 				cmd.Stdin = strings.NewReader("")
-				env := append([]string{}, os.Environ()...)
-				env = append(env,
-					"USERPROFILE="+home,
-					"HOME="+home,
-					"APPDATA="+appData,
-					"TEMP="+tempDir,
-					"TMP="+tempDir,
-					"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-					"FAKE_DL_DIR="+dlDir,
-					"FAKE_CURL_LOG="+curlLog,
-				)
-				env = append(env, extraEnv...)
-				cmd.Env = env
+				overrides := map[string]string{
+					"USERPROFILE":   home,
+					"HOME":          home,
+					"APPDATA":       appData,
+					"TEMP":          tempDir,
+					"TMP":           tempDir,
+					"PATH":          binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+					"FAKE_DL_DIR":   dlDir,
+					"FAKE_CURL_LOG": curlLog,
+				}
+				for k, v := range extraEnv {
+					overrides[k] = v
+				}
+				cmd.Env = mergeEnv(os.Environ(), overrides, dropForShell...)
 				out, err := cmd.CombinedOutput()
 				logBytes, _ := os.ReadFile(curlLog)
 				return string(out), string(logBytes), err
@@ -279,15 +306,15 @@ func TestStartPs1BehaviorAndSecurity(t *testing.T) {
 				fmt.Sprintf("$s = [System.IO.File]::ReadAllText('%s'); & ([scriptblock]::Create($s)) -ExpectedHost 'pen2.gate.example.com' 'https://pen2.gate.example.com/join#t=tok123'",
 					strings.ReplaceAll(scriptPath, "'", "''")))
 			sbCmd.Stdin = strings.NewReader("")
-			sbCmd.Env = append(os.Environ(),
-				"USERPROFILE="+sbHome,
-				"HOME="+sbHome,
-				"APPDATA="+filepath.Join(sbHome, "AppData", "Roaming"),
-				"TEMP="+filepath.Join(sbHome, "Temp"),
-				"TMP="+filepath.Join(sbHome, "Temp"),
-				"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-				"FAKE_DL_DIR="+dlDir,
-			)
+			sbCmd.Env = mergeEnv(os.Environ(), map[string]string{
+				"USERPROFILE": sbHome,
+				"HOME":        sbHome,
+				"APPDATA":     filepath.Join(sbHome, "AppData", "Roaming"),
+				"TEMP":        filepath.Join(sbHome, "Temp"),
+				"TMP":         filepath.Join(sbHome, "Temp"),
+				"PATH":        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"FAKE_DL_DIR": dlDir,
+			}, dropForShell...)
 			if outBytes, err := sbCmd.CombinedOutput(); err != nil || !strings.Contains(string(outBytes), "FAKE_HOGMAN_ARGS:https://pen2.gate.example.com/join#t=tok123") {
 				t.Fatalf("case 5 (scriptblock invocation) failed: err=%v out=%s", err, string(outBytes))
 			}
