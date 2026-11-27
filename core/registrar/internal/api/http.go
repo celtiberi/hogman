@@ -500,7 +500,8 @@ func (a *meshAPI) handleAdminHerd(w http.ResponseWriter, r *http.Request, c call
 		}
 	}
 	if len(q) > 32 {
-		q = q[:32]
+		writeError(a.logger, w, httpBad("search query is too long (max 32 characters)"))
+		return
 	}
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	if offset < 0 {

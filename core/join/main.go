@@ -254,25 +254,31 @@ func (e *redeemError) Error() string { return e.msg }
 
 var handleRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`)
 
+const maxHostnameLen = 63
+
 var nonHostnameRE = regexp.MustCompile(`[^a-z0-9-]+`)
 
-func sanitizeHostname(raw string) string {
+func sanitizeHostname(raw string) (string, error) {
 	h := strings.ToLower(strings.TrimSpace(raw))
 	h = strings.Split(h, ".")[0]
 	h = nonHostnameRE.ReplaceAllString(h, "-")
 	h = strings.Trim(h, "-")
-	if len(h) > 63 {
-		h = strings.TrimRight(h[:63], "-")
+	if len(h) > maxHostnameLen {
+		return "", errorf("device name %q is %d characters (max %d) — pick a shorter name with --hostname", h, len(h), maxHostnameLen)
 	}
-	return h
+	return h, nil
 }
 
-func defaultHostname() string {
-	h, _ := os.Hostname()
-	if h = sanitizeHostname(h); h != "" {
-		return h
+func defaultHostname() (string, error) {
+	raw, _ := os.Hostname()
+	h, err := sanitizeHostname(raw)
+	if err != nil {
+		return "", errorf("this computer's hostname %q is over %d characters — pick a shorter device name with --hostname", raw, maxHostnameLen)
 	}
-	return "device"
+	if h != "" {
+		return h, nil
+	}
+	return "device", nil
 }
 
 // ------------------------------------------------------------------- join --

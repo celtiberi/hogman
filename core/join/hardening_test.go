@@ -547,11 +547,17 @@ func TestRedTeamTailscaleStatusNonJSONNoPanic(t *testing.T) {
 }
 
 func TestRedTeamHostnameAndPenTargetValidation(t *testing.T) {
-	if got := sanitizeHostname("My MacBook Pro.local"); got != "my-macbook-pro" {
-		t.Fatalf("sanitizeHostname = %q, want my-macbook-pro", got)
+	if got, err := sanitizeHostname("My MacBook Pro.local"); err != nil || got != "my-macbook-pro" {
+		t.Fatalf("sanitizeHostname = (%q, %v), want my-macbook-pro", got, err)
 	}
-	if got := sanitizeHostname("!!!"); got != "" {
-		t.Fatalf("sanitizeHostname(!!!) = %q, want empty", got)
+	if got, err := sanitizeHostname("!!!"); err != nil || got != "" {
+		t.Fatalf("sanitizeHostname(!!!) = (%q, %v), want empty, nil", got, err)
+	}
+	if got, err := sanitizeHostname(strings.Repeat("a", 63)); err != nil || len(got) != 63 {
+		t.Fatalf("sanitizeHostname(63 chars) = (%q, %v), want 63-char name", got, err)
+	}
+	if got, err := sanitizeHostname(strings.Repeat("a", 64)); err == nil || !strings.Contains(err.Error(), "--hostname") {
+		t.Fatalf("sanitizeHostname(64 chars) = (%q, %v), want error mentioning --hostname", got, err)
 	}
 
 	base := t.TempDir()

@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { createApiClient } from '../../portal/js/api.js';
 import { renderBillingBanner, renderPenDelete } from '../../portal/js/billing.js';
-import { createPressTwice, relativeTime } from '../../portal/js/dom.js';
+import { createPressTwice, formatUTCDate, formatUTCTime, relativeTime } from '../../portal/js/dom.js';
 
 class FakeClassList {
   constructor() {
@@ -251,4 +251,13 @@ test('relativeTime formats seconds, minutes, hours, days, and empty/invalid inpu
   assert.equal(relativeTime(new Date(now - 5 * 60_000).toISOString(), now), '5m ago');
   assert.equal(relativeTime(new Date(now - 3 * 3600_000).toISOString(), now), '3h ago');
   assert.equal(relativeTime(new Date(now - 4 * 86400_000).toISOString(), now), '4d ago');
+});
+
+test('formatUTCDate and formatUTCTime format ISO strings and Dates without string slicing', () => {
+  assert.equal(formatUTCDate('2026-11-05T09:07:00Z'), '2026-11-05');
+  assert.equal(formatUTCTime('2026-11-05T09:07:00Z'), '09:07');
+  assert.equal(formatUTCDate(new Date(Date.UTC(2026, 0, 2, 3, 4))), '2026-01-02');
+  assert.equal(formatUTCTime(new Date(Date.UTC(2026, 0, 2, 3, 4))), '03:04');
+  assert.equal(formatUTCDate('not-a-date'), '');
+  assert.equal(formatUTCTime(''), '');
 });

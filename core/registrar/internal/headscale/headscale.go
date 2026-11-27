@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 // ErrNotFound reports that Headscale has no user or node with the requested key.
@@ -87,21 +86,10 @@ const (
 	// 8 MiB caps memory on malformed responses; GET /api/v1/node averages ~1 KB/node,
 	// so this comfortably covers pens up to several thousand nodes.
 	maxResponseBytes = 8 << 20
-	// Cap error bodies stored in Error/logs so a verbose upstream error cannot spam logs.
-	maxErrorBytes = 4 << 10
+	// Refuse runaway upstream error bodies instead of reading unbounded bytes or
+	// returning a truncated partial body.
+	maxErrorBytes = 64 << 10
 )
-
-func truncateErrorBody(b []byte) string {
-	trimmed := bytes.TrimSpace(b)
-	if len(trimmed) > maxErrorBytes {
-		cut := trimmed[:maxErrorBytes]
-		for len(cut) > 0 && !utf8.Valid(cut) {
-			cut = cut[:len(cut)-1]
-		}
-		return string(cut) + "...(truncated)"
-	}
-	return string(trimmed)
-}
 
 func (h *Client) do(ctx context.Context, method, path string, in, out any) error {
 	var body io.Reader
@@ -125,15 +113,25 @@ func (h *Client) do(ctx context.Context, method, path string, in, out any) error
 		return fmt.Errorf("headscale: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes+1))
+		if err != nil {
+			return fmt.Errorf("headscale: read error response: %w", err)
+		}
+		if len(data) > maxErrorBytes {
+			return &Error{
+				Status: resp.StatusCode,
+				Body:   fmt.Sprintf("error body over %d bytes (not read)", maxErrorBytes),
+			}
+		}
+		return &Error{Status: resp.StatusCode, Body: string(bytes.TrimSpace(data))}
+	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return fmt.Errorf("headscale: read response: %w", err)
 	}
 	if len(data) > maxResponseBytes {
 		return fmt.Errorf("headscale: response exceeded %d bytes", maxResponseBytes)
-	}
-	if resp.StatusCode/100 != 2 {
-		return &Error{Status: resp.StatusCode, Body: truncateErrorBody(data)}
 	}
 	if out != nil {
 		return json.Unmarshal(data, out)

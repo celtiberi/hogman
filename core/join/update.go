@@ -309,7 +309,7 @@ func downloadVerifiedBinaryURL(client *http.Client, urlStr, binName, wantHex, tm
 	}
 	gotHex := strings.ToLower(hex.EncodeToString(h.Sum(nil)))
 	if !digestEqualHex(gotHex, wantHex) {
-		return "", errorf("downloaded %s failed SHA-256 verification: expected %s, got %s", binName, wantHex[:12], gotHex[:12])
+		return "", errorf("downloaded %s failed SHA-256 verification: expected %s, got %s", binName, wantHex, gotHex)
 	}
 	if err := f.Close(); err != nil {
 		return "", err
@@ -362,7 +362,7 @@ func stageAndVerify(srcPath, dstPath, wantHex string) error {
 	}
 	gotHex := strings.ToLower(hex.EncodeToString(h.Sum(nil)))
 	if !digestEqualHex(gotHex, wantHex) {
-		return errorf("staged binary for %s failed SHA-256 check (%s != %s)", dstPath, gotHex[:12], wantHex[:12])
+		return errorf("staged binary for %s failed SHA-256 check (%s != %s)", dstPath, gotHex, wantHex)
 	}
 	if err := tmp.Chmod(0o755); err != nil {
 		return err
@@ -1258,7 +1258,7 @@ func updateCmd(args []string, o options) error {
 
 	anyUpdate := selfNeedsUpdate || canonicalNeedsUpdate || nhNeedsUpdate || anyLegacy || anyInterrupted || anyStaleAgent
 	if !anyUpdate {
-		say("\n✓ %s is already up to date (%s).", cliBinaryName(), wantHex[:12])
+		say("\n✓ %s is already up to date (%s).", cliBinaryName(), wantHex)
 		if !o.dryRun {
 			warnMissingSystemProxyServices(loadInstalledPenConfigs(configBase))
 		}
@@ -1266,12 +1266,12 @@ func updateCmd(args []string, o options) error {
 	}
 
 	if o.dryRun {
-		step("Dry run: nothing changed. Would update to %s:", wantHex[:12])
+		step("Dry run: nothing changed. Would update to %s:", wantHex)
 		if selfNeedsUpdate {
 			if pkgManaged {
 				note("%s is managed by %s (upgrade with: %s)", selfPath, pkgMgr, pkgUpgradeCmd)
 			} else {
-				note("%s (current %s)", selfPath, shortDigest(selfHash))
+				note("%s (current %s)", selfPath, formatDigest(selfHash))
 			}
 		}
 		if canonicalNeedsUpdate {
@@ -1333,7 +1333,7 @@ func updateCmd(args []string, o options) error {
 		if err != nil {
 			return err
 		}
-		note("checksum verified (%s)", wantHex[:12])
+		note("checksum verified (%s)", wantHex)
 		if err := stageAndVerify(verifiedSrc, selfPath, wantHex); err != nil {
 			return errorf("could not replace %s: %v", selfPath, err)
 		}
@@ -1424,13 +1424,13 @@ func updateCmd(args []string, o options) error {
 		if len(failedShares) > 0 {
 			parts = append(parts, fmt.Sprintf("share(s): %s", strings.Join(failedShares, ", ")))
 		}
-		return errorf("updated binary (%s), but %s did not come back online", wantHex[:12], strings.Join(parts, "; "))
+		return errorf("updated binary (%s), but %s did not come back online", wantHex, strings.Join(parts, "; "))
 	}
 
 	if verLine := queryBinaryVersionLine(selfPath); verLine != "" {
-		say("\n✓ Updated %s (SHA-256 %s).", verLine, wantHex[:12])
+		say("\n✓ Updated %s (SHA-256 %s).", verLine, wantHex)
 	} else {
-		say("\n✓ Updated hogman (SHA-256 %s).", wantHex[:12])
+		say("\n✓ Updated hogman (SHA-256 %s).", wantHex)
 	}
 	warnMissingSystemProxyServices(loadInstalledPenConfigs(configBase))
 	return nil
@@ -1452,10 +1452,7 @@ func warnMissingSystemProxyServices(configs []*agentConfig) {
 	}
 }
 
-func shortDigest(h string) string {
-	if len(h) >= 12 {
-		return h[:12]
-	}
+func formatDigest(h string) string {
 	if h == "" {
 		return "missing"
 	}
