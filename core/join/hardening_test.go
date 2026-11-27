@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -529,5 +530,71 @@ func TestRedTeamShareTargetReservedNamesAndSystemdSingleLine(t *testing.T) {
 	unit := platform.RenderSystemdUnit("line1\nExecStart=/bin/evil\rline2", "/bin/hogman", "/tmp/dir")
 	if strings.Contains(unit, "\nExecStart=/bin/evil") || !strings.Contains(unit, "Description=Hogman pen connection (line1ExecStart=/bin/evilline2)\n") {
 		t.Fatalf("RenderSystemdUnit retained injected newline:\n%s", unit)
+	}
+}
+
+func TestPollPortalErrorFormattingNeverEchoesRawBody(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+		wantSub     []string
+		forbidSub   []string
+	}{
+		{
+			name:        "json error extracted and sanitized",
+			status:      http.StatusForbidden,
+			contentType: "application/json",
+			body:        `{"error":"member suspended\u001b[31m"}`,
+			wantSub:     []string{"member suspended"},
+			forbidSub:   []string{"\x1b"},
+		},
+		{
+			name:        "html captive portal never echoes raw body",
+			status:      http.StatusBadGateway,
+			contentType: "text/html; charset=utf-8",
+			body:        "<html><body>CAPTIVE_SECRET_MARKER</body></html>",
+			wantSub:     []string{"HTTP 502 (text/html)", "Wi-Fi login page"},
+			forbidSub:   []string{"CAPTIVE_SECRET_MARKER", "<html>"},
+		},
+		{
+			name:        "plain text non-json never echoes raw body",
+			status:      http.StatusServiceUnavailable,
+			contentType: "text/plain",
+			body:        "RAW_UPSTREAM_BODY_MARKER",
+			wantSub:     []string{"HTTP 503 (text/plain)"},
+			forbidSub:   []string{"RAW_UPSTREAM_BODY_MARKER"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.contentType != "" {
+					w.Header().Set("Content-Type", tc.contentType)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			_, err := pollPortalCtx(context.Background(), srv.Client(), srv.URL, 10*time.Millisecond)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			msg := err.Error()
+			for _, want := range tc.wantSub {
+				if !strings.Contains(msg, want) {
+					t.Fatalf("error %q missing %q", msg, want)
+				}
+			}
+			for _, bad := range tc.forbidSub {
+				if strings.Contains(msg, bad) {
+					t.Fatalf("error %q leaked forbidden content %q", msg, bad)
+				}
+			}
+		})
 	}
 }

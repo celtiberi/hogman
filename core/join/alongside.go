@@ -359,7 +359,7 @@ func pollPortalCtx(ctx context.Context, c *http.Client, portal string, d time.Du
 				case resp.StatusCode == 200 && json.Unmarshal(data, &me) == nil:
 					return me.Member.Handle, nil
 				default:
-					err = fmt.Errorf("HTTP %d: %s", resp.StatusCode, link.SingleLine(string(data)))
+					err = errors.New(penapi.FormatHTTPResponseError(resp.StatusCode, resp.Header.Get("Content-Type"), data))
 				}
 			}
 		}
