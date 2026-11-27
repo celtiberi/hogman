@@ -632,8 +632,8 @@ func TestQueryBinaryVersionLineAndPensOutsidePlan(t *testing.T) {
 	if err := os.WriteFile(multi, []byte("#!/bin/sh\necho 'hogman 2026.11.26 darwin/arm64'\necho 'extra trailing line'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if got := queryBinaryVersionLine(multi); got != "hogman 2026.11.26 darwin/arm64" {
-		t.Fatalf("queryBinaryVersionLine(multi) = %q, want first line only", got)
+	if got := queryBinaryVersionLine(multi); got != "hogman 2026.11.26 darwin/arm64; extra trailing line" {
+		t.Fatalf("queryBinaryVersionLine(multi) = %q, want all lines joined by '; '", got)
 	}
 	if got := queryBinaryVersion(multi); got != "2026.11.26" {
 		t.Fatalf("queryBinaryVersion(multi) = %q, want 2026.11.26", got)

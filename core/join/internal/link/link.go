@@ -9,6 +9,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"golang.org/x/net/publicsuffix"
 )
@@ -239,5 +240,28 @@ func ShortPenLabel(zone string) string {
 	return z
 }
 
-// FirstLine returns the first non-empty trimmed line of s.
-func FirstLine(s string) string { return strings.SplitN(strings.TrimSpace(s), "\n", 2)[0] }
+// SingleLine folds a potentially multi-line message or command output onto one
+// line by joining non-empty lines with "; " (never dropping lines) and
+// replacing control and Unicode format/BiDi characters (unicode.IsControl /
+// unicode.Cf) with '?' so terminal output stays intact and safe.
+func SingleLine(s string) string {
+	s = strings.NewReplacer("\r\n", "\n", "\r", "\n", "\u2028", "\n", "\u2029", "\n").Replace(s)
+	var parts []string
+	for _, rawLine := range strings.Split(s, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		var b strings.Builder
+		b.Grow(len(line))
+		for _, r := range line {
+			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+				b.WriteByte('?')
+			} else {
+				b.WriteRune(r)
+			}
+		}
+		parts = append(parts, b.String())
+	}
+	return strings.Join(parts, "; ")
+}

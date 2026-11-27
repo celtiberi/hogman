@@ -787,7 +787,8 @@ func detectPackageManager(exePath, goos string) (name, upgradeCmd string, ok boo
 var versionQueryTimeout = 5 * time.Second
 
 // queryBinaryVersionLine runs `<bin> --version` with a short timeout and
-// returns its first trimmed output line (e.g. "hogman 2026.11.24 darwin/arm64").
+// returns its output as a sanitized single line (joining any extra lines with
+// "; " rather than dropping them).
 func queryBinaryVersionLine(binPath string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), versionQueryTimeout)
 	defer cancel()
@@ -795,7 +796,7 @@ func queryBinaryVersionLine(binPath string) string {
 	if err != nil {
 		return ""
 	}
-	return link.FirstLine(string(out))
+	return link.SingleLine(string(out))
 }
 
 // queryBinaryVersion extracts the version token from `<bin> --version`

@@ -79,3 +79,16 @@ func TestValidatePublicZoneAndQueries(t *testing.T) {
 		t.Fatalf("ValidatePenQuery(../etc) = %v", err)
 	}
 }
+
+func TestSingleLinePreservesAllLinesAndSanitizes(t *testing.T) {
+	t.Parallel()
+	threeLine := "Bootstrap failed: 5: Input/output error\nTry re-running the command\r\nfor richer \x1b[31m\u009b\u202Eerrors."
+	got := SingleLine(threeLine)
+	want := "Bootstrap failed: 5: Input/output error; Try re-running the command; for richer ?[31m??errors."
+	if got != want {
+		t.Fatalf("SingleLine = %q, want %q", got, want)
+	}
+	if got := SingleLine("\n  \r\n"); got != "" {
+		t.Fatalf("SingleLine(whitespace) = %q, want empty", got)
+	}
+}

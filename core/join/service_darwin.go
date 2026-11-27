@@ -59,7 +59,7 @@ func startAgent(dir string, c *state.AgentConfig, o options) error {
 			return err
 		}
 		// No desktop session (for example over SSH): fall back to a plain background process.
-		note("could not register a login item (%s); running in the background until restart", link.FirstLine(out))
+		note("could not register a login item (%s); running in the background until restart", link.SingleLine(out))
 		return startDetached(bin, dir)
 	}
 	note("it will start by itself when you log in")
@@ -150,7 +150,7 @@ func startShareServiceWithBinary(bin, dir string, c *state.ShareConfig, noServic
 		if out == "" {
 			return false, 0, err
 		}
-		note("could not register a login item (%s); running in the background until restart", link.FirstLine(out))
+		note("could not register a login item (%s); running in the background until restart", link.SingleLine(out))
 		pid, serr := spawnDetached(logPath, bin, "__share-run", dir)
 		return false, pid, serr
 	}

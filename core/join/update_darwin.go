@@ -25,7 +25,7 @@ func startExistingBinary(bin, dir string, c *state.AgentConfig, noService bool) 
 	}
 	if out, err := installLaunchAgent(launchLabel(c.Zone), launchPlist(c.Zone), plist); err != nil {
 		if out != "" {
-			note("could not register login item for %s (%s); running in the background until restart", c.Zone, link.FirstLine(out))
+			note("could not register login item for %s (%s); running in the background until restart", c.Zone, link.SingleLine(out))
 		} else {
 			note("could not write login item for %s (%v); running in the background until restart", c.Zone, err)
 		}

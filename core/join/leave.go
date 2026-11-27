@@ -404,7 +404,7 @@ func leaveOne(t leaveTarget) error {
 	for _, dir := range state.AllShares(t.zone) {
 		if c, err := state.LoadShare(dir); err == nil {
 			if err := removeShareForLeave(dir, c); err != nil {
-				note("could not take down %s: %v", c.URL(), link.FirstLine(err.Error()))
+				note("could not take down %s: %v", c.URL(), link.SingleLine(err.Error()))
 			} else {
 				note("took down %s", c.URL())
 			}
@@ -421,7 +421,7 @@ func leaveOne(t leaveTarget) error {
 		if st, err := ts.Status(); err == nil && st.OnNetwork(t.zone) {
 			if err := ts.Logout(); err != nil {
 				_ = ts.Down()
-				note("disconnected, but could not log out (%v)", link.FirstLine(err.Error()))
+				note("disconnected, but could not log out (%v)", link.SingleLine(err.Error()))
 				note("the network still lists this device until an admin removes it")
 			} else {
 				note("logged out of %s", t.zone)

@@ -1517,7 +1517,7 @@ func collectShareListItems(dirs []string) []shareListItemJSON {
 		errMsg := ""
 		if !running {
 			if st := state.ReadShareStatus(d); st.State == "error" && st.Error != "" {
-				errMsg = link.FirstLine(st.Error)
+				errMsg = link.SingleLine(st.Error)
 				stateLabel += ": " + errMsg
 			}
 		}
@@ -1723,7 +1723,7 @@ func removeShareWithOptions(dir string, c *state.ShareConfig, timeout time.Durat
 			return os.RemoveAll(dir)
 		}
 		if cleanupOnUnreachable {
-			note("could not reach the pen for %s (%v); cleaned up local files (check your home page to remove the server if it is still listed)", c.URL(), link.FirstLine(err.Error()))
+			note("could not reach the pen for %s (%v); cleaned up local files (check your home page to remove the server if it is still listed)", c.URL(), link.SingleLine(err.Error()))
 			return os.RemoveAll(dir)
 		}
 		return errorf("could not reach the pen (%v).\n  Remove the server on your home page instead, then delete %s", err, dir)
@@ -1732,7 +1732,7 @@ func removeShareWithOptions(dir string, c *state.ShareConfig, timeout time.Durat
 	node.Close()
 	if err != nil {
 		if cleanupOnUnreachable {
-			note("could not give back %s (%v); cleaned up local files", c.URL(), link.FirstLine(err.Error()))
+			note("could not give back %s (%v); cleaned up local files", c.URL(), link.SingleLine(err.Error()))
 			return os.RemoveAll(dir)
 		}
 		return errorf("%v\n  Local files remain in %s; run 'hogman share stop %s --force' to remove them.", err, dir, c.Name)

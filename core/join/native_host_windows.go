@@ -82,7 +82,7 @@ func registerNativeManifests(configBase, hostPath string, chromeIDs, firefoxIDs 
 			manifestPath = firefoxPath
 		}
 		if out, err := exec.Command(winSystem32("reg.exe"), "add", rk.key, "/ve", "/t", "REG_SZ", "/d", manifestPath, "/f").CombinedOutput(); err != nil {
-			return written, fmt.Errorf("register %s: %v (%s)", rk.key, err, link.FirstLine(string(out)))
+			return written, fmt.Errorf("register %s: %v (%s)", rk.key, err, link.SingleLine(string(out)))
 		}
 		written++
 	}
