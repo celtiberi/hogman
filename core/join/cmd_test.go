@@ -12,7 +12,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"hogman/join/internal/platform"
+	"hogman/join/internal/share"
 	"hogman/join/internal/state"
+	"hogman/join/internal/ui"
+	"hogman/join/internal/updater"
 )
 
 // extractPlistProgramArgs parses a generated macOS LaunchAgent plist and returns
@@ -213,19 +216,20 @@ func TestCLIInterspersedFlagsGolden(t *testing.T) {
 }
 
 func TestCLIJoinInteractivePasteAndStdin(t *testing.T) {
-	oldTTY, oldAsk := isTerminalFn, askFn
-	t.Cleanup(func() { isTerminalFn, askFn = oldTTY, oldAsk })
-
+	t.Parallel()
 	// Interactive TTY prompt when running `hogman join` with 0 args.
-	isTerminalFn = func() bool { return true }
-	askFn = func(prompt string) string {
-		if !strings.Contains(prompt, "Paste your join link") {
-			t.Errorf("unexpected prompt: %q", prompt)
-		}
-		return "https://bobo.gate.example.com/join#t=pasted"
+	uTTY := &ui.UI{
+		IsTerminalFn: func() bool { return true },
+		AskFn: func(prompt string) string {
+			if !strings.Contains(prompt, "Paste your join link") {
+				t.Errorf("unexpected prompt: %q", prompt)
+			}
+			return "https://bobo.gate.example.com/join#t=pasted"
+		},
 	}
 	var gotRaw string
 	rc := runCLI([]string{"join", "--dry-run"}, cliHandlers{
+		ui:   uTTY,
 		join: func(raw string, o options) error { gotRaw = raw; return nil },
 	})
 	if rc != 0 || gotRaw != "https://bobo.gate.example.com/join#t=pasted" {
@@ -233,9 +237,10 @@ func TestCLIJoinInteractivePasteAndStdin(t *testing.T) {
 	}
 
 	// Non-TTY with 0 args refuses with usage exit 2 and --link-stdin hint.
-	isTerminalFn = func() bool { return false }
+	uNoTTY := &ui.UI{IsTerminalFn: func() bool { return false }}
 	var errOut bytes.Buffer
 	rc = runCLI([]string{"join"}, cliHandlers{
+		ui:     uNoTTY,
 		errOut: &errOut,
 		join:   func(string, options) error { t.Fatal("join should not run"); return nil },
 	})
@@ -244,71 +249,69 @@ func TestCLIJoinInteractivePasteAndStdin(t *testing.T) {
 	}
 
 	// --link-stdin reads from io.Reader cleanly.
-	got, err := readJoinLinkInteractive(options{linkStdin: true}, strings.NewReader("  https://bobo.gate.example.com/join#k=xyz\n"))
+	got, err := uNoTTY.ReadJoinLink(true, strings.NewReader("  https://bobo.gate.example.com/join#k=xyz\n"))
 	if err != nil || got != "https://bobo.gate.example.com/join#k=xyz" {
-		t.Fatalf("readJoinLinkInteractive(--link-stdin) = (%q, %v)", got, err)
+		t.Fatalf("ReadJoinLink(--link-stdin) = (%q, %v)", got, err)
 	}
 }
 
 func TestUnifiedPenResolver(t *testing.T) {
-	oldTTY, oldAsk := isTerminalFn, askFn
-	t.Cleanup(func() { isTerminalFn, askFn = oldTTY, oldAsk })
-	isTerminalFn = func() bool { return false }
+	u := &ui.UI{IsTerminalFn: func() bool { return false }}
 
-	pens := []penConn{
-		{zone: "alpha.pens.example.com", loginServer: "https://alpha.gate.example.com"},
-		{zone: "beta.pens.example.com", loginServer: "https://beta.gate.example.com"},
+	pens := []share.PenConn{
+		{Zone: "alpha.pens.example.com", LoginServer: "https://alpha.gate.example.com"},
+		{Zone: "beta.pens.example.com", LoginServer: "https://beta.gate.example.com"},
 	}
 
 	// Short name, full zone, and control host all resolve cleanly.
 	for _, q := range []string{"alpha", "alpha.pens.example.com", "alpha.gate.example.com"} {
-		p, err := resolvePenConn(pens, q)
-		if err != nil || p.zone != "alpha.pens.example.com" {
-			t.Fatalf("resolvePenConn(%q) = (%+v, %v)", q, p, err)
+		p, err := share.ResolvePenConn(pens, q, u)
+		if err != nil || p.Zone != "alpha.pens.example.com" {
+			t.Fatalf("ResolvePenConn(%q) = (%+v, %v)", q, p, err)
 		}
 	}
 
 	// Partial prefix must NOT match.
-	if _, err := resolvePenConn(pens, "alp"); err == nil {
+	if _, err := share.ResolvePenConn(pens, "alp", u); err == nil {
 		t.Fatal("partial prefix 'alp' must not match 'alpha'")
 	}
 
 	// HOGMAN_PEN env var works when --pen is empty, and --pen overrides HOGMAN_PEN.
 	t.Setenv("HOGMAN_PEN", "beta")
-	p, err := resolvePenConn(pens, "")
-	if err != nil || p.zone != "beta.pens.example.com" {
+	p, err := share.ResolvePenConn(pens, "", u)
+	if err != nil || p.Zone != "beta.pens.example.com" {
 		t.Fatalf("HOGMAN_PEN=beta -> (%+v, %v)", p, err)
 	}
-	p, err = resolvePenConn(pens, "alpha")
-	if err != nil || p.zone != "alpha.pens.example.com" {
+	p, err = share.ResolvePenConn(pens, "alpha", u)
+	if err != nil || p.Zone != "alpha.pens.example.com" {
 		t.Fatalf("--pen alpha over HOGMAN_PEN=beta -> (%+v, %v)", p, err)
 	}
 	t.Setenv("HOGMAN_PEN", "")
 
 	// Ambiguous short name across two servers is refused with both full zones named.
-	ambig := []penConn{
-		{zone: "home.pens.a.example", loginServer: "https://home.gate.a.example"},
-		{zone: "home.pens.b.example", loginServer: "https://home.gate.b.example"},
+	ambig := []share.PenConn{
+		{Zone: "home.pens.a.example", LoginServer: "https://home.gate.a.example"},
+		{Zone: "home.pens.b.example", LoginServer: "https://home.gate.b.example"},
 	}
-	_, err = resolvePenConn(ambig, "home")
+	_, err = share.ResolvePenConn(ambig, "home", u)
 	if err == nil || !strings.Contains(err.Error(), "home.pens.a.example") || !strings.Contains(err.Error(), "home.pens.b.example") {
 		t.Fatalf("ambiguous short name err = %v", err)
 	}
 
 	// 2+ pens on non-TTY refuses clearly mentioning --pen and HOGMAN_PEN.
-	if _, err := resolvePenConn(pens, ""); err == nil || !strings.Contains(err.Error(), "HOGMAN_PEN") {
+	if _, err := share.ResolvePenConn(pens, "", u); err == nil || !strings.Contains(err.Error(), "HOGMAN_PEN") {
 		t.Fatalf("non-tty multi-pen err = %v", err)
 	}
 
 	// 2+ pens on TTY opens numbered picker and selects chosen pen.
-	isTerminalFn = func() bool { return true }
-	askFn = func(string) string { return "2" }
-	p, err = resolvePenConn(pens, "")
-	if err != nil || p.zone != "beta.pens.example.com" {
+	u.IsTerminalFn = func() bool { return true }
+	u.AskFn = func(string) string { return "2" }
+	p, err = share.ResolvePenConn(pens, "", u)
+	if err != nil || p.Zone != "beta.pens.example.com" {
 		t.Fatalf("TTY picker choice 2 -> (%+v, %v)", p, err)
 	}
-	askFn = func(string) string { return "99" }
-	if _, err := resolvePenConn(pens, ""); err == nil {
+	u.AskFn = func(string) string { return "99" }
+	if _, err := share.ResolvePenConn(pens, "", u); err == nil {
 		t.Fatal("out-of-range TTY choice should error")
 	}
 
@@ -324,11 +327,11 @@ func TestUnifiedPenResolver(t *testing.T) {
 		_ = os.MkdirAll(d, 0o700)
 		_ = (&state.AgentConfig{Zone: z.zone, LoginServer: z.ls}).Save(d)
 	}
-	plan, err := resolveUpdatePlan(nil, options{pen: "solo"}, cfgBase, filepath.Join(root, "shares"))
-	if err != nil || plan.baseURL != "https://solo.gate.a.example" {
+	plan, err := updater.ResolvePlan(nil, "solo", cfgBase, filepath.Join(root, "shares"))
+	if err != nil || plan.BaseURL != "https://solo.gate.a.example" {
 		t.Fatalf("update --pen solo: (%+v, %v)", plan, err)
 	}
-	if _, err := resolveUpdatePlan(nil, options{pen: "work"}, cfgBase, filepath.Join(root, "shares")); err == nil || !strings.Contains(err.Error(), "work.pens.a.example") {
+	if _, err := updater.ResolvePlan(nil, "work", cfgBase, filepath.Join(root, "shares")); err == nil || !strings.Contains(err.Error(), "work.pens.a.example") {
 		t.Fatalf("update --pen ambiguous work: %v", err)
 	}
 }
@@ -411,40 +414,40 @@ func TestSingleDashLongFlagsGolden(t *testing.T) {
 }
 
 func TestPenQueryValidationAndEnvNotice(t *testing.T) {
-	pens := []penConn{
-		{zone: "alpha.pens.example.com", loginServer: "https://alpha.gate.example.com"},
-		{zone: "beta.pens.example.com", loginServer: "https://beta.gate.example.com"},
+	pens := []share.PenConn{
+		{Zone: "alpha.pens.example.com", LoginServer: "https://alpha.gate.example.com"},
+		{Zone: "beta.pens.example.com", LoginServer: "https://beta.gate.example.com"},
+	}
+
+	var notices []string
+	u := &ui.UI{
+		NoteFn: func(f string, a ...any) { notices = append(notices, fmt.Sprintf(f, a...)) },
 	}
 
 	// Wildcards and path traversals must be rejected before any globbing.
 	for _, bad := range []string{"*", "../..", "foo/bar", "a?b", "[a-z]", "bad pen", "..", "-leading"} {
-		if _, err := resolvePenConn(pens, bad); err == nil {
-			t.Errorf("resolvePenConn(%q) succeeded, want validation error", bad)
+		if _, err := share.ResolvePenConn(pens, bad, u); err == nil {
+			t.Errorf("ResolvePenConn(%q) succeeded, want validation error", bad)
 		}
-		if _, err := resolveShareZoneFilter(nil, bad); err == nil {
-			t.Errorf("resolveShareZoneFilter(%q) succeeded, want validation error", bad)
+		if _, err := share.ResolveZoneFilter(nil, bad, u); err == nil {
+			t.Errorf("ResolveZoneFilter(%q) succeeded, want validation error", bad)
 		}
-		if _, err := resolveUpdatePlan(nil, options{pen: bad}, t.TempDir(), t.TempDir()); err == nil {
-			t.Errorf("resolveUpdatePlan(--pen %q) succeeded, want validation error", bad)
+		if _, err := updater.ResolvePlan(nil, bad, t.TempDir(), t.TempDir()); err == nil {
+			t.Errorf("ResolvePlan(--pen %q) succeeded, want validation error", bad)
 		}
 	}
 
 	// HOGMAN_PEN with invalid traversal value is also rejected.
 	t.Setenv("HOGMAN_PEN", "../..")
-	if _, err := resolveShareZoneFilter(nil, ""); err == nil {
+	if _, err := share.ResolveZoneFilter(nil, "", u); err == nil {
 		t.Fatal("HOGMAN_PEN=../.. should fail validation")
 	}
 
 	// HOGMAN_PEN prints an explicit notice whenever it makes the choice.
-	var notices []string
-	oldNote := noteFn
-	t.Cleanup(func() { noteFn = oldNote })
-	noteFn = func(f string, a ...any) { notices = append(notices, fmt.Sprintf(f, a...)) }
-
 	t.Setenv("HOGMAN_PEN", "beta")
-	p, err := resolvePenConn(pens, "")
-	if err != nil || p.zone != "beta.pens.example.com" {
-		t.Fatalf("resolvePenConn with HOGMAN_PEN=beta: (%+v, %v)", p, err)
+	p, err := share.ResolvePenConn(pens, "", u)
+	if err != nil || p.Zone != "beta.pens.example.com" {
+		t.Fatalf("ResolvePenConn with HOGMAN_PEN=beta: (%+v, %v)", p, err)
 	}
 	if len(notices) != 1 || !strings.Contains(notices[0], "using pen beta.pens.example.com (from HOGMAN_PEN)") {
 		t.Fatalf("expected HOGMAN_PEN notice, got %v", notices)
@@ -452,7 +455,7 @@ func TestPenQueryValidationAndEnvNotice(t *testing.T) {
 
 	// Explicit --pen overrides HOGMAN_PEN and does not print the env notice.
 	notices = nil
-	if _, err := resolvePenConn(pens, "alpha"); err != nil {
+	if _, err := share.ResolvePenConn(pens, "alpha", u); err != nil {
 		t.Fatalf("explicit --pen alpha failed: %v", err)
 	}
 	if len(notices) != 0 {

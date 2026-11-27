@@ -1,4 +1,4 @@
-package main
+package share
 
 import (
 	"context"
@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caddyserver/certmagic"
 	"github.com/libdns/libdns"
 	"github.com/mholt/acmez/v3/acme"
 
@@ -215,8 +216,8 @@ func TestShouldFailoverACME(t *testing.T) {
 	}{
 		{"nil", nil, false},
 		{"canceled", context.Canceled, false},
-		{"dns step wrapping registrar 429 cap", dnsStepError{err: &penapi.HomeAPIError{Status: http.StatusTooManyRequests, Msg: "weekly cap"}}, false},
-		{"dns step wrapping acme 429", dnsStepError{err: acme.Problem{Status: http.StatusTooManyRequests}}, false},
+		{"dns step wrapping registrar 429 cap", DNSStepError{Err: &penapi.HomeAPIError{Status: http.StatusTooManyRequests, Msg: "weekly cap"}}, false},
+		{"dns step wrapping acme 429", DNSStepError{Err: acme.Problem{Status: http.StatusTooManyRequests}}, false},
 		{"acme 429", acme.Problem{Status: http.StatusTooManyRequests}, true},
 		{"acme rateLimited urn", acme.Problem{Status: http.StatusBadRequest, Type: "urn:ietf:params:acme:error:rateLimited"}, true},
 		{"acme 503", acme.Problem{Status: http.StatusServiceUnavailable}, true},
@@ -228,13 +229,13 @@ func TestShouldFailoverACME(t *testing.T) {
 		{"url canceled error", &url.Error{Op: "Get", URL: "https://ca.example", Err: context.Canceled}, false},
 	}
 	for _, tc := range cases {
-		if got := shouldFailoverACME(tc.err); got != tc.want {
-			t.Errorf("%s: shouldFailoverACME = %v, want %v", tc.name, got, tc.want)
+		if got := ShouldFailoverACME(tc.err); got != tc.want {
+			t.Errorf("%s: ShouldFailoverACME = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
 
-func verifyCertManagerHandshake(t *testing.T, cm *shareCertManager, serverName string, rootPool *x509.CertPool) *big.Int {
+func verifyCertManagerHandshake(t *testing.T, cm *CertManager, serverName string, rootPool *x509.CertPool) *big.Int {
 	t.Helper()
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("share ok"))
@@ -558,8 +559,8 @@ func TestShareCertManagerMockACME(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	newMgr := func(storageDir string) *shareCertManager {
-		cm, err := newShareCertManager(shareACMEConfig{
+	newMgr := func(storageDir string) *CertManager {
+		cm, err := NewCertManager(ACMEConfig{
 			Zone:       penZone,
 			Host:       shareHost,
 			StorageDir: storageDir,
@@ -587,7 +588,7 @@ func TestShareCertManagerMockACME(t *testing.T) {
 		t.Fatalf("403 triggered fallback: eabHits=%d fbHits=%d", eabHits.Load(), fallbackHits.Load())
 	}
 
-	// 2. Registrar /api/acme/txt 429 cap (dnsStepError) must NOT fail over or mint EAB,
+	// 2. Registrar /api/acme/txt 429 cap (DNSStepError) must NOT fail over or mint EAB,
 	//    and must persist backoff state without in-process retry bursts.
 	orderStatus.Store(http.StatusOK)
 	txtCap429.Store(true)
@@ -647,251 +648,6 @@ func TestShareCertManagerMockACME(t *testing.T) {
 		t.Fatalf("restart hit CA/mesh unexpectedly: pri=%d->%d fb=%d->%d eab=%d->%d txt=%d->%d",
 			priBefore, primaryHits.Load(), fbBefore, fallbackHits.Load(),
 			eabBefore, eabHits.Load(), txtBefore, txtHits.Load())
-	}
-}
-
-func TestSharePublicCertPebbleE2E(t *testing.T) {
-	if os.Getenv("HOGMAN_PEBBLE_E2E") != "1" {
-		t.Skip("set HOGMAN_PEBBLE_E2E=1 inside the ACME Pebble Compose network to run")
-	}
-
-	mustEnv := func(k string) string {
-		v := strings.TrimSpace(os.Getenv(k))
-		if v == "" {
-			t.Fatalf("missing required env %s", k)
-		}
-		return v
-	}
-	readPool := func(path string) *x509.CertPool {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		p := x509.NewCertPool()
-		if !p.AppendCertsFromPEM(b) {
-			t.Fatalf("invalid PEM in %s", path)
-		}
-		return p
-	}
-
-	zone := mustEnv("ACME_ZONE")
-	meshSock := mustEnv("ACME_MESH_SOCK")
-	serverIP := mustEnv("ACME_SERVER_IP")
-	pebble1URL := mustEnv("ACME_PEBBLE1_CA_URL")
-	pebble2URL := mustEnv("ACME_PEBBLE2_CA_URL")
-	mock429URL := mustEnv("ACME_MOCK429_CA_URL")
-	caRoot := mustEnv("ACME_CA_ROOT")
-	pebble1Pool := readPool(mustEnv("ACME_PEBBLE1_ROOT"))
-	pebble2Pool := readPool(mustEnv("ACME_PEBBLE2_ROOT"))
-	resolver := mustEnv("ACME_RESOLVER")
-	statsURL := mustEnv("ACME_STATS_URL")
-
-	type stats struct {
-		TXTWrites     int                 `json:"txt_writes"`
-		EABCount      int                 `json:"eab_count"`
-		DistinctFQDNs int                 `json:"distinct_fqdns"`
-		Live          map[string][]string `json:"live"`
-	}
-	getStats := func() stats {
-		resp, err := http.Get(statsURL)
-		if err != nil {
-			t.Fatalf("GET %s: %v", statsURL, err)
-		}
-		defer resp.Body.Close()
-		var st stats
-		if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
-			t.Fatalf("decode stats: %v", err)
-		}
-		return st
-	}
-
-	// Simulate the share's mesh http.Client routing https://home.<zone>/api/...
-	// to the live registrar mesh Unix socket with the share server's mesh IP.
-	meshClient := func(xff string) *http.Client {
-		dialer := &net.Dialer{Timeout: 10 * time.Second}
-		unixTr := &http.Transport{
-			DisableKeepAlives: true,
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return dialer.DialContext(ctx, "unix", meshSock)
-			},
-		}
-		return &http.Client{
-			Timeout: 20 * time.Second,
-			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				cloned := req.Clone(req.Context())
-				cloned.URL.Scheme = "http"
-				cloned.URL.Host = "localhost"
-				cloned.Host = "localhost"
-				cloned.Header.Set("X-Forwarded-For", xff)
-				return unixTr.RoundTrip(cloned)
-			}),
-		}
-	}
-
-	ctx := context.Background()
-
-	// 1. Obtain photos.<zone> via Pebble1 through live registrar /api/acme/txt + fake-challengedns.
-	photosHost := "photos." + zone
-	photosDir := filepath.Join(t.TempDir(), "acme-photos")
-	before := getStats()
-	cm1, err := newShareCertManager(shareACMEConfig{
-		Zone:               zone,
-		Host:               photosHost,
-		StorageDir:         photosDir,
-		PrimaryCA:          pebble1URL,
-		CARootFile:         caRoot,
-		Resolvers:          []string{resolver},
-		PropagationDelay:   100 * time.Millisecond,
-		PropagationTimeout: 15 * time.Second,
-		HTTPClient:         meshClient(serverIP),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cm1.Ensure(ctx); err != nil {
-		cm1.Close()
-		t.Fatalf("pebble1 share Ensure failed: %v", err)
-	}
-	serial1 := verifyCertManagerHandshake(t, cm1, photosHost, pebble1Pool)
-	cm1.Close()
-
-	afterPhotos := getStats()
-	if afterPhotos.EABCount != before.EABCount {
-		t.Fatalf("happy path minted fallback EAB: before=%+v after=%+v", before, afterPhotos)
-	}
-	if afterPhotos.TXTWrites <= before.TXTWrites || len(afterPhotos.Live) != 0 {
-		t.Fatalf("unexpected DNS TXT stats after issuance: before=%+v after=%+v", before, afterPhotos)
-	}
-
-	// 2. Restarting on the same storage dir reuses cached cert without new TXT writes or orders.
-	cm2, err := newShareCertManager(shareACMEConfig{
-		Zone:               zone,
-		Host:               photosHost,
-		StorageDir:         photosDir,
-		PrimaryCA:          pebble1URL,
-		CARootFile:         caRoot,
-		Resolvers:          []string{resolver},
-		PropagationDelay:   100 * time.Millisecond,
-		PropagationTimeout: 15 * time.Second,
-		HTTPClient:         meshClient(serverIP),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cm2.Ensure(ctx); err != nil {
-		cm2.Close()
-		t.Fatalf("restarted Ensure failed: %v", err)
-	}
-	serial2 := verifyCertManagerHandshake(t, cm2, photosHost, pebble1Pool)
-	cm2.Close()
-	if serial1.Cmp(serial2) != 0 {
-		t.Fatalf("restart changed cert serial: %v -> %v", serial1, serial2)
-	}
-	afterRestart := getStats()
-	if afterRestart.TXTWrites != afterPhotos.TXTWrites {
-		t.Fatalf("restart performed unexpected TXT writes: %d -> %d", afterPhotos.TXTWrites, afterRestart.TXTWrites)
-	}
-
-	// 3. Unowned name fails on registrar /api/acme/txt (403) without failing over or minting EAB.
-	cmDenied, err := newShareCertManager(shareACMEConfig{
-		Zone:               zone,
-		Host:               "other." + zone,
-		StorageDir:         filepath.Join(t.TempDir(), "acme-denied"),
-		PrimaryCA:          pebble1URL,
-		FallbackCA:         pebble2URL,
-		CARootFile:         caRoot,
-		Resolvers:          []string{resolver},
-		PropagationDelay:   100 * time.Millisecond,
-		PropagationTimeout: 10 * time.Second,
-		HTTPClient:         meshClient(serverIP),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmDenied.Ensure(ctx); err == nil {
-		cmDenied.Close()
-		t.Fatal("expected unowned share name to fail")
-	}
-	cmDenied.Close()
-	if stDenied := getStats(); stDenied.EABCount != before.EABCount {
-		t.Fatalf("unowned name 403 triggered EAB mint: %+v", stDenied)
-	}
-
-	// 4. Primary HTTP 429 fails over to Pebble2 via lazy POST /api/acme/eab, and restart reuses cert.
-	fbHost := "sharefb." + zone
-	fbDir := filepath.Join(t.TempDir(), "acme-fb")
-	cmFB, err := newShareCertManager(shareACMEConfig{
-		Zone:               zone,
-		Host:               fbHost,
-		StorageDir:         fbDir,
-		PrimaryCA:          mock429URL,
-		FallbackCA:         pebble2URL,
-		CARootFile:         caRoot,
-		Resolvers:          []string{resolver},
-		PropagationDelay:   100 * time.Millisecond,
-		PropagationTimeout: 15 * time.Second,
-		HTTPClient:         meshClient(serverIP),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmFB.Ensure(ctx); err != nil {
-		cmFB.Close()
-		t.Fatalf("mock429 -> pebble2 share failover failed: %v", err)
-	}
-	fbSerial1 := verifyCertManagerHandshake(t, cmFB, fbHost, pebble2Pool)
-	// Verify cert fails against Pebble1 root before testing restart cache reuse.
-	badSrv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	badSrv.TLS = cmFB.TLSConfig()
-	badSrv.StartTLS()
-	badAddr := badSrv.Listener.Addr().String()
-	badClient := &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{ServerName: fbHost, RootCAs: pebble1Pool},
-			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, badAddr)
-			},
-		},
-	}
-	if _, err := badClient.Get("https://" + fbHost + "/"); err == nil {
-		badSrv.Close()
-		t.Fatal("expected pebble2 fallback cert to fail verification against pebble1 root")
-	}
-	badSrv.Close()
-
-	cmFB.Close()
-
-	afterFB := getStats()
-	if afterFB.EABCount != before.EABCount+1 {
-		t.Fatalf("expected 1 fallback EAB mint, got before=%+v after=%+v", before, afterFB)
-	}
-	cmFBRestart, err := newShareCertManager(shareACMEConfig{
-		Zone:               zone,
-		Host:               fbHost,
-		StorageDir:         fbDir,
-		PrimaryCA:          mock429URL,
-		FallbackCA:         pebble2URL,
-		CARootFile:         caRoot,
-		Resolvers:          []string{resolver},
-		PropagationDelay:   100 * time.Millisecond,
-		PropagationTimeout: 15 * time.Second,
-		HTTPClient:         meshClient(serverIP),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cmFBRestart.Close()
-	if err := cmFBRestart.Ensure(ctx); err != nil {
-		t.Fatalf("fallback restart Ensure failed: %v", err)
-	}
-	fbSerial2 := verifyCertManagerHandshake(t, cmFBRestart, fbHost, pebble2Pool)
-	if fbSerial1.Cmp(fbSerial2) != 0 {
-		t.Fatalf("fallback restart changed serial: %v -> %v", fbSerial1, fbSerial2)
-	}
-	afterFBRestart := getStats()
-	if afterFBRestart.EABCount != afterFB.EABCount || afterFBRestart.TXTWrites != afterFB.TXTWrites {
-		t.Fatalf("fallback restart hit EAB or TXT unexpectedly: before=%+v after=%+v", afterFB, afterFBRestart)
 	}
 }
 
@@ -1094,15 +850,15 @@ func TestShareACMENoPromptSubprocess(t *testing.T) {
 	storageDir := filepath.Join(t.TempDir(), "acme")
 	ca := newMockLeafACMEServer(t, shareHost)
 
-	cfg := shareACMEConfigFromEnv(penZone, shareHost, storageDir, &http.Client{Timeout: 5 * time.Second})
+	cfg := ACMEConfigFromEnv(penZone, shareHost, storageDir, &http.Client{Timeout: 5 * time.Second})
 	if cfg.Email != "" {
-		t.Fatalf("shareACMEConfigFromEnv Email = %q, want empty", cfg.Email)
+		t.Fatalf("ACMEConfigFromEnv Email = %q, want empty", cfg.Email)
 	}
 	cfg.PrimaryCA = ca.srv.URL + "/dir"
 	cfg.FallbackCA = ""
 	cfg.CARootFile = ca.caFile
 
-	cm1, err := newShareCertManager(cfg)
+	cm1, err := NewCertManager(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1116,7 +872,7 @@ func TestShareACMENoPromptSubprocess(t *testing.T) {
 		t.Fatalf("expected 1 acct and 1 order call, got acct=%d order=%d", ca.acctHits.Load(), ca.orderHits.Load())
 	}
 
-	cm2, err := newShareCertManager(cfg)
+	cm2, err := NewCertManager(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1145,8 +901,8 @@ func TestShareACMEPersistentBackoffAcrossRestarts(t *testing.T) {
 	fakeNow := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 	var waits []time.Duration
 
-	newMgr := func(withFakeWait bool) *shareCertManager {
-		cm, err := newShareCertManager(shareACMEConfig{
+	newMgr := func(withFakeWait bool) *CertManager {
+		cm, err := NewCertManager(ACMEConfig{
 			Zone:       penZone,
 			Host:       shareHost,
 			StorageDir: storageDir,
@@ -1266,7 +1022,7 @@ func TestShareACMEPersistentBackoffAcrossRestarts(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(corruptDir, acmeRetryStateFile), []byte("{corrupt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmCorrupt, err := newShareCertManager(shareACMEConfig{
+	cmCorrupt, err := NewCertManager(ACMEConfig{
 		Zone: penZone, Host: shareHost, StorageDir: corruptDir,
 		PrimaryCA: ca.srv.URL + "/dir", CARootFile: ca.caFile, HTTPClient: &http.Client{Timeout: time.Second},
 	})
@@ -1396,8 +1152,8 @@ func TestShareACMERegistrarCapLongBackoff(t *testing.T) {
 	fakeNow := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 	var waits []time.Duration
 
-	newMgr := func() *shareCertManager {
-		cm, err := newShareCertManager(shareACMEConfig{
+	newMgr := func() *CertManager {
+		cm, err := NewCertManager(ACMEConfig{
 			Zone:       penZone,
 			Host:       shareHost,
 			StorageDir: storageDir,
@@ -1473,18 +1229,18 @@ func TestShareACMERegistrarCapLongBackoff(t *testing.T) {
 }
 
 func TestFallbackContact(t *testing.T) {
-	if got := fallbackContact(" ops@example.com "); len(got) != 1 || got[0] != "mailto:ops@example.com" {
-		t.Fatalf("fallbackContact = %v", got)
+	if got := FallbackContact(" ops@example.com "); len(got) != 1 || got[0] != "mailto:ops@example.com" {
+		t.Fatalf("FallbackContact = %v", got)
 	}
 	for _, bad := range []string{"", "nope", "Ops <ops@example.com>", "a@b.com,c@d.com", "ops@example.com?cc=x@y.z"} {
-		if got := fallbackContact(bad); got != nil {
-			t.Fatalf("fallbackContact(%q) = %v, want nil", bad, got)
+		if got := FallbackContact(bad); got != nil {
+			t.Fatalf("FallbackContact(%q) = %v, want nil", bad, got)
 		}
 	}
 }
 
 func TestShareCertManagerCloseIdempotent(t *testing.T) {
-	cm, err := newShareCertManager(shareACMEConfig{
+	cm, err := NewCertManager(ACMEConfig{
 		Zone:       "bobo.pens.example.com",
 		Host:       "photos.bobo.pens.example.com",
 		StorageDir: filepath.Join(t.TempDir(), "acme"),
@@ -1528,5 +1284,88 @@ func TestMeshJSONParsesRetryAfter(t *testing.T) {
 	}
 	if me.Msg != "too many new certificate names for this pen in the last hour" {
 		t.Fatalf("HomeAPIError.Msg = %q", me.Msg)
+	}
+}
+
+func makeSelfSignedPEM(t *testing.T, dnsName string, notBefore, notAfter time.Time) (certPEM, keyPEM []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: dnsName},
+		DNSNames:     []string{dnsName},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM
+}
+
+func TestACMEFallbackUsedWhenPrimaryExpired(t *testing.T) {
+	t.Parallel()
+	host := "blog.bobo.pens.example.com"
+	cm, err := NewCertManager(ACMEConfig{
+		Zone:       "bobo.pens.example.com",
+		Host:       host,
+		StorageDir: t.TempDir(),
+		PrimaryCA:  "https://primary.acme.example.com/directory",
+		FallbackCA: "https://fallback.acme.example.com/directory",
+		HTTPClient: &http.Client{Timeout: 5 * time.Second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cm.Close()
+
+	now := time.Now()
+	expCert, expKey := makeSelfSignedPEM(t, host, now.Add(-48*time.Hour), now.Add(-1*time.Hour))
+	valCert, valKey := makeSelfSignedPEM(t, host, now.Add(-1*time.Hour), now.Add(30*24*time.Hour))
+
+	ctx := context.Background()
+	primKey := cm.primaryIss.IssuerKey()
+	fbKey := cm.fallbackIss.IssuerKey()
+	meta := []byte(`{"sans":["` + host + `"]}`)
+	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SiteCert(primKey, host), expCert); err != nil {
+		t.Fatal(err)
+	}
+	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SitePrivateKey(primKey, host), expKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SiteMeta(primKey, host), meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SiteCert(fbKey, host), valCert); err != nil {
+		t.Fatal(err)
+	}
+	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SitePrivateKey(fbKey, host), valKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SiteMeta(fbKey, host), meta); err != nil {
+		t.Fatal(err)
+	}
+
+	gotCfg, err := cm.getConfigForCert(certmagic.Certificate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCfg != cm.fallbackCfg {
+		t.Fatalf("getConfigForCert selected primary despite expired primary cert and valid fallback cert")
+	}
+	if !cm.ensureCachedLocked(ctx) {
+		t.Fatal("ensureCachedLocked should load the valid fallback cert even when an expired primary cert exists on disk")
 	}
 }

@@ -11,7 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"hogman/join/internal/share"
 	"hogman/join/internal/state"
+	"hogman/join/internal/ui"
 )
 
 func TestCLIPrivateNameShareParsing(t *testing.T) {
@@ -164,8 +166,8 @@ func TestClaimShareNamePrivateAndRestart(t *testing.T) {
 		Zone:        "acme.pens.example.com",
 		Note:        "Cooler 3",
 	}
-	if _, err := claimShareName(context.Background(), hc, cfg, dir); err != nil {
-		t.Fatalf("first claimShareName failed: %v", err)
+	if _, err := share.ClaimName(context.Background(), hc, cfg, dir); err != nil {
+		t.Fatalf("first ClaimName failed: %v", err)
 	}
 	if cfg.Name != "k7p3m9x2q4v8" {
 		t.Fatalf("cfg.Name = %q, want k7p3m9x2q4v8", cfg.Name)
@@ -182,8 +184,8 @@ func TestClaimShareNamePrivateAndRestart(t *testing.T) {
 	}
 
 	// Second call (restart): sends explicit name, NOT private=true.
-	if _, err := claimShareName(context.Background(), hc, saved, dir); err != nil {
-		t.Fatalf("restart claimShareName failed: %v", err)
+	if _, err := share.ClaimName(context.Background(), hc, saved, dir); err != nil {
+		t.Fatalf("restart ClaimName failed: %v", err)
 	}
 	if _, hasPrivate := seenBodies[1]["private"]; hasPrivate {
 		t.Fatalf("restart POST /api/names should not send private=true, got %+v", seenBodies[1])
@@ -214,9 +216,9 @@ func TestAllSharesInSkipsPendingDirsAndStateDirRejectsMismatch(t *testing.T) {
 	if len(dirs) != 1 || dirs[0] != realDir {
 		t.Fatalf("AllSharesIn = %v, want [%s]", dirs, realDir)
 	}
-	items := collectShareListItems(dirs)
+	items := share.CollectListItems(dirs)
 	if len(items) != 1 || !items[0].Private || items[0].Note != "Cooler 3" {
-		t.Fatalf("unexpected collectShareListItems: %+v", items)
+		t.Fatalf("unexpected CollectListItems: %+v", items)
 	}
 
 	// State-dir enrolled for a non-private share must refuse --private-name.
@@ -224,19 +226,19 @@ func TestAllSharesInSkipsPendingDirsAndStateDirRejectsMismatch(t *testing.T) {
 	if err := (&state.ShareConfig{Name: "blog", PrivateName: false, Zone: zone}).Save(namedDir); err != nil {
 		t.Fatal(err)
 	}
-	err := shareStart("", "3000", "", options{privateName: true, stateDir: namedDir})
+	err := share.Start("", "3000", "", share.StartOptions{PrivateName: true, StateDir: namedDir}, ui.Default(), ensureCanonicalBinary)
 	if err == nil || !strings.Contains(err.Error(), "not --private-name") {
 		t.Fatalf("expected mismatch error for non-private state-dir, got: %v", err)
 	}
 
 	// Verify honest private-name notice & tip text.
-	notice := formatSharePrivateNameNotice("k7p3m9x2q4v8." + zone)
+	notice := share.FormatPrivateNameNotice("k7p3m9x2q4v8." + zone)
 	for _, want := range []string{"k7p3m9x2q4v8." + zone, "certificate logs", "pen name", "site count"} {
 		if !strings.Contains(notice, want) {
 			t.Fatalf("notice missing %q: %s", want, notice)
 		}
 	}
-	if !strings.Contains(formatSharePrivateNoteTip(), "--note") {
-		t.Fatalf("tip missing --note: %s", formatSharePrivateNoteTip())
+	if !strings.Contains(share.FormatPrivateNoteTip(), "--note") {
+		t.Fatalf("tip missing --note: %s", share.FormatPrivateNoteTip())
 	}
 }

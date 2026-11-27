@@ -92,6 +92,21 @@ func formatNonJSONAPIError(status int, contentType string, hasBody bool) string 
 	return fmt.Sprintf("HTTP %d: unexpected non-JSON response from pen API", status)
 }
 
+// FormatHTTPResponseError returns a sanitized JSON "error" message when present
+// in body; otherwise it reports HTTP <status> (<content-type>) with a Wi-Fi
+// login hint for HTML responses and never echoes raw response body bytes.
+func FormatHTTPResponseError(status int, contentType string, body []byte) string {
+	var apiErr struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &apiErr) == nil {
+		if msg := SanitizeAPIErrorMsg(apiErr.Error); msg != "" {
+			return msg
+		}
+	}
+	return formatNonJSONAPIError(status, contentType, len(bytes.TrimSpace(body)) > 0)
+}
+
 func HomeAPI(c *http.Client, zone, method, path string, in, out any) (int, error) {
 	return HomeAPICtx(context.Background(), c, zone, method, path, in, out)
 }
@@ -128,16 +143,7 @@ func HomeAPICtx(ctx context.Context, c *http.Client, zone, method, path string, 
 		}
 	}
 	if resp.StatusCode >= 300 {
-		var apiErr struct {
-			Error string `json:"error"`
-		}
-		msg := ""
-		if json.Unmarshal(data, &apiErr) == nil {
-			msg = SanitizeAPIErrorMsg(apiErr.Error)
-		}
-		if msg == "" {
-			msg = formatNonJSONAPIError(resp.StatusCode, resp.Header.Get("Content-Type"), len(bytes.TrimSpace(data)) > 0)
-		}
+		msg := FormatHTTPResponseError(resp.StatusCode, resp.Header.Get("Content-Type"), data)
 		var retryAfter time.Duration
 		if raw := strings.TrimSpace(resp.Header.Get("Retry-After")); raw != "" {
 			if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {

@@ -13,6 +13,7 @@ import (
 	"hogman/join/internal/agent"
 	"hogman/join/internal/penapi"
 	"hogman/join/internal/platform"
+	"hogman/join/internal/share"
 	"hogman/join/internal/state"
 )
 
@@ -172,7 +173,7 @@ func TestAuditShareSubpathBlocksTraversal(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, closeH, err := shareHandler(&state.ShareConfig{
+	h, closeH, err := share.NewHandler(&state.ShareConfig{
 		Name:   "app",
 		Zone:   "farm.pens.hogman.network",
 		Target: upstream.URL + "/sub",
@@ -243,7 +244,7 @@ func TestAuditSystemdQuoteEscapesPercentAndNewlines(t *testing.T) {
 
 func TestAuditACMEValidatesCARootBeforeMkdir(t *testing.T) {
 	storageDir := filepath.Join(t.TempDir(), "should-not-exist")
-	_, err := newShareCertManager(shareACMEConfig{
+	_, err := share.NewCertManager(share.ACMEConfig{
 		Zone:       "farm.pens.hogman.network",
 		Host:       "web.farm.pens.hogman.network",
 		StorageDir: storageDir,
