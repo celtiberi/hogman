@@ -491,3 +491,30 @@ func TestLinkStdinWithArgErrorsAndDefaults(t *testing.T) {
 		t.Fatalf("update --help should not expose test-only HOGMAN_RELEASE_BASE:\n%s", out.String())
 	}
 }
+
+func TestStartDetachedHiddenCommand(t *testing.T) {
+	var errBuf bytes.Buffer
+	var gotKind, gotDir string
+	h := cliHandlers{
+		errOut: &errBuf,
+		startDetached: func(kind, dir string) error {
+			gotKind, gotDir = kind, dir
+			return nil
+		},
+	}
+	for _, kind := range []string{"agent", "share"} {
+		gotKind, gotDir = "", ""
+		errBuf.Reset()
+		if rc := runCLI([]string{"__start-detached", kind, "/tmp/state-dir"}, h); rc != 0 || gotKind != kind || gotDir != "/tmp/state-dir" {
+			t.Fatalf("__start-detached %s: rc=%d kind=%q dir=%q err=%q", kind, rc, gotKind, gotDir, errBuf.String())
+		}
+	}
+	errBuf.Reset()
+	if rc := runCLI([]string{"__start-detached", "evil", "/tmp/state-dir"}, h); rc != 2 {
+		t.Fatalf("__start-detached evil: rc=%d, want 2 (err=%q)", rc, errBuf.String())
+	}
+	errBuf.Reset()
+	if rc := runCLI([]string{"__start-detached", "agent"}, h); rc != 2 {
+		t.Fatalf("__start-detached missing dir: rc=%d, want 2 (err=%q)", rc, errBuf.String())
+	}
+}

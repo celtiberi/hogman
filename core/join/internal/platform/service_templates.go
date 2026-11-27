@@ -25,6 +25,47 @@ func ShareLaunchLabel(c *state.ShareConfig) string { return "network.hogman.shar
 
 func ShareUnitName(c *state.ShareConfig) string { return "hogman-share-" + c.FQDN() + ".service" }
 
+func WindowsRunValueName(zone string) string { return "Hogman." + zone }
+
+func WindowsShareRunValueName(c *state.ShareConfig) string { return "Hogman.share." + c.FQDN() }
+
+func winQuoteArg(s string) (string, error) {
+	if s == "" {
+		return "", fmt.Errorf("empty Windows command argument")
+	}
+	if strings.ContainsAny(s, "\r\n\x00\"") {
+		return "", fmt.Errorf("Windows command argument contains disallowed control or quote characters")
+	}
+	// Per Win32 CommandLineToArgvW rules, backslashes immediately preceding the
+	// closing double-quote must be doubled so the closing quote is not escaped.
+	trailingBS := 0
+	for i := len(s) - 1; i >= 0 && s[i] == '\\'; i-- {
+		trailingBS++
+	}
+	if trailingBS > 0 {
+		s += strings.Repeat(`\`, trailingBS)
+	}
+	return `"` + s + `"`, nil
+}
+
+// RenderWindowsRunCommand builds the HKCU\...\Run command line for starting a
+// pen agent or share cleanly in the background at user login without leaving a
+// console window open.
+func RenderWindowsRunCommand(bin, kind, dir string) (string, error) {
+	if kind != "agent" && kind != "share" {
+		return "", fmt.Errorf("invalid Windows autostart target kind %q", kind)
+	}
+	qBin, err := winQuoteArg(bin)
+	if err != nil {
+		return "", fmt.Errorf("binary path: %w", err)
+	}
+	qDir, err := winQuoteArg(dir)
+	if err != nil {
+		return "", fmt.Errorf("state dir: %w", err)
+	}
+	return fmt.Sprintf("%s __start-detached %s %s", qBin, kind, qDir), nil
+}
+
 // RenderLaunchPlist builds a macOS LaunchAgent plist for a pen agent.
 func RenderLaunchPlist(label, bin, dir, logPath string) (string, error) {
 	return renderLaunchPlistArgs(label, bin, []string{"agent", dir}, logPath, false)

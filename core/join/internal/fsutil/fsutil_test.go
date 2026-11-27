@@ -98,19 +98,17 @@ func TestCopyExecutableAtomicSHA256AndShareLock(t *testing.T) {
 		t.Fatal("SameFilePath failed on equivalent clean paths")
 	}
 
-	if runtime.GOOS != "windows" {
-		unlock, err := AcquireShareLock(dir)
-		if err != nil {
-			t.Fatalf("AcquireShareLock #1: %v", err)
-		}
-		if _, err := AcquireShareLock(dir); !errors.Is(err, ErrLocked) {
-			t.Fatalf("AcquireShareLock #2 = %v, want ErrLocked", err)
-		}
-		unlock()
-		unlock2, err := AcquireShareLock(dir)
-		if err != nil {
-			t.Fatalf("AcquireShareLock after unlock: %v", err)
-		}
-		unlock2()
+	unlock, err := AcquireShareLock(dir)
+	if err != nil {
+		t.Fatalf("AcquireShareLock #1: %v", err)
 	}
+	if _, err := AcquireShareLock(dir); !errors.Is(err, ErrLocked) {
+		t.Fatalf("AcquireShareLock #2 = %v, want ErrLocked", err)
+	}
+	unlock()
+	unlock2, err := AcquireShareLock(dir)
+	if err != nil {
+		t.Fatalf("AcquireShareLock after unlock: %v", err)
+	}
+	unlock2()
 }
