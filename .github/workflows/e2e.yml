@@ -175,6 +175,7 @@ jobs:
             cd deploy/challenge-dns
             export GOFLAGS=-trimpath
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$out/challenge-dns/challenge-dns-linux-amd64" .
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags=cdnstest -ldflags="-s -w" -o "$out/challenge-dns/challenge-dns-e2e-linux-amd64" .
           ) &
           p_cdns=$!
           wait "$p_join_amd64"

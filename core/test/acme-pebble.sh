@@ -213,13 +213,13 @@ chown -R 65532:65532 "$WORKDIR/data"
 chmod 700 "$WORKDIR/data/headscale/lib" "$WORKDIR/data/registrar" "$WORKDIR/data/registrar/tsnet" "$WORKDIR/data/home-tls"
 
 case "$(uname -m)" in x86_64|amd64) HOST_GOARCH=amd64 ;; aarch64|arm64) HOST_GOARCH=arm64 ;; *) HOST_GOARCH="" ;; esac
-if [ -n "$HOST_GOARCH" ] && [ -f "$ROOT_DIR/core/prebuilt/challenge-dns/challenge-dns-linux-$HOST_GOARCH" ]; then
-  install -m 0755 "$ROOT_DIR/core/prebuilt/challenge-dns/challenge-dns-linux-$HOST_GOARCH" "$WORKDIR/cdns/challenge-dns"
+if [ -n "$HOST_GOARCH" ] && [ -f "$ROOT_DIR/core/prebuilt/challenge-dns/challenge-dns-e2e-linux-$HOST_GOARCH" ]; then
+  install -m 0755 "$ROOT_DIR/core/prebuilt/challenge-dns/challenge-dns-e2e-linux-$HOST_GOARCH" "$WORKDIR/cdns/challenge-dns"
 else
   docker run --rm -v "$ROOT_DIR/deploy/challenge-dns:/src:ro" -v "$WORKDIR/cdns:/out" -w /src \
     -e CGO_ENABLED=0 -e GOFLAGS=-buildvcs=false \
     golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 \
-    go build -o /out/challenge-dns . || fail "failed building challenge-dns"
+    go build -tags=cdnstest -o /out/challenge-dns . || fail "failed building challenge-dns"
 fi
 
 cat >"$WORKDIR/cdns/test-eab.json" <<EOF
@@ -299,7 +299,7 @@ cat >"$WORKDIR/config/mock429.Caddyfile" <<'EOF'
 	admin off
 }
 
-https://mock429:14000 {
+:14000 {
 	tls /certs/server.crt /certs/server.key
 	handle /dir {
 		header Content-Type application/json

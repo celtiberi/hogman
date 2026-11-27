@@ -168,35 +168,3 @@ func TestAdminClientRejectsOversizedResponse(t *testing.T) {
 		t.Fatalf("oversized admin response error = %v, want size-limit rejection", err)
 	}
 }
-
-func TestStaticEABMinterValidation(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	valid := filepath.Join(dir, "eab.json")
-	if err := os.WriteFile(valid, []byte(`{"kid":"test-kid","hmac_b64url":"bWFjLWtleQ"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	m, err := newStaticEABMinter(valid)
-	if err != nil {
-		t.Fatalf("newStaticEABMinter valid: %v", err)
-	}
-	kid, hmac, err := m.Mint(context.Background())
-	if err != nil || kid != "test-kid" || hmac != "bWFjLWtleQ" {
-		t.Fatalf("Mint = (%q, %q, %v), want (test-kid, bWFjLWtleQ, nil)", kid, hmac, err)
-	}
-
-	for name, content := range map[string]string{
-		"missing hmac":  `{"kid":"test-kid"}`,
-		"unknown field": `{"kid":"k","hmac_b64url":"v","extra":"no"}`,
-		"oversized":     strings.Repeat("x", maxTestEABFileBytes+1),
-	} {
-		p := filepath.Join(dir, strings.ReplaceAll(name, " ", "_")+".json")
-		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := newStaticEABMinter(p); err == nil {
-			t.Fatalf("newStaticEABMinter(%s) succeeded, want error", name)
-		}
-	}
-}

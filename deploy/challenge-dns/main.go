@@ -141,6 +141,40 @@ func newNtfyAlerter(ntfyURL string, hc *http.Client, logger *slog.Logger) func(u
 	}
 }
 
+func configureFallbackEAB(ctx context.Context, api *API, gcpKeyFile, testEABFile, rawContact string, logger *slog.Logger) error {
+	log := defaultLogger(logger)
+	if gcpKeyFile != "" && testEABFile != "" {
+		return errors.New("CDNS_GCP_KEY and CDNS_TEST_EAB_FILE are mutually exclusive")
+	}
+	if gcpKeyFile == "" && testEABFile == "" {
+		return nil
+	}
+	if testEABFile != "" {
+		m, err := loadTestEABMinter(testEABFile, log)
+		if err != nil {
+			return err
+		}
+		api.eab = m
+	} else {
+		m, err := newGCPMinter(ctx, gcpKeyFile)
+		if err != nil {
+			return fmt.Errorf("CDNS_GCP_KEY: %w", err)
+		}
+		api.eab = m
+		log.Info("fallback CA account keys configured", "gcp_project", m.project)
+	}
+	contact, err := parseContact(rawContact)
+	if err != nil {
+		return err
+	}
+	if api.contact = contact; contact == "" {
+		log.Warn("CDNS_GTS_CONTACT is not set; Google refuses accounts without a contact, so no fallback account keys will be handed out")
+	} else {
+		log.Info("fallback CA account contact configured", "contact", contact)
+	}
+	return nil
+}
+
 func serve() error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	listen := os.Getenv("CDNS_LISTEN")
@@ -188,36 +222,15 @@ func serve() error {
 		limiter: defaultEABLimiter(store.now),
 		logger:  logger,
 	}
-	gcpKeyFile := strings.TrimSpace(os.Getenv("CDNS_GCP_KEY"))
-	testEABFile := strings.TrimSpace(os.Getenv("CDNS_TEST_EAB_FILE"))
-	if gcpKeyFile != "" && testEABFile != "" {
-		return errors.New("CDNS_GCP_KEY and CDNS_TEST_EAB_FILE are mutually exclusive")
-	}
-	if gcpKeyFile != "" || testEABFile != "" {
-		if gcpKeyFile != "" {
-			m, err := newGCPMinter(ctx, gcpKeyFile)
-			if err != nil {
-				return fmt.Errorf("CDNS_GCP_KEY: %w", err)
-			}
-			api.eab = m
-			logger.Info("fallback CA account keys configured", "gcp_project", m.project)
-		} else {
-			m, err := newStaticEABMinter(testEABFile)
-			if err != nil {
-				return fmt.Errorf("CDNS_TEST_EAB_FILE: %w", err)
-			}
-			api.eab = m
-			logger.Warn("fallback CA using static test EAB file (tests only)", "path", testEABFile)
-		}
-		contact, err := parseContact(os.Getenv("CDNS_GTS_CONTACT"))
-		if err != nil {
-			return err
-		}
-		if api.contact = contact; contact == "" {
-			logger.Warn("CDNS_GTS_CONTACT is not set; Google refuses accounts without a contact, so no fallback account keys will be handed out")
-		} else {
-			logger.Info("fallback CA account contact configured", "contact", contact)
-		}
+	if err := configureFallbackEAB(
+		ctx,
+		api,
+		strings.TrimSpace(os.Getenv("CDNS_GCP_KEY")),
+		strings.TrimSpace(os.Getenv("CDNS_TEST_EAB_FILE")),
+		os.Getenv("CDNS_GTS_CONTACT"),
+		logger,
+	); err != nil {
+		return err
 	}
 
 	errc := make(chan error, 8)
