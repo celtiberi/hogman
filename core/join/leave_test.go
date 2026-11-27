@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"hogman/join/internal/penapi"
+	"hogman/join/internal/platform"
 	"hogman/join/internal/state"
 )
 
@@ -397,15 +398,15 @@ func TestLeaveAllSweepsStaleProxy(t *testing.T) {
 // someone else's proxy (which would also stop a later join from setting it).
 func TestStaleHogmanPACIsNotAConflict(t *testing.T) {
 	const stale = "http://127.0.0.1:25148/proxy.pac?v=f862f6b0"
-	old := staleHogmanPAC
-	t.Cleanup(func() { staleHogmanPAC = old })
-	staleHogmanPAC = func(u string) bool { return u == stale }
+	old := platform.StaleHogmanPAC
+	t.Cleanup(func() { platform.StaleHogmanPAC = old })
+	platform.StaleHogmanPAC = func(u string) bool { return u == stale }
 
-	st := evaluateDarwinProxyState(scutilProxyInfo{PACOn: true, PACURL: stale}, "en0", false, nil)
+	st := platform.EvaluateDarwinProxyState(platform.ScutilProxyInfo{PACOn: true, PACURL: stale}, "en0", false, nil)
 	if st.OSProxyConflict || st.StalePAC != stale {
 		t.Fatalf("stale Hogman PAC: conflict=%v stale=%q; want no conflict, stale reported", st.OSProxyConflict, st.StalePAC)
 	}
-	st = evaluateDarwinProxyState(scutilProxyInfo{PACOn: true, PACURL: "http://proxy.corp.example/wpad.dat"}, "en0", false, nil)
+	st = platform.EvaluateDarwinProxyState(platform.ScutilProxyInfo{PACOn: true, PACURL: "http://proxy.corp.example/wpad.dat"}, "en0", false, nil)
 	if !st.OSProxyConflict || st.StalePAC != "" {
 		t.Fatalf("company PAC: conflict=%v stale=%q; want a conflict", st.OSProxyConflict, st.StalePAC)
 	}

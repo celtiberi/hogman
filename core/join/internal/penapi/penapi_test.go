@@ -2,9 +2,11 @@ package penapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -179,5 +181,65 @@ func TestValidateNetworkInfoAndDeleteSelfDevice(t *testing.T) {
 	})}
 	if res := DeleteSelfDevice(context.Background(), hc, "bobo.pens.example.com", 7, nil); res.Outcome != SelfDeleteRemoved {
 		t.Fatalf("code 0 confirmed via 403 = %+v, want SelfDeleteRemoved", res)
+	}
+}
+
+func TestFetchNetworkValidation(t *testing.T) {
+	t.Parallel()
+	var payload NetworkInfo
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(payload)
+	}))
+	defer srv.Close()
+	host := "bobo.gate.example.com"
+	baseTransport := srv.Client().Transport
+	srvAddr := strings.TrimPrefix(srv.URL, "https://")
+	c := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			r2 := req.Clone(req.Context())
+			r2.URL.Host = srvAddr
+			return baseTransport.RoundTrip(r2)
+		}),
+	}
+
+	baseValid := NetworkInfo{
+		Zone:        "bobo.pens.example.com",
+		LoginServer: "https://" + host,
+		CertMode:    "public",
+		Portal:      "https://home.bobo.pens.example.com",
+		DNSServer:   "100.64.0.2",
+	}
+	payload = baseValid
+	if _, err := FetchNetwork(c, host); err != nil {
+		t.Fatalf("valid public NetworkInfo rejected: %v", err)
+	}
+	payload.CertMode = ""
+	if _, err := FetchNetwork(c, host); err != nil {
+		t.Fatalf("public NetworkInfo with omitted cert_mode rejected: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*NetworkInfo)
+	}{
+		{"private cert_mode", func(n *NetworkInfo) { n.CertMode = "private" }},
+		{"unknown cert_mode", func(n *NetworkInfo) { n.CertMode = "bogus" }},
+		{"cross-pen zone", func(n *NetworkInfo) {
+			n.Zone = "alice.pens.example.com"
+			n.Portal = "https://home.alice.pens.example.com"
+		}},
+		{"non-public zone", func(n *NetworkInfo) { n.Zone = "bobo.hogman"; n.Portal = "https://home.bobo.hogman" }},
+		{"mismatched login_server", func(n *NetworkInfo) { n.LoginServer = "https://evil.example" }},
+		{"foreign portal", func(n *NetworkInfo) { n.Portal = "https://evil.example/phish" }},
+		{"non-mesh dns_server", func(n *NetworkInfo) { n.DNSServer = "8.8.8.8" }},
+	}
+	for _, tc := range cases {
+		bad := baseValid
+		tc.mutate(&bad)
+		payload = bad
+		if _, err := FetchNetwork(c, host); err == nil {
+			t.Errorf("%s: expected FetchNetwork to reject payload", tc.name)
+		}
+		payload = baseValid
 	}
 }

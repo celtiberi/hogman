@@ -8,9 +8,12 @@ import (
 	"sort"
 	"strings"
 
+	"hogman/join/internal/agent"
 	"hogman/join/internal/fsutil"
 	"hogman/join/internal/link"
+	"hogman/join/internal/nativehost"
 	"hogman/join/internal/penapi"
+	"hogman/join/internal/platform"
 	"hogman/join/internal/state"
 )
 
@@ -158,10 +161,10 @@ func cleanupOrphanCanonicalBinary() {
 		return
 	}
 	cfgBase := state.ConfigBase()
-	removeNativeHost(cfgBase)
+	nativehost.Remove(cfgBase)
 	selfPath, _ := fsutil.ResolvedExePath()
 	canon := state.CanonicalBinaryPath(cfgBase)
-	nh := nativeHostBinaryPath(cfgBase)
+	nh := nativehost.BinaryPath(cfgBase)
 	if fi, err := os.Lstat(nh); err == nil {
 		if fi.Mode()&os.ModeSymlink != 0 || !fsutil.SameFilePath(nh, selfPath) {
 			_ = os.Remove(nh)
@@ -252,7 +255,7 @@ var sweepStaleProxyFn = func() {
 	if runtime.GOOS != "darwin" {
 		return
 	}
-	if msg := clearSystemProxy(nil, state.LoadInstalledPenConfigs(state.ConfigBase())); msg != "" {
+	if msg := platform.ClearSystemProxy(nil, state.LoadInstalledPenConfigs(state.ConfigBase())); msg != "" {
 		note("%s", msg)
 	}
 }
@@ -340,7 +343,7 @@ func typedConfirm(zone, warning string) bool {
 func assessLeaveRisk(cfg *state.AgentConfig) leaveRisk {
 	// Already removed from the pen (the agent proves it and the pen says log
 	// in again): nothing left to protect.
-	if st, d := verifyAgentEndpointDetail(state.StateDir(cfg.Zone), cfg); st == agentEndpointDown && d.verified && d.needsLogin {
+	if st, d := agent.VerifyEndpointDetail(state.StateDir(cfg.Zone), cfg); st == agent.EndpointDown && d.Verified && d.NeedsLogin {
 		return leaveRiskNone
 	}
 	c, err := penapi.PenClient(cfg)
@@ -377,7 +380,7 @@ func leaveRiskFromMe(me penapi.MeView) leaveRisk {
 // onTailscaleAppFn: is this computer on zone through its Tailscale app? A
 // seam for tests.
 var onTailscaleAppFn = func(zone string) bool {
-	ts, err := findTailscale()
+	ts, err := platform.FindTailscale()
 	if err != nil {
 		return false
 	}
@@ -417,7 +420,7 @@ func leaveOne(t leaveTarget) error {
 		gone := removeOwnDevice(t.zone)
 		leaveAlongside(t.zone, gone)
 	}
-	if ts, err := findTailscale(); err == nil {
+	if ts, err := platform.FindTailscale(); err == nil {
 		if st, err := ts.Status(); err == nil && st.OnNetwork(t.zone) {
 			if err := ts.Logout(); err != nil {
 				_ = ts.Down()
@@ -429,7 +432,7 @@ func leaveOne(t leaveTarget) error {
 			note("to return to another Tailscale network: tailscale switch --list")
 		}
 		if t.host != "" {
-			if removed := ts.RemoveProfiles(t.host); removed > 0 {
+			if removed := ts.RemoveProfiles(t.host, note); removed > 0 {
 				note("removed the saved %s profile from Tailscale", t.zone)
 			}
 		}
@@ -471,7 +474,7 @@ func uninstallCmd(args []string, o options) error {
 		return err // a pen failed to leave: remove nothing
 	}
 	step("Removing Hogman's settings from this computer")
-	removeNativeHost(state.ConfigBase())
+	nativehost.Remove(state.ConfigBase())
 	for _, dir := range []string{state.ConfigBase(), state.SharesBase()} {
 		if err := os.RemoveAll(dir); err != nil {
 			note("could not remove %s: %v", dir, err)

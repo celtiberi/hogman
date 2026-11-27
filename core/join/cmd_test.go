@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"hogman/join/internal/platform"
 	"hogman/join/internal/state"
 )
 
@@ -125,16 +126,16 @@ func TestCLIInstalledServiceGoldenCommands(t *testing.T) {
 	bin := "/tmp/hogman bin/hogman"
 	sc := &state.ShareConfig{Name: "blog", Zone: "bobo.pens.example.com"}
 
-	agentPlist, err := renderLaunchPlist(launchLabel("bobo.pens.example.com"), bin, agentDir, filepath.Join(agentDir, "agent.log"))
+	agentPlist, err := platform.RenderLaunchPlist(platform.LaunchLabel("bobo.pens.example.com"), bin, agentDir, filepath.Join(agentDir, "agent.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	sharePlist, err := renderShareLaunchPlist(sc, bin, shareDirPath)
+	sharePlist, err := platform.RenderShareLaunchPlist(sc, bin, shareDirPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	agentUnit := renderSystemdUnit("bobo.pens.example.com", bin, agentDir)
-	shareUnit := renderShareSystemdUnit(sc, bin, shareDirPath)
+	agentUnit := platform.RenderSystemdUnit("bobo.pens.example.com", bin, agentDir)
+	shareUnit := platform.RenderShareSystemdUnit(sc, bin, shareDirPath)
 
 	for _, tc := range []struct {
 		name string

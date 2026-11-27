@@ -80,6 +80,49 @@ func TestValidatePublicZoneAndQueries(t *testing.T) {
 	}
 }
 
+func TestValidatePublicZoneMatrix(t *testing.T) {
+	t.Parallel()
+	hostedOK := []struct {
+		host string
+		zone string
+	}{
+		{"bobo.gate.example.com", "bobo.pens.example.com"},
+		{"bobo.gate.example.com:8443", "bobo.pens.example.com"},
+		{"bobo.gate.hogman.test", "bobo.pens.hogman.test"},
+		{"hs.example.com", "bobo.example.com"},
+		{"gate.hogman.test", "bobo.pens.hogman.test"},
+		{"login.corp.example.co.uk", "bobo.example.co.uk"},
+	}
+	for _, tc := range hostedOK {
+		if err := ValidatePublicZone(tc.host, tc.zone); err != nil {
+			t.Errorf("ValidatePublicZone(%q, %q) unexpected error: %v", tc.host, tc.zone, err)
+		}
+	}
+
+	hostedBad := []struct {
+		host string
+		zone string
+	}{
+		{"bobo.gate.example.com", "alice.pens.example.com"},
+		{"bobo.gate.example.com", "bobo.other.example.com"},
+		{"bobo.gate.example.com", "bobo.example.com"},
+		{"bobo.gate.example.com", "example.com"},
+		{"bobo.gate.example.com", "bobo.hogman"},
+		{"evil.gate.co.uk", "evil.pens.co.uk"},
+		{"hs.example.com", "example.com"},
+		{"hs.example.com", "bobo.other.com"},
+		{"hs.example.com", "bobo.hogman"},
+		{"hs.example.com", "Bobo.example.com"},
+		{"hs.example.com", "bobo.example.com."},
+		{"127.0.0.1:8443", "bobo.example.com"},
+	}
+	for _, tc := range hostedBad {
+		if err := ValidatePublicZone(tc.host, tc.zone); err == nil {
+			t.Errorf("ValidatePublicZone(%q, %q) expected error, got nil", tc.host, tc.zone)
+		}
+	}
+}
+
 func TestSingleLinePreservesAllLinesAndSanitizes(t *testing.T) {
 	t.Parallel()
 	threeLine := "Bootstrap failed: 5: Input/output error\nTry re-running the command\r\nfor richer \x1b[31m\u009b\u202Eerrors."

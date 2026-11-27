@@ -29,6 +29,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,11 +40,13 @@ import (
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tsnet"
 
+	"hogman/join/internal/agent"
 	"hogman/join/internal/bridge"
 	"hogman/join/internal/fsutil"
 	"hogman/join/internal/link"
 	"hogman/join/internal/mesh"
 	"hogman/join/internal/penapi"
+	"hogman/join/internal/platform"
 	"hogman/join/internal/state"
 )
 
@@ -524,7 +527,7 @@ func shareStart(name, what, rawLink string, o options) error {
 		return err
 	}
 	if explicitDir == "" {
-		stopShareService(cfg)
+		platform.StopShareService(cfg)
 	}
 	if cfg.Name != "" {
 		step("Sharing %s as %s", cfg.Showing(), cfg.URL())
@@ -752,7 +755,7 @@ func isPermanentNodeError(hasAuthKey bool, backendState string, err error) bool 
 
 // shareNode brings a share's own device onto the pen and returns it with a
 // client for reaching the pen through it.
-func shareNode(ctx context.Context, dir string, c *state.ShareConfig) (*tsnet.Server, *agent, *http.Client, error) {
+func shareNode(ctx context.Context, dir string, c *state.ShareConfig) (*tsnet.Server, *agent.Agent, *http.Client, error) {
 	ac := c.AgentConfig()
 	ac.TrustControlCA()
 	key, _ := os.ReadFile(filepath.Join(dir, "authkey"))
@@ -788,14 +791,14 @@ func shareNode(ctx context.Context, dir string, c *state.ShareConfig) (*tsnet.Se
 		node.Close()
 		return nil, nil, nil, permanentShare(errorf("that link adds a personal device, which can't be visited. Use a share link (Get a share link on your home page)"))
 	}
-	a := newAgent(ac, node)
+	a := agent.New(ac, node)
 	pool, err := penapi.TestACMECAPool()
 	if err != nil {
 		node.Close()
 		return nil, nil, nil, permanentShare(err)
 	}
 	hc := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
-		DialContext:     func(ctx context.Context, _, addr string) (net.Conn, error) { return a.dial(ctx, addr) },
+		DialContext:     func(ctx context.Context, _, addr string) (net.Conn, error) { return a.Dial(ctx, addr) },
 		TLSClientConfig: &tls.Config{RootCAs: pool},
 	}}
 	return node, a, hc, nil
@@ -1378,6 +1381,18 @@ func shareHandlerWithResolver(c *state.ShareConfig, resolve sharePeerResolver) (
 
 // ------------------------------------------------- background, status --
 
+func startShareBackground(dir string, c *state.ShareConfig, o options) (bool, int, error) {
+	bin, err := installedBinary(dir)
+	if err != nil {
+		return false, 0, err
+	}
+	if runtime.GOOS == "windows" {
+		note("on Windows shares do not yet restart by themselves; run this command again after a restart")
+		return platform.StartShareServiceWithBinary(bin, dir, c, true, note)
+	}
+	return platform.StartShareServiceWithBinary(bin, dir, c, o.noService, note)
+}
+
 // sharePID is the process serving a share in the background, or 0.
 func sharePID(dir string) int {
 	b, err := os.ReadFile(filepath.Join(dir, "share.pid"))
@@ -1385,7 +1400,7 @@ func sharePID(dir string) int {
 		return 0
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || pid <= 0 || !processAlive(pid) {
+	if err != nil || pid <= 0 || !platform.ProcessAlive(pid) {
 		return 0
 	}
 	return pid
@@ -1425,7 +1440,7 @@ func waitShareBackground(dir string, c *state.ShareConfig, managed bool, pid int
 		case <-time.After(poll):
 		}
 		st := state.ReadShareStatus(dir)
-		if !managed && st.State != "up" && st.State != "error" && !processAlive(pid) {
+		if !managed && st.State != "up" && st.State != "error" && !platform.ProcessAlive(pid) {
 			if stopFn != nil {
 				stopFn()
 			}
@@ -1462,7 +1477,7 @@ func runShareProcess(dir string) error {
 }
 
 func stopShare(dir string, c *state.ShareConfig) {
-	stopShareService(c)
+	platform.StopShareService(c)
 	stopShareProcess(dir)
 }
 
@@ -1471,7 +1486,7 @@ func stopShareProcess(dir string) {
 	if pid == 0 {
 		return
 	}
-	stopProcess(pid, 5*time.Second)
+	platform.StopProcess(pid, 5*time.Second)
 	_ = os.Remove(filepath.Join(dir, "share.pid"))
 }
 
@@ -1512,7 +1527,7 @@ func collectShareListItems(dirs []string) []shareListItemJSON {
 			continue
 		}
 		running := sharePID(d) != 0
-		managed := shareServiceConfigured(c)
+		managed := platform.ShareServiceConfigured(c)
 		stateLabel := shareListState(running, managed)
 		errMsg := ""
 		if !running {

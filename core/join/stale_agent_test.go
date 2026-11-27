@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"hogman/join/internal/agent"
 	"hogman/join/internal/state"
 )
 
@@ -34,7 +35,7 @@ func TestAgentRunningStaleBinaryAndMigrateRestartsStaleAgent(t *testing.T) {
 				w.Header().Set("X-Hogman-Proof", state.ComputeStatusProof(tok, nonce, zone))
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(agentStatus{
+			_ = json.NewEncoder(w).Encode(agent.Status{
 				Zone:      zone,
 				Up:        true,
 				BinSHA256: reportedHex,

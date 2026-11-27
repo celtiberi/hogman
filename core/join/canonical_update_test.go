@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"hogman/join/internal/fsutil"
+	"hogman/join/internal/nativehost"
+	"hogman/join/internal/platform"
 	"hogman/join/internal/state"
 )
 
@@ -121,11 +123,11 @@ func TestInstallNativeHostBinarySymlinkOnUnix(t *testing.T) {
 		t.Fatal(err)
 	}
 	hostPath := filepath.Join(dir, "hogman-native-host")
-	// Even if an old regular-file copy exists, installNativeHostBinary replaces it with a symlink.
+	// Even if an old regular-file copy exists, nativehost.InstallBinary replaces it with a symlink.
 	if err := os.WriteFile(hostPath, []byte("old-copy"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := installNativeHostBinary(canon, hostPath); err != nil {
+	if err := nativehost.InstallBinary(canon, hostPath); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Lstat(hostPath)
@@ -276,20 +278,20 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	nhBin := nativeHostBinaryPath(cfgBase)
+	nhBin := nativehost.BinaryPath(cfgBase)
 	if err := os.WriteFile(nhBin, []byte("old-native-host-copy"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	// Write legacy login items pointing at the per-pen/per-share hogman-join binaries.
 	if runtime.GOOS != "windows" {
-		if err := rewriteAgentService(alphaLegacyBin, alphaDir, alphaCfg); err != nil {
+		if err := platform.RewriteAgentService(alphaLegacyBin, alphaDir, alphaCfg); err != nil {
 			t.Fatal(err)
 		}
-		if err := rewriteAgentService(betaLegacyBin, betaDir, betaCfg); err != nil {
+		if err := platform.RewriteAgentService(betaLegacyBin, betaDir, betaCfg); err != nil {
 			t.Fatal(err)
 		}
-		if err := rewriteShareService(blogLegacyBin, blogDir, shareCfg); err != nil {
+		if err := platform.RewriteShareService(blogLegacyBin, blogDir, shareCfg); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -324,7 +326,7 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 	if err := stageAndVerify(srcPath, canonBin, wantHex); err != nil {
 		t.Fatalf("stage canonical binary: %v", err)
 	}
-	if err := installNativeHostBinary(canonBin, nhBin); err != nil {
+	if err := nativehost.InstallBinary(canonBin, nhBin); err != nil {
 		t.Fatalf("install native host binary: %v", err)
 	}
 
@@ -346,7 +348,7 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 			rolledBackBin = bin
 			return nil
 		},
-		rewriteService: rewriteAgentService,
+		rewriteService: platform.RewriteAgentService,
 	}
 	alphaTarget := &penTarget{zone: alphaZone, dir: alphaDir, cfg: alphaCfg}
 	betaTarget := &penTarget{zone: betaZone, dir: betaDir, cfg: betaCfg}
@@ -375,7 +377,7 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 			if runtime.GOOS == "windows" {
 				return false
 			}
-			return serviceConfigured(zone)
+			return platform.ServiceConfigured(zone)
 		},
 		stop: func(string, *state.AgentConfig) {},
 		restartNew: func(p *penTarget, bin string, hadService bool, _ options) error {
@@ -383,7 +385,7 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 				return errors.New("expected canonical binary")
 			}
 			if hadService && runtime.GOOS != "windows" {
-				if err := rewriteAgentService(bin, p.dir, p.cfg); err != nil {
+				if err := platform.RewriteAgentService(bin, p.dir, p.cfg); err != nil {
 					return err
 				}
 			}
@@ -391,7 +393,7 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 			return nil
 		},
 		restartOld:     func(*penTarget, string, bool, options) error { return nil },
-		rewriteService: rewriteAgentService,
+		rewriteService: platform.RewriteAgentService,
 	}
 	var restartedShares []string
 	shOps := shareUpdateOps{
@@ -400,7 +402,7 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 			if runtime.GOOS == "windows" {
 				return true
 			}
-			return shareServiceConfigured(c)
+			return platform.ShareServiceConfigured(c)
 		},
 		stop: func(string, *state.ShareConfig) {},
 		restartNew: func(s *shareTargetDir, bin string, _ options) error {
@@ -408,7 +410,7 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 				return errors.New("expected canonical binary")
 			}
 			if runtime.GOOS != "windows" {
-				if err := rewriteShareService(bin, s.dir, s.cfg); err != nil {
+				if err := platform.RewriteShareService(bin, s.dir, s.cfg); err != nil {
 					return err
 				}
 			}
@@ -416,7 +418,7 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 			return nil
 		},
 		restartOld:     func(*shareTargetDir, string, options) error { return nil },
-		rewriteService: rewriteShareService,
+		rewriteService: platform.RewriteShareService,
 	}
 
 	if err := migrateAndRestartPen(alphaTarget, canonBin, alphaLegacyBin, "/tmp/hogman-cli", options{}, penOps); err != nil {
@@ -663,8 +665,8 @@ func TestInstallNativeHostRespectsCanonicalBinaryDowngradeGuard(t *testing.T) {
 	version = "2025.01.01-aaaaaaa"
 	t.Cleanup(func() { version = origVer })
 
-	if _, _, err := installNativeHost(configBase, nil, nil); err != nil {
-		t.Fatalf("installNativeHost failed: %v", err)
+	if _, _, err := nativehost.Install(configBase, ensureCanonicalBinary, nil, nil, nil); err != nil {
+		t.Fatalf("nativehost.Install failed: %v", err)
 	}
 	got, err := os.ReadFile(canon)
 	if err != nil {

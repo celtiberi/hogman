@@ -22,9 +22,12 @@ import (
 	"strings"
 	"time"
 
+	"hogman/join/internal/agent"
 	"hogman/join/internal/fsutil"
 	"hogman/join/internal/link"
+	"hogman/join/internal/nativehost"
 	"hogman/join/internal/penapi"
+	"hogman/join/internal/platform"
 	"hogman/join/internal/state"
 )
 
@@ -577,7 +580,7 @@ func resolveUpdatePlan(args []string, o options, configBase, sharesDir string) (
 // local /status endpoint answers for this zone (whether online, still
 // connecting, or holding a startup error) or its recorded agent.pid is alive.
 func agentRunning(dir string, c *state.AgentConfig) bool {
-	if _, err := agentState(c); err == nil {
+	if _, err := agent.State(c); err == nil {
 		return true
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "agent.pid"))
@@ -585,7 +588,7 @@ func agentRunning(dir string, c *state.AgentConfig) bool {
 		return false
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	return err == nil && pid > 0 && processAlive(pid)
+	return err == nil && pid > 0 && platform.ProcessAlive(pid)
 }
 
 type penUpdateOps struct {
@@ -608,7 +611,7 @@ func agentRunningStaleBinary(p *penTarget, wantHex string) bool {
 	if p == nil || p.cfg == nil || wantHex == "" {
 		return false
 	}
-	st, err := agentState(p.cfg)
+	st, err := agent.State(p.cfg)
 	if err != nil {
 		return false
 	}
@@ -618,15 +621,15 @@ func agentRunningStaleBinary(p *penTarget, wantHex string) bool {
 func defaultPenUpdateOps() penUpdateOps {
 	return penUpdateOps{
 		isRunning:      agentRunning,
-		hasService:     serviceConfigured,
+		hasService:     platform.ServiceConfigured,
 		probeReachable: probePenLoginServer,
-		stop:           stopAgent,
+		stop:           platform.StopAgent,
 		startNoWait: func(p *penTarget, binPath string, hadService bool, o options) error {
-			return startExistingBinary(binPath, p.dir, p.cfg, o.noService || !hadService)
+			return platform.StartExistingBinary(binPath, p.dir, p.cfg, o.noService || !hadService, note)
 		},
 		restartNew:     restartPenAgent,
 		restartOld:     restartOldPenAgent,
-		rewriteService: rewriteAgentService,
+		rewriteService: platform.RewriteAgentService,
 	}
 }
 
@@ -663,13 +666,13 @@ func probePenLoginServer(p *penTarget, o options) error {
 func restartPenAgent(p *penTarget, binPath string, hadService bool, o options) error {
 	noService := o.noService || !hadService
 	logPath := filepath.Join(p.dir, "agent.log")
-	if err := startExistingBinary(binPath, p.dir, p.cfg, noService); err != nil {
+	if err := platform.StartExistingBinary(binPath, p.dir, p.cfg, noService, note); err != nil {
 		return errorf("updated %s, but its new agent could not start: %v.\n"+
 			"  Log: %s\n"+
 			"  To get back on: run 'hogman update' again, or re-run hogman with your link.",
 			p.zone, err, logPath)
 	}
-	if _, err := waitAgentUp(p.cfg, 60*time.Second); err != nil {
+	if _, err := agent.WaitUp(p.cfg, 60*time.Second); err != nil {
 		return errorf("updated %s, but its new agent did not come online: %v.\n"+
 			"  Log: %s\n"+
 			"  To get back on: fix what the log shows and run 'hogman agent %s', or re-run hogman with your link.",
@@ -681,10 +684,10 @@ func restartPenAgent(p *penTarget, binPath string, hadService bool, o options) e
 
 func restartOldPenAgent(p *penTarget, binPath string, hadService bool, o options) error {
 	noService := o.noService || !hadService
-	if err := startExistingBinary(binPath, p.dir, p.cfg, noService); err != nil {
+	if err := platform.StartExistingBinary(binPath, p.dir, p.cfg, noService, note); err != nil {
 		return err
 	}
-	_, err := waitAgentUp(p.cfg, 30*time.Second)
+	_, err := agent.WaitUp(p.cfg, 30*time.Second)
 	return err
 }
 
@@ -700,7 +703,7 @@ type shareUpdateOps struct {
 func defaultShareUpdateOps() shareUpdateOps {
 	return shareUpdateOps{
 		isRunning:  func(dir string) bool { return sharePID(dir) != 0 },
-		hasService: shareServiceConfigured,
+		hasService: platform.ShareServiceConfigured,
 		stop:       stopShare,
 		restartNew: func(s *shareTargetDir, binPath string, o options) error {
 			return restartShareService(s, binPath, o, true)
@@ -708,14 +711,14 @@ func defaultShareUpdateOps() shareUpdateOps {
 		restartOld: func(s *shareTargetDir, binPath string, o options) error {
 			return restartShareService(s, binPath, o, false)
 		},
-		rewriteService: rewriteShareService,
+		rewriteService: platform.RewriteShareService,
 	}
 }
 
 func restartShareService(s *shareTargetDir, binPath string, o options, updated bool) error {
 	_ = os.Remove(filepath.Join(s.dir, "status.json"))
 	_ = os.Remove(filepath.Join(s.dir, "share.pid"))
-	managed, pid, err := startShareServiceWithBinary(binPath, s.dir, s.cfg, o.noService)
+	managed, pid, err := platform.StartShareServiceWithBinary(binPath, s.dir, s.cfg, o.noService, note)
 	if err != nil {
 		return err
 	}
@@ -1104,7 +1107,7 @@ func updateCmd(args []string, o options) error {
 	if _, err := os.Stat(canonicalBin); err == nil {
 		canonicalNeeded = true
 	}
-	nhBin := nativeHostBinaryPath(configBase)
+	nhBin := nativehost.BinaryPath(configBase)
 	if _, err := os.Lstat(nhBin); err == nil {
 		canonicalNeeded = true
 	}
@@ -1280,7 +1283,7 @@ func updateCmd(args []string, o options) error {
 		if !canonicalNeeded {
 			srcForNH = verifiedSrc
 		}
-		if err := installNativeHostBinary(srcForNH, nhBin); err != nil {
+		if err := nativehost.InstallBinary(srcForNH, nhBin); err != nil {
 			note("could not update %s: %v", nhBin, err)
 		} else {
 			note("updated %s", nhBin)
@@ -1356,12 +1359,12 @@ func warnMissingSystemProxyServices(configs []*state.AgentConfig) {
 	if len(configs) == 0 {
 		return
 	}
-	sys := detectSystemProxyState(configs)
+	sys := platform.DetectSystemProxyState(configs)
 	if len(sys.MissingProxyServices) == 0 {
 		return
 	}
-	if host := pickPACHost(configs); host != nil {
-		svcList := formatServiceList(sys.MissingProxyServices)
+	if host := agent.PickPACHost(configs); host != nil {
+		svcList := platform.FormatServiceList(sys.MissingProxyServices)
 		say("\n! Automatic proxy configuration is not set on: %s", svcList)
 		say("  In System Settings → Network → %s → Details… → Proxies, turn on \"Automatic proxy configuration\" and paste:", svcList)
 		say("    %s", host.PACURL())

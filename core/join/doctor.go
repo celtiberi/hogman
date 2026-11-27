@@ -10,8 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"hogman/join/internal/agent"
 	"hogman/join/internal/fsutil"
 	"hogman/join/internal/link"
+	"hogman/join/internal/nativehost"
+	"hogman/join/internal/platform"
 	"hogman/join/internal/state"
 )
 
@@ -109,7 +112,7 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 	}
 
 	// 4. Installed pens
-	pens, configs := collectNativePens(configBase)
+	pens, configs := nativehost.CollectPens(configBase)
 	if len(pens) == 0 {
 		add(doctorCheck{
 			Name:   "pens",
@@ -120,7 +123,7 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 		for _, p := range pens {
 			switch {
 			case p.Squatted:
-				port := p.configuredPort
+				port := p.ConfiguredPort()
 				if port == 0 {
 					port = p.Port
 				}
@@ -137,12 +140,12 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 					Detail: fmt.Sprintf("up on 127.0.0.1:%d", p.Port),
 				})
 			default:
-				reason := p.statusReason
+				reason := p.StatusReason()
 				penDir := filepath.Join(configBase, p.Zone)
 				if interrupted, _ := state.ReadUpdatingMarker(penDir); interrupted {
 					reason = "interrupted update left agent stopped"
 				} else if reason == "" {
-					if !serviceConfigured(p.Zone) {
+					if !platform.ServiceConfigured(p.Zone) {
 						reason = "agent not running and no login item registered"
 					} else {
 						reason = "agent not running"
@@ -192,10 +195,10 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 	}
 
 	// 6. System proxy & VPN state
-	sys := detectSystemProxyState(configs)
+	sys := platform.DetectSystemProxyState(configs)
 	if sys.StalePAC != "" {
 		fix := "turn off \"Automatic proxy configuration\" in System Settings → Network → Wi-Fi (or Ethernet) → Details… → Proxies"
-		if host := pickPACHost(configs); host != nil {
+		if host := agent.PickPACHost(configs); host != nil {
 			fix = "update \"Automatic proxy configuration\" in System Settings → Network → Wi-Fi (or Ethernet) → Details… → Proxies to " + host.PACURL()
 		}
 		add(doctorCheck{
@@ -211,9 +214,9 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 			Detail: "non-Hogman system proxy active: " + sys.OSProxyDetail,
 		})
 	} else if len(sys.MissingProxyServices) > 0 {
-		svcList := formatServiceList(sys.MissingProxyServices)
+		svcList := platform.FormatServiceList(sys.MissingProxyServices)
 		fix := "turn on \"Automatic proxy configuration\" in System Settings → Network → " + svcList + " → Details… → Proxies"
-		if host := pickPACHost(configs); host != nil {
+		if host := agent.PickPACHost(configs); host != nil {
 			fix += " and paste " + host.PACURL()
 		}
 		add(doctorCheck{
@@ -230,9 +233,9 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 		})
 	}
 
-	_, hostErr := os.Stat(nativeHostBinaryPath(configBase))
+	_, hostErr := os.Stat(nativehost.BinaryPath(configBase))
 	extInstalled := hostErr == nil
-	extSeen := extensionRecentlySeen(configBase, 7*24*time.Hour)
+	extSeen := nativehost.ExtensionRecentlySeen(configBase, 7*24*time.Hour)
 	if sys.VPNOverride {
 		if extInstalled && extSeen {
 			add(doctorCheck{
@@ -245,7 +248,7 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 				Name:   "vpn",
 				Status: "warn",
 				Detail: fmt.Sprintf("VPN override detected (%s): macOS hides system PAC while VPN is on", sys.VPNInterface),
-				Fix:    "install the Hogman browser extension (" + chromeExtensionStoreURL + "; Firefox: coming soon), open its popup to turn on your pen, and run: " + cliBinaryName() + " browser-setup",
+				Fix:    "install the Hogman browser extension (" + platform.ChromeExtensionStoreURL + "; Firefox: coming soon), open its popup to turn on your pen, and run: " + cliBinaryName() + " browser-setup",
 			})
 		}
 	} else if extInstalled {
