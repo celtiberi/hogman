@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"hogman/registrar/internal/api"
 	"hogman/registrar/internal/billing"
 	"hogman/registrar/internal/registrar"
 )
@@ -54,7 +53,7 @@ func TestPenDeleteViewAndToken(t *testing.T) {
 	billingPath := filepath.Join(dir, "billing-status.json")
 	metaPath := filepath.Join(dir, "host-meta.json")
 	e.svc.SetBillingStatusPath(billingPath)
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 	js := map[string]string{"Content-Type": "application/json"}
 
 	// Absent host-meta.json -> no pen_delete in /api/me and 409 on delete-token.

@@ -82,7 +82,7 @@ func TestRenewOnlyPolicyAndHTTPEnforcement(t *testing.T) {
 	}
 
 	// HTTP enforcement during renew_only:
-	mesh := api.MeshHandler(e.svc)
+	mesh := e.meshHandler(e.svc)
 	pub := api.PublicHandler(e.svc)
 	js := map[string]string{"Content-Type": "application/json"}
 

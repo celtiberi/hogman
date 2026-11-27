@@ -30,7 +30,7 @@ func TestPrivateNameHTTPFlowRetryAndPermanentRetirement(t *testing.T) {
 	e.addDevice(t, "alice", "server", "manager", "100.64.0.13", "")
 	e.addDevice(t, "alice", "server", "named-srv", "100.64.0.14", "")
 
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 	jsonHdr := map[string]string{"Content-Type": "application/json"}
 
 	// Reject passing both name and private: true.

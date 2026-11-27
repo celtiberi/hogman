@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -138,75 +140,106 @@ func TestSharePublicCertPebbleE2E(t *testing.T) {
 	}
 
 	zone := mustEnv("ACME_ZONE")
-	meshSock := mustEnv("ACME_MESH_SOCK")
-	serverIP := mustEnv("ACME_SERVER_IP")
+	homeCAPool := readPool(mustEnv("ACME_HOME_CA_ROOT"))
 	pebble1URL := mustEnv("ACME_PEBBLE1_CA_URL")
 	pebble2URL := mustEnv("ACME_PEBBLE2_CA_URL")
 	mock429URL := mustEnv("ACME_MOCK429_CA_URL")
 	caRoot := mustEnv("ACME_CA_ROOT")
 	pebble1Pool := readPool(mustEnv("ACME_PEBBLE1_ROOT"))
 	pebble2Pool := readPool(mustEnv("ACME_PEBBLE2_ROOT"))
-	resolver := mustEnv("ACME_RESOLVER")
-	statsURL := mustEnv("ACME_STATS_URL")
+	resolverAddr := mustEnv("ACME_RESOLVER")
+	stateJSONPath := mustEnv("ACME_STATE_JSON")
 
-	type stats struct {
-		TXTWrites     int                 `json:"txt_writes"`
-		EABCount      int                 `json:"eab_count"`
-		DistinctFQDNs int                 `json:"distinct_fqdns"`
-		Live          map[string][]string `json:"live"`
+	type cdnsState struct {
+		Seen map[string]map[string]time.Time `json:"seen"`
+		EAB  map[string][]time.Time          `json:"eab"`
 	}
-	getStats := func() stats {
-		resp, err := http.Get(statsURL)
+	readCDNSStats := func() (eabCount int, seen map[string]bool) {
+		b, err := os.ReadFile(stateJSONPath)
 		if err != nil {
-			t.Fatalf("GET %s: %v", statsURL, err)
+			t.Fatalf("read %s: %v", stateJSONPath, err)
 		}
-		defer resp.Body.Close()
-		var st stats
-		if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
-			t.Fatalf("decode stats: %v", err)
+		var st cdnsState
+		if err := json.Unmarshal(b, &st); err != nil {
+			t.Fatalf("decode %s: %v", stateJSONPath, err)
 		}
-		return st
+		seen = map[string]bool{}
+		for _, m := range st.Seen {
+			for fqdn := range m {
+				seen[fqdn] = true
+			}
+		}
+		for _, ts := range st.EAB {
+			eabCount += len(ts)
+		}
+		return eabCount, seen
 	}
 
-	// Simulate the share's mesh http.Client routing https://home.<zone>/api/...
-	// to the live registrar mesh Unix socket with the share server's mesh IP.
-	meshClient := func(xff string) *http.Client {
-		dialer := &net.Dialer{Timeout: 10 * time.Second}
-		unixTr := &http.Transport{
-			DisableKeepAlives: true,
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return dialer.DialContext(ctx, "unix", meshSock)
+	lookupTXT := func(fqdn string) []string {
+		r := &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, resolverAddr)
 			},
+		}
+		vals, err := r.LookupTXT(context.Background(), fqdn)
+		if err != nil {
+			var de *net.DNSError
+			if errors.As(err, &de) && de.IsNotFound {
+				return nil
+			}
+			if strings.Contains(err.Error(), "no such host") || strings.Contains(strings.ToLower(err.Error()), "no answer") {
+				return nil
+			}
+			t.Fatalf("LookupTXT(%s): %v", fqdn, err)
+		}
+		return vals
+	}
+
+	type callCounts struct {
+		txtPosts   atomic.Int32
+		txtDeletes atomic.Int32
+		eabPosts   atomic.Int32
+	}
+	newMeshClient := func() (*http.Client, *callCounts) {
+		counts := &callCounts{}
+		baseTr := &http.Transport{
+			DisableKeepAlives: true,
+			TLSClientConfig:   &tls.Config{RootCAs: homeCAPool},
 		}
 		return &http.Client{
 			Timeout: 20 * time.Second,
 			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				cloned := req.Clone(req.Context())
-				cloned.URL.Scheme = "http"
-				cloned.URL.Host = "localhost"
-				cloned.Host = "localhost"
-				cloned.Header.Set("X-Forwarded-For", xff)
-				return unixTr.RoundTrip(cloned)
+				switch {
+				case req.URL.Path == "/api/acme/txt" && req.Method == http.MethodPost:
+					counts.txtPosts.Add(1)
+				case req.URL.Path == "/api/acme/txt" && req.Method == http.MethodDelete:
+					counts.txtDeletes.Add(1)
+				case req.URL.Path == "/api/acme/eab" && req.Method == http.MethodPost:
+					counts.eabPosts.Add(1)
+				}
+				return baseTr.RoundTrip(req)
 			}),
-		}
+		}, counts
 	}
 
 	ctx := context.Background()
 
-	// 1. Obtain photos.<zone> via Pebble1 through live registrar /api/acme/txt + fake-challengedns.
+	// 1. Obtain photos.<zone> via Pebble1 over real WireGuard -> embedded registrar -> real challenge-dns.
 	photosHost := "photos." + zone
 	photosDir := filepath.Join(t.TempDir(), "acme-photos")
-	before := getStats()
+	beforeEAB, _ := readCDNSStats()
+	cli1, counts1 := newMeshClient()
 	cm1, err := share.NewCertManager(share.ACMEConfig{
 		Zone:               zone,
 		Host:               photosHost,
 		StorageDir:         photosDir,
 		PrimaryCA:          pebble1URL,
 		CARootFile:         caRoot,
-		Resolvers:          []string{resolver},
+		Resolvers:          []string{resolverAddr},
 		PropagationDelay:   100 * time.Millisecond,
 		PropagationTimeout: 15 * time.Second,
-		HTTPClient:         meshClient(serverIP),
+		HTTPClient:         cli1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -218,25 +251,30 @@ func TestSharePublicCertPebbleE2E(t *testing.T) {
 	serial1 := verifyCertManagerHandshake(t, cm1, photosHost, pebble1Pool)
 	cm1.Close()
 
-	afterPhotos := getStats()
-	if afterPhotos.EABCount != before.EABCount {
-		t.Fatalf("happy path minted fallback EAB: before=%+v after=%+v", before, afterPhotos)
+	afterPhotosEAB, afterPhotosSeen := readCDNSStats()
+	if afterPhotosEAB != beforeEAB || counts1.eabPosts.Load() != 0 {
+		t.Fatalf("happy path minted fallback EAB: before=%d after=%d calls=%d", beforeEAB, afterPhotosEAB, counts1.eabPosts.Load())
 	}
-	if afterPhotos.TXTWrites <= before.TXTWrites || len(afterPhotos.Live) != 0 {
-		t.Fatalf("unexpected DNS TXT stats after issuance: before=%+v after=%+v", before, afterPhotos)
+	wantChallengeFQDN := "_acme-challenge." + photosHost
+	if !afterPhotosSeen[wantChallengeFQDN] || counts1.txtPosts.Load() == 0 {
+		t.Fatalf("expected TXT write for %s: seen=%v txtPosts=%d", wantChallengeFQDN, afterPhotosSeen, counts1.txtPosts.Load())
+	}
+	if live := lookupTXT(wantChallengeFQDN); len(live) != 0 {
+		t.Fatalf("expected challenge TXT cleanup after issuance, live=%v", live)
 	}
 
 	// 2. Restarting on the same storage dir reuses cached cert without new TXT writes or orders.
+	cli2, counts2 := newMeshClient()
 	cm2, err := share.NewCertManager(share.ACMEConfig{
 		Zone:               zone,
 		Host:               photosHost,
 		StorageDir:         photosDir,
 		PrimaryCA:          pebble1URL,
 		CARootFile:         caRoot,
-		Resolvers:          []string{resolver},
+		Resolvers:          []string{resolverAddr},
 		PropagationDelay:   100 * time.Millisecond,
 		PropagationTimeout: 15 * time.Second,
-		HTTPClient:         meshClient(serverIP),
+		HTTPClient:         cli2,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -250,12 +288,12 @@ func TestSharePublicCertPebbleE2E(t *testing.T) {
 	if serial1.Cmp(serial2) != 0 {
 		t.Fatalf("restart changed cert serial: %v -> %v", serial1, serial2)
 	}
-	afterRestart := getStats()
-	if afterRestart.TXTWrites != afterPhotos.TXTWrites {
-		t.Fatalf("restart performed unexpected TXT writes: %d -> %d", afterPhotos.TXTWrites, afterRestart.TXTWrites)
+	if counts2.txtPosts.Load() != 0 || counts2.eabPosts.Load() != 0 {
+		t.Fatalf("restart hit ACME proxy unexpectedly: txtPosts=%d eabPosts=%d", counts2.txtPosts.Load(), counts2.eabPosts.Load())
 	}
 
 	// 3. Unowned name fails on registrar /api/acme/txt (403) without failing over or minting EAB.
+	cliDenied, countsDenied := newMeshClient()
 	cmDenied, err := share.NewCertManager(share.ACMEConfig{
 		Zone:               zone,
 		Host:               "other." + zone,
@@ -263,10 +301,10 @@ func TestSharePublicCertPebbleE2E(t *testing.T) {
 		PrimaryCA:          pebble1URL,
 		FallbackCA:         pebble2URL,
 		CARootFile:         caRoot,
-		Resolvers:          []string{resolver},
+		Resolvers:          []string{resolverAddr},
 		PropagationDelay:   100 * time.Millisecond,
 		PropagationTimeout: 10 * time.Second,
-		HTTPClient:         meshClient(serverIP),
+		HTTPClient:         cliDenied,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -276,13 +314,14 @@ func TestSharePublicCertPebbleE2E(t *testing.T) {
 		t.Fatal("expected unowned share name to fail")
 	}
 	cmDenied.Close()
-	if stDenied := getStats(); stDenied.EABCount != before.EABCount {
-		t.Fatalf("unowned name 403 triggered EAB mint: %+v", stDenied)
+	if eabAfterDenied, _ := readCDNSStats(); eabAfterDenied != beforeEAB || countsDenied.eabPosts.Load() != 0 {
+		t.Fatalf("unowned name 403 triggered EAB mint: before=%d after=%d calls=%d", beforeEAB, eabAfterDenied, countsDenied.eabPosts.Load())
 	}
 
 	// 4. Primary HTTP 429 fails over to Pebble2 via lazy POST /api/acme/eab, and restart reuses cert.
 	fbHost := "sharefb." + zone
 	fbDir := filepath.Join(t.TempDir(), "acme-fb")
+	cliFB, countsFB := newMeshClient()
 	cmFB, err := share.NewCertManager(share.ACMEConfig{
 		Zone:               zone,
 		Host:               fbHost,
@@ -290,10 +329,10 @@ func TestSharePublicCertPebbleE2E(t *testing.T) {
 		PrimaryCA:          mock429URL,
 		FallbackCA:         pebble2URL,
 		CARootFile:         caRoot,
-		Resolvers:          []string{resolver},
+		Resolvers:          []string{resolverAddr},
 		PropagationDelay:   100 * time.Millisecond,
 		PropagationTimeout: 15 * time.Second,
-		HTTPClient:         meshClient(serverIP),
+		HTTPClient:         cliFB,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -322,13 +361,14 @@ func TestSharePublicCertPebbleE2E(t *testing.T) {
 		t.Fatal("expected pebble2 fallback cert to fail verification against pebble1 root")
 	}
 	badSrv.Close()
-
 	cmFB.Close()
 
-	afterFB := getStats()
-	if afterFB.EABCount != before.EABCount+1 {
-		t.Fatalf("expected 1 fallback EAB mint, got before=%+v after=%+v", before, afterFB)
+	afterFBEAB, _ := readCDNSStats()
+	if afterFBEAB != beforeEAB+1 || countsFB.eabPosts.Load() != 1 {
+		t.Fatalf("expected 1 fallback EAB mint, got before=%d after=%d calls=%d", beforeEAB, afterFBEAB, countsFB.eabPosts.Load())
 	}
+
+	cliFBRestart, countsFBRestart := newMeshClient()
 	cmFBRestart, err := share.NewCertManager(share.ACMEConfig{
 		Zone:               zone,
 		Host:               fbHost,
@@ -336,10 +376,10 @@ func TestSharePublicCertPebbleE2E(t *testing.T) {
 		PrimaryCA:          mock429URL,
 		FallbackCA:         pebble2URL,
 		CARootFile:         caRoot,
-		Resolvers:          []string{resolver},
+		Resolvers:          []string{resolverAddr},
 		PropagationDelay:   100 * time.Millisecond,
 		PropagationTimeout: 15 * time.Second,
-		HTTPClient:         meshClient(serverIP),
+		HTTPClient:         cliFBRestart,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -352,8 +392,8 @@ func TestSharePublicCertPebbleE2E(t *testing.T) {
 	if fbSerial1.Cmp(fbSerial2) != 0 {
 		t.Fatalf("fallback restart changed serial: %v -> %v", fbSerial1, fbSerial2)
 	}
-	afterFBRestart := getStats()
-	if afterFBRestart.EABCount != afterFB.EABCount || afterFBRestart.TXTWrites != afterFB.TXTWrites {
-		t.Fatalf("fallback restart hit EAB or TXT unexpectedly: before=%+v after=%+v", afterFB, afterFBRestart)
+	if eabAfterRestart, _ := readCDNSStats(); eabAfterRestart != afterFBEAB || countsFBRestart.txtPosts.Load() != 0 || countsFBRestart.eabPosts.Load() != 0 {
+		t.Fatalf("fallback restart hit EAB or TXT unexpectedly: eab=%d->%d txtPosts=%d eabPosts=%d",
+			afterFBEAB, eabAfterRestart, countsFBRestart.txtPosts.Load(), countsFBRestart.eabPosts.Load())
 	}
 }

@@ -1305,27 +1305,22 @@ func TestEmbeddedHealthzReadinessAndServeModeValidation(t *testing.T) {
 		t.Fatalf("ready /healthz = %d %q, want 200", rec.Code, rec.Body.String())
 	}
 
-	// 2. validateServeMode fail-closed matrix.
-	cases := []struct {
-		name       string
-		tsnetDir   string
-		legacyFlag string
-		meshAddr   string
-		wantLegacy bool
-		wantErr    bool
+	// 2. requireTsnetStateDir fails closed when TSNET_STATE_DIR is unset.
+	for _, tc := range []struct {
+		name     string
+		tsnetDir string
+		wantErr  bool
 	}{
-		{"production tsnet", "/var/lib/registrar/tsnet", "", "", false, false},
-		{"missing both fails closed", "", "", "unix:/run/mesh.sock", false, true},
-		{"mutually exclusive", "/var/lib/registrar/tsnet", "1", "unix:/run/mesh.sock", false, true},
-		{"legacy requires unix socket", "", "1", "127.0.0.1:8082", false, true},
-		{"legacy empty unix path fails", "", "1", "unix:", false, true},
-		{"legacy empty mesh addr fails", "", "1", "", false, true},
-		{"legacy unix socket valid", "", "1", "unix:/run/mesh.sock", true, false},
-	}
-	for _, tc := range cases {
-		legacy, err := validateServeMode(tc.tsnetDir, tc.legacyFlag, tc.meshAddr)
-		if (err != nil) != tc.wantErr || legacy != tc.wantLegacy {
-			t.Fatalf("%s: got (legacy=%v, err=%v), want (legacy=%v, wantErr=%v)", tc.name, legacy, err, tc.wantLegacy, tc.wantErr)
+		{"production tsnet", "/var/lib/registrar/tsnet", false},
+		{"empty fails closed", "", true},
+		{"whitespace fails closed", "   ", true},
+	} {
+		got, err := requireTsnetStateDir(tc.tsnetDir)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("%s: err=%v, wantErr=%v", tc.name, err, tc.wantErr)
+		}
+		if err == nil && got != tc.tsnetDir {
+			t.Fatalf("%s: got %q, want %q", tc.name, got, tc.tsnetDir)
 		}
 	}
 }

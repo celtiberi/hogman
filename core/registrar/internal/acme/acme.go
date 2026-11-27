@@ -346,7 +346,6 @@ type HomeConfig struct {
 	Host               string // the name to certify; default home.<Zone>
 	FileBase           string // files written are <FileBase>.crt and <FileBase>.key; default "home"
 	HomeTLSDir         string
-	CaddyAdminSocket   string
 	StorageDir         string
 	PrimaryCA          string
 	FallbackCA         string
@@ -671,11 +670,6 @@ func (m *HomeCertManager) exportFromStorageKeys(ctx context.Context, certKey, pr
 	p := pair
 	m.currentCert = &p
 	m.certMu.Unlock()
-	if m.cfg.CaddyAdminSocket != "" {
-		if err := m.reloadCaddy(ctx, m.cfg.CaddyAdminSocket); err != nil {
-			return err
-		}
-	}
 	m.lastCertPEM = certPEM
 	m.lastKeyPEM = keyPEM
 	return nil
@@ -962,64 +956,4 @@ func VerifyTLSFiles(dir, base string) error {
 		return fmt.Errorf("%s certificate expired at %s", base, leaf.NotAfter.UTC().Format(time.RFC3339))
 	}
 	return nil
-}
-
-func (m *HomeCertManager) reloadCaddy(ctx context.Context, socketPath string) error {
-	if socketPath == "" {
-		return nil
-	}
-	if _, err := os.Stat(socketPath); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			m.slog.Info("acme: caddy admin socket does not exist yet; skipping reload", "socket", socketPath)
-			return nil
-		}
-		return err
-	}
-	client := newUnixHTTPClient(socketPath, 10*time.Second)
-
-	getReq, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/config/", nil)
-	if err != nil {
-		return err
-	}
-	getResp, err := client.Do(getReq)
-	if err != nil {
-		if isUnixConnRefused(err) {
-			m.slog.Info("acme: caddy admin socket not listening yet; skipping reload", "socket", socketPath)
-			return nil
-		}
-		return fmt.Errorf("caddy admin GET /config/: %w", err)
-	}
-	cfgBytes, readErr := io.ReadAll(io.LimitReader(getResp.Body, 1<<20))
-	_ = getResp.Body.Close()
-	if getResp.StatusCode != http.StatusOK || readErr != nil {
-		return fmt.Errorf("caddy admin GET /config/: status=%d err=%v", getResp.StatusCode, readErr)
-	}
-
-	postReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost/load", bytes.NewReader(cfgBytes))
-	if err != nil {
-		return err
-	}
-	postReq.Header.Set("Content-Type", "application/json")
-	postReq.Header.Set("Cache-Control", "must-revalidate")
-
-	postResp, err := client.Do(postReq)
-	if err != nil {
-		return fmt.Errorf("caddy admin POST /load: %w", err)
-	}
-	postBody, _ := io.ReadAll(io.LimitReader(postResp.Body, 4096))
-	_ = postResp.Body.Close()
-	if postResp.StatusCode != http.StatusOK {
-		return fmt.Errorf("caddy admin POST /load: status=%d body=%s", postResp.StatusCode, strings.TrimSpace(string(postBody)))
-	}
-	m.slog.Info("acme: reloaded caddy", "socket", socketPath)
-	return nil
-}
-
-func isUnixConnRefused(err error) bool {
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		msg := strings.ToLower(opErr.Err.Error())
-		return strings.Contains(msg, "connection refused") || strings.Contains(msg, "no such file")
-	}
-	return false
 }

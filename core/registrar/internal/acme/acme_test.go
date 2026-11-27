@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -272,46 +271,6 @@ func TestHomeTLSAtomicAndCaddyUnixReload(t *testing.T) {
 	}
 	if err := VerifyHomeTLS(dir); err == nil {
 		t.Fatal("VerifyHomeTLS accepted expired cert")
-	}
-
-	// Missing socket skips gracefully without error.
-	ctx := context.Background()
-	mgr := &HomeCertManager{slog: slog.Default()}
-	missingSock := newShortSocketPath(t, "missing.sock")
-	if err := mgr.reloadCaddy(ctx, missingSock); err != nil {
-		t.Fatalf("missing socket should be skipped cleanly, got %v", err)
-	}
-
-	// Existing Unix socket receives GET /config/ then POST /load with Cache-Control: must-revalidate.
-	sockPath := newShortSocketPath(t, "admin.sock")
-	ln, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var gotConfig, gotCacheCtl, gotContentType, gotLoadedBody string
-	const fakeCfg = `{"apps":{"tls":{"certificates":{"load_files":[{"certificate":"/home-tls/home.crt","key":"/home-tls/home.key"}]}}}}`
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /config/", func(w http.ResponseWriter, r *http.Request) {
-		gotConfig = "yes"
-		_, _ = io.WriteString(w, fakeCfg)
-	})
-	mux.HandleFunc("POST /load", func(w http.ResponseWriter, r *http.Request) {
-		gotCacheCtl = r.Header.Get("Cache-Control")
-		gotContentType = r.Header.Get("Content-Type")
-		b, _ := io.ReadAll(r.Body)
-		gotLoadedBody = string(b)
-		w.WriteHeader(http.StatusOK)
-	})
-	srv := &http.Server{Handler: mux}
-	go func() { _ = srv.Serve(ln) }()
-	t.Cleanup(func() { _ = srv.Close() })
-
-	if err := mgr.reloadCaddy(ctx, sockPath); err != nil {
-		t.Fatalf("reloadCaddy: %v", err)
-	}
-	if gotConfig != "yes" || gotCacheCtl != "must-revalidate" || gotContentType != "application/json" || gotLoadedBody != fakeCfg {
-		t.Fatalf("unexpected Caddy reload call: config=%q cache=%q ct=%q body=%q", gotConfig, gotCacheCtl, gotContentType, gotLoadedBody)
 	}
 }
 

@@ -188,13 +188,27 @@ func serve() error {
 		limiter: defaultEABLimiter(store.now),
 		logger:  logger,
 	}
-	if kf := os.Getenv("CDNS_GCP_KEY"); kf != "" {
-		m, err := newGCPMinter(ctx, kf)
-		if err != nil {
-			return fmt.Errorf("CDNS_GCP_KEY: %w", err)
+	gcpKeyFile := strings.TrimSpace(os.Getenv("CDNS_GCP_KEY"))
+	testEABFile := strings.TrimSpace(os.Getenv("CDNS_TEST_EAB_FILE"))
+	if gcpKeyFile != "" && testEABFile != "" {
+		return errors.New("CDNS_GCP_KEY and CDNS_TEST_EAB_FILE are mutually exclusive")
+	}
+	if gcpKeyFile != "" || testEABFile != "" {
+		if gcpKeyFile != "" {
+			m, err := newGCPMinter(ctx, gcpKeyFile)
+			if err != nil {
+				return fmt.Errorf("CDNS_GCP_KEY: %w", err)
+			}
+			api.eab = m
+			logger.Info("fallback CA account keys configured", "gcp_project", m.project)
+		} else {
+			m, err := newStaticEABMinter(testEABFile)
+			if err != nil {
+				return fmt.Errorf("CDNS_TEST_EAB_FILE: %w", err)
+			}
+			api.eab = m
+			logger.Warn("fallback CA using static test EAB file (tests only)", "path", testEABFile)
 		}
-		api.eab = m
-		logger.Info("fallback CA account keys configured", "gcp_project", m.project)
 		contact, err := parseContact(os.Getenv("CDNS_GTS_CONTACT"))
 		if err != nil {
 			return err

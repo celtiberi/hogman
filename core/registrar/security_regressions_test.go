@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"hogman/registrar/internal/acme"
-	"hogman/registrar/internal/api"
 	"hogman/registrar/internal/headscale"
 	"hogman/registrar/internal/registrar"
 	"hogman/registrar/internal/store"
@@ -267,7 +266,7 @@ func TestAuditACMERateLimitAndAuditActor(t *testing.T) {
 
 func TestAuditCrossOriginGETBlockedAndSanitization(t *testing.T) {
 	e := newTestEnv(t)
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 
 	// Cross-origin and same-site GETs must be rejected with 403 before identify() even checks XFF.
 	for _, sfs := range []string{"cross-site", "same-site"} {

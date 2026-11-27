@@ -239,7 +239,7 @@ jobs:
 
   pen-acme:
     name: pen ACME (core/test/acme-pebble.sh)
-    needs: changes
+    needs: [changes, prebuilt]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -247,28 +247,29 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: e2e-prebuilt
+          path: core/prebuilt
+      - name: Restore execute bits on prebuilt binaries
+        run: find core/prebuilt -type f ! -name SHA256SUMS -exec chmod 0755 {} +
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build ACME test images with BuildKit cache
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/acme-build-logs"
+          mkdir -p "$RUNNER_TEMP/acme-build-logs" "$RUNNER_TEMP/reg-ctx"
+          install -m 0755 core/prebuilt/registrar/registrar-linux-amd64 "$RUNNER_TEMP/reg-ctx/registrar.bin"
           docker buildx build --load \
-            --cache-from type=gha,scope=fake-challengedns \
-            --cache-to type=gha,mode=max,scope=fake-challengedns \
-            -t hogman/fake-challengedns:test core/test/fake-challengedns >"$RUNNER_TEMP/acme-build-logs/fake.log" 2>&1 &
+            -f core/registrar/Dockerfile.prebuilt \
+            -t hogman/registrar:dev "$RUNNER_TEMP/reg-ctx" >"$RUNNER_TEMP/acme-build-logs/registrar.log" 2>&1 &
           p1=$!
-          docker buildx build --load \
-            --cache-from type=gha,scope=registrar \
-            --cache-to type=gha,mode=max,scope=registrar \
-            -t hogman/registrar:dev core/registrar >"$RUNNER_TEMP/acme-build-logs/registrar.log" 2>&1 &
-          p2=$!
           docker buildx build --load \
             --cache-from type=gha,scope=join-e2e \
             --cache-to type=gha,mode=max,scope=join-e2e \
             -f core/join/Dockerfile.e2e -t hogman/join-e2e:test core/join >"$RUNNER_TEMP/acme-build-logs/join-e2e.log" 2>&1 &
-          p3=$!
+          p2=$!
           rc=0
-          for item in "fake:$p1" "registrar:$p2" "join-e2e:$p3"; do
+          for item in "registrar:$p1" "join-e2e:$p2"; do
             name="${item%%:*}"; pid="${item#*:}"
             if ! wait "$pid"; then
               cat "$RUNNER_TEMP/acme-build-logs/$name.log"

@@ -548,55 +548,6 @@ func (s *Service) commitNodeKeyRotation(hsNodeID string, n *headscale.Node, addr
 	return nil
 }
 
-// VerifyLiveCaller maps a mesh source IP to an enrolled device and verifies
-// against Headscale (single-node GET /api/v1/node/{id}) that the exact
-// Headscale node still owns that IP. Used ONLY by the legacy test/migration
-// MeshHandler (REGISTRAR_LEGACY_MESH_SOCKET=1); production embedded tsnet uses
-// VerifyDirectPeer.
-func (s *Service) VerifyLiveCaller(ctx context.Context, src string) (*store.Member, *store.Device, error) {
-	addr, err := netip.ParseAddr(src)
-	if err != nil {
-		return nil, nil, ErrNotFound
-	}
-	addr = addr.Unmap()
-	if !addr.Is4() {
-		return nil, nil, ErrNotFound
-	}
-	canon := addr.String()
-	m, d, err := s.WhoIs(canon)
-	if err != nil {
-		return nil, nil, err
-	}
-	if m.Status != "active" {
-		return nil, nil, forbidden("membership %s", m.Status)
-	}
-	node, err := s.hs.Node(ctx, d.HSNodeID)
-	if err != nil && !errors.Is(err, headscale.ErrNotFound) {
-		return nil, nil, fmt.Errorf("verify caller: %w", err)
-	}
-	if nodeMatchesAddr(node, addr) {
-		return m, d, nil
-	}
-	if err := s.Sync(ctx); err != nil {
-		return nil, nil, err
-	}
-	m, d, err = s.WhoIs(canon)
-	if err != nil {
-		return nil, nil, err
-	}
-	if m.Status != "active" {
-		return nil, nil, forbidden("membership %s", m.Status)
-	}
-	node, err = s.hs.Node(ctx, d.HSNodeID)
-	if err != nil && !errors.Is(err, headscale.ErrNotFound) {
-		return nil, nil, fmt.Errorf("verify caller: %w", err)
-	}
-	if !nodeMatchesAddr(node, addr) {
-		return nil, nil, ErrNotFound
-	}
-	return m, d, nil
-}
-
 // PresenceSnapshot returns a display-only map of Headscale nodes indexed by
 // node ID for UI online/last-seen badges (GET /api/directory and
 // GET /api/admin/devices). No authorization, identity, or ACL policy decision

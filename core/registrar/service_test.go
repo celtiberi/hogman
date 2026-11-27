@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -22,6 +23,7 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 
+	"hogman/registrar/internal/api"
 	"hogman/registrar/internal/dns"
 	"hogman/registrar/internal/headscale"
 	"hogman/registrar/internal/registrar"
@@ -252,6 +254,48 @@ func testNodeKey(seed string) string {
 func testMachineKey(seed string) string {
 	sum := sha256.Sum256([]byte("mkey:" + seed))
 	return "mkey:" + hex.EncodeToString(sum[:])
+}
+
+// peerResolver simulates tsnet LocalClient.WhoIs against the fake Headscale
+// node table so HTTP tests exercise production MeshHandlerDirect.
+func (e *testEnv) peerResolver() func(context.Context, string) (*registrar.PeerIdentity, error) {
+	return func(_ context.Context, remoteAddr string) (*registrar.PeerIdentity, error) {
+		host, _, err := net.SplitHostPort(remoteAddr)
+		if err != nil {
+			return nil, errors.New("malformed remoteAddr")
+		}
+		addr, err := netip.ParseAddr(host)
+		if err != nil {
+			return nil, errors.New("invalid peer ip")
+		}
+		addr = addr.Unmap()
+		if !addr.Is4() {
+			return nil, errors.New("non-ipv4 peer")
+		}
+		canon := addr.String()
+		e.hs.mu.Lock()
+		defer e.hs.mu.Unlock()
+		for _, n := range e.hs.nodes {
+			for _, ip := range n.IPAddresses {
+				if ip == canon {
+					nk := n.NodeKey
+					if nk == "" {
+						nk = testNodeKey("hs-" + n.ID)
+					}
+					return &registrar.PeerIdentity{
+						IP:       canon,
+						HSNodeID: n.ID,
+						NodeKey:  nk,
+					}, nil
+				}
+			}
+		}
+		return nil, errors.New("unknown peer")
+	}
+}
+
+func (e *testEnv) meshHandler(svc *registrar.Service) http.Handler {
+	return api.MeshHandlerDirect(svc, e.peerResolver())
 }
 
 func (e *testEnv) addDevice(t *testing.T, handle, kind, name, ipv4, ipv6 string) (*store.Member, *store.Device) {

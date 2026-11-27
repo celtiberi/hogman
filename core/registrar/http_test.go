@@ -25,8 +25,11 @@ import (
 
 func doMeshReq(h http.Handler, method, path, srcIP, body string, headers map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
-	req.RemoteAddr = "127.0.0.1:42424"
-	req.Header.Set("X-Forwarded-For", srcIP)
+	if net.ParseIP(srcIP) != nil {
+		req.RemoteAddr = net.JoinHostPort(srcIP, "42424")
+	} else {
+		req.RemoteAddr = srcIP
+	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -49,7 +52,7 @@ func TestMeshCSRFProtection(t *testing.T) {
 	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
 	_, bobSrv := e.addDevice(t, "bob", "server", "bob-srv", "100.64.0.12", "")
 
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 
 	// Non-JSON Content-Type and missing Content-Type must be rejected with 415.
 	cases415 := []struct {
@@ -142,7 +145,7 @@ func TestMeshServerNamesItself(t *testing.T) {
 	_, laptop := e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.10", "")
 	_, srvA := e.addDevice(t, "bob", "server", "a", "100.64.0.11", "")
 	_, srvB := e.addDevice(t, "bob", "server", "b", "100.64.0.12", "")
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 	js := map[string]string{"Content-Type": "application/json"}
 	want := func(code int, method, path, src, body string) {
 		t.Helper()
@@ -186,7 +189,7 @@ func TestMeshOwnerServerNameCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.addDevice(t, "root", "server", "srv", "100.64.0.11", "")
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 	js := map[string]string{"Content-Type": "application/json"}
 	got409 := false
 	for i := 0; i <= e.svc.Config().MaxNamesPerMember; i++ {
@@ -218,7 +221,7 @@ func TestMeshServerDeviceRestricted(t *testing.T) {
 	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
 	e.addDevice(t, "root", "server", "root-srv", "100.64.0.11", "")
 
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 
 	// Server device can reach GET /api/me (trimmed payload) and GET /api/directory.
 	rec := doMeshReq(h, "GET", "/api/me", "100.64.0.11", "", nil)
@@ -299,7 +302,7 @@ func TestIPReuseBlockedBeforeSync(t *testing.T) {
 	}}
 	e.hs.mu.Unlock()
 
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 	rec := doMeshReq(h, "POST", "/api/admin/members/bob/role", "100.64.0.10", `{"role":"owner"}`, map[string]string{
 		"Content-Type": "application/json",
 	})
@@ -357,7 +360,7 @@ func TestEmptyXFFDoesNotMatchIPv4OnlyDevice(t *testing.T) {
 	// IPv4-only device has ipv6 = "" in SQLite.
 	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
 
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 	for _, xff := range []string{"", "100.64.0.10, ", "not-an-ip"} {
 		rec := doMeshReq(h, "GET", "/api/me", xff, "", nil)
 		if rec.Code != http.StatusForbidden {
@@ -412,7 +415,7 @@ func TestKeeperPageAPI(t *testing.T) {
 	}
 	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
 	e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.11", "")
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 	js := map[string]string{"Content-Type": "application/json"}
 
 	var me struct {
@@ -472,7 +475,7 @@ func TestHerdPagedAndSearched(t *testing.T) {
 	if _, err := e.svc.Kick(ctx, cli, "pig101", "test"); err != nil {
 		t.Fatal(err)
 	}
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 	type page struct {
 		Members []struct {
 			Handle  string `json:"handle"`
@@ -536,7 +539,7 @@ func TestNameDirectoryNoteAndMigration(t *testing.T) {
 	_, bobSrv := e.addDevice(t, "bob", "server", "bobSrv", "100.64.0.12", "")
 	_, srvA2 := e.addDevice(t, "alice", "server", "srvA2", "100.64.0.13", "")
 	_, rootSrv := e.addDevice(t, "root", "server", "rootSrv", "100.64.0.14", "")
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 	js := map[string]string{"Content-Type": "application/json"}
 
 	// Control characters, invisible fillers, Unicode bidi overrides, and newlines
@@ -727,7 +730,7 @@ func TestOwnerCount(t *testing.T) {
 	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
 	e.addDevice(t, "ann", "personal", "ann-laptop", "100.64.0.12", "")
 	e.addDevice(t, "bob", "personal", "bob-laptop", "100.64.0.14", "")
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 	owners := func(ip string) (float64, bool) {
 		rec := doMeshReq(h, "GET", "/api/me", ip, "", nil)
 		var me map[string]any
@@ -795,64 +798,6 @@ func TestIPRateLimiterIPv6AndBoundedEviction(t *testing.T) {
 	}
 }
 
-// H2 (audit 2026-11): in a pen the mesh API listens only on a Unix socket that
-// just the portal can reach, and a request arriving there is trusted to carry
-// the caller's mesh address. Over the socket, an enrolled device is known.
-func TestMeshAPIOverUnixSocket(t *testing.T) {
-	e := newTestEnv(t)
-	ctx := context.Background()
-	if _, err := e.svc.AddMember(ctx, registrar.Actor{CLI: true}, "root", "owner"); err != nil {
-		t.Fatal(err)
-	}
-	e.addDevice(t, "root", "personal", "root-laptop", "100.64.0.10", "")
-
-	// Short path: Unix socket paths are limited to about 100 bytes.
-	dir, err := os.MkdirTemp("", "hm")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-	path := filepath.Join(dir, "mesh.sock")
-	ln, err := api.ListenMesh("unix:" + path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("socket mode: %v %v", fi, err)
-	}
-	srv := &http.Server{Handler: api.MeshHandler(e.svc), ConnContext: api.MarkSocketConn}
-	go srv.Serve(ln)
-	defer srv.Close()
-
-	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", path)
-	}}}
-	get := func(xff string) int {
-		req, _ := http.NewRequest("GET", "http://portal/api/me", nil)
-		req.Header.Set("X-Forwarded-For", xff)
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		return resp.StatusCode
-	}
-	if code := get("100.64.0.10"); code != http.StatusOK {
-		t.Fatalf("enrolled device over the socket: %d, want 200", code)
-	}
-	if code := get("100.64.0.99"); code != http.StatusForbidden {
-		t.Fatalf("unknown device over the socket: %d, want 403", code)
-	}
-
-	// A stale socket from a previous run is replaced, not an error.
-	srv.Close()
-	ln2, err := api.ListenMesh("unix:" + path)
-	if err != nil {
-		t.Fatalf("relisten over a stale socket: %v", err)
-	}
-	ln2.Close()
-}
-
 func TestNetworkInfoTheme(t *testing.T) {
 	// Default ("", "default") omits "theme" from JSON; "work" (case-insensitive)
 	// exposes "theme":"work" on both /hogman/v1/network and /api/me; anything else fails.
@@ -869,7 +814,7 @@ func TestNetworkInfoTheme(t *testing.T) {
 	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"theme"`) {
 		t.Fatalf("default /hogman/v1/network: %d %s", rec.Code, rec.Body.String())
 	}
-	rec = doMeshReq(api.MeshHandler(e.svc), "GET", "/api/me", "100.64.0.10", "", nil)
+	rec = doMeshReq(e.meshHandler(e.svc), "GET", "/api/me", "100.64.0.10", "", nil)
 	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"theme"`) {
 		t.Fatalf("default /api/me: %d %s", rec.Code, rec.Body.String())
 	}
@@ -892,7 +837,7 @@ func TestNetworkInfoTheme(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"theme":"work"`) {
 		t.Fatalf("work /hogman/v1/network: %d %s", rec.Code, rec.Body.String())
 	}
-	rec = doMeshReq(api.MeshHandler(svcWork), "GET", "/api/me", "100.64.0.10", "", nil)
+	rec = doMeshReq(e.meshHandler(svcWork), "GET", "/api/me", "100.64.0.10", "", nil)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"theme":"work"`) {
 		t.Fatalf("work /api/me: %d %s", rec.Code, rec.Body.String())
 	}
@@ -918,7 +863,7 @@ func TestBillingStatusInMeAndRenewToken(t *testing.T) {
 	dir := t.TempDir()
 	billingPath := filepath.Join(dir, "billing-status.json")
 	e.svc.SetBillingStatusPath(billingPath)
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 
 	// Absent file -> no billing field in /api/me.
 	rec := doMeshReq(h, "GET", "/api/me", "100.64.0.10", "", nil)
@@ -1036,7 +981,7 @@ func TestPortalPresenceDirectoryAndAdminDevices(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 
 	// Regular member reads GET /api/directory: server sites include live online/last_seen,
 	// offline server serializes explicit online:false with zero timestamp omitted, missing node
