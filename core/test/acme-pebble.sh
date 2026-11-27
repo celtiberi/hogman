@@ -27,6 +27,7 @@ if [ "$(uname -s)" != Linux ]; then
 fi
 
 source "$ROOT_DIR/core/test/e2e-lock.sh"
+source "$ROOT_DIR/core/test/lib.sh"
 e2e_lock
 
 export ACME_PEN_NAME="${ACME_PEN_NAME:-bobo}"
@@ -212,7 +213,7 @@ chmod 750 "$WORKDIR/sock"
 chown -R 65532:65532 "$WORKDIR/data"
 chmod 700 "$WORKDIR/data/headscale/lib" "$WORKDIR/data/registrar" "$WORKDIR/data/registrar/tsnet" "$WORKDIR/data/home-tls"
 
-case "$(uname -m)" in x86_64|amd64) HOST_GOARCH=amd64 ;; aarch64|arm64) HOST_GOARCH=arm64 ;; *) HOST_GOARCH="" ;; esac
+HOST_GOARCH="$(test_goarch)"
 if [ -n "$HOST_GOARCH" ] && [ -f "$ROOT_DIR/core/prebuilt/challenge-dns/challenge-dns-e2e-linux-$HOST_GOARCH" ]; then
   install -m 0755 "$ROOT_DIR/core/prebuilt/challenge-dns/challenge-dns-e2e-linux-$HOST_GOARCH" "$WORKDIR/cdns/challenge-dns"
 else
@@ -227,28 +228,8 @@ cat >"$WORKDIR/cdns/test-eab.json" <<EOF
 EOF
 chmod 600 "$WORKDIR/cdns/test-eab.json"
 
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
-  -keyout "$WORKDIR/certs/ca.key" -out "$WORKDIR/certs/ca.crt" \
-  -days 7 -subj "/CN=hogman-acme-test-ca" \
-  -addext "basicConstraints=critical,CA:TRUE" \
-  -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1
-
-openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
-  -keyout "$WORKDIR/certs/server.key" -out "$WORKDIR/certs/server.csr" \
-  -subj "/CN=pebble1" >/dev/null 2>&1
-
-cat >"$WORKDIR/certs/ext.cnf" <<'EOF'
-basicConstraints=CA:FALSE
-keyUsage=critical,digitalSignature,keyEncipherment
-extendedKeyUsage=serverAuth
-subjectAltName=DNS:pebble1,DNS:pebble2,DNS:pebble-baddns,DNS:mock429,DNS:localhost,IP:127.0.0.1
-EOF
-
-openssl x509 -req -in "$WORKDIR/certs/server.csr" \
-  -CA "$WORKDIR/certs/ca.crt" -CAkey "$WORKDIR/certs/ca.key" -CAcreateserial \
-  -out "$WORKDIR/certs/server.crt" -days 7 \
-  -extfile "$WORKDIR/certs/ext.cnf" >/dev/null 2>&1
-chmod 644 "$WORKDIR/certs/ca.crt" "$WORKDIR/certs/server.crt" "$WORKDIR/certs/server.key"
+gen_pebble_certs "$WORKDIR/certs" "hogman-acme-test-ca" "pebble1" \
+  "DNS:pebble1,DNS:pebble2,DNS:pebble-baddns,DNS:mock429,DNS:localhost,IP:127.0.0.1" 7
 
 cat >"$WORKDIR/config/pebble1.json" <<'EOF'
 {

@@ -1,0 +1,1 @@
+- Split `core/test/run.sh` into a thin orchestrator sourcing shared helpers (`core/test/lib.sh`) and six focused phase scripts under `core/test/phases/`, and simplify `core/test/sidecar-check.sh` to probe the `:ro` Unix socket with `curl --unix-socket` inside `nicolaka/netshoot` instead of pulling a Go toolchain image.
