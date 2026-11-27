@@ -30,9 +30,7 @@ function Say([string]$Message) {
 }
 
 function Die([string]$Message) {
-    [Console]::Error.WriteLine("")
-    [Console]::Error.WriteLine("ERROR: $Message")
-    exit 1
+    throw (New-Object System.OperationCanceledException($Message))
 }
 
 function Get-FileSHA256Hex([string]$Path) {
@@ -71,34 +69,6 @@ function Get-HogmanArch {
         "ARM64" { return "arm64" }
         default { Die "this Windows architecture ($raw) isn't supported yet: use 64-bit Windows (AMD64 or ARM64)" }
     }
-}
-
-$curlCmd = Get-Command curl.exe -ErrorAction SilentlyContinue
-if (-not $curlCmd) {
-    Die "curl.exe is required (included in Windows 10 1803+ and Windows 11)"
-}
-$curlExe = $curlCmd.Source
-
-$arch = Get-HogmanArch
-$file = "hogman-windows-$arch.exe"
-
-$homeDir = $env:USERPROFILE
-if ([string]::IsNullOrWhiteSpace($homeDir)) {
-    $homeDir = $HOME
-}
-if ([string]::IsNullOrWhiteSpace($homeDir)) {
-    Die "could not determine your user home directory (USERPROFILE)"
-}
-$destPath = Join-Path $homeDir "hogman.exe"
-
-$appData = $env:APPDATA
-if ([string]::IsNullOrWhiteSpace($appData)) {
-    $appData = Join-Path $homeDir "AppData\Roaming"
-}
-$configBase = Join-Path $appData "hogman"
-
-if ([string]::IsNullOrWhiteSpace($ExpectedHost) -and -not [string]::IsNullOrWhiteSpace($env:HOGMAN_EXPECTED_HOST)) {
-    $ExpectedHost = $env:HOGMAN_EXPECTED_HOST.Trim()
 }
 
 function Parse-ExpectedSHA256([string]$SumsPath, [string]$TargetFile) {
@@ -154,23 +124,23 @@ function Install-StagedBinary([string]$SourceBin, [string]$TargetPath) {
     }
 }
 
-function Download-AndInstall([string]$SrcLabel, [string]$SumsUrl, [string]$BinUrl) {
+function Download-AndInstall([string]$CurlExe, [string]$Arch, [string]$FileName, [string]$DestPath, [string]$SrcLabel, [string]$SumsUrl, [string]$BinUrl) {
     $tmpRoot = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
     $tmpDir = Join-Path $tmpRoot ("hogman-" + [System.IO.Path]::GetRandomFileName())
     New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
     try {
         Say ""
-        Say "* Downloading hogman for Windows $arch from $SrcLabel"
+        Say "* Downloading hogman for Windows $Arch from $SrcLabel"
         $sumsPath = Join-Path $tmpDir "SHA256SUMS"
         $binPath = Join-Path $tmpDir "hogman.exe"
 
-        & $curlExe -fsSL --proto '=https' --proto-redir '=https' -o $sumsPath $SumsUrl | Out-Null
+        & $CurlExe -fsSL --proto '=https' --proto-redir '=https' -o $sumsPath $SumsUrl | Out-Null
         if ($LASTEXITCODE -ne 0) { return 1 }
 
-        $want = Parse-ExpectedSHA256 -SumsPath $sumsPath -TargetFile $file
+        $want = Parse-ExpectedSHA256 -SumsPath $sumsPath -TargetFile $FileName
         if ([string]::IsNullOrWhiteSpace($want)) { return 2 }
 
-        & $curlExe -fsSL --proto '=https' --proto-redir '=https' -o $binPath $BinUrl | Out-Null
+        & $CurlExe -fsSL --proto '=https' --proto-redir '=https' -o $binPath $BinUrl | Out-Null
         if ($LASTEXITCODE -ne 0) { return 3 }
 
         $got = Get-FileSHA256Hex -Path $binPath
@@ -180,11 +150,11 @@ function Download-AndInstall([string]$SrcLabel, [string]$SumsUrl, [string]$BinUr
         Say "  checked: SHA-256 matches"
 
         try {
-            Install-StagedBinary -SourceBin $binPath -TargetPath $destPath
+            Install-StagedBinary -SourceBin $binPath -TargetPath $DestPath
         } catch {
             return 4
         }
-        Say "  saved as $destPath (keep it: it updates, shares and leaves later)"
+        Say "  saved as $DestPath (keep it: it updates, shares and leaves later)"
         return 0
     } finally {
         if (Test-Path -LiteralPath $tmpDir) {
@@ -193,110 +163,165 @@ function Download-AndInstall([string]$SrcLabel, [string]$SumsUrl, [string]$BinUr
     }
 }
 
-# Check if this computer already belongs to any Hogman pens.
-$hasPens = $false
-$hostInPens = $false
-$firstPenHost = ""
-if (Test-Path -LiteralPath $configBase) {
-    $configs = Get-ChildItem -LiteralPath $configBase -Directory -ErrorAction SilentlyContinue
-    foreach ($dir in $configs) {
-        $cfgPath = Join-Path $dir.FullName "config.json"
-        if (-not (Test-Path -LiteralPath $cfgPath)) { continue }
-        $hasPens = $true
-        try {
-            $rawCfg = [System.IO.File]::ReadAllText($cfgPath)
-            if ($rawCfg -match '"login_server"\s*:\s*"https://([a-zA-Z0-9.:-]+)(?:/|")') {
-                $lsHost = $Matches[1]
-                if ($firstPenHost -eq "") { $firstPenHost = $lsHost }
-                if ($ExpectedHost -ne "" -and $lsHost.ToLowerInvariant() -eq $ExpectedHost.ToLowerInvariant()) {
-                    $hostInPens = $true
+function Invoke-HogmanStart([hashtable]$State, [string]$ExpectedHostArg, [string]$LinkArg, [string[]]$ExtraArgs) {
+    $curlCmd = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if (-not $curlCmd) {
+        Die "curl.exe is required (included in Windows 10 1803+ and Windows 11)"
+    }
+    $curlExe = $curlCmd.Source
+
+    $arch = Get-HogmanArch
+    $file = "hogman-windows-$arch.exe"
+
+    $homeDir = $env:USERPROFILE
+    if ([string]::IsNullOrWhiteSpace($homeDir)) {
+        $homeDir = $HOME
+    }
+    if ([string]::IsNullOrWhiteSpace($homeDir)) {
+        Die "could not determine your user home directory (USERPROFILE)"
+    }
+    $destPath = Join-Path $homeDir "hogman.exe"
+
+    $appData = $env:APPDATA
+    if ([string]::IsNullOrWhiteSpace($appData)) {
+        $appData = Join-Path $homeDir "AppData\Roaming"
+    }
+    $configBase = Join-Path $appData "hogman"
+
+    $expected = $ExpectedHostArg
+    if ([string]::IsNullOrWhiteSpace($expected) -and -not [string]::IsNullOrWhiteSpace($env:HOGMAN_EXPECTED_HOST)) {
+        $expected = $env:HOGMAN_EXPECTED_HOST.Trim()
+    }
+
+    # Check if this computer already belongs to any Hogman pens.
+    $hasPens = $false
+    $hostInPens = $false
+    $firstPenHost = ""
+    if (Test-Path -LiteralPath $configBase) {
+        $configs = Get-ChildItem -LiteralPath $configBase -Directory -ErrorAction SilentlyContinue
+        foreach ($dir in $configs) {
+            $cfgPath = Join-Path $dir.FullName "config.json"
+            if (-not (Test-Path -LiteralPath $cfgPath)) { continue }
+            $hasPens = $true
+            try {
+                $rawCfg = [System.IO.File]::ReadAllText($cfgPath)
+                if ($rawCfg -match '"login_server"\s*:\s*"https://([a-zA-Z0-9.:-]+)(?:/|")') {
+                    $lsHost = $Matches[1]
+                    if ($firstPenHost -eq "") { $firstPenHost = $lsHost }
+                    if ($expected -ne "" -and $lsHost.ToLowerInvariant() -eq $expected.ToLowerInvariant()) {
+                        $hostInPens = $true
+                    }
                 }
+            } catch {
+                # Ignore unreadable or malformed config.json when scanning existing pens.
             }
-        } catch {
-            # Ignore unreadable or malformed config.json when scanning existing pens.
         }
     }
-}
 
-# If run with no link on a machine that already has pens (and not explicitly
-# pinned to a brand-new pen host via -ExpectedHost / HOGMAN_EXPECTED_HOST),
-# install hogman.exe and run `hogman.exe update` instead of asking for an invite link (I-9).
-if ([string]::IsNullOrWhiteSpace($Link) -and $hasPens -and ([string]::IsNullOrWhiteSpace($ExpectedHost) -or $hostInPens)) {
-    Say "* Existing Hogman pen(s) found on this computer -- installing $destPath and running update"
-    $installed = $false
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedHost)) {
-        if ($ExpectedHost -notmatch '^[a-zA-Z0-9.:-]+$') {
-            Die "unexpected host: $ExpectedHost"
-        }
-        $rc = Download-AndInstall -SrcLabel $ExpectedHost `
-            -SumsUrl "https://$ExpectedHost/join/dl/SHA256SUMS" `
-            -BinUrl "https://$ExpectedHost/join/dl/$file"
-        if ($rc -eq 0) { $installed = $true }
-    } else {
-        if (-not [string]::IsNullOrWhiteSpace($firstPenHost)) {
-            $rc = Download-AndInstall -SrcLabel $firstPenHost `
-                -SumsUrl "https://$firstPenHost/join/dl/SHA256SUMS" `
-                -BinUrl "https://$firstPenHost/join/dl/$file"
+    $link = $LinkArg
+
+    # If run with no link on a machine that already has pens (and not explicitly
+    # pinned to a brand-new pen host via -ExpectedHost / HOGMAN_EXPECTED_HOST),
+    # install hogman.exe and run `hogman.exe update` instead of asking for an invite link (I-9).
+    if ([string]::IsNullOrWhiteSpace($link) -and $hasPens -and ([string]::IsNullOrWhiteSpace($expected) -or $hostInPens)) {
+        Say "* Existing Hogman pen(s) found on this computer -- installing $destPath and running update"
+        $installed = $false
+        if (-not [string]::IsNullOrWhiteSpace($expected)) {
+            if ($expected -notmatch '^[a-zA-Z0-9.:-]+$') {
+                Die "unexpected host: $expected"
+            }
+            $rc = Download-AndInstall -CurlExe $curlExe -Arch $arch -FileName $file -DestPath $destPath `
+                -SrcLabel $expected `
+                -SumsUrl "https://$expected/join/dl/SHA256SUMS" `
+                -BinUrl "https://$expected/join/dl/$file"
             if ($rc -eq 0) { $installed = $true }
+        } else {
+            if (-not [string]::IsNullOrWhiteSpace($firstPenHost)) {
+                $rc = Download-AndInstall -CurlExe $curlExe -Arch $arch -FileName $file -DestPath $destPath `
+                    -SrcLabel $firstPenHost `
+                    -SumsUrl "https://$firstPenHost/join/dl/SHA256SUMS" `
+                    -BinUrl "https://$firstPenHost/join/dl/$file"
+                if ($rc -eq 0) { $installed = $true }
+            }
+            if (-not $installed) {
+                $ghBase = "https://github.com/celtiberi/hogman/releases/latest/download"
+                $rc = Download-AndInstall -CurlExe $curlExe -Arch $arch -FileName $file -DestPath $destPath `
+                    -SrcLabel "GitHub Releases" `
+                    -SumsUrl "$ghBase/hogman-SHA256SUMS" `
+                    -BinUrl "$ghBase/$file"
+                if ($rc -eq 0) { $installed = $true }
+            }
         }
         if (-not $installed) {
-            $ghBase = "https://github.com/celtiberi/hogman/releases/latest/download"
-            $rc = Download-AndInstall -SrcLabel "GitHub Releases" `
-                -SumsUrl "$ghBase/hogman-SHA256SUMS" `
-                -BinUrl "$ghBase/$file"
-            if ($rc -eq 0) { $installed = $true }
+            Die "could not download $file; try downloading it from https://hogman.network/dl/$file and running: $destPath update"
+        }
+        $legacyPath = Join-Path $homeDir "hogman-join.exe"
+        if (Test-Path -LiteralPath $legacyPath) {
+            Say "  note: once updated, you can delete $legacyPath"
+        }
+        Say "  (to join another pen later, run: $destPath '<invite link>')"
+        $global:LASTEXITCODE = 0
+        & $destPath update
+        if ($null -ne $LASTEXITCODE) { $State.ExitCode = [int]$LASTEXITCODE }
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($link)) {
+        if (-not (Have-InteractiveConsole)) {
+            Die "no terminal to ask for your invite link on; pass the link on the command line"
+        }
+        $link = Read-Host "Paste your invite link (the full link you were sent, including everything after the #)"
+        if ([string]::IsNullOrWhiteSpace($link)) {
+            Die "no link given"
         }
     }
-    if (-not $installed) {
-        Die "could not download $file; try downloading it from https://hogman.network/dl/$file and running: $destPath update"
+    $link = $link -replace '[\s\r\n\t]+', ''
+
+    # https://<host>/join#t=... (an invite) or #k=... (a device link).
+    if ($link -notmatch '^https://') {
+        Die "that doesn't look like a Hogman invite link (it starts https:// and contains /join#)"
     }
-    $legacyPath = Join-Path $homeDir "hogman-join.exe"
-    if (Test-Path -LiteralPath $legacyPath) {
-        Say "  note: once updated, you can delete $legacyPath"
+    if ($link -notmatch '^https://([a-zA-Z0-9.:-]+)/join#(t|k)=([^&\s]+)(&.*)?$') {
+        Die "that doesn't look like a Hogman invite link (expected https://<host>/join#t=... or #k=...)"
     }
-    Say "  (to join another pen later, run: $destPath '<invite link>')"
-    & $destPath update
-    exit $LASTEXITCODE
-}
+    $linkHost = $Matches[1]
 
-if ([string]::IsNullOrWhiteSpace($Link)) {
-    if (-not (Have-InteractiveConsole)) {
-        Die "no terminal to ask for your invite link on; pass the link on the command line"
+    if (-not [string]::IsNullOrWhiteSpace($expected) -and $linkHost.ToLowerInvariant() -ne $expected.ToLowerInvariant()) {
+        Die "refusing link for $linkHost (expected $expected)"
     }
-    $Link = Read-Host "Paste your invite link (the full link you were sent, including everything after the #)"
-    if ([string]::IsNullOrWhiteSpace($Link)) {
-        Die "no link given"
+
+    $rc = Download-AndInstall -CurlExe $curlExe -Arch $arch -FileName $file -DestPath $destPath `
+        -SrcLabel $linkHost `
+        -SumsUrl "https://$linkHost/join/dl/SHA256SUMS" `
+        -BinUrl "https://$linkHost/join/dl/$file"
+    switch ($rc) {
+        0 { }
+        1 { Die "couldn't reach https://$linkHost" }
+        2 { Die "there's no hogman for Windows $arch yet" }
+        4 { Die "could not write $destPath (check permissions on $homeDir)" }
+        default { Die "the download failed; try again" }
     }
-}
-$Link = $Link -replace '[\s\r\n\t]+', ''
 
-# https://<host>/join#t=... (an invite) or #k=... (a device link).
-if ($Link -notmatch '^https://') {
-    Die "that doesn't look like a Hogman invite link (it starts https:// and contains /join#)"
-}
-if ($Link -notmatch '^https://([a-zA-Z0-9.:-]+)/join#(t|k)=([^&\s]+)(&.*)?$') {
-    Die "that doesn't look like a Hogman invite link (expected https://<host>/join#t=... or #k=...)"
-}
-$linkHost = $Matches[1]
-
-if (-not [string]::IsNullOrWhiteSpace($ExpectedHost) -and $linkHost.ToLowerInvariant() -ne $ExpectedHost.ToLowerInvariant()) {
-    Die "refusing link for $linkHost (expected $ExpectedHost)"
+    $global:LASTEXITCODE = 0
+    if ($ExtraArgs.Count -gt 0) {
+        & $destPath @ExtraArgs $link
+    } else {
+        & $destPath $link
+    }
+    if ($null -ne $LASTEXITCODE) { $State.ExitCode = [int]$LASTEXITCODE }
 }
 
-$rc = Download-AndInstall -SrcLabel $linkHost `
-    -SumsUrl "https://$linkHost/join/dl/SHA256SUMS" `
-    -BinUrl "https://$linkHost/join/dl/$file"
-switch ($rc) {
-    0 { }
-    1 { Die "couldn't reach https://$linkHost" }
-    2 { Die "there's no hogman for Windows $arch yet" }
-    4 { Die "could not write $destPath (check permissions on $homeDir)" }
-    default { Die "the download failed; try again" }
+$runState = @{ ExitCode = 0 }
+try {
+    Invoke-HogmanStart -State $runState -ExpectedHostArg $ExpectedHost -LinkArg $Link -ExtraArgs $HogmanArgs
+} catch [System.OperationCanceledException] {
+    [Console]::Error.WriteLine("")
+    [Console]::Error.WriteLine("ERROR: $($_.Exception.Message)")
+    $runState.ExitCode = 1
 }
-
-if ($HogmanArgs.Count -gt 0) {
-    & $destPath @HogmanArgs $Link
-} else {
-    & $destPath $Link
+$global:LASTEXITCODE = [int]$runState.ExitCode
+# Only call `exit` when executed as a standalone .ps1 file; calling `exit` inside
+# `& ([scriptblock]::Create($s))` would close the user's interactive PowerShell window.
+if (-not [string]::IsNullOrEmpty($PSCommandPath)) {
+    exit $runState.ExitCode
 }
-exit $LASTEXITCODE

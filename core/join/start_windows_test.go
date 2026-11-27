@@ -298,25 +298,46 @@ func TestStartPs1BehaviorAndSecurity(t *testing.T) {
 				t.Fatalf("case 4: expected download from pen2, curlLog:\n%s", curlLog)
 			}
 
-			// 5. Scriptblock invocation (exact /join one-liner mechanism) works identically.
+			// 5. Scriptblock invocation (exact /join one-liner mechanism) must survive in an
+			// interactive PowerShell session on BOTH success and error paths without closing the shell.
 			sbHome := filepath.Join(tmp, shellName+"-sb")
 			_ = os.MkdirAll(filepath.Join(sbHome, "AppData", "Roaming"), 0o700)
 			_ = os.MkdirAll(filepath.Join(sbHome, "Temp"), 0o700)
-			sbCmd := exec.Command(shellExe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
-				fmt.Sprintf("$s = [System.IO.File]::ReadAllText('%s'); & ([scriptblock]::Create($s)) -ExpectedHost 'pen2.gate.example.com' 'https://pen2.gate.example.com/join#t=tok123'",
-					strings.ReplaceAll(scriptPath, "'", "''")))
-			sbCmd.Stdin = strings.NewReader("")
-			sbCmd.Env = mergeEnv(os.Environ(), map[string]string{
-				"USERPROFILE": sbHome,
-				"HOME":        sbHome,
-				"APPDATA":     filepath.Join(sbHome, "AppData", "Roaming"),
-				"TEMP":        filepath.Join(sbHome, "Temp"),
-				"TMP":         filepath.Join(sbHome, "Temp"),
-				"PATH":        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-				"FAKE_DL_DIR": dlDir,
-			}, dropForShell...)
-			if outBytes, err := sbCmd.CombinedOutput(); err != nil || !strings.Contains(string(outBytes), "FAKE_HOGMAN_ARGS:https://pen2.gate.example.com/join#t=tok123") {
-				t.Fatalf("case 5 (scriptblock invocation) failed: err=%v out=%s", err, string(outBytes))
+			escapedScript := strings.ReplaceAll(scriptPath, "'", "''")
+			runScriptBlockSession := func(invocation string) (string, error) {
+				cmd := exec.Command(shellExe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+					fmt.Sprintf("$s = [System.IO.File]::ReadAllText('%s'); %s; [Console]::Out.WriteLine(\"STILL-ALIVE:$LASTEXITCODE\")",
+						escapedScript, invocation))
+				cmd.Stdin = strings.NewReader("")
+				cmd.Env = mergeEnv(os.Environ(), map[string]string{
+					"USERPROFILE": sbHome,
+					"HOME":        sbHome,
+					"APPDATA":     filepath.Join(sbHome, "AppData", "Roaming"),
+					"TEMP":        filepath.Join(sbHome, "Temp"),
+					"TMP":         filepath.Join(sbHome, "Temp"),
+					"PATH":        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+					"FAKE_DL_DIR": dlDir,
+				}, dropForShell...)
+				outBytes, err := cmd.CombinedOutput()
+				return string(outBytes), err
+			}
+			// 5a. Success path: runs hogman.exe, sets $LASTEXITCODE=0, and caller session stays alive.
+			if sbOut, err := runScriptBlockSession(`& ([scriptblock]::Create($s)) -ExpectedHost 'pen2.gate.example.com' 'https://pen2.gate.example.com/join#t=tok123'`); err != nil ||
+				!strings.Contains(sbOut, "FAKE_HOGMAN_ARGS:https://pen2.gate.example.com/join#t=tok123") ||
+				!strings.Contains(sbOut, "STILL-ALIVE:0") {
+				t.Fatalf("case 5a (scriptblock success survival) failed: err=%v out=%s", err, sbOut)
+			}
+			// 5b. Error path (host mismatch): prints ERROR, sets $LASTEXITCODE=1, and caller session stays alive.
+			if sbOut, err := runScriptBlockSession(`& ([scriptblock]::Create($s)) -ExpectedHost 'pen2.gate.example.com' 'https://evil.example.com/join#t=tok123'`); err != nil ||
+				!strings.Contains(sbOut, "ERROR: refusing link for evil.example.com") ||
+				!strings.Contains(sbOut, "STILL-ALIVE:1") {
+				t.Fatalf("case 5b (scriptblock error survival) failed: err=%v out=%s", err, sbOut)
+			}
+			// 5c. Direct .ps1 file call error path: sets $LASTEXITCODE=1 and caller session stays alive.
+			if sbOut, err := runScriptBlockSession(fmt.Sprintf(`& '%s' -ExpectedHost 'pen2.gate.example.com' 'https://evil.example.com/join#t=tok123'`, escapedScript)); err != nil ||
+				!strings.Contains(sbOut, "ERROR: refusing link for evil.example.com") ||
+				!strings.Contains(sbOut, "STILL-ALIVE:1") {
+				t.Fatalf("case 5c (file invocation error survival) failed: err=%v out=%s", err, sbOut)
 			}
 
 			// 6. Host pinning refusal: -ExpectedHost mismatch must abort before downloading.
