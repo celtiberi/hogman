@@ -136,7 +136,9 @@ stays up.
   Chrome, Brave, Edge, Arc, Vivaldi, Chromium, Firefox (128+), and LibreWolf that routes only the
   pens you explicitly allow per browser profile straight to `hogman` (fail-closed for everything
   else) while leaving regular traffic on your VPN. Published on the Chrome Web Store, with Firefox
-  Add-ons (AMO) review pending; developers can also load unpacked builds from `browser-ext/`.
+  Add-ons (AMO) review pending; the published build covers hosted `*.pens.hogman.network` pens only
+  (other domains use the automatic proxy URL / `proxy.pac` method, or an unpacked `--zone-suffix`
+  test build from `browser-ext/`).
 - **Safari:** Apple does not expose proxy APIs to Safari extensions, so pause your VPN while
   visiting pen sites in Safari.
 

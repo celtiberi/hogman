@@ -3,12 +3,20 @@
 
 export const NATIVE_HOST = "network.hogman.browser";
 
+export const ZONE_SUFFIX = "pens.hogman.network";
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export const HOST_PERMISSION_ORIGINS = Object.freeze([
-  "*://*.pens.hogman.network/*",
-  "*://pens.hogman.network/*",
+  `*://*.${ZONE_SUFFIX}/*`,
+  `*://${ZONE_SUFFIX}/*`,
 ]);
 
-export const HOSTED_ZONE_RE = /^[a-z][a-z0-9-]{1,28}[a-z0-9]\.pens\.hogman\.network$/;
+export const HOSTED_ZONE_RE = new RegExp(
+  `^[a-z][a-z0-9-]{1,28}[a-z0-9]\\.${escapeRegExp(ZONE_SUFFIX)}$`,
+);
 export const HOGMAN_PORT_MIN = 17000;
 export const HOGMAN_PORT_MAX = 26999;
 
