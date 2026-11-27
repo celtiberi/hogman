@@ -403,16 +403,9 @@ func StartBackground(dir string, c *state.ShareConfig, noService bool, u *ui.UI,
 	return platform.StartShareServiceWithBinary(bin, dir, c, noService, u.Note)
 }
 
-// PID is the live process serving a share in the background, or 0.
+// PID is the live hogman process serving a share in the background, or 0.
 func PID(dir string) int {
-	b, err := os.ReadFile(filepath.Join(dir, "share.pid"))
-	if err != nil {
-		return 0
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || pid <= 0 || !platform.ProcessAlive(pid) {
-		return 0
-	}
+	pid, _ := platform.ReadLiveHogmanPID(filepath.Join(dir, "share.pid"))
 	return pid
 }
 
@@ -450,7 +443,7 @@ func WaitBackground(dir string, c *state.ShareConfig, managed bool, pid int, tim
 		case <-time.After(poll):
 		}
 		st := state.ReadShareStatus(dir)
-		if (!managed || pid > 0) && st.State != "up" && st.State != "error" && !platform.ProcessAlive(pid) {
+		if (!managed || pid > 0) && st.State != "up" && st.State != "error" && !platform.ProcessIsHogman(pid, "") {
 			if stopFn != nil {
 				stopFn()
 			}
@@ -483,12 +476,7 @@ func Stop(dir string, c *state.ShareConfig) {
 }
 
 func StopProcess(dir string) {
-	pid := PID(dir)
-	if pid == 0 {
-		return
-	}
-	platform.StopProcess(pid, 5*time.Second)
-	_ = os.Remove(filepath.Join(dir, "share.pid"))
+	platform.StopPIDFile(filepath.Join(dir, "share.pid"), 5*time.Second)
 }
 
 func ListState(running, managed bool) string {

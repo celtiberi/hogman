@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -232,7 +231,7 @@ func Serve(ctx context.Context, dir string, u *ui.UI, ready func(*state.ShareCon
 		}
 	}
 	pidFile := filepath.Join(dir, "share.pid")
-	_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
+	_ = fsutil.WritePIDFile(pidFile)
 	defer os.Remove(pidFile)
 	state.WriteShareStatus(dir, "starting", "")
 	fail := func(err error) error { state.WriteShareStatus(dir, "error", err.Error()); return err }

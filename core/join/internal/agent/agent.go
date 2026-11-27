@@ -14,7 +14,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -64,7 +63,7 @@ func Run(dir string) error {
 	}
 	defer ln.Close()
 
-	_ = os.WriteFile(filepath.Join(dir, "agent.pid"), []byte(strconv.Itoa(os.Getpid())), 0o600)
+	_ = fsutil.WritePIDFile(filepath.Join(dir, "agent.pid"))
 	defer os.Remove(filepath.Join(dir, "agent.pid"))
 
 	// Rotate status.token atomically on startup and intentionally keep it on

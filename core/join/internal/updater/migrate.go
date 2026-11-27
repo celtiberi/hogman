@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -37,17 +36,14 @@ func (o Options) binaryName() string {
 }
 
 // AgentRunning reports whether this pen's agent process is alive: either its
-// local /status endpoint answers for this zone or its recorded agent.pid is alive.
+// local /status endpoint answers for this zone or its recorded agent.pid still
+// refers to a live hogman process with a matching start time.
 func AgentRunning(dir string, c *state.AgentConfig) bool {
 	if _, err := agent.State(c); err == nil {
 		return true
 	}
-	b, err := os.ReadFile(filepath.Join(dir, "agent.pid"))
-	if err != nil {
-		return false
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	return err == nil && pid > 0 && platform.ProcessAlive(pid)
+	pid, _ := platform.ReadLiveHogmanPID(filepath.Join(dir, "agent.pid"))
+	return pid > 0
 }
 
 // AgentRunningStaleBinary reports whether p's running agent is executing a

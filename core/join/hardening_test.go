@@ -8,8 +8,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -443,6 +445,55 @@ func TestRedTeamNonPositivePIDGuards(t *testing.T) {
 		if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 			t.Fatalf("platform.StopDetached(%q) did not remove stale agent.pid", raw)
 		}
+	}
+}
+
+func TestRedTeamStalePIDDoesNotKillUnrelatedProcess(t *testing.T) {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("ping.exe", "-n", "30", "127.0.0.1")
+	} else {
+		cmd = exec.Command("/bin/sleep", "30")
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start unrelated process: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+
+	otherPID := cmd.Process.Pid
+	dir := t.TempDir()
+	agentPIDPath := filepath.Join(dir, "agent.pid")
+	sharePIDPath := filepath.Join(dir, "share.pid")
+	pidText := []byte(strconv.Itoa(otherPID) + "\n")
+	if err := os.WriteFile(agentPIDPath, pidText, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sharePIDPath, pidText, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := share.PID(dir); got != 0 {
+		t.Fatalf("share.PID returned non-hogman PID %d, want 0", got)
+	}
+	if updater.AgentRunning(dir, &state.AgentConfig{Zone: "stale.pens.example.com", ProxyAddr: "127.0.0.1:1"}) {
+		t.Fatal("updater.AgentRunning returned true for stale non-hogman agent.pid")
+	}
+
+	share.StopProcess(dir)
+	if _, err := os.Stat(sharePIDPath); !os.IsNotExist(err) {
+		t.Fatalf("share.StopProcess did not remove stale share.pid (err=%v)", err)
+	}
+	platform.StopDetached(dir)
+	if _, err := os.Stat(agentPIDPath); !os.IsNotExist(err) {
+		t.Fatalf("platform.StopDetached did not remove stale agent.pid (err=%v)", err)
+	}
+	if !platform.ProcessAlive(otherPID) {
+		t.Fatalf("unrelated process %d was killed by stale PID cleanup!", otherPID)
 	}
 }
 
