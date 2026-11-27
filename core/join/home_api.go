@@ -51,9 +51,10 @@ func homeAPI(c *http.Client, zone, method, path string, in, out any) (int, error
 
 const maxHomeAPIRespBytes = 1 << 20 // 1 MiB
 
-// sanitizeAPIErrorMsg replaces terminal control characters (C0/DEL and C1
-// controls such as U+009B CSI via unicode.IsControl) with '?' while keeping
-// the full message intact without truncation.
+// sanitizeAPIErrorMsg replaces terminal control characters (C0/DEL, C1 such as
+// U+009B CSI via unicode.IsControl, and Unicode format/BiDi controls such as
+// U+202E via unicode.Cf) with '?' while keeping the full message intact without
+// truncation.
 func sanitizeAPIErrorMsg(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -62,7 +63,7 @@ func sanitizeAPIErrorMsg(raw string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			b.WriteByte('?')
 		} else {
 			b.WriteRune(r)

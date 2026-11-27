@@ -55,7 +55,7 @@ func TestHomeAPICtxErrorParsingAndRetryAfter(t *testing.T) {
 			return &http.Response{
 				StatusCode: http.StatusBadRequest,
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(strings.NewReader(`{"error":"bad \u001b[2J\u009b2Jinput\u007f ` + longTail + `"}`)),
+				Body:       io.NopCloser(strings.NewReader(`{"error":"bad \u001b[2J\u009b2J\u202einput\u007f ` + longTail + `"}`)),
 			}, nil
 		default:
 			return &http.Response{
@@ -94,13 +94,13 @@ func TestHomeAPICtxErrorParsingAndRetryAfter(t *testing.T) {
 	if code != http.StatusBadRequest || err == nil {
 		t.Fatalf("/json-ctrl = (%d, %v), want 400 error", code, err)
 	}
-	wantJSON := "bad ?[2J?2Jinput? " + longTail
+	wantJSON := "bad ?[2J?2J?input? " + longTail
 	if err.Error() != wantJSON {
 		t.Fatalf("/json-ctrl = %q, want %q", err.Error(), wantJSON)
 	}
 	for _, r := range err.Error() {
-		if unicode.IsControl(r) {
-			t.Fatalf("/json-ctrl: unsanitized control char %U in %q", r, err.Error())
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			t.Fatalf("/json-ctrl: unsanitized control/format char %U in %q", r, err.Error())
 		}
 	}
 
