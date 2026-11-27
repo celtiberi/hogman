@@ -6,8 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -44,10 +42,17 @@ func ProcessAlive(pid int) bool {
 	return !isZombiePID(pid)
 }
 
-// StopProcess sends SIGTERM to pid and waits up to termTimeout for it to exit
-// cleanly, escalating to SIGKILL (waiting up to 1s) if it is still running.
+// StopProcess sends SIGTERM to pid only after verifying it is our hogman
+// executable, waiting up to termTimeout for clean exit before escalating to
+// SIGKILL (waiting up to 1s).
 func StopProcess(pid int, termTimeout time.Duration) {
-	if pid <= 0 {
+	StopProcessVerified(pid, "", termTimeout)
+}
+
+// StopProcessVerified verifies executable identity (and optional startTag)
+// before sending SIGTERM and again before escalating to SIGKILL.
+func StopProcessVerified(pid int, startTag string, termTimeout time.Duration) {
+	if pid <= 0 || !ProcessMatchesPIDRecord(pid, startTag, "") {
 		return
 	}
 	p, err := os.FindProcess(pid)
@@ -56,6 +61,9 @@ func StopProcess(pid int, termTimeout time.Duration) {
 	}
 	_ = p.Signal(syscall.SIGTERM)
 	if waitProcessExit(pid, termTimeout) {
+		return
+	}
+	if !ProcessMatchesPIDRecord(pid, startTag, "") {
 		return
 	}
 	_ = p.Kill()
@@ -75,18 +83,12 @@ func waitProcessExit(pid int, timeout time.Duration) bool {
 	}
 }
 
-// StopDetached stops an agent that was started as a plain background process,
-// waiting until the process has actually exited so its proxy port is released,
-// and also stops any orphaned legacy hogman-join agent still bound to dir.
+// StopDetached stops an agent that was started as a plain background process
+// only if dir/agent.pid still refers to our hogman binary (and matching start
+// time), otherwise removing the stale PID file without killing unrelated
+// processes, then also stops any orphaned legacy hogman-join agent for dir.
 func StopDetached(dir string) {
-	pidPath := filepath.Join(dir, "agent.pid")
-	if b, err := os.ReadFile(pidPath); err == nil {
-		pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-		if err == nil && pid > 0 {
-			StopProcess(pid, 4*time.Second)
-		}
-		_ = os.Remove(pidPath)
-	}
+	StopPIDFile(filepath.Join(dir, "agent.pid"), 4*time.Second)
 	StopOrphanAgentForDir(dir)
 }
 

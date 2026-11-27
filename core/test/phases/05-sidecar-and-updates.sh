@@ -162,9 +162,10 @@ run dave-laptop sh -c '
   mkdir -p /root/.config/hogman/aaa-dead.example.test
   printf "{\"zone\":\"aaa-dead.example.test\",\"login_server\":\"https://127.0.0.1:1\",\"dns_server\":\"100.64.0.1\",\"hostname\":\"dead\",\"proxy_addr\":\"127.0.0.1:19999\"}\n" > /root/.config/hogman/aaa-dead.example.test/config.json
   cp "/dl/hogman-$(uname -s)-$(uname -m)" /root/.config/hogman/aaa-dead.example.test/hogman-join
-  nohup sleep 300 >/dev/null 2>&1 </dev/null & echo $! > /root/.config/hogman/aaa-dead.example.test/agent.pid
+  nohup /root/.config/hogman/aaa-dead.example.test/hogman-join agent /root/.config/hogman/aaa-dead.example.test >/root/.config/hogman/aaa-dead.example.test/agent.log 2>&1 </dev/null &
   cp "/dl/hogman-$(uname -s)-$(uname -m)" "/root/.config/hogman/'"$ZONE"'/hogman-join"
 '
+retry 20 run dave-laptop sh -c 'test -s /root/.config/hogman/aaa-dead.example.test/agent.pid && kill -0 "$(cat /root/.config/hogman/aaa-dead.example.test/agent.pid)" 2>/dev/null'
 DEAD_OLD_PID="$(run dave-laptop cat /root/.config/hogman/aaa-dead.example.test/agent.pid 2>/dev/null | tr -d '\r')"
 t0="$(date +%s)"
 out="$(run dave-laptop sh -c 'HOGMAN_RELEASE_BASE="https://dave-server:8443" "/dl/hogman-$(uname -s)-$(uname -m)" --no-open update' 2>&1)"; rc=$?
@@ -213,8 +214,9 @@ run dave-laptop sh -c '
   mkdir -p /root/.config/hogman/aaa-gone.example.test
   printf "{\"zone\":\"aaa-gone.example.test\",\"login_server\":\"https://dave-server:8443/gone\",\"dns_server\":\"100.64.0.1\",\"hostname\":\"gone\",\"proxy_addr\":\"127.0.0.1:19998\"}\n" > /root/.config/hogman/aaa-gone.example.test/config.json
   printf "0\n" > /root/.config/hogman/aaa-gone.example.test/.updating
-  nohup sleep 300 >/dev/null 2>&1 </dev/null & echo $! > /root/.config/hogman/aaa-gone.example.test/agent.pid
+  nohup /tmp/hogman-old agent /root/.config/hogman/aaa-gone.example.test >/root/.config/hogman/aaa-gone.example.test/agent.log 2>&1 </dev/null &
 '
+retry 20 run dave-laptop sh -c 'test -s /root/.config/hogman/aaa-gone.example.test/agent.pid && kill -0 "$(cat /root/.config/hogman/aaa-gone.example.test/agent.pid)" 2>/dev/null'
 retry 20 alice_via
 run dave-laptop rm -f /tmp/hogman-stale-deleted
 STALE_LIVE_PID="$(run dave-laptop cat "/root/.config/hogman/$ZONE/agent.pid" 2>/dev/null | tr -d '\r')"
