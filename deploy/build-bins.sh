@@ -28,7 +28,7 @@ if [ -z "$version" ] && git -C "$src" rev-parse --verify HEAD >/dev/null 2>&1; t
 fi
 version="${version:-dev}"
 
-echo "building the join tool (5 platforms, version $version), the registrar, and challenge-dns (linux amd64, arm64)..."
+echo "building the join tool (6 platforms, version $version), the registrar, and challenge-dns (linux amd64, arm64)..."
 
 # Compile all three modules sequentially in the pinned Go container sharing
 # hogman-gomod and hogman-gocache (no concurrent writers to shared volumes, no
@@ -63,7 +63,7 @@ run_go_build "core/join" "$src/core/join" "$out/join" "-tags=ts_omit_peerapiserv
   rm -f /out/hogman-* /out/SHA256SUMS
   for t in Linux-x86_64:linux/amd64 Linux-aarch64:linux/arm64 \
            Darwin-arm64:darwin/arm64 Darwin-x86_64:darwin/amd64 \
-           windows-amd64.exe:windows/amd64; do
+           windows-amd64.exe:windows/amd64 windows-arm64.exe:windows/arm64; do
     name=${t%%:*}; plat=${t#*:}
     GOOS=${plat%/*} GOARCH=${plat#*/} CGO_ENABLED=0 \
       go build -ldflags="-s -w -X main.version=$VERSION" -o "/out/hogman-$name" .

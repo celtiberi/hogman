@@ -56,16 +56,30 @@ export function buildManualCommand(host, cleanLink, verb = '') {
   return `curl -fsSL --proto '=https' --proto-redir '=https' -o hogman "https://${host}/join/dl/hogman-$(uname -s)-$(uname -m)" && chmod +x hogman && ./hogman ${verb}${quoted}`;
 }
 
+export function buildWindowsStartCommand(host, cleanLink, args = []) {
+  const extra = args.length ? ' ' + args.map(a => `'${a}'`).join(' ') : '';
+  return `$s = curl.exe -fsSL --proto '=https' --proto-redir '=https' 'https://${host}/start.ps1' | Out-String; if ($LASTEXITCODE -eq 0) { & ([scriptblock]::Create($s)) -ExpectedHost '${host}' '${cleanLink}'${extra} }`;
+}
+
+export function buildWindowsManualCommand(host, cleanLink, verb = '') {
+  return `$a = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') { 'arm64' } else { 'amd64' }; curl.exe -fsSL --proto '=https' --proto-redir '=https' -o hogman.exe "https://${host}/join/dl/hogman-windows-$a.exe"; if ($LASTEXITCODE -eq 0) { .\\hogman.exe ${verb}'${cleanLink}' }`;
+}
+
 export function buildJoinCommands({ host, cleanLink, forShare = false, isWork = false }) {
   if (!forShare) {
     return {
       startCmd: buildStartCommand(host, cleanLink, ''),
       manualCmd: buildManualCommand(host, cleanLink, ''),
+      winStartCmd: buildWindowsStartCommand(host, cleanLink, []),
+      winManualCmd: buildWindowsManualCommand(host, cleanLink, ''),
     };
   }
-  const shareArgs = isWork ? 'share cooler-1 http://192.168.1.40' : 'share blog 8080';
+  const shareTokens = isWork ? ['share', 'cooler-1', 'http://192.168.1.40'] : ['share', 'blog', '8080'];
+  const shareArgs = shareTokens.join(' ');
   return {
     startCmd: buildStartCommand(host, cleanLink, shareArgs),
     manualCmd: buildManualCommand(host, cleanLink, `${shareArgs} `),
+    winStartCmd: buildWindowsStartCommand(host, cleanLink, shareTokens),
+    winManualCmd: buildWindowsManualCommand(host, cleanLink, `${shareArgs} `),
   };
 }

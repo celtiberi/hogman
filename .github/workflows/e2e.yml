@@ -135,6 +135,50 @@ jobs:
           } finally {
             Pop-Location
           }
+      - name: Validate start.ps1 and /join PowerShell commands in PS 5.1 and pwsh
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $cmds = node --input-type=module -e '
+            import { buildJoinCommands } from "./core/join-page/commands.js";
+            const host = "example.gate.hogman.network";
+            const link = `https://${host}/join#k=hskey-auth-TEST`;
+            const shareLink = `${link}&for=share`;
+            for (const opts of [
+              { host, cleanLink: link, forShare: false, isWork: false },
+              { host, cleanLink: shareLink, forShare: true, isWork: false },
+              { host, cleanLink: shareLink, forShare: true, isWork: true },
+            ]) {
+              const { winStartCmd, winManualCmd } = buildJoinCommands(opts);
+              console.log(winStartCmd);
+              console.log(winManualCmd);
+            }
+          '
+          if ($LASTEXITCODE -ne 0 -or $cmds.Count -lt 6) {
+            throw "failed to generate Windows PowerShell commands from commands.js"
+          }
+          $cmdFile = Join-Path $env:RUNNER_TEMP "win-join-cmds.txt"
+          [System.IO.File]::WriteAllLines($cmdFile, $cmds, [System.Text.Encoding]::ASCII)
+          $checkScript = @'
+          $ErrorActionPreference = "Stop"
+          $tokens = $null; $errs = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path "core/join-page/start.ps1").Path, [ref]$tokens, [ref]$errs)
+          if ($errs -and $errs.Count -gt 0) { throw "start.ps1 parse errors: $($errs -join '; ')" }
+          foreach ($line in [System.IO.File]::ReadAllLines($env:WIN_CMD_FILE)) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $t2 = $null; $e2 = $null
+            [void][System.Management.Automation.Language.Parser]::ParseInput($line, [ref]$t2, [ref]$e2)
+            if ($e2 -and $e2.Count -gt 0) { throw "command parse errors ($line): $($e2 -join '; ')" }
+          }
+          [Console]::Out.WriteLine("PowerShell AST check passed on $($PSVersionTable.PSVersion)")
+          '@
+          $env:WIN_CMD_FILE = $cmdFile
+          foreach ($sh in @("powershell.exe", "pwsh.exe")) {
+            if (Get-Command $sh -ErrorAction SilentlyContinue) {
+              & $sh -NoProfile -NonInteractive -Command $checkScript
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }
 
   images:
     name: docker image builds
@@ -246,6 +290,7 @@ jobs:
             CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-Darwin-arm64" .
             CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-Darwin-x86_64" .
             CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-windows-amd64.exe" .
+            CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags="-s -w -X main.version=$ver" -o "$out/join/hogman-windows-arm64.exe" .
           ) &
           p_lane2=$!
           wait "$p_cdns" "$p_lane1" "$p_lane2"

@@ -1,0 +1,1 @@
+- Add Windows PowerShell installer (`/start.ps1`), activate the `/join` Windows tab with verified PowerShell join/share commands and extension/proxy instructions, and ship `windows/arm64` client binaries alongside `windows/amd64`.

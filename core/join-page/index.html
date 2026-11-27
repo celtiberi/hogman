@@ -98,7 +98,49 @@
     </div>
 
     <div id="win-panel" hidden>
-      <p class="callout warn">Windows support is coming soon (not available yet). For now, open this link on a macOS or Linux computer.</p>
+      <div class="step-card">
+        <div class="step-head">
+          <span class="step-title">Run this command in PowerShell</span>
+        </div>
+        <pre id="win-cmd"></pre>
+        <p class="action-row">
+          <button id="win-copy" class="primary" type="button">Copy</button>
+          <span class="ok-msg" id="win-copied" aria-live="polite"></span>
+        </p>
+      </div>
+
+      <p class="callout warn" id="win-key-warn">This command embeds a one-time key — treat it like a password and don't share it.</p>
+
+      <details id="win-manual" class="manual-box">
+        <summary>Rather not run a fetched PowerShell script?</summary>
+        <div class="manual-body">
+          <p><a href="/start.ps1" target="_blank" rel="noopener noreferrer">Read the script</a> first (it's short), or run the same steps by hand:</p>
+          <pre id="win-cmd-manual"></pre>
+        </div>
+      </details>
+
+      <div class="expect-box">
+        <p class="note-head" id="win-expect-head">One-time browser setup (Hogman never asks for Administrator permission)</p>
+        <ul class="note">
+          <li id="win-proxy-note"><strong>Using Chrome, Edge, Brave, or Vivaldi?</strong>
+            <div class="ext-btn-row">
+              <a class="ext-btn" href="https://chromewebstore.google.com/detail/hogman/mgokdogedagoejnjmjpmbcmicbmhplkk" target="_blank" rel="noopener noreferrer">
+                <img class="ext-btn-icon" src="/join/assets/hogman-icon.webp" width="32" height="32" alt="">
+                <span class="ext-btn-copy">
+                  <span class="ext-btn-title">Install Hogman Extension</span>
+                  <span class="ext-btn-sub">Chrome Web Store &middot; Chrome, Edge, Brave, Vivaldi</span>
+                </span>
+                <span class="ext-btn-arrow" aria-hidden="true">&#8599;</span>
+              </a>
+            </div>
+            Then open its popup and turn on <code id="win-proxy-zone">this pen</code>. No proxy settings needed (works alongside VPNs; store extension covers hosted <code>*.pens.hogman.network</code> pens; Firefox: coming soon). <strong>Other browsers (Firefox, custom domains, or no extension):</strong> set your automatic proxy URL once using the <code>http://127.0.0.1:&lt;port&gt;/proxy.pac</code> address printed by <code>hogman</code> (only pen sites use it; normal browsing goes direct):
+            <br><strong>Windows:</strong> <em>Settings &rarr; Network &amp; internet &rarr; Proxy &rarr; Use setup script &rarr; Set up</em> &rarr; turn on <em>Use setup script</em> &rarr; paste the URL &rarr; Save.
+            <br><strong>Firefox:</strong> <em>Settings &rarr; Network Settings &rarr; Automatic proxy configuration URL</em>.</li>
+          <li><strong>Windows Firewall &amp; SmartScreen:</strong> If Windows Firewall prompts for <code>hogman.exe</code>, allow it on private networks (or click Cancel — your pen still works through the relay). Because the open-source binary is unsigned today, SmartScreen may ask before running it; you can verify the download against the <a href="/join/dl/SHA256SUMS" target="_blank" rel="noopener noreferrer">SHA-256 checksums</a> first.</li>
+        </ul>
+        <p class="note vpn-callout" id="win-vpn-note"><strong>Using a VPN (ProtonVPN, Mullvad, WireGuard, or a work VPN)?</strong>
+          Use the <a href="https://chromewebstore.google.com/detail/hogman/mgokdogedagoejnjmjpmbcmicbmhplkk" target="_blank" rel="noopener noreferrer">Hogman browser extension</a> (open its popup and turn on <code id="win-vpn-zone">this pen</code>; Firefox: coming soon), or set Firefox's built-in <em>Automatic proxy configuration URL</em> to the address printed by <code>hogman</code>.</p>
+      </div>
     </div>
 
     <div class="meta-foot">

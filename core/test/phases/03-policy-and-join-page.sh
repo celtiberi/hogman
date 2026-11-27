@@ -169,6 +169,7 @@ edge_blocked_routes_ok() {
 }
 check "edge blocks Headscale root, register, auth, apple, windows, version (-> 404)" edge_blocked_routes_ok
 sums="$(from_internet "https://$PUBLIC_HOST/join/dl/SHA256SUMS")"
-check "the join tool is downloadable for 5 platforms" test "$(grep -c hogman <<<"$sums")" = 5
+check "the join tool is downloadable for 6 platforms" test "$(grep -c hogman <<<"$sums")" = 6
+check "edge serves /start.ps1 as plain text" match 'Join a Hogman pen on Windows' from_internet "https://$PUBLIC_HOST/start.ps1"
 check "the network info endpoint is public" net_ok
 

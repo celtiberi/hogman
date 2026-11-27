@@ -37,6 +37,7 @@ func TestPlatformBinaryName(t *testing.T) {
 		{"linux", "amd64", "hogman-Linux-x86_64", false},
 		{"linux", "arm64", "hogman-Linux-aarch64", false},
 		{"windows", "amd64", "hogman-windows-amd64.exe", false},
+		{"windows", "arm64", "hogman-windows-arm64.exe", false},
 		{"freebsd", "amd64", "", true},
 	}
 	for _, tc := range cases {
