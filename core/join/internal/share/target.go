@@ -39,7 +39,7 @@ options:
   --foreground        stay attached to this terminal (Ctrl-C to stop) instead of running in the background
   --no-service        don't register a login item, just run in the background
   --pen ZONE          which pen, if this computer is on more than one
-  --identity-headers  pass verified X-Hogman-* caller identity headers to a local upstream target
+  --identity-headers  pass verified X-Hogman-* caller identity headers to a local upstream target (use sealed unix:// mode for automatic sign-in)
   --force             with stop, remove local files even if the pen cannot be reached
 `
 
@@ -273,4 +273,32 @@ func FormatPrivateNameNotice(fqdn string) string {
 
 func FormatPrivateNoteTip() string {
 	return `• Tip: pass --note "Label" so members see a readable name in the portal directory instead of the random hostname.`
+}
+
+// FormatIdentityTCPWarning returns a one-time warning when --identity-headers
+// targets a loopback TCP port instead of a Unix domain socket (sealed mode).
+// Returns "" for unix:// targets, where a dedicated 0600 socket inside an
+// isolated network_mode: none namespace prevents other host processes from
+// forging X-Hogman-* headers.
+func FormatIdentityTCPWarning(target string) string {
+	if target == "" || strings.HasPrefix(target, "unix://") {
+		return ""
+	}
+	u, err := url.Parse(target)
+	if err != nil {
+		return fmt.Sprintf("--identity-headers over loopback TCP: any program on this computer (or a DNS-rebinding web page) can connect to %s and claim to be any pen member; for automatic sign-in, use sealed mode (docs/sealed-server.md).", target)
+	}
+	port := u.Port()
+	if port == "" {
+		switch strings.ToLower(u.Scheme) {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
+		}
+	}
+	if port != "" {
+		return fmt.Sprintf("--identity-headers over loopback TCP: any program on this computer (or a DNS-rebinding web page) can connect to port %s and claim to be any pen member; for automatic sign-in, use sealed mode (docs/sealed-server.md).", port)
+	}
+	return fmt.Sprintf("--identity-headers over loopback TCP: any program on this computer (or a DNS-rebinding web page) can connect to %s and claim to be any pen member; for automatic sign-in, use sealed mode (docs/sealed-server.md).", target)
 }
