@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"hogman/join/internal/penapi"
+	"hogman/join/internal/share"
 	"hogman/join/internal/state"
+	"hogman/join/internal/ui"
 )
 
 func withFastSelfDeleteTimeouts(t *testing.T) {
@@ -61,7 +63,7 @@ func TestGiveBackDeviceImmediate202Accepted(t *testing.T) {
 	defer srv.Close()
 
 	start := time.Now()
-	if err := giveBackDevice(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"}); err != nil {
+	if err := share.GiveBackDevice(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"}); err != nil {
 		t.Fatalf("giveBackDevice on 202 = %v, want nil", err)
 	}
 	if elapsed := time.Since(start); elapsed >= time.Second {
@@ -98,7 +100,7 @@ func TestGiveBackDeviceDroppedReplyConfirmedByMe403NotEnrolled(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := giveBackDevice(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"}); err != nil {
+	if err := share.GiveBackDevice(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"}); err != nil {
 		t.Fatalf("giveBackDevice confirmed by 403 not-enrolled = %v, want nil", err)
 	}
 }
@@ -141,7 +143,7 @@ func TestGiveBackDeviceDroppedReplyRejectsSuspendedRenewOnlyAnd404(t *testing.T)
 			}))
 			defer srv.Close()
 
-			err := giveBackDevice(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"})
+			err := share.GiveBackDevice(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"})
 			if err == nil || !strings.Contains(err.Error(), "could not confirm removal") {
 				t.Fatalf("case %s: err = %v, want unconfirmed error", tc.name, err)
 			}
@@ -183,7 +185,7 @@ func TestGiveBackDeviceDroppedReplyConfirmedByNeedsLoginOverControlChannel(t *te
 	checkNL := func(context.Context) bool {
 		return polls.Add(1) >= 2
 	}
-	err := giveBackDeviceWith(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"}, 0, checkNL)
+	err := share.GiveBackDeviceWith(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"}, 0, checkNL)
 	if err != nil {
 		t.Fatalf("giveBackDeviceWith confirmed by NeedsLogin = %v, want nil", err)
 	}
@@ -210,7 +212,7 @@ func TestGiveBackDeviceDroppedReplyUnconfirmedWhenStillEnrolled(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := giveBackDevice(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"})
+	err := share.GiveBackDevice(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"})
 	if err == nil || !strings.Contains(err.Error(), "could not confirm removal") {
 		t.Fatalf("expected unconfirmed error when GET /api/me still returns 200, got: %v", err)
 	}
@@ -244,7 +246,7 @@ func TestGiveBackDeviceDroppedReplyUnconfirmedWhenBothTimeOutAndNotNeedsLogin(t 
 	}))
 	defer srv.Close()
 
-	err := giveBackDeviceWith(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"}, 0, func(context.Context) bool { return false })
+	err := share.GiveBackDeviceWith(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"}, 0, func(context.Context) bool { return false })
 	if err == nil || !strings.Contains(err.Error(), "could not confirm removal") {
 		t.Fatalf("expected unconfirmed error, got: %v", err)
 	}
@@ -257,13 +259,13 @@ func TestGiveBackDeviceGuardsZeroDeviceIDAndRespectsCtxCancel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := giveBackDevice(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"}); err == nil || !strings.Contains(err.Error(), "device ID") {
+	if err := share.GiveBackDevice(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"}); err == nil || !strings.Contains(err.Error(), "device ID") {
 		t.Fatalf("expected zero device ID error, got: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := giveBackDevice(ctx, newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"}); !errors.Is(err, context.Canceled) {
+	if err := share.GiveBackDevice(ctx, newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled ctx err = %v, want context.Canceled", err)
 	}
 }
@@ -280,8 +282,8 @@ func TestGiveBackDeviceStillReportsRealHTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := giveBackDevice(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"}); err == nil {
-		t.Fatal("expected giveBackDevice to report HTTP 403 error")
+	if err := share.GiveBackDevice(context.Background(), newMockHomeClient(srv), &state.ShareConfig{Zone: "bobo.pens.example.test"}); err == nil {
+		t.Fatal("expected share.GiveBackDevice to report HTTP 403 error")
 	}
 }
 
@@ -299,7 +301,7 @@ func TestRemoveOwnDeviceWithStates(t *testing.T) {
 			w.WriteHeader(http.StatusAccepted)
 		}))
 		defer srv.Close()
-		if !removeOwnDeviceWith(context.Background(), newMockHomeClient(srv), zone, nil) {
+		if !removeOwnDeviceWith(context.Background(), newMockHomeClient(srv), zone, nil, ui.Default()) {
 			t.Fatal("expected true on 202")
 		}
 	})
@@ -321,7 +323,7 @@ func TestRemoveOwnDeviceWithStates(t *testing.T) {
 			}
 		}))
 		defer srv.Close()
-		if !removeOwnDeviceWith(context.Background(), newMockHomeClient(srv), zone, func(context.Context) bool { return true }) {
+		if !removeOwnDeviceWith(context.Background(), newMockHomeClient(srv), zone, func(context.Context) bool { return true }, ui.Default()) {
 			t.Fatal("expected true when control plane confirms NeedsLogin")
 		}
 	})
@@ -341,7 +343,7 @@ func TestRemoveOwnDeviceWithStates(t *testing.T) {
 			}
 		}))
 		defer srv.Close()
-		if removeOwnDeviceWith(context.Background(), newMockHomeClient(srv), zone, func(context.Context) bool { return true }) {
+		if removeOwnDeviceWith(context.Background(), newMockHomeClient(srv), zone, func(context.Context) bool { return true }, ui.Default()) {
 			t.Fatal("expected false when /api/me still returns 200")
 		}
 	})

@@ -1,9 +1,7 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,7 +13,10 @@ import (
 	"hogman/join/internal/link"
 	"hogman/join/internal/nativehost"
 	"hogman/join/internal/platform"
+	"hogman/join/internal/share"
 	"hogman/join/internal/state"
+	"hogman/join/internal/ui"
+	"hogman/join/internal/updater"
 )
 
 type doctorCheck struct {
@@ -47,7 +48,7 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 	}
 
 	// 1. Binary & installation mode
-	if mgr, upgradeCmd, managed := detectPackageManager(exePath, runtime.GOOS); managed {
+	if mgr, upgradeCmd, managed := updater.DetectPackageManager(exePath, runtime.GOOS); managed {
 		add(doctorCheck{
 			Name:   "binary",
 			Status: "ok",
@@ -76,8 +77,8 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 			}
 		}
 	}
-	for _, p := range loadPenTargets(configBase) {
-		checkLegacy(p.dir, p.zone)
+	for _, p := range updater.LoadPenTargets(configBase) {
+		checkLegacy(p.Dir, p.Zone)
 	}
 	for _, d := range state.AllSharesIn(sharesDir, "") {
 		checkLegacy(d, filepath.Base(d))
@@ -176,7 +177,7 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 			})
 			continue
 		}
-		running := sharePID(d) != 0
+		running := share.PID(d) != 0
 		st := state.ReadShareStatus(d)
 		if !running && st.State == "error" && st.Error != "" {
 			add(doctorCheck{
@@ -266,11 +267,11 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 	return rep
 }
 
-func doctorCmd(o options) error {
+func doctorCmd(o options, u *ui.UI) error {
 	exePath, _ := fsutil.ResolvedExePath()
 	rep := runDoctor(state.ConfigBase(), state.SharesBase(), exePath)
 	if o.jsonOut {
-		return writeJSON(os.Stdout, rep)
+		return u.WriteJSON(rep)
 	}
 	for _, c := range rep.Checks {
 		icon := "✓"
@@ -280,19 +281,13 @@ func doctorCmd(o options) error {
 		case "fail":
 			icon = "✗"
 		}
-		say("%s %-24s %s", icon, c.Name, c.Detail)
+		u.Say("%s %-24s %s", icon, c.Name, c.Detail)
 		if c.Fix != "" && c.Status != "ok" {
-			say("    fix: %s", c.Fix)
+			u.Say("    fix: %s", c.Fix)
 		}
 	}
 	if !rep.OK {
 		return errorf("one or more checks failed")
 	}
 	return nil
-}
-
-func writeJSON(w io.Writer, v any) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
 }

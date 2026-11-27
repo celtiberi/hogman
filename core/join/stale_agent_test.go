@@ -11,6 +11,8 @@ import (
 
 	"hogman/join/internal/agent"
 	"hogman/join/internal/state"
+	"hogman/join/internal/ui"
+	"hogman/join/internal/updater"
 )
 
 func TestAgentRunningStaleBinaryAndMigrateRestartsStaleAgent(t *testing.T) {
@@ -21,7 +23,7 @@ func TestAgentRunningStaleBinaryAndMigrateRestartsStaleAgent(t *testing.T) {
 	const wantHex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const oldHex = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
-	makeAgent := func(zone, reportedHex string) penTarget {
+	makeAgent := func(zone, reportedHex string) updater.PenTarget {
 		dir := state.StateDir(zone)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
@@ -47,78 +49,79 @@ func TestAgentRunningStaleBinaryAndMigrateRestartsStaleAgent(t *testing.T) {
 			LoginServer: "https://gate.example.test",
 			ProxyAddr:   strings.TrimPrefix(srv.URL, "http://"),
 		}
-		return penTarget{zone: zone, dir: dir, cfg: cfg}
+		return updater.PenTarget{Zone: zone, Dir: dir, Cfg: cfg}
 	}
 
 	pCurrent := makeAgent("current.pens.example.test", wantHex)
 	pStale := makeAgent("stale.pens.example.test", oldHex)
 	pPreI20 := makeAgent("legacy-agent.pens.example.test", "")
 
-	if agentRunningStaleBinary(&pCurrent, wantHex) {
+	if updater.AgentRunningStaleBinary(&pCurrent, wantHex) {
 		t.Fatal("agent matching wantHex should not be marked stale")
 	}
-	if !agentRunningStaleBinary(&pStale, wantHex) {
+	if !updater.AgentRunningStaleBinary(&pStale, wantHex) {
 		t.Fatal("agent reporting older bin_sha256 should be marked stale")
 	}
-	if !agentRunningStaleBinary(&pPreI20, wantHex) {
+	if !updater.AgentRunningStaleBinary(&pPreI20, wantHex) {
 		t.Fatal("older agent omitting bin_sha256 should be marked stale")
 	}
 
-	// Verify migratePensForUpdate restarts stale pens even when forceAll=false,
+	// Verify MigratePens restarts stale pens even when forceAll=false,
 	// no legacy copy exists, and an earlier deleted pen returns HTTP 404.
 	deadSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}))
 	defer deadSrv.Close()
-	pDead := penTarget{
-		zone: "aaa-deleted.pens.example.test",
-		dir:  filepath.Join(home, "aaa-deleted"),
-		cfg:  &state.AgentConfig{Zone: "aaa-deleted.pens.example.test", LoginServer: deadSrv.URL},
+	pDead := updater.PenTarget{
+		Zone: "aaa-deleted.pens.example.test",
+		Dir:  filepath.Join(home, "aaa-deleted"),
+		Cfg:  &state.AgentConfig{Zone: "aaa-deleted.pens.example.test", LoginServer: deadSrv.URL},
 	}
 
 	var restarted []string
 	var startedNoWait []string
-	ops := penUpdateOps{
-		isRunning: func(string, *state.AgentConfig) bool { return true },
-		runningStale: func(p *penTarget) bool {
-			return p.zone == pDead.zone || agentRunningStaleBinary(p, wantHex)
+	ops := updater.PenOps{
+		IsRunning: func(string, *state.AgentConfig) bool { return true },
+		RunningStale: func(p *updater.PenTarget) bool {
+			return p.Zone == pDead.Zone || updater.AgentRunningStaleBinary(p, wantHex)
 		},
-		hasService: func(string) bool { return false },
-		probeReachable: func(p *penTarget, _ options) error {
-			if p.zone == pDead.zone {
+		HasService: func(string) bool { return false },
+		ProbeReachable: func(p *updater.PenTarget, _ updater.Options) error {
+			if p.Zone == pDead.Zone {
 				return errorf("pen server returned HTTP 404")
 			}
 			return nil
 		},
-		stop: func(string, *state.AgentConfig) {},
-		startNoWait: func(p *penTarget, _ string, _ bool, _ options) error {
-			startedNoWait = append(startedNoWait, p.zone)
+		Stop: func(string, *state.AgentConfig) {},
+		StartNoWait: func(p *updater.PenTarget, _ string, _ bool, _ updater.Options) error {
+			startedNoWait = append(startedNoWait, p.Zone)
 			return nil
 		},
-		restartNew: func(p *penTarget, _ string, _ bool, _ options) error {
-			restarted = append(restarted, p.zone)
+		RestartNew: func(p *updater.PenTarget, _ string, _ bool, _ updater.Options) error {
+			restarted = append(restarted, p.Zone)
 			return nil
 		},
 	}
-	results := migratePensForUpdate(
-		[]penTarget{pDead, pCurrent, pStale, pPreI20},
+	results := updater.MigratePens(
+		[]updater.PenTarget{pDead, pCurrent, pStale, pPreI20},
 		"/tmp/canon/hogman",
 		"/tmp/self",
 		func(string) string { return "" },
 		false, // on-disk binaries are ALREADY up to date!
-		options{},
+		updater.Options{},
 		ops,
+		ui.Default(),
 	)
 	if len(results) != 3 {
 		t.Fatalf("expected 3 migrated pens (dead, stale, pre-I20; current skipped), got %+v", results)
 	}
-	if results[0].Zone != pDead.zone || results[0].Err == nil {
+	if results[0].Zone != pDead.Zone || results[0].Err == nil {
 		t.Fatalf("expected dead 404 pen to record error, got %+v", results[0])
 	}
-	if len(startedNoWait) != 1 || startedNoWait[0] != pDead.zone {
-		t.Fatalf("startedNoWait = %v, want [%s]", startedNoWait, pDead.zone)
+	if len(startedNoWait) != 1 || startedNoWait[0] != pDead.Zone {
+		t.Fatalf("startedNoWait = %v, want [%s]", startedNoWait, pDead.Zone)
 	}
-	if strings.Join(restarted, ",") != pStale.zone+","+pPreI20.zone {
-		t.Fatalf("restarted = %v, want [%s, %s]", restarted, pStale.zone, pPreI20.zone)
+	if strings.Join(restarted, ",") != pStale.Zone+","+pPreI20.Zone {
+		t.Fatalf("restarted = %v, want [%s, %s]", restarted, pStale.Zone, pPreI20.Zone)
 	}
 }

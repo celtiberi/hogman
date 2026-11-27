@@ -20,20 +20,21 @@ import (
 
 	"hogman/join/internal/bridge"
 	"hogman/join/internal/fsutil"
+	"hogman/join/internal/share"
 	"hogman/join/internal/state"
 )
 
 func TestUnixSocketShareTargetValidation(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		if _, _, err := shareTarget("unix:///tmp/app.sock"); err == nil {
+		if _, _, err := share.ParseTarget("unix:///tmp/app.sock"); err == nil {
 			t.Fatal("expected unix:// target to fail on windows")
 		}
 		return
 	}
 
-	got, folder, err := shareTarget("unix:///run/hogman-in/app.sock")
+	got, folder, err := share.ParseTarget("unix:///run/hogman-in/app.sock")
 	if err != nil || folder || got != "unix:///run/hogman-in/app.sock" {
-		t.Fatalf("shareTarget(unix valid) = (%q, %v, %v)", got, folder, err)
+		t.Fatalf("share.ParseTarget(unix valid) = (%q, %v, %v)", got, folder, err)
 	}
 
 	for _, bad := range []string{
@@ -45,8 +46,8 @@ func TestUnixSocketShareTargetValidation(t *testing.T) {
 		"unix:///",
 		"unix://host/path.sock",
 	} {
-		if got, _, err := shareTarget(bad); err == nil {
-			t.Errorf("shareTarget(%q) succeeded (%q), want error", bad, got)
+		if got, _, err := share.ParseTarget(bad); err == nil {
+			t.Errorf("share.ParseTarget(%q) succeeded (%q), want error", bad, got)
 		}
 	}
 }
@@ -104,14 +105,14 @@ func TestBridgeAndUnixShareHandlerEndToEnd(t *testing.T) {
 		t.Fatalf("bridge --check failed: %v", err)
 	}
 
-	// Build shareHandler pointing at unix://sockPath and verify forwarding + header stripping.
-	h, closeH, err := shareHandler(&state.ShareConfig{
+	// Build NewHandler pointing at unix://sockPath and verify forwarding + header stripping.
+	h, closeH, err := share.NewHandler(&state.ShareConfig{
 		Name:   "lab-notes",
 		Zone:   "lab.pens.example.com",
 		Target: "unix://" + sockPath,
 	})
 	if err != nil {
-		t.Fatalf("shareHandler(unix) failed: %v", err)
+		t.Fatalf("share.NewHandler(unix) failed: %v", err)
 	}
 	defer closeH()
 
@@ -137,12 +138,12 @@ func TestBridgeAndUnixShareHandlerEndToEnd(t *testing.T) {
 		t.Errorf("forwarded headers = (host=%q proto=%q fwd=%q)", gotXFH, gotXFP, gotFwd)
 	}
 
-	// Verify symlink to socket is refused by shareHandler's dialer.
+	// Verify symlink to socket is refused by share.NewHandler's dialer.
 	symPath := filepath.Join(sockDir, "sym.sock")
 	if err := os.Symlink(sockPath, symPath); err != nil {
 		t.Fatal(err)
 	}
-	hSym, closeSym, err := shareHandler(&state.ShareConfig{
+	hSym, closeSym, err := share.NewHandler(&state.ShareConfig{
 		Name:   "lab-notes",
 		Zone:   "lab.pens.example.com",
 		Target: "unix://" + symPath,
@@ -270,16 +271,16 @@ func TestShareIdentityHeaders(t *testing.T) {
 
 	// 1. Default OFF: inbound X-Hogman-* headers (including underscore variants) are ALWAYS stripped and resolver is not called.
 	resolverCalls := 0
-	hOff, closeOff, err := shareHandlerWithResolver(&state.ShareConfig{
+	hOff, closeOff, err := share.NewHandlerWithResolver(&state.ShareConfig{
 		Name:   "fleet",
 		Zone:   "ops.pens.example.com",
 		Target: upstream.URL,
-	}, func(ctx context.Context, remoteAddr string) (*sharePeerIdentity, error) {
+	}, func(ctx context.Context, remoteAddr string) (*share.PeerIdentity, error) {
 		resolverCalls++
-		return &sharePeerIdentity{Handle: "bob", Node: "bob-laptop", IP: "100.64.0.11"}, nil
+		return &share.PeerIdentity{Handle: "bob", Node: "bob-laptop", IP: "100.64.0.11"}, nil
 	})
 	if err != nil {
-		t.Fatalf("shareHandlerWithResolver(off): %v", err)
+		t.Fatalf("NewHandlerWithResolver(off): %v", err)
 	}
 	defer closeOff()
 	sendSpoofed(hOff, "100.64.0.11:51234")
@@ -287,20 +288,20 @@ func TestShareIdentityHeaders(t *testing.T) {
 		t.Fatalf("resolver called %d times when IdentityHeaders=false, want 0", resolverCalls)
 	}
 	for k := range gotHeaders {
-		if isHogmanHeaderName(k) {
+		if share.IsHogmanHeaderName(k) {
 			t.Fatalf("client-supplied header %q leaked when IdentityHeaders=false: %v", k, gotHeaders)
 		}
 	}
 
 	// 2. Enabled ON with personal device (including Headscale trailing '@' on LoginName):
 	// spoofed hyphen/underscore/mixed headers are stripped and replaced with verified peer identity.
-	hOn, closeOn, err := shareHandlerWithResolver(&state.ShareConfig{
+	hOn, closeOn, err := share.NewHandlerWithResolver(&state.ShareConfig{
 		Name:            "fleet",
 		Zone:            "ops.pens.example.com",
 		Target:          upstream.URL,
 		IdentityHeaders: true,
-	}, func(ctx context.Context, remoteAddr string) (*sharePeerIdentity, error) {
-		return peerIdentityFromWhoIs(remoteAddr, &apitype.WhoIsResponse{
+	}, func(ctx context.Context, remoteAddr string) (*share.PeerIdentity, error) {
+		return share.PeerIdentityFromWhoIs(remoteAddr, &apitype.WhoIsResponse{
 			Node: &tailcfg.Node{
 				Name:         "bob-laptop.ops.pens.example.com.",
 				ComputedName: "bob-laptop",
@@ -309,7 +310,7 @@ func TestShareIdentityHeaders(t *testing.T) {
 		}), nil
 	})
 	if err != nil {
-		t.Fatalf("shareHandlerWithResolver(on): %v", err)
+		t.Fatalf("NewHandlerWithResolver(on): %v", err)
 	}
 	defer closeOn()
 	sendSpoofed(hOn, "100.64.0.11:51234")
@@ -326,19 +327,19 @@ func TestShareIdentityHeaders(t *testing.T) {
 		t.Fatalf("X-Hogman-Tags = %q, want empty for personal device", got)
 	}
 	for k := range gotHeaders {
-		if isHogmanHeaderName(k) && k != "X-Hogman-Handle" && k != "X-Hogman-Node" && k != "X-Hogman-Ip" {
+		if share.IsHogmanHeaderName(k) && k != "X-Hogman-Handle" && k != "X-Hogman-Node" && k != "X-Hogman-Ip" {
 			t.Fatalf("unexpected or spoofed X-Hogman header %q leaked: %v", k, gotHeaders[k])
 		}
 	}
 
 	// 3. Tagged server node: emits X-Hogman-Tags, never X-Hogman-Handle (even if LoginName is set).
-	hSrv, closeSrv, err := shareHandlerWithResolver(&state.ShareConfig{
+	hSrv, closeSrv, err := share.NewHandlerWithResolver(&state.ShareConfig{
 		Name:            "fleet",
 		Zone:            "ops.pens.example.com",
 		Target:          upstream.URL,
 		IdentityHeaders: true,
-	}, func(ctx context.Context, remoteAddr string) (*sharePeerIdentity, error) {
-		return peerIdentityFromWhoIs(remoteAddr, &apitype.WhoIsResponse{
+	}, func(ctx context.Context, remoteAddr string) (*share.PeerIdentity, error) {
+		return share.PeerIdentityFromWhoIs(remoteAddr, &apitype.WhoIsResponse{
 			Node: &tailcfg.Node{
 				Name:         "notes.ops.pens.example.com.",
 				ComputedName: "notes",
@@ -348,7 +349,7 @@ func TestShareIdentityHeaders(t *testing.T) {
 		}), nil
 	})
 	if err != nil {
-		t.Fatalf("shareHandlerWithResolver(tagged): %v", err)
+		t.Fatalf("NewHandlerWithResolver(tagged): %v", err)
 	}
 	defer closeSrv()
 	sendSpoofed(hSrv, "100.64.0.20:44444")
@@ -363,16 +364,16 @@ func TestShareIdentityHeaders(t *testing.T) {
 	}
 
 	// 4. WhoIs lookup error: fail closed with 503 and never forward to the upstream app.
-	hErr, closeErr, err := shareHandlerWithResolver(&state.ShareConfig{
+	hErr, closeErr, err := share.NewHandlerWithResolver(&state.ShareConfig{
 		Name:            "fleet",
 		Zone:            "ops.pens.example.com",
 		Target:          upstream.URL,
 		IdentityHeaders: true,
-	}, func(ctx context.Context, remoteAddr string) (*sharePeerIdentity, error) {
+	}, func(ctx context.Context, remoteAddr string) (*share.PeerIdentity, error) {
 		return nil, errors.New("whois unavailable")
 	})
 	if err != nil {
-		t.Fatalf("shareHandlerWithResolver(err): %v", err)
+		t.Fatalf("NewHandlerWithResolver(err): %v", err)
 	}
 	defer closeErr()
 	gotHeaders = nil
@@ -389,7 +390,7 @@ func TestShareIdentityHeaders(t *testing.T) {
 	}
 
 	// 5. Local-target restriction: refuses folder shares and non-loopback LAN targets.
-	if _, _, err := shareHandlerWithResolver(&state.ShareConfig{
+	if _, _, err := share.NewHandlerWithResolver(&state.ShareConfig{
 		Name:            "docs",
 		Zone:            "ops.pens.example.com",
 		Target:          t.TempDir(),
@@ -398,7 +399,7 @@ func TestShareIdentityHeaders(t *testing.T) {
 	}, nil); err == nil {
 		t.Fatal("expected IdentityHeaders=true on folder share to fail")
 	}
-	if _, _, err := shareHandlerWithResolver(&state.ShareConfig{
+	if _, _, err := share.NewHandlerWithResolver(&state.ShareConfig{
 		Name:            "lan",
 		Zone:            "ops.pens.example.com",
 		Target:          "http://192.168.1.40:8080",
@@ -407,7 +408,7 @@ func TestShareIdentityHeaders(t *testing.T) {
 		t.Fatal("expected IdentityHeaders=true on LAN target to fail")
 	}
 	// Dial-time enforcement: localhost resolving to a LAN IP must be refused.
-	dialFn := loopbackOnlyDialContext(
+	dialFn := share.LoopbackOnlyDialContext(
 		func(ctx context.Context, host string) ([]net.IPAddr, error) {
 			return []net.IPAddr{{IP: net.ParseIP("192.168.1.40")}}, nil
 		},

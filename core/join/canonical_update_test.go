@@ -17,6 +17,8 @@ import (
 	"hogman/join/internal/nativehost"
 	"hogman/join/internal/platform"
 	"hogman/join/internal/state"
+	"hogman/join/internal/ui"
+	"hogman/join/internal/updater"
 )
 
 func TestCanonicalBinaryConsolidationAndMigration(t *testing.T) {
@@ -50,20 +52,20 @@ func TestCanonicalBinaryConsolidationAndMigration(t *testing.T) {
 	if err := os.WriteFile(legacy, []byte("legacy-bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	p := &penTarget{zone: "alpha.pens.example.com", dir: penDir, cfg: &state.AgentConfig{Zone: "alpha.pens.example.com"}}
+	p := &updater.PenTarget{Zone: "alpha.pens.example.com", Dir: penDir, Cfg: &state.AgentConfig{Zone: "alpha.pens.example.com"}}
 
-	failOps := penUpdateOps{
-		isRunning:  func(string, *state.AgentConfig) bool { return true },
-		hasService: func(string) bool { return true },
-		stop:       func(string, *state.AgentConfig) {},
-		restartNew: func(_ *penTarget, bin string, _ bool, _ options) error {
+	failOps := updater.PenOps{
+		IsRunning:  func(string, *state.AgentConfig) bool { return true },
+		HasService: func(string) bool { return true },
+		Stop:       func(string, *state.AgentConfig) {},
+		RestartNew: func(_ *updater.PenTarget, bin string, _ bool, _ updater.Options) error {
 			if bin != wantCanon {
 				t.Errorf("restartNew got bin=%q, want canonical %q", bin, wantCanon)
 			}
 			return errors.New("start failed")
 		},
 	}
-	if err := migrateAndRestartPen(p, wantCanon, legacy, "/tmp/other-self", options{}, failOps); err == nil {
+	if err := updater.MigrateAndRestartPen(p, wantCanon, legacy, "/tmp/other-self", updater.Options{}, failOps, ui.Default()); err == nil {
 		t.Fatal("expected restart error")
 	}
 	if _, err := os.Stat(legacy); err != nil {
@@ -71,14 +73,14 @@ func TestCanonicalBinaryConsolidationAndMigration(t *testing.T) {
 	}
 
 	okOps := failOps
-	okOps.restartNew = func(_ *penTarget, bin string, _ bool, _ options) error {
+	okOps.RestartNew = func(_ *updater.PenTarget, bin string, _ bool, _ updater.Options) error {
 		if bin != wantCanon {
 			t.Errorf("restartNew got bin=%q, want canonical %q", bin, wantCanon)
 		}
 		return nil
 	}
-	if err := migrateAndRestartPen(p, wantCanon, legacy, "/tmp/other-self", options{}, okOps); err != nil {
-		t.Fatalf("migrateAndRestartPen failed: %v", err)
+	if err := updater.MigrateAndRestartPen(p, wantCanon, legacy, "/tmp/other-self", updater.Options{}, okOps, ui.Default()); err != nil {
+		t.Fatalf("MigrateAndRestartPen failed: %v", err)
 	}
 	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
 		t.Fatalf("legacy binary was not removed after successful migration: %v", err)
@@ -106,9 +108,9 @@ func TestDetectPackageManager(t *testing.T) {
 		{"/tmp/hogman", "darwin", "", "", false},
 		{"/usr/local/bin/hogman", "linux", "", "", false},
 	} {
-		mgr, cmd, ok := detectPackageManager(tc.path, tc.goos)
+		mgr, cmd, ok := updater.DetectPackageManager(tc.path, tc.goos)
 		if ok != tc.wantOK || mgr != tc.wantMgr || cmd != tc.wantCmd {
-			t.Errorf("detectPackageManager(%q, %q) = (%q, %q, %v), want (%q, %q, %v)", tc.path, tc.goos, mgr, cmd, ok, tc.wantMgr, tc.wantCmd, tc.wantOK)
+			t.Errorf("DetectPackageManager(%q, %q) = (%q, %q, %v), want (%q, %q, %v)", tc.path, tc.goos, mgr, cmd, ok, tc.wantMgr, tc.wantCmd, tc.wantOK)
 		}
 	}
 }
@@ -149,7 +151,7 @@ func TestStatusShareListAndDoctorJSON(t *testing.T) {
 	// 1. Empty status JSON emits [] arrays (never null) and valid JSON.
 	out := buildStatusOutput(cfgBase, sharesDir)
 	var buf bytes.Buffer
-	if err := writeJSON(&buf, out); err != nil {
+	if err := (&ui.UI{Out: &buf}).WriteJSON(out); err != nil {
 		t.Fatal(err)
 	}
 	var decoded map[string]any
@@ -323,37 +325,37 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := stageAndVerify(srcPath, canonBin, wantHex); err != nil {
+	if err := updater.StageAndVerify(srcPath, canonBin, wantHex); err != nil {
 		t.Fatalf("stage canonical binary: %v", err)
 	}
 	if err := nativehost.InstallBinary(canonBin, nhBin); err != nil {
 		t.Fatalf("install native host binary: %v", err)
 	}
 
-	// 2. First verify rollback on failed restart: if restartNew fails, ops.stop
-	//    runs BEFORE restartOld (so a partially started new agent is stopped),
+	// 2. First verify rollback on failed restart: if RestartNew fails, ops.Stop
+	//    runs BEFORE RestartOld (so a partially started new agent is stopped),
 	//    alpha comes back up on alphaLegacyBin with zero gap, and alphaLegacyBin is kept.
 	var rolledBackBin string
 	var rollbackSeq []string
-	rollbackOps := penUpdateOps{
-		isRunning:  func(string, *state.AgentConfig) bool { return true },
-		hasService: func(string) bool { return true },
-		stop:       func(string, *state.AgentConfig) { rollbackSeq = append(rollbackSeq, "stop") },
-		restartNew: func(*penTarget, string, bool, options) error {
+	rollbackOps := updater.PenOps{
+		IsRunning:  func(string, *state.AgentConfig) bool { return true },
+		HasService: func(string) bool { return true },
+		Stop:       func(string, *state.AgentConfig) { rollbackSeq = append(rollbackSeq, "stop") },
+		RestartNew: func(*updater.PenTarget, string, bool, updater.Options) error {
 			rollbackSeq = append(rollbackSeq, "restartNew")
 			return errors.New("boom")
 		},
-		restartOld: func(_ *penTarget, bin string, _ bool, _ options) error {
+		RestartOld: func(_ *updater.PenTarget, bin string, _ bool, _ updater.Options) error {
 			rollbackSeq = append(rollbackSeq, "restartOld")
 			rolledBackBin = bin
 			return nil
 		},
-		rewriteService: platform.RewriteAgentService,
+		RewriteService: platform.RewriteAgentService,
 	}
-	alphaTarget := &penTarget{zone: alphaZone, dir: alphaDir, cfg: alphaCfg}
-	betaTarget := &penTarget{zone: betaZone, dir: betaDir, cfg: betaCfg}
-	blogTarget := &shareTargetDir{zone: alphaZone, name: "blog", dir: blogDir, cfg: shareCfg}
-	if err := migrateAndRestartPen(alphaTarget, canonBin, alphaLegacyBin, "/tmp/hogman-cli", options{}, rollbackOps); err == nil {
+	alphaTarget := &updater.PenTarget{Zone: alphaZone, Dir: alphaDir, Cfg: alphaCfg}
+	betaTarget := &updater.PenTarget{Zone: betaZone, Dir: betaDir, Cfg: betaCfg}
+	blogTarget := &updater.ShareTargetDir{Zone: alphaZone, Name: "blog", Dir: blogDir, Cfg: shareCfg}
+	if err := updater.MigrateAndRestartPen(alphaTarget, canonBin, alphaLegacyBin, "/tmp/hogman-cli", updater.Options{}, rollbackOps, ui.Default()); err == nil {
 		t.Fatal("expected error when restartNew fails")
 	}
 	if rolledBackBin != alphaLegacyBin {
@@ -371,63 +373,63 @@ func TestUpgradeFromLegacyHogmanJoinLayout(t *testing.T) {
 
 	// 3. Now run the full upgrade migration for running alpha, stopped beta, and running blog share.
 	var restartedPens []string
-	penOps := penUpdateOps{
-		isRunning: func(dir string, _ *state.AgentConfig) bool { return dir == alphaDir },
-		hasService: func(zone string) bool {
+	penOps := updater.PenOps{
+		IsRunning: func(dir string, _ *state.AgentConfig) bool { return dir == alphaDir },
+		HasService: func(zone string) bool {
 			if runtime.GOOS == "windows" {
 				return false
 			}
 			return platform.ServiceConfigured(zone)
 		},
-		stop: func(string, *state.AgentConfig) {},
-		restartNew: func(p *penTarget, bin string, hadService bool, _ options) error {
+		Stop: func(string, *state.AgentConfig) {},
+		RestartNew: func(p *updater.PenTarget, bin string, hadService bool, _ updater.Options) error {
 			if bin != canonBin {
 				return errors.New("expected canonical binary")
 			}
 			if hadService && runtime.GOOS != "windows" {
-				if err := platform.RewriteAgentService(bin, p.dir, p.cfg); err != nil {
+				if err := platform.RewriteAgentService(bin, p.Dir, p.Cfg); err != nil {
 					return err
 				}
 			}
-			restartedPens = append(restartedPens, p.zone+":"+bin)
+			restartedPens = append(restartedPens, p.Zone+":"+bin)
 			return nil
 		},
-		restartOld:     func(*penTarget, string, bool, options) error { return nil },
-		rewriteService: platform.RewriteAgentService,
+		RestartOld:     func(*updater.PenTarget, string, bool, updater.Options) error { return nil },
+		RewriteService: platform.RewriteAgentService,
 	}
 	var restartedShares []string
-	shOps := shareUpdateOps{
-		isRunning: func(dir string) bool { return dir == blogDir },
-		hasService: func(c *state.ShareConfig) bool {
+	shOps := updater.ShareOps{
+		IsRunning: func(dir string) bool { return dir == blogDir },
+		HasService: func(c *state.ShareConfig) bool {
 			if runtime.GOOS == "windows" {
 				return true
 			}
 			return platform.ShareServiceConfigured(c)
 		},
-		stop: func(string, *state.ShareConfig) {},
-		restartNew: func(s *shareTargetDir, bin string, _ options) error {
+		Stop: func(string, *state.ShareConfig) {},
+		RestartNew: func(s *updater.ShareTargetDir, bin string, _ updater.Options) error {
 			if bin != canonBin {
 				return errors.New("expected canonical binary")
 			}
 			if runtime.GOOS != "windows" {
-				if err := platform.RewriteShareService(bin, s.dir, s.cfg); err != nil {
+				if err := platform.RewriteShareService(bin, s.Dir, s.Cfg); err != nil {
 					return err
 				}
 			}
-			restartedShares = append(restartedShares, s.cfg.FQDN()+":"+bin)
+			restartedShares = append(restartedShares, s.Cfg.FQDN()+":"+bin)
 			return nil
 		},
-		restartOld:     func(*shareTargetDir, string, options) error { return nil },
-		rewriteService: platform.RewriteShareService,
+		RestartOld:     func(*updater.ShareTargetDir, string, updater.Options) error { return nil },
+		RewriteService: platform.RewriteShareService,
 	}
 
-	if err := migrateAndRestartPen(alphaTarget, canonBin, alphaLegacyBin, "/tmp/hogman-cli", options{}, penOps); err != nil {
+	if err := updater.MigrateAndRestartPen(alphaTarget, canonBin, alphaLegacyBin, "/tmp/hogman-cli", updater.Options{}, penOps, ui.Default()); err != nil {
 		t.Fatalf("migrate alpha: %v", err)
 	}
-	if err := migrateAndRestartPen(betaTarget, canonBin, betaLegacyBin, "/tmp/hogman-cli", options{}, penOps); err != nil {
+	if err := updater.MigrateAndRestartPen(betaTarget, canonBin, betaLegacyBin, "/tmp/hogman-cli", updater.Options{}, penOps, ui.Default()); err != nil {
 		t.Fatalf("migrate beta (stopped): %v", err)
 	}
-	if err := migrateAndRestartShare(blogTarget, canonBin, blogLegacyBin, "/tmp/hogman-cli", options{}, shOps); err != nil {
+	if err := updater.MigrateAndRestartShare(blogTarget, canonBin, blogLegacyBin, "/tmp/hogman-cli", updater.Options{}, shOps, ui.Default()); err != nil {
 		t.Fatalf("migrate blog share: %v", err)
 	}
 
@@ -488,18 +490,18 @@ func TestInterruptedUpdateRecoveryAndVersionGuard(t *testing.T) {
 
 	var restarted bool
 	var restoredService bool
-	ops := penUpdateOps{
-		isRunning:  func(string, *state.AgentConfig) bool { return false },
-		hasService: func(string) bool { return false },
-		stop:       func(string, *state.AgentConfig) {},
-		restartNew: func(_ *penTarget, _ string, hadService bool, _ options) error {
+	ops := updater.PenOps{
+		IsRunning:  func(string, *state.AgentConfig) bool { return false },
+		HasService: func(string) bool { return false },
+		Stop:       func(string, *state.AgentConfig) {},
+		RestartNew: func(_ *updater.PenTarget, _ string, hadService bool, _ updater.Options) error {
 			restarted = true
 			restoredService = hadService
 			return nil
 		},
 	}
-	p := &penTarget{zone: cfg.Zone, dir: dir, cfg: cfg}
-	if err := migrateAndRestartPen(p, "/tmp/canon/hogman", legacy, "/tmp/self", options{}, ops); err != nil {
+	p := &updater.PenTarget{Zone: cfg.Zone, Dir: dir, Cfg: cfg}
+	if err := updater.MigrateAndRestartPen(p, "/tmp/canon/hogman", legacy, "/tmp/self", updater.Options{}, ops, ui.Default()); err != nil {
 		t.Fatalf("interrupted recovery failed: %v", err)
 	}
 	if !restarted || !restoredService {
@@ -530,9 +532,9 @@ func TestInterruptedUpdateRecoveryAndVersionGuard(t *testing.T) {
 		{"dev", "2026.11.24", 0, false},
 		{"", "2026.11.24", 0, false},
 	} {
-		got, ok := compareReleaseVersions(tc.a, tc.b)
+		got, ok := updater.CompareReleaseVersions(tc.a, tc.b)
 		if ok != tc.wantOK || got != tc.wantCmp {
-			t.Errorf("compareReleaseVersions(%q, %q) = (%d, %v), want (%d, %v)", tc.a, tc.b, got, ok, tc.wantCmp, tc.wantOK)
+			t.Errorf("CompareReleaseVersions(%q, %q) = (%d, %v), want (%d, %v)", tc.a, tc.b, got, ok, tc.wantCmp, tc.wantOK)
 		}
 	}
 }
@@ -551,38 +553,38 @@ func TestUpdateContinuesPastUnreachablePenAndLegacySHA256Message(t *testing.T) {
 	_ = os.WriteFile(deadLegacy, []byte("old"), 0o755)
 	_ = os.WriteFile(goodLegacy, []byte("old"), 0o755)
 
-	pens := []penTarget{
-		{zone: "aaa-dead.example.test", dir: deadDir, cfg: &state.AgentConfig{Zone: "aaa-dead.example.test", LoginServer: "https://dead.example.test"}},
-		{zone: "zzz-good.example.test", dir: goodDir, cfg: &state.AgentConfig{Zone: "zzz-good.example.test", LoginServer: "https://good.example.test"}},
+	pens := []updater.PenTarget{
+		{Zone: "aaa-dead.example.test", Dir: deadDir, Cfg: &state.AgentConfig{Zone: "aaa-dead.example.test", LoginServer: "https://dead.example.test"}},
+		{Zone: "zzz-good.example.test", Dir: goodDir, Cfg: &state.AgentConfig{Zone: "zzz-good.example.test", LoginServer: "https://good.example.test"}},
 	}
 	var stopped, startedNoWait, restarted []string
-	ops := penUpdateOps{
-		isRunning:  func(string, *state.AgentConfig) bool { return true },
-		hasService: func(string) bool { return true },
-		probeReachable: func(p *penTarget, _ options) error {
-			if p.zone == "aaa-dead.example.test" {
+	ops := updater.PenOps{
+		IsRunning:  func(string, *state.AgentConfig) bool { return true },
+		HasService: func(string) bool { return true },
+		ProbeReachable: func(p *updater.PenTarget, _ updater.Options) error {
+			if p.Zone == "aaa-dead.example.test" {
 				return errors.New("dial tcp: connection refused")
 			}
 			return nil
 		},
-		stop: func(_ string, c *state.AgentConfig) { stopped = append(stopped, c.Zone) },
-		startNoWait: func(p *penTarget, bin string, _ bool, _ options) error {
-			startedNoWait = append(startedNoWait, p.zone+":"+bin)
+		Stop: func(_ string, c *state.AgentConfig) { stopped = append(stopped, c.Zone) },
+		StartNoWait: func(p *updater.PenTarget, bin string, _ bool, _ updater.Options) error {
+			startedNoWait = append(startedNoWait, p.Zone+":"+bin)
 			return nil
 		},
-		restartNew: func(p *penTarget, _ string, _ bool, _ options) error {
-			restarted = append(restarted, p.zone)
+		RestartNew: func(p *updater.PenTarget, _ string, _ bool, _ updater.Options) error {
+			restarted = append(restarted, p.Zone)
 			return nil
 		},
 	}
 
-	results := migratePensForUpdate(pens, "/tmp/canon/hogman", "/tmp/self", func(dir string) string {
+	results := updater.MigratePens(pens, "/tmp/canon/hogman", "/tmp/self", func(dir string) string {
 		p := filepath.Join(dir, "hogman-join")
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
 		return ""
-	}, true, options{}, ops)
+	}, true, updater.Options{}, ops, ui.Default())
 
 	if len(results) != 2 {
 		t.Fatalf("got %d results, want 2", len(results))
@@ -608,13 +610,13 @@ func TestUpdateContinuesPastUnreachablePenAndLegacySHA256Message(t *testing.T) {
 
 	// 2. Legacy pen SHA256SUMS listing hogman-join-* gives an actionable message.
 	legacySums := []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  hogman-join-Linux-x86_64\n")
-	if _, err := parseSHA256SUMS(legacySums, "hogman-Linux-x86_64"); err == nil ||
+	if _, err := updater.ParseSHA256SUMS(legacySums, "hogman-Linux-x86_64"); err == nil ||
 		!strings.Contains(err.Error(), "older release") ||
 		!strings.Contains(err.Error(), "hogman update") {
 		t.Fatalf("legacy SHA256SUMS err = %v, want older-release + plain hogman update hint", err)
 	}
 
-	// 3. probePenLoginServer probes /hogman/v1/network (the real public route used by fetchNetwork).
+	// 3. ProbePenLoginServer probes /hogman/v1/network (the real public route used by fetchNetwork).
 	var statusCode int = http.StatusOK
 	var gotPath string
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -628,19 +630,19 @@ func TestUpdateContinuesPastUnreachablePenAndLegacySHA256Message(t *testing.T) {
 	}))
 	defer ts.Close()
 	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ts.Certificate().Raw})
-	probeTarget := &penTarget{
-		zone: "lab.example.test",
-		cfg:  &state.AgentConfig{Zone: "lab.example.test", LoginServer: ts.URL, ControlCA: string(caPEM)},
+	probeTarget := &updater.PenTarget{
+		Zone: "lab.example.test",
+		Cfg:  &state.AgentConfig{Zone: "lab.example.test", LoginServer: ts.URL, ControlCA: string(caPEM)},
 	}
-	if err := probePenLoginServer(probeTarget, options{}); err != nil {
-		t.Fatalf("probePenLoginServer against live /hogman/v1/network failed: %v (path=%q)", err, gotPath)
+	if err := updater.ProbePenLoginServer(probeTarget, updater.Options{}); err != nil {
+		t.Fatalf("ProbePenLoginServer against live /hogman/v1/network failed: %v (path=%q)", err, gotPath)
 	}
 	if gotPath != "/hogman/v1/network" {
 		t.Fatalf("probed path = %q, want /hogman/v1/network", gotPath)
 	}
 	statusCode = http.StatusServiceUnavailable
-	if err := probePenLoginServer(probeTarget, options{}); err == nil || !strings.Contains(err.Error(), "503") {
-		t.Fatalf("probePenLoginServer on 503 = %v, want 503 error", err)
+	if err := updater.ProbePenLoginServer(probeTarget, updater.Options{}); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("ProbePenLoginServer on 503 = %v, want 503 error", err)
 	}
 }
 

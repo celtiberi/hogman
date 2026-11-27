@@ -17,6 +17,9 @@ import (
 	"hogman/join/internal/nativehost"
 	"hogman/join/internal/penapi"
 	"hogman/join/internal/platform"
+	"hogman/join/internal/state"
+	"hogman/join/internal/ui"
+	"hogman/join/internal/updater"
 )
 
 var version = "dev"
@@ -54,7 +57,7 @@ func main() {
 	os.Exit(runCLI(os.Args[1:], defaultCLIHandlers()))
 }
 
-func join(raw string, o options) error {
+func join(raw string, o options, u *ui.UI) error {
 	l, err := link.Parse(raw)
 	if err != nil {
 		return errorf("%v", err)
@@ -68,12 +71,12 @@ func join(raw string, o options) error {
 		return err
 	}
 
-	step("Checking the network at %s", l.Host)
+	u.Step("Checking the network at %s", l.Host)
 	n, err := penapi.FetchNetwork(client, l.Host)
 	if err != nil {
 		return err
 	}
-	note("network: %s", n.Zone)
+	u.Note("network: %s", n.Zone)
 
 	// One way in (D-11): the agent, which runs as this user and carries HTTPS to
 	// the pen's names and nothing else. Joining through this computer's
@@ -87,7 +90,7 @@ func join(raw string, o options) error {
 				"  Then run hogman leave %s, and join with the fresh link.", n.Zone, n.Portal, n.Zone)
 		}
 	}
-	return joinAlongside(l, n, client, o, "the pen's own small connection: HTTPS to the pen and nothing else")
+	return joinAlongside(l, n, client, o, "the pen's own small connection: HTTPS to the pen and nothing else", u)
 }
 
 func orAsk(h string) string {
@@ -97,27 +100,27 @@ func orAsk(h string) string {
 	return h
 }
 
-func redeemWithHandle(c *http.Client, l *link.Link, o options) (*penapi.Enrolment, error) {
+func redeemWithHandle(c *http.Client, l *link.Link, o options, u *ui.UI) (*penapi.Enrolment, error) {
 	handle := strings.ToLower(strings.TrimSpace(o.handle))
 	for attempt := 0; ; attempt++ {
 		if handle == "" {
-			if !isTerminal() {
+			if !u.IsTerminal() {
 				return nil, errorf("choose a name with --handle (lowercase letters, digits, dashes)")
 			}
-			handle = strings.ToLower(ask("  Choose your name on the network (lowercase letters, digits, dashes): "))
+			handle = strings.ToLower(u.Ask("  Choose your name on the network (lowercase letters, digits, dashes): "))
 		}
 		if !link.HandleRE.MatchString(handle) {
-			if o.handle != "" || !isTerminal() {
+			if o.handle != "" || !u.IsTerminal() {
 				return nil, errorf("%q is not a valid name: 2-32 lowercase letters, digits or dashes, starting with a letter", handle)
 			}
-			note("that is not a valid name")
+			u.Note("that is not a valid name")
 			handle = ""
 			continue
 		}
 		en, err := penapi.Redeem(c, l.Host, l.InviteToken, handle)
 		var re *penapi.RedeemError
-		if errors.As(err, &re) && re.Status == 409 && o.handle == "" && isTerminal() && attempt < 5 {
-			note("%s", re.Msg)
+		if errors.As(err, &re) && re.Status == 409 && o.handle == "" && u.IsTerminal() && attempt < 5 {
+			u.Note("%s", re.Msg)
 			handle = ""
 			continue
 		}
@@ -126,4 +129,12 @@ func redeemWithHandle(c *http.Client, l *link.Link, o options) (*penapi.Enrolmen
 		}
 		return en, err
 	}
+}
+
+func ensureCanonicalBinary(configBase string) (string, error) {
+	return updater.EnsureCanonicalBinary(configBase, version, ui.Default().Note)
+}
+
+func installedBinary(_ string) (string, error) {
+	return ensureCanonicalBinary(state.ConfigBase())
 }

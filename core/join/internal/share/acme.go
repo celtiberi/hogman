@@ -1,4 +1,4 @@
-package main
+package share
 
 import (
 	"context"
@@ -108,12 +108,12 @@ func (p *meshTXTProvider) DeleteRecords(ctx context.Context, zone string, recs [
 	return out, nil
 }
 
-// dnsStepError marks errors originating from DNS record setup or local DNS
+// DNSStepError marks errors originating from DNS record setup or local DNS
 // propagation checks so failover never switches CAs when DNS is at fault.
-type dnsStepError struct{ err error }
+type DNSStepError struct{ Err error }
 
-func (e dnsStepError) Error() string { return e.err.Error() }
-func (e dnsStepError) Unwrap() error { return e.err }
+func (e DNSStepError) Error() string { return e.Err.Error() }
+func (e DNSStepError) Unwrap() error { return e.Err }
 
 type dns01GateSolver struct {
 	inner acmez.Solver
@@ -121,7 +121,7 @@ type dns01GateSolver struct {
 
 func (s dns01GateSolver) Present(ctx context.Context, ch acme.Challenge) error {
 	if err := s.inner.Present(ctx, ch); err != nil {
-		return dnsStepError{err: err}
+		return DNSStepError{Err: err}
 	}
 	return nil
 }
@@ -129,7 +129,7 @@ func (s dns01GateSolver) Present(ctx context.Context, ch acme.Challenge) error {
 func (s dns01GateSolver) Wait(ctx context.Context, ch acme.Challenge) error {
 	if waiter, ok := s.inner.(acmez.Waiter); ok {
 		if err := waiter.Wait(ctx, ch); err != nil {
-			return dnsStepError{err: err}
+			return DNSStepError{Err: err}
 		}
 	}
 	return nil
@@ -139,14 +139,14 @@ func (s dns01GateSolver) CleanUp(ctx context.Context, ch acme.Challenge) error {
 	return s.inner.CleanUp(ctx, ch)
 }
 
-// shouldFailoverACME returns true only for CA rate limits, CA 5xx responses,
+// ShouldFailoverACME returns true only for CA rate limits, CA 5xx responses,
 // or CA transport/outage failures, never for DNS-side failures (including the
 // registrar's 429 rate limits) or caller cancellations.
-func shouldFailoverACME(err error) bool {
+func ShouldFailoverACME(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return false
 	}
-	var dnsErr dnsStepError
+	var dnsErr DNSStepError
 	if errors.As(err, &dnsErr) {
 		return false
 	}
@@ -173,7 +173,7 @@ func shouldFailoverACME(err error) bool {
 	return false
 }
 
-type shareACMEConfig struct {
+type ACMEConfig struct {
 	Zone               string
 	Host               string
 	StorageDir         string
@@ -203,7 +203,7 @@ func parseCSVEnv(raw string) []string {
 	return out
 }
 
-func shareACMEConfigFromEnv(zone, host, storageDir string, hc *http.Client) shareACMEConfig {
+func ACMEConfigFromEnv(zone, host, storageDir string, hc *http.Client) ACMEConfig {
 	primaryCA := strings.TrimSpace(os.Getenv("HOGMAN_ACME_CA_URL"))
 	fallbackCA := ""
 	if raw, ok := os.LookupEnv("HOGMAN_ACME_FALLBACK_CA_URL"); ok {
@@ -232,7 +232,7 @@ func shareACMEConfigFromEnv(zone, host, storageDir string, hc *http.Client) shar
 		}
 	}
 
-	return shareACMEConfig{
+	return ACMEConfig{
 		Zone:               zone,
 		Host:               host,
 		StorageDir:         storageDir,
@@ -296,8 +296,10 @@ func defaultACMEWait(ctx context.Context, d time.Duration) error {
 	}
 }
 
-type shareCertManager struct {
-	cfg     shareACMEConfig
+// CertManager obtains, caches, renews, and fails over public ACME certificates
+// for a single share hostname using DNS-01 over the pen mesh.
+type CertManager struct {
+	cfg     ACMEConfig
 	host    string
 	storage certmagic.Storage
 	solver  acmez.Solver
@@ -321,7 +323,7 @@ type shareCertManager struct {
 	waitFn               func(context.Context, time.Duration) error
 }
 
-func newShareCertManager(cfg shareACMEConfig) (*shareCertManager, error) {
+func NewCertManager(cfg ACMEConfig) (*CertManager, error) {
 	cfg.Zone = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(cfg.Zone)), ".")
 	cfg.Host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(cfg.Host)), ".")
 	if cfg.Zone == "" || cfg.Host == "" {
@@ -362,7 +364,7 @@ func newShareCertManager(cfg shareACMEConfig) (*shareCertManager, error) {
 	if slogger == nil {
 		slogger = fsutil.DaemonLogger()
 	}
-	m := &shareCertManager{
+	m := &CertManager{
 		cfg:     cfg,
 		host:    cfg.Host,
 		storage: &certmagic.FileStorage{Path: cfg.StorageDir},
@@ -400,7 +402,7 @@ func newShareCertManager(cfg shareACMEConfig) (*shareCertManager, error) {
 	return m, nil
 }
 
-func (m *shareCertManager) Close() {
+func (m *CertManager) Close() {
 	m.closeOnce.Do(func() {
 		if m.cache != nil {
 			m.cache.Stop()
@@ -408,17 +410,17 @@ func (m *shareCertManager) Close() {
 	})
 }
 
-func (m *shareCertManager) TLSConfig() *tls.Config {
+func (m *CertManager) TLSConfig() *tls.Config {
 	return m.primaryCfg.TLSConfig()
 }
 
-func (m *shareCertManager) newManagedConfig(caURL string, withEAB bool) (*certmagic.Config, *certmagic.ACMEIssuer) {
+func (m *CertManager) newManagedConfig(caURL string, withEAB bool) (*certmagic.Config, *certmagic.ACMEIssuer) {
 	var cfg *certmagic.Config
 	onEvent := func(_ context.Context, event string, data map[string]any) error {
 		if event == "cert_failed" {
 			renewal, _ := data["renewal"].(bool)
 			errVal, _ := data["error"].(error)
-			if renewal && caURL == m.cfg.PrimaryCA && m.fallbackCfg != nil && shouldFailoverACME(errVal) {
+			if renewal && caURL == m.cfg.PrimaryCA && m.fallbackCfg != nil && ShouldFailoverACME(errVal) {
 				select {
 				case m.failoverCh <- struct{}{}:
 				default:
@@ -461,7 +463,7 @@ func (m *shareCertManager) newManagedConfig(caURL string, withEAB bool) (*certma
 				MACKey: pair.HMACB64URL,
 			}
 			if len(acct.Contact) == 0 {
-				acct.Contact = fallbackContact(pair.Contact)
+				acct.Contact = FallbackContact(pair.Contact)
 			}
 			return acct, nil
 		}
@@ -471,7 +473,7 @@ func (m *shareCertManager) newManagedConfig(caURL string, withEAB bool) (*certma
 	return cfg, iss
 }
 
-func (m *shareCertManager) syncCert(ctx context.Context, cfg *certmagic.Config, iss *certmagic.ACMEIssuer) error {
+func (m *CertManager) syncCert(ctx context.Context, cfg *certmagic.Config, iss *certmagic.ACMEIssuer) error {
 	syncCfg := certmagic.New(m.cache, certmagic.Config{
 		Storage: m.storage,
 		OnEvent: cfg.OnEvent,
@@ -481,7 +483,7 @@ func (m *shareCertManager) syncCert(ctx context.Context, cfg *certmagic.Config, 
 	return syncCfg.ManageSync(ctx, []string{m.host})
 }
 
-func (m *shareCertManager) storageHasPair(ctx context.Context, issuerKey string) bool {
+func (m *CertManager) storageHasPair(ctx context.Context, issuerKey string) bool {
 	return m.storage.Exists(ctx, certmagic.StorageKeys.SiteCert(issuerKey, m.host)) &&
 		m.storage.Exists(ctx, certmagic.StorageKeys.SitePrivateKey(issuerKey, m.host))
 }
@@ -489,7 +491,7 @@ func (m *shareCertManager) storageHasPair(ctx context.Context, issuerKey string)
 // storageCertFresh inspects the stored leaf certificate without loading it into
 // the in-memory TLS cache, returning true only when the cert/key pair exists,
 // is currently valid, and has more than one-third of its lifetime remaining.
-func (m *shareCertManager) storageCertFresh(ctx context.Context, issuerKey string) bool {
+func (m *CertManager) storageCertFresh(ctx context.Context, issuerKey string) bool {
 	if !m.storageHasPair(ctx, issuerKey) {
 		return false
 	}
@@ -516,7 +518,7 @@ func (m *shareCertManager) storageCertFresh(ctx context.Context, issuerKey strin
 	return lifetime > 0 && remaining > lifetime/3
 }
 
-func (m *shareCertManager) getConfigForCert(_ certmagic.Certificate) (*certmagic.Config, error) {
+func (m *CertManager) getConfigForCert(_ certmagic.Certificate) (*certmagic.Config, error) {
 	ctx := context.Background()
 	if m.fallbackCfg != nil && m.fallbackIss != nil &&
 		!m.storageCertFresh(ctx, m.primaryIss.IssuerKey()) &&
@@ -526,7 +528,7 @@ func (m *shareCertManager) getConfigForCert(_ certmagic.Certificate) (*certmagic
 	return m.primaryCfg, nil
 }
 
-func (m *shareCertManager) ensureCachedLocked(ctx context.Context) bool {
+func (m *CertManager) ensureCachedLocked(ctx context.Context) bool {
 	if m.storageCertFresh(ctx, m.primaryIss.IssuerKey()) {
 		if _, err := m.primaryCfg.CacheManagedCertificate(ctx, m.host); err == nil {
 			return true
@@ -540,17 +542,17 @@ func (m *shareCertManager) ensureCachedLocked(ctx context.Context) bool {
 	return false
 }
 
-func (m *shareCertManager) ensureCached(ctx context.Context) bool {
+func (m *CertManager) ensureCached(ctx context.Context) bool {
 	m.renewMu.Lock()
 	defer m.renewMu.Unlock()
 	return m.ensureCachedLocked(ctx)
 }
 
-func (m *shareCertManager) retryStatePath() string {
+func (m *CertManager) retryStatePath() string {
 	return filepath.Join(m.cfg.StorageDir, acmeRetryStateFile)
 }
 
-func (m *shareCertManager) loadRetryState() acmeRetryState {
+func (m *CertManager) loadRetryState() acmeRetryState {
 	raw, err := os.ReadFile(m.retryStatePath())
 	if err != nil {
 		return acmeRetryState{}
@@ -562,14 +564,14 @@ func (m *shareCertManager) loadRetryState() acmeRetryState {
 	return st
 }
 
-func (m *shareCertManager) log() *slog.Logger {
+func (m *CertManager) log() *slog.Logger {
 	if m != nil && m.slogger != nil {
 		return m.slogger
 	}
 	return slog.Default()
 }
 
-func (m *shareCertManager) saveRetryState(st acmeRetryState) {
+func (m *CertManager) saveRetryState(st acmeRetryState) {
 	data, err := json.Marshal(st)
 	if err != nil {
 		m.log().Warn("acme: could not encode retry state", "host", m.host, "err", err)
@@ -580,18 +582,18 @@ func (m *shareCertManager) saveRetryState(st acmeRetryState) {
 	}
 }
 
-func (m *shareCertManager) clearRetryState() {
+func (m *CertManager) clearRetryState() {
 	_ = os.Remove(m.retryStatePath())
 }
 
-func (m *shareCertManager) backoffSchedule() []time.Duration {
+func (m *CertManager) backoffSchedule() []time.Duration {
 	if len(m.backoff) > 0 {
 		return m.backoff
 	}
 	return defaultShareACMEBackoff
 }
 
-func (m *shareCertManager) backoffDelay(failures int) time.Duration {
+func (m *CertManager) backoffDelay(failures int) time.Duration {
 	sched := m.backoffSchedule()
 	idx := failures - 1
 	if idx < 0 {
@@ -603,19 +605,19 @@ func (m *shareCertManager) backoffDelay(failures int) time.Duration {
 	return sched[idx]
 }
 
-func (m *shareCertManager) maxBackoff() time.Duration {
+func (m *CertManager) maxBackoff() time.Duration {
 	sched := m.backoffSchedule()
 	return sched[len(sched)-1]
 }
 
-func (m *shareCertManager) currentTime() time.Time {
+func (m *CertManager) currentTime() time.Time {
 	if m.now != nil {
 		return m.now()
 	}
 	return time.Now()
 }
 
-func (m *shareCertManager) cappedWait(nextAttempt time.Time) time.Duration {
+func (m *CertManager) cappedWait(nextAttempt time.Time) time.Duration {
 	now := m.currentTime()
 	if !now.Before(nextAttempt) {
 		return 0
@@ -627,7 +629,7 @@ func (m *shareCertManager) cappedWait(nextAttempt time.Time) time.Duration {
 	return wait
 }
 
-func (m *shareCertManager) wait(ctx context.Context, d time.Duration) error {
+func (m *CertManager) wait(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return nil
 	}
@@ -640,7 +642,7 @@ func (m *shareCertManager) wait(ctx context.Context, d time.Duration) error {
 // Ensure loads a valid cached certificate from storage or obtains one via
 // DNS-01 from the primary CA, failing over with lazy EAB only on CA outages or
 // rate limits.
-func (m *shareCertManager) Ensure(ctx context.Context) error {
+func (m *CertManager) Ensure(ctx context.Context) error {
 	m.renewMu.Lock()
 	defer m.renewMu.Unlock()
 
@@ -655,7 +657,7 @@ func (m *shareCertManager) Ensure(ctx context.Context) error {
 		m.clearRetryState()
 		return nil
 	}
-	if m.fallbackCfg == nil || !shouldFailoverACME(err) {
+	if m.fallbackCfg == nil || !ShouldFailoverACME(err) {
 		return err
 	}
 
@@ -674,7 +676,7 @@ func isRegistrarCapErr(err error) bool {
 	return errors.As(err, &me) && me.Status == http.StatusTooManyRequests
 }
 
-func isNonRetryableShareCertErr(err error) bool {
+func IsNonRetryableCertErr(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -691,7 +693,7 @@ func isNonRetryableShareCertErr(err error) bool {
 	}
 	var prob acme.Problem
 	if errors.As(err, &prob) {
-		return !shouldFailoverACME(err) && (prob.Status == http.StatusBadRequest || prob.Status == http.StatusForbidden)
+		return !ShouldFailoverACME(err) && (prob.Status == http.StatusBadRequest || prob.Status == http.StatusForbidden)
 	}
 	return false
 }
@@ -699,17 +701,17 @@ func isNonRetryableShareCertErr(err error) bool {
 // EnsureWithBackoff obtains or loads a certificate with persistent exponential
 // backoff in StorageDir/retry.json so validation failures or service restarts
 // do not hammer the CA.
-func (m *shareCertManager) EnsureWithBackoff(ctx context.Context) error {
+func (m *CertManager) EnsureWithBackoff(ctx context.Context) error {
 	if m.ensureCached(ctx) {
 		m.clearRetryState()
 		return nil
 	}
 
-	state := m.loadRetryState()
-	if !state.NextAttempt.IsZero() {
-		if wait := m.cappedWait(state.NextAttempt); wait > 0 {
+	st := m.loadRetryState()
+	if !st.NextAttempt.IsZero() {
+		if wait := m.cappedWait(st.NextAttempt); wait > 0 {
 			m.log().Info("acme: backing off certificate retry",
-				"host", m.host, "wait", wait.Round(time.Second), "until", state.NextAttempt.UTC().Format(time.RFC3339))
+				"host", m.host, "wait", wait.Round(time.Second), "until", st.NextAttempt.UTC().Format(time.RFC3339))
 			if err := m.wait(ctx, wait); err != nil {
 				return err
 			}
@@ -717,7 +719,7 @@ func (m *shareCertManager) EnsureWithBackoff(ctx context.Context) error {
 	}
 
 	maxAttempts := 1
-	if state.Failures == 0 && m.maxInProcessAttempts > 1 {
+	if st.Failures == 0 && m.maxInProcessAttempts > 1 {
 		maxAttempts = m.maxInProcessAttempts
 	}
 
@@ -734,21 +736,21 @@ func (m *shareCertManager) EnsureWithBackoff(ctx context.Context) error {
 		}
 		if isRegistrarCapErr(last) {
 			delay := m.maxBackoff()
-			state.Failures++
-			state.NextAttempt = m.currentTime().UTC().Add(delay)
-			m.saveRetryState(state)
+			st.Failures++
+			st.NextAttempt = m.currentTime().UTC().Add(delay)
+			m.saveRetryState(st)
 			m.log().Warn("acme: registrar certificate limit reached",
 				"host", m.host, "err", last, "next_retry", delay)
 			return last
 		}
-		if isNonRetryableShareCertErr(last) {
+		if IsNonRetryableCertErr(last) {
 			return last
 		}
 
-		state.Failures++
-		delay := m.backoffDelay(state.Failures)
-		state.NextAttempt = m.currentTime().UTC().Add(delay)
-		m.saveRetryState(state)
+		st.Failures++
+		delay := m.backoffDelay(st.Failures)
+		st.NextAttempt = m.currentTime().UTC().Add(delay)
+		m.saveRetryState(st)
 
 		if attempt+1 >= maxAttempts || (m.maxInProcessWait > 0 && delay > m.maxInProcessWait) {
 			m.log().Warn("acme: certificate failed", "host", m.host, "err", last, "next_retry", delay)
@@ -764,7 +766,7 @@ func (m *shareCertManager) EnsureWithBackoff(ctx context.Context) error {
 
 // RunFailoverLoop watches for background primary renewal failures that qualify
 // for failover and obtains a replacement certificate from the fallback CA.
-func (m *shareCertManager) RunFailoverLoop(ctx context.Context) {
+func (m *CertManager) RunFailoverLoop(ctx context.Context) {
 	if m.fallbackCfg == nil {
 		<-ctx.Done()
 		return
@@ -789,11 +791,11 @@ func (m *shareCertManager) RunFailoverLoop(ctx context.Context) {
 	}
 }
 
-// fallbackContact turns the operator contact handed out with a fallback EAB
+// FallbackContact turns the operator contact handed out with a fallback EAB
 // into an ACME contact URI. Google refuses accounts without a contact; the
 // primary CA's accounts stay without one. Anything that isn't a plain address
 // is dropped rather than sent.
-func fallbackContact(addr string) []string {
+func FallbackContact(addr string) []string {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
 		return nil

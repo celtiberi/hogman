@@ -2,15 +2,7 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
-	"encoding/pem"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -21,14 +13,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/caddyserver/certmagic"
-
 	"hogman/join/internal/agent"
 	"hogman/join/internal/fsutil"
 	"hogman/join/internal/link"
 	"hogman/join/internal/penapi"
 	"hogman/join/internal/platform"
+	"hogman/join/internal/share"
 	"hogman/join/internal/state"
+	"hogman/join/internal/ui"
+	"hogman/join/internal/updater"
 )
 
 func TestRedTeamLoopbackStatusTransportNoLeak(t *testing.T) {
@@ -201,7 +194,7 @@ func TestRedTeamShareHandlerRejectsOpaqueURIAndHidesDotfiles(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, closeH, err := shareHandler(&state.ShareConfig{
+	h, closeH, err := share.NewHandler(&state.ShareConfig{
 		Name:   "app",
 		Zone:   "farm.pens.example.com",
 		Target: upstream.URL,
@@ -239,7 +232,7 @@ func TestRedTeamShareHandlerRejectsOpaqueURIAndHidesDotfiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	fh, closeFH, err := shareHandler(&state.ShareConfig{Name: "site", Zone: "farm.pens.example.com", Target: dir, Folder: true})
+	fh, closeFH, err := share.NewHandler(&state.ShareConfig{Name: "site", Zone: "farm.pens.example.com", Target: dir, Folder: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,14 +387,14 @@ func TestRedTeamParseLinkAndUpdateSourceNormalization(t *testing.T) {
 	if l.Host != "bobo.gate.example.com" || l.InviteToken != "abc" {
 		t.Fatalf("link.Parse normalized = %+v", l)
 	}
-	base, host, err := parseUpdateSourceURL(`"HTTPS://BOBO.GATE.EXAMPLE.COM"`)
+	base, host, err := updater.ParseSourceURL(`"HTTPS://BOBO.GATE.EXAMPLE.COM"`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if base != "https://bobo.gate.example.com" || host != "bobo.gate.example.com" {
-		t.Fatalf("parseUpdateSourceURL = (%q, %q)", base, host)
+		t.Fatalf("ParseSourceURL = (%q, %q)", base, host)
 	}
-	c, err := updateHTTPClient("", "", "bobo.gate.example.com", 5*time.Second)
+	c, err := updater.HTTPClient("", "", "bobo.gate.example.com", 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,102 +409,16 @@ func TestRedTeamAskPreservesBufferedStdin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	orig := os.Stdin
-	os.Stdin = r
-	defer func() {
-		os.Stdin = orig
-		_ = r.Close()
-	}()
+	defer r.Close()
 	_, _ = w.WriteString("alice\nbob\n")
 	_ = w.Close()
 
-	if got := ask(""); got != "alice" {
+	u := &ui.UI{In: r, Err: &bytes.Buffer{}}
+	if got := u.Ask(""); got != "alice" {
 		t.Fatalf("first ask = %q, want alice", got)
 	}
-	if got := ask(""); got != "bob" {
+	if got := u.Ask(""); got != "bob" {
 		t.Fatalf("second ask = %q, want bob", got)
-	}
-}
-
-func makeSelfSignedPEM(t *testing.T, dnsName string, notBefore, notAfter time.Time) (certPEM, keyPEM []byte) {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: dnsName},
-		DNSNames:     []string{dnsName},
-		NotBefore:    notBefore,
-		NotAfter:     notAfter,
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	return certPEM, keyPEM
-}
-
-func TestRedTeamACMEFallbackUsedWhenPrimaryExpired(t *testing.T) {
-	host := "blog.bobo.pens.example.com"
-	cm, err := newShareCertManager(shareACMEConfig{
-		Zone:       "bobo.pens.example.com",
-		Host:       host,
-		StorageDir: t.TempDir(),
-		PrimaryCA:  "https://primary.acme.example.com/directory",
-		FallbackCA: "https://fallback.acme.example.com/directory",
-		HTTPClient: &http.Client{Timeout: 5 * time.Second},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cm.Close()
-
-	now := time.Now()
-	expCert, expKey := makeSelfSignedPEM(t, host, now.Add(-48*time.Hour), now.Add(-1*time.Hour))
-	valCert, valKey := makeSelfSignedPEM(t, host, now.Add(-1*time.Hour), now.Add(30*24*time.Hour))
-
-	ctx := context.Background()
-	primKey := cm.primaryIss.IssuerKey()
-	fbKey := cm.fallbackIss.IssuerKey()
-	meta := []byte(`{"sans":["` + host + `"]}`)
-	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SiteCert(primKey, host), expCert); err != nil {
-		t.Fatal(err)
-	}
-	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SitePrivateKey(primKey, host), expKey); err != nil {
-		t.Fatal(err)
-	}
-	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SiteMeta(primKey, host), meta); err != nil {
-		t.Fatal(err)
-	}
-	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SiteCert(fbKey, host), valCert); err != nil {
-		t.Fatal(err)
-	}
-	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SitePrivateKey(fbKey, host), valKey); err != nil {
-		t.Fatal(err)
-	}
-	if err := cm.storage.Store(ctx, certmagic.StorageKeys.SiteMeta(fbKey, host), meta); err != nil {
-		t.Fatal(err)
-	}
-
-	gotCfg, err := cm.getConfigForCert(certmagic.Certificate{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gotCfg != cm.fallbackCfg {
-		t.Fatalf("getConfigForCert selected primary despite expired primary cert and valid fallback cert")
-	}
-	if !cm.ensureCachedLocked(ctx) {
-		t.Fatal("ensureCachedLocked should load the valid fallback cert even when an expired primary cert exists on disk")
 	}
 }
 
@@ -524,8 +431,8 @@ func TestRedTeamNonPositivePIDGuards(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "share.pid"), []byte(raw), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if pid := sharePID(dir); pid != 0 {
-			t.Fatalf("sharePID(%q) = %d, want 0", raw, pid)
+		if pid := share.PID(dir); pid != 0 {
+			t.Fatalf("share.PID(%q) = %d, want 0", raw, pid)
 		}
 		pidPath := filepath.Join(dir, "agent.pid")
 		if err := os.WriteFile(pidPath, []byte(raw), 0o600); err != nil {
@@ -583,9 +490,9 @@ func TestRedTeamHostnameAndPenTargetValidation(t *testing.T) {
 	_ = os.MkdirAll(corruptDir, 0o700)
 	_ = os.WriteFile(filepath.Join(corruptDir, "config.json"), []byte("{not json"), 0o600)
 
-	pens := loadPenTargets(base)
-	if len(pens) != 1 || pens[0].zone != "bobo.pens.example.com" {
-		t.Fatalf("loadPenTargets = %+v, want only bobo.pens.example.com", pens)
+	pens := updater.LoadPenTargets(base)
+	if len(pens) != 1 || pens[0].Zone != "bobo.pens.example.com" {
+		t.Fatalf("LoadPenTargets = %+v, want only bobo.pens.example.com", pens)
 	}
 	bad := state.CorruptPenConfigs(base)
 	if len(bad) != 2 {
@@ -600,22 +507,22 @@ func TestRedTeamShareTargetReservedNamesAndSystemdSingleLine(t *testing.T) {
 		"http://localhost:99999",
 		"http://localhost:0",
 	} {
-		if _, _, err := shareTarget(bad); err == nil {
-			t.Fatalf("shareTarget(%q) succeeded, want error", bad)
+		if _, _, err := share.ParseTarget(bad); err == nil {
+			t.Fatalf("share.ParseTarget(%q) succeeded, want error", bad)
 		}
 	}
-	if target, folder, err := shareTarget("http://127.0.0.1:8080/"); err != nil || folder || target != "http://127.0.0.1:8080" {
-		t.Fatalf("shareTarget valid = (%q, %v, %v)", target, folder, err)
+	if target, folder, err := share.ParseTarget("http://127.0.0.1:8080/"); err != nil || folder || target != "http://127.0.0.1:8080" {
+		t.Fatalf("share.ParseTarget valid = (%q, %v, %v)", target, folder, err)
 	}
 
 	for _, res := range []string{"home", "www", "admin", "nodes", "ns", "ns1", "ns42", "sub.home", "x.admin"} {
-		if !isReservedShareName(res) {
-			t.Fatalf("isReservedShareName(%q) = false, want true", res)
+		if !share.IsReservedName(res) {
+			t.Fatalf("share.IsReservedName(%q) = false, want true", res)
 		}
 	}
 	for _, okName := range []string{"blog", "my-notes", "app.blog", "nsa"} {
-		if isReservedShareName(okName) {
-			t.Fatalf("isReservedShareName(%q) = true, want false", okName)
+		if share.IsReservedName(okName) {
+			t.Fatalf("share.IsReservedName(%q) = true, want false", okName)
 		}
 	}
 

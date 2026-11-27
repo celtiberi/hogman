@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"hogman/join/internal/state"
+	"hogman/join/internal/ui"
+	"hogman/join/internal/updater"
 )
 
 func hexSHA256(b []byte) string {
@@ -38,7 +40,7 @@ func TestPlatformBinaryName(t *testing.T) {
 		{"freebsd", "amd64", "", true},
 	}
 	for _, tc := range cases {
-		got, err := platformBinaryName(tc.goos, tc.goarch)
+		got, err := updater.PlatformBinaryName(tc.goos, tc.goarch)
 		if (err != nil) != tc.wantErr {
 			t.Fatalf("%s/%s: err=%v, wantErr=%v", tc.goos, tc.goarch, err, tc.wantErr)
 		}
@@ -55,23 +57,23 @@ func TestParseSHA256SUMS(t *testing.T) {
 	sums := []byte(sumA + "  hogman-Darwin-arm64\n" +
 		sumB + " *hogman-Linux-x86_64\r\n\n")
 
-	gotA, err := parseSHA256SUMS(sums, "hogman-Darwin-arm64")
+	gotA, err := updater.ParseSHA256SUMS(sums, "hogman-Darwin-arm64")
 	if err != nil || gotA != sumA {
 		t.Fatalf("Darwin-arm64: got (%q, %v), want %q", gotA, err, sumA)
 	}
-	gotB, err := parseSHA256SUMS(sums, "hogman-Linux-x86_64")
+	gotB, err := updater.ParseSHA256SUMS(sums, "hogman-Linux-x86_64")
 	if err != nil || gotB != strings.ToLower(sumB) {
 		t.Fatalf("Linux-x86_64: got (%q, %v), want %q", gotB, err, strings.ToLower(sumB))
 	}
-	if _, err := parseSHA256SUMS(sums, "hogman-windows-amd64.exe"); err == nil {
+	if _, err := updater.ParseSHA256SUMS(sums, "hogman-windows-amd64.exe"); err == nil {
 		t.Fatal("expected error for missing entry")
 	}
-	if _, err := parseSHA256SUMS([]byte("zzzz"+sumA[4:]+"  hogman-Darwin-arm64\n"), "hogman-Darwin-arm64"); err == nil {
+	if _, err := updater.ParseSHA256SUMS([]byte("zzzz"+sumA[4:]+"  hogman-Darwin-arm64\n"), "hogman-Darwin-arm64"); err == nil {
 		t.Fatal("expected error for non-hex digest")
 	}
 	dup := append([]byte{}, sums...)
 	dup = append(dup, []byte(sumA+"  hogman-Darwin-arm64\n")...)
-	if _, err := parseSHA256SUMS(dup, "hogman-Darwin-arm64"); err == nil {
+	if _, err := updater.ParseSHA256SUMS(dup, "hogman-Darwin-arm64"); err == nil {
 		t.Fatal("expected error for duplicate entry")
 	}
 }
@@ -88,7 +90,7 @@ func TestParseUpdateSourceURL(t *testing.T) {
 		{"https://pen.example:8443/", "https://pen.example:8443", "pen.example:8443"},
 	}
 	for _, tc := range good {
-		base, host, err := parseUpdateSourceURL(tc.raw)
+		base, host, err := updater.ParseSourceURL(tc.raw)
 		if err != nil || base != tc.wantBase || host != tc.wantHost {
 			t.Fatalf("%q: got (%q, %q, %v), want (%q, %q, nil)", tc.raw, base, host, err, tc.wantBase, tc.wantHost)
 		}
@@ -102,7 +104,7 @@ func TestParseUpdateSourceURL(t *testing.T) {
 		"https://pen.example#frag",
 	}
 	for _, raw := range bad {
-		if _, _, err := parseUpdateSourceURL(raw); err == nil {
+		if _, _, err := updater.ParseSourceURL(raw); err == nil {
 			t.Fatalf("expected error for %q", raw)
 		}
 	}
@@ -134,18 +136,18 @@ func TestDownloadVerifiedBinary(t *testing.T) {
 	defer srv.Close()
 
 	host := strings.TrimPrefix(srv.URL, "https://")
-	client, err := updateHTTPClient("", testServerPEM(srv), host, 10*time.Second)
+	client, err := updater.HTTPClient("", testServerPEM(srv), host, 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	gotHex, err := fetchExpectedSHA256URL(client, srv.URL+"/join/dl/SHA256SUMS", binName)
+	gotHex, err := updater.FetchExpectedSHA256URL(client, srv.URL+"/join/dl/SHA256SUMS", binName)
 	if err != nil || gotHex != wantHex {
-		t.Fatalf("fetchExpectedSHA256URL: (%q, %v), want %q", gotHex, err, wantHex)
+		t.Fatalf("FetchExpectedSHA256URL: (%q, %v), want %q", gotHex, err, wantHex)
 	}
 
 	tmpDir := t.TempDir()
-	path, err := downloadVerifiedBinaryURL(client, srv.URL+"/join/dl/"+binName, binName, wantHex, tmpDir)
+	path, err := updater.DownloadVerifiedBinaryURL(client, srv.URL+"/join/dl/"+binName, binName, wantHex, tmpDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,17 +157,17 @@ func TestDownloadVerifiedBinary(t *testing.T) {
 	}
 
 	failDir := t.TempDir()
-	if _, err := downloadVerifiedBinaryURL(client, srv.URL+"/join/dl/bad-"+binName, "bad-"+binName, wantHex, failDir); err == nil {
+	if _, err := updater.DownloadVerifiedBinaryURL(client, srv.URL+"/join/dl/bad-"+binName, "bad-"+binName, wantHex, failDir); err == nil {
 		t.Fatal("expected error on checksum mismatch")
 	}
 	if entries, _ := os.ReadDir(failDir); len(entries) != 0 {
 		t.Fatalf("failed download left temp files: %v", entries)
 	}
 
-	if _, err := downloadVerifiedBinaryURL(client, srv.URL+"/join/dl/redir-"+binName, "redir-"+binName, wantHex, failDir); err == nil {
+	if _, err := updater.DownloadVerifiedBinaryURL(client, srv.URL+"/join/dl/redir-"+binName, "redir-"+binName, wantHex, failDir); err == nil {
 		t.Fatal("expected error on cross-host redirect")
 	}
-	if _, err := downloadVerifiedBinaryURL(client, srv.URL+"/join/dl/missing-"+binName, "missing-"+binName, wantHex, failDir); err == nil {
+	if _, err := updater.DownloadVerifiedBinaryURL(client, srv.URL+"/join/dl/missing-"+binName, "missing-"+binName, wantHex, failDir); err == nil {
 		t.Fatal("expected error on HTTP 404")
 	}
 }
@@ -186,7 +188,7 @@ func TestStageAndVerifyAtomicReplace(t *testing.T) {
 	}
 
 	// Mismatch must leave existing dst completely untouched.
-	if err := stageAndVerify(src, dst, strings.Repeat("00", 32)); err == nil {
+	if err := updater.StageAndVerify(src, dst, strings.Repeat("00", 32)); err == nil {
 		t.Fatal("expected error when staged checksum mismatches")
 	}
 	got, _ := os.ReadFile(dst)
@@ -194,7 +196,7 @@ func TestStageAndVerifyAtomicReplace(t *testing.T) {
 		t.Fatalf("dst modified after failed stage: %q", got)
 	}
 
-	if err := stageAndVerify(src, dst, newHex); err != nil {
+	if err := updater.StageAndVerify(src, dst, newHex); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = os.ReadFile(dst)
@@ -212,11 +214,11 @@ func TestResolveUpdatePlan(t *testing.T) {
 	sharesDir := filepath.Join(root, "hogman-shares")
 
 	// Default with 0 pens resolves to immutable GitHub Releases (I-4).
-	p0, err := resolveUpdatePlan(nil, options{}, cfgBase, sharesDir)
+	p0, err := updater.ResolvePlan(nil, "", cfgBase, sharesDir)
 	if err != nil {
 		t.Fatalf("0-pen default update plan failed: %v", err)
 	}
-	if !p0.fromRelease || p0.host != "github.com" || p0.releaseBase != defaultReleaseBase || len(p0.pens) != 0 {
+	if !p0.FromRelease || p0.Host != "github.com" || p0.ReleaseBase != updater.DefaultReleaseBase || len(p0.Pens) != 0 {
 		t.Fatalf("unexpected 0-pen plan: %+v", p0)
 	}
 
@@ -245,28 +247,28 @@ func TestResolveUpdatePlan(t *testing.T) {
 
 	// Default with 2 pens on different servers still resolves to GitHub Releases
 	// and includes ALL installed pens and shares (no --pen ambiguity).
-	pAll, err := resolveUpdatePlan(nil, options{}, cfgBase, sharesDir)
+	pAll, err := updater.ResolvePlan(nil, "", cfgBase, sharesDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !pAll.fromRelease || len(pAll.pens) != 2 || len(pAll.shares) != 1 {
+	if !pAll.FromRelease || len(pAll.Pens) != 2 || len(pAll.Shares) != 1 {
 		t.Fatalf("unexpected multi-pen release plan: %+v", pAll)
 	}
 
 	// --pen selects that specific pen's server instead of GitHub Releases.
-	pBeta, err := resolveUpdatePlan(nil, options{pen: "beta.hogman"}, cfgBase, sharesDir)
-	if err != nil || pBeta.fromRelease || pBeta.baseURL != "https://beta.example" || len(pBeta.pens) != 1 {
+	pBeta, err := updater.ResolvePlan(nil, "beta.hogman", cfgBase, sharesDir)
+	if err != nil || pBeta.FromRelease || pBeta.BaseURL != "https://beta.example" || len(pBeta.Pens) != 1 {
 		t.Fatalf("unexpected --pen beta plan: (%+v, %v)", pBeta, err)
 	}
 
 	// Explicit URL matching alpha picks up alpha's ControlCA and targets.
-	pExpl, err := resolveUpdatePlan([]string{"https://alpha.example"}, options{}, cfgBase, sharesDir)
-	if err != nil || pExpl.fromRelease || pExpl.baseURL != "https://alpha.example" || pExpl.controlCA != "CA-ALPHA" || len(pExpl.pens) != 1 || len(pExpl.shares) != 1 {
+	pExpl, err := updater.ResolvePlan([]string{"https://alpha.example"}, "", cfgBase, sharesDir)
+	if err != nil || pExpl.FromRelease || pExpl.BaseURL != "https://alpha.example" || pExpl.ControlCA != "CA-ALPHA" || len(pExpl.Pens) != 1 || len(pExpl.Shares) != 1 {
 		t.Fatalf("unexpected explicit plan: (%+v, %v)", pExpl, err)
 	}
 
 	// Explicit URL conflicting with --pen fails cleanly.
-	if _, err := resolveUpdatePlan([]string{"https://alpha.example"}, options{pen: "beta.hogman"}, cfgBase, sharesDir); err == nil {
+	if _, err := updater.ResolvePlan([]string{"https://alpha.example"}, "beta.hogman", cfgBase, sharesDir); err == nil {
 		t.Fatal("expected error when --pen LoginServer mismatches explicit URL")
 	}
 
@@ -279,8 +281,8 @@ func TestResolveUpdatePlan(t *testing.T) {
 	if err := (&state.ShareConfig{Zone: "gamma.hogman", Name: "blog", LoginServer: "https://gamma.example", ControlCA: "CA-GAMMA"}).Save(d); err != nil {
 		t.Fatal(err)
 	}
-	pShareOnly, err := resolveUpdatePlan(nil, options{pen: "gamma.hogman"}, filepath.Join(t.TempDir(), "none"), onlyShares)
-	if err != nil || pShareOnly.fromRelease || pShareOnly.baseURL != "https://gamma.example" || pShareOnly.controlCA != "CA-GAMMA" || len(pShareOnly.shares) != 1 {
+	pShareOnly, err := updater.ResolvePlan(nil, "gamma.hogman", filepath.Join(t.TempDir(), "none"), onlyShares)
+	if err != nil || pShareOnly.FromRelease || pShareOnly.BaseURL != "https://gamma.example" || pShareOnly.ControlCA != "CA-GAMMA" || len(pShareOnly.Shares) != 1 {
 		t.Fatalf("unexpected share-only --pen plan: (%+v, %v)", pShareOnly, err)
 	}
 }
@@ -288,26 +290,26 @@ func TestResolveUpdatePlan(t *testing.T) {
 func TestGitHubReleaseFlowAndRedirects(t *testing.T) {
 	// Version tag validation rejects traversal, whitespace, and shell metacharacters.
 	for _, bad := range []string{"", " ", "../evil", "2026.11.23/foo", "v..bad", "v1.0;rm"} {
-		if _, _, err := validateReleaseVersion(bad); err == nil {
-			t.Fatalf("validateReleaseVersion(%q) succeeded, want error", bad)
+		if _, _, err := updater.ValidateReleaseVersion(bad); err == nil {
+			t.Fatalf("ValidateReleaseVersion(%q) succeeded, want error", bad)
 		}
 	}
-	ver, tag, err := validateReleaseVersion("2026.11.23-abc1234\r\n")
+	ver, tag, err := updater.ValidateReleaseVersion("2026.11.23-abc1234\r\n")
 	if err != nil || ver != "2026.11.23-abc1234" || tag != "v2026.11.23-abc1234" {
-		t.Fatalf("validateReleaseVersion = (%q, %q, %v)", ver, tag, err)
+		t.Fatalf("ValidateReleaseVersion = (%q, %q, %v)", ver, tag, err)
 	}
 
 	// GitHub redirect allowlist permits official release asset hosts only.
-	if !allowedUpdateRedirectHost("github.com", "objects.githubusercontent.com") {
+	if !updater.AllowedRedirectHost("github.com", "objects.githubusercontent.com") {
 		t.Fatal("expected objects.githubusercontent.com allowed for github.com")
 	}
-	if !allowedUpdateRedirectHost("github.com", "release-assets.githubusercontent.com") {
+	if !updater.AllowedRedirectHost("github.com", "release-assets.githubusercontent.com") {
 		t.Fatal("expected release-assets.githubusercontent.com allowed for github.com")
 	}
-	if allowedUpdateRedirectHost("github.com", "evil.example.com") {
+	if updater.AllowedRedirectHost("github.com", "evil.example.com") {
 		t.Fatal("evil.example.com must be rejected for github.com")
 	}
-	if allowedUpdateRedirectHost("bobo.gate.example.com", "objects.githubusercontent.com") {
+	if updater.AllowedRedirectHost("bobo.gate.example.com", "objects.githubusercontent.com") {
 		t.Fatal("objects.githubusercontent.com must not be allowed for non-GitHub hosts")
 	}
 
@@ -330,20 +332,20 @@ func TestGitHubReleaseFlowAndRedirects(t *testing.T) {
 	defer srv.Close()
 
 	host := strings.TrimPrefix(srv.URL, "https://")
-	client, err := updateHTTPClient("", testServerPEM(srv), host, 10*time.Second)
+	client, err := updater.HTTPClient("", testServerPEM(srv), host, 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	relBase := srv.URL + "/releases"
-	gotVer, gotTag, dlBase, err := fetchLatestReleaseTag(client, relBase)
+	gotVer, gotTag, dlBase, err := updater.FetchLatestReleaseTag(client, relBase)
 	if err != nil || gotVer != "2026.11.23-abc1234" || gotTag != "v2026.11.23-abc1234" {
-		t.Fatalf("fetchLatestReleaseTag = (%q, %q, %q, %v)", gotVer, gotTag, dlBase, err)
+		t.Fatalf("FetchLatestReleaseTag = (%q, %q, %q, %v)", gotVer, gotTag, dlBase, err)
 	}
-	gotHex, err := fetchExpectedSHA256URL(client, dlBase+"/hogman-SHA256SUMS", binName)
+	gotHex, err := updater.FetchExpectedSHA256URL(client, dlBase+"/hogman-SHA256SUMS", binName)
 	if err != nil || gotHex != wantHex {
-		t.Fatalf("fetchExpectedSHA256URL = (%q, %v), want %q", gotHex, err, wantHex)
+		t.Fatalf("FetchExpectedSHA256URL = (%q, %v), want %q", gotHex, err, wantHex)
 	}
-	path, err := downloadVerifiedBinaryURL(client, dlBase+"/"+binName, binName, wantHex, t.TempDir())
+	path, err := updater.DownloadVerifiedBinaryURL(client, dlBase+"/"+binName, binName, wantHex, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +356,7 @@ func TestGitHubReleaseFlowAndRedirects(t *testing.T) {
 
 	// Unreachable GitHub Releases fails clearly with explicit override hint (no silent fallback).
 	srv.Close()
-	if _, _, _, err := fetchLatestReleaseTag(client, relBase); err == nil || !strings.Contains(err.Error(), "hogman update --pen") {
+	if _, _, _, err := updater.FetchLatestReleaseTag(client, relBase); err == nil || !strings.Contains(err.Error(), "hogman update --pen") {
 		t.Fatalf("unreachable error = %v, want override hint", err)
 	}
 }
@@ -390,19 +392,19 @@ func TestMigrateAndRestartPenRollbackAndRecovery(t *testing.T) {
 	if err := os.WriteFile(legacyBin, []byte("legacy"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	pen := &penTarget{zone: "bobo.hogman", dir: dir, cfg: &state.AgentConfig{Zone: "bobo.hogman"}}
+	pen := &updater.PenTarget{Zone: "bobo.hogman", Dir: dir, Cfg: &state.AgentConfig{Zone: "bobo.hogman"}}
 
 	// 1. restartNew fails while running -> stops partial new agent, rolls back to legacyBin, keeps legacyBin.
 	var calls []string
-	ops := penUpdateOps{
-		isRunning:  func(string, *state.AgentConfig) bool { return true },
-		hasService: func(string) bool { return true },
-		stop:       func(string, *state.AgentConfig) { calls = append(calls, "stop") },
-		restartNew: func(*penTarget, string, bool, options) error {
+	ops := updater.PenOps{
+		IsRunning:  func(string, *state.AgentConfig) bool { return true },
+		HasService: func(string) bool { return true },
+		Stop:       func(string, *state.AgentConfig) { calls = append(calls, "stop") },
+		RestartNew: func(*updater.PenTarget, string, bool, updater.Options) error {
 			calls = append(calls, "restartNew")
 			return errors.New("agent timeout")
 		},
-		restartOld: func(_ *penTarget, bin string, hadService bool, _ options) error {
+		RestartOld: func(_ *updater.PenTarget, bin string, hadService bool, _ updater.Options) error {
 			if !hadService || bin != legacyBin {
 				t.Fatalf("restartOld got hadService=%v bin=%q, want true %q", hadService, bin, legacyBin)
 			}
@@ -410,7 +412,7 @@ func TestMigrateAndRestartPenRollbackAndRecovery(t *testing.T) {
 			return nil
 		},
 	}
-	err := migrateAndRestartPen(pen, canonBin, legacyBin, "/tmp/self", options{}, ops)
+	err := updater.MigrateAndRestartPen(pen, canonBin, legacyBin, "/tmp/self", updater.Options{}, ops, ui.Default())
 	if err == nil || !strings.Contains(err.Error(), "agent timeout") {
 		t.Fatalf("expected restartNew error, got %v", err)
 	}
@@ -426,11 +428,11 @@ func TestMigrateAndRestartPenRollbackAndRecovery(t *testing.T) {
 
 	// 1b. restartNew fails AND restartOld fails -> updating marker remains on disk for recovery.
 	calls = nil
-	ops.restartOld = func(*penTarget, string, bool, options) error {
+	ops.RestartOld = func(*updater.PenTarget, string, bool, updater.Options) error {
 		calls = append(calls, "restartOld")
 		return errors.New("rollback failed")
 	}
-	if err := migrateAndRestartPen(pen, canonBin, legacyBin, "/tmp/self", options{}, ops); err == nil {
+	if err := updater.MigrateAndRestartPen(pen, canonBin, legacyBin, "/tmp/self", updater.Options{}, ops, ui.Default()); err == nil {
 		t.Fatal("expected error when both restartNew and restartOld fail")
 	}
 	if present, hadSvc := state.ReadUpdatingMarker(dir); !present || !hadSvc {
@@ -440,15 +442,15 @@ func TestMigrateAndRestartPenRollbackAndRecovery(t *testing.T) {
 
 	// 2. Stopped pen with service -> rewrites service and removes legacyBin without starting.
 	calls = nil
-	ops.isRunning = func(string, *state.AgentConfig) bool { return false }
-	ops.rewriteService = func(bin, _ string, _ *state.AgentConfig) error {
+	ops.IsRunning = func(string, *state.AgentConfig) bool { return false }
+	ops.RewriteService = func(bin, _ string, _ *state.AgentConfig) error {
 		if bin != canonBin {
 			t.Fatalf("rewriteService bin=%q, want %q", bin, canonBin)
 		}
 		calls = append(calls, "rewriteService")
 		return nil
 	}
-	if err := migrateAndRestartPen(pen, canonBin, legacyBin, "/tmp/self", options{}, ops); err != nil {
+	if err := updater.MigrateAndRestartPen(pen, canonBin, legacyBin, "/tmp/self", updater.Options{}, ops, ui.Default()); err != nil {
 		t.Fatalf("stopped pen migrate: %v", err)
 	}
 	if !slices.Equal(calls, []string{"rewriteService"}) {
@@ -460,9 +462,12 @@ func TestMigrateAndRestartPenRollbackAndRecovery(t *testing.T) {
 
 	// 3. Running pen happy path -> stop, restartNew, clear marker.
 	calls = nil
-	ops.isRunning = func(string, *state.AgentConfig) bool { return true }
-	ops.restartNew = func(*penTarget, string, bool, options) error { calls = append(calls, "restartNew"); return nil }
-	if err := migrateAndRestartPen(pen, canonBin, "", "/tmp/self", options{}, ops); err != nil {
+	ops.IsRunning = func(string, *state.AgentConfig) bool { return true }
+	ops.RestartNew = func(*updater.PenTarget, string, bool, updater.Options) error {
+		calls = append(calls, "restartNew")
+		return nil
+	}
+	if err := updater.MigrateAndRestartPen(pen, canonBin, "", "/tmp/self", updater.Options{}, ops, ui.Default()); err != nil {
 		t.Fatalf("happy-path migrate: %v", err)
 	}
 	if !slices.Equal(calls, []string{"stop", "restartNew"}) {
@@ -480,35 +485,35 @@ func TestMigrateAndRestartShareRollbackAndRecovery(t *testing.T) {
 	if err := os.WriteFile(legacyBin, []byte("legacy"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	s := &shareTargetDir{
-		dir:  dir,
-		name: "blog",
-		cfg:  &state.ShareConfig{Name: "blog", Zone: "bobo.hogman", Target: "http://127.0.0.1:3000"},
+	s := &updater.ShareTargetDir{
+		Dir:  dir,
+		Name: "blog",
+		Cfg:  &state.ShareConfig{Name: "blog", Zone: "bobo.hogman", Target: "http://127.0.0.1:3000"},
 	}
 
 	// 1. Running managed share + restartNew fails -> stops, rolls back to legacyBin, keeps legacyBin.
 	var calls []string
-	ops := shareUpdateOps{
-		isRunning:  func(string) bool { return true },
-		hasService: func(*state.ShareConfig) bool { return true },
-		stop:       func(string, *state.ShareConfig) { calls = append(calls, "stop") },
-		restartNew: func(*shareTargetDir, string, options) error {
+	ops := updater.ShareOps{
+		IsRunning:  func(string) bool { return true },
+		HasService: func(*state.ShareConfig) bool { return true },
+		Stop:       func(string, *state.ShareConfig) { calls = append(calls, "stop") },
+		RestartNew: func(*updater.ShareTargetDir, string, updater.Options) error {
 			calls = append(calls, "restartNew")
 			return errors.New("share failed")
 		},
-		restartOld: func(_ *shareTargetDir, bin string, _ options) error {
+		RestartOld: func(_ *updater.ShareTargetDir, bin string, _ updater.Options) error {
 			if bin != legacyBin {
 				t.Fatalf("restartOld bin=%q, want %q", bin, legacyBin)
 			}
 			calls = append(calls, "restartOld")
 			return nil
 		},
-		rewriteService: func(string, string, *state.ShareConfig) error {
+		RewriteService: func(string, string, *state.ShareConfig) error {
 			calls = append(calls, "rewriteService")
 			return nil
 		},
 	}
-	err := migrateAndRestartShare(s, canonBin, legacyBin, "/tmp/self", options{}, ops)
+	err := updater.MigrateAndRestartShare(s, canonBin, legacyBin, "/tmp/self", updater.Options{}, ops, ui.Default())
 	if err == nil || !strings.Contains(err.Error(), "share failed") {
 		t.Fatalf("expected restartNew error, got %v", err)
 	}
@@ -521,8 +526,8 @@ func TestMigrateAndRestartShareRollbackAndRecovery(t *testing.T) {
 
 	// 2. Running unmanaged share -> leaves running without stopping or deleting legacyBin.
 	calls = nil
-	ops.hasService = func(*state.ShareConfig) bool { return false }
-	if err := migrateAndRestartShare(s, canonBin, legacyBin, "/tmp/self", options{}, ops); err != nil {
+	ops.HasService = func(*state.ShareConfig) bool { return false }
+	if err := updater.MigrateAndRestartShare(s, canonBin, legacyBin, "/tmp/self", updater.Options{}, ops, ui.Default()); err != nil {
 		t.Fatalf("unmanaged running share: %v", err)
 	}
 	if len(calls) != 0 {
@@ -534,9 +539,12 @@ func TestMigrateAndRestartShareRollbackAndRecovery(t *testing.T) {
 
 	// 3. Running managed share happy path -> stop, restartNew, remove legacyBin.
 	calls = nil
-	ops.hasService = func(*state.ShareConfig) bool { return true }
-	ops.restartNew = func(*shareTargetDir, string, options) error { calls = append(calls, "restartNew"); return nil }
-	if err := migrateAndRestartShare(s, canonBin, legacyBin, "/tmp/self", options{}, ops); err != nil {
+	ops.HasService = func(*state.ShareConfig) bool { return true }
+	ops.RestartNew = func(*updater.ShareTargetDir, string, updater.Options) error {
+		calls = append(calls, "restartNew")
+		return nil
+	}
+	if err := updater.MigrateAndRestartShare(s, canonBin, legacyBin, "/tmp/self", updater.Options{}, ops, ui.Default()); err != nil {
 		t.Fatalf("managed happy path: %v", err)
 	}
 	if !slices.Equal(calls, []string{"stop", "restartNew"}) {
@@ -548,8 +556,8 @@ func TestMigrateAndRestartShareRollbackAndRecovery(t *testing.T) {
 
 	// 4. Stopped managed share -> rewrites service without starting.
 	calls = nil
-	ops.isRunning = func(string) bool { return false }
-	if err := migrateAndRestartShare(s, canonBin, "", "/tmp/self", options{}, ops); err != nil {
+	ops.IsRunning = func(string) bool { return false }
+	if err := updater.MigrateAndRestartShare(s, canonBin, "", "/tmp/self", updater.Options{}, ops, ui.Default()); err != nil {
 		t.Fatalf("stopped managed share: %v", err)
 	}
 	if !slices.Equal(calls, []string{"rewriteService"}) {
@@ -577,23 +585,23 @@ func TestFindAndRetireLegacySameServerPens(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	found := findLegacySameServerPens(base, "bobo.pens.example.com", "https://hs.example.com")
-	if len(found) != 1 || found[0].zone != "bobo.hogman" || found[0].dir != oldDir {
-		t.Fatalf("findLegacySameServerPens = %+v, want only bobo.hogman", found)
+	found := updater.FindLegacySameServerPens(base, "bobo.pens.example.com", "https://hs.example.com")
+	if len(found) != 1 || found[0].Zone != "bobo.hogman" || found[0].Dir != oldDir {
+		t.Fatalf("FindLegacySameServerPens = %+v, want only bobo.hogman", found)
 	}
 
 	var steps []string
-	retireLegacySameServerPens(found, legacyRetireOps{
-		stop: func(_ string, c *state.AgentConfig) {
+	updater.RetireLegacySameServerPens(found, updater.LegacyRetireOps{
+		Stop: func(_ string, c *state.AgentConfig) {
 			steps = append(steps, "stop:"+c.Zone)
 		},
-		logout: func(dir string) {
+		Logout: func(dir string) {
 			if dir != oldDir {
 				t.Fatalf("logout dir = %q, want %q", dir, oldDir)
 			}
 			steps = append(steps, "logout")
 		},
-	})
+	}, ui.Default())
 	if !slices.Equal(steps, []string{"stop:bobo.hogman", "logout"}) {
 		t.Fatalf("retire call sequence = %v, want [stop:bobo.hogman logout]", steps)
 	}
@@ -619,9 +627,9 @@ func TestQueryBinaryVersionLineAndPensOutsidePlan(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	outside := pensOutsidePlan(base, []penTarget{{zone: "beta.pens.example.com"}})
+	outside := updater.PensOutsidePlan(base, []updater.PenTarget{{Zone: "beta.pens.example.com"}})
 	if !slices.Equal(outside, []string{"alpha.pens.example.com", "gamma.pens.example.com"}) {
-		t.Fatalf("pensOutsidePlan = %v, want [alpha gamma]", outside)
+		t.Fatalf("PensOutsidePlan = %v, want [alpha gamma]", outside)
 	}
 
 	if runtime.GOOS == "windows" {
@@ -632,21 +640,21 @@ func TestQueryBinaryVersionLineAndPensOutsidePlan(t *testing.T) {
 	if err := os.WriteFile(multi, []byte("#!/bin/sh\necho 'hogman 2026.11.26 darwin/arm64'\necho 'extra trailing line'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if got := queryBinaryVersionLine(multi); got != "hogman 2026.11.26 darwin/arm64; extra trailing line" {
-		t.Fatalf("queryBinaryVersionLine(multi) = %q, want all lines joined", got)
+	if got := updater.QueryBinaryVersionLine(multi); got != "hogman 2026.11.26 darwin/arm64; extra trailing line" {
+		t.Fatalf("QueryBinaryVersionLine(multi) = %q, want all lines joined", got)
 	}
-	if got := queryBinaryVersion(multi); got != "2026.11.26" {
-		t.Fatalf("queryBinaryVersion(multi) = %q, want 2026.11.26", got)
+	if got := updater.QueryBinaryVersion(multi); got != "2026.11.26" {
+		t.Fatalf("QueryBinaryVersion(multi) = %q, want 2026.11.26", got)
 	}
 
 	slow := filepath.Join(dir, "slow")
 	if err := os.WriteFile(slow, []byte("#!/bin/sh\nsleep 5\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	prev := versionQueryTimeout
-	versionQueryTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { versionQueryTimeout = prev })
-	if got := queryBinaryVersionLine(slow); got != "" {
-		t.Fatalf("queryBinaryVersionLine(slow) = %q, want empty on timeout", got)
+	prev := updater.VersionQueryTimeout
+	updater.VersionQueryTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { updater.VersionQueryTimeout = prev })
+	if got := updater.QueryBinaryVersionLine(slow); got != "" {
+		t.Fatalf("QueryBinaryVersionLine(slow) = %q, want empty on timeout", got)
 	}
 }

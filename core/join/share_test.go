@@ -18,7 +18,9 @@ import (
 	"hogman/join/internal/mesh"
 	"hogman/join/internal/penapi"
 	"hogman/join/internal/platform"
+	"hogman/join/internal/share"
 	"hogman/join/internal/state"
+	"hogman/join/internal/ui"
 )
 
 func TestShareTarget(t *testing.T) {
@@ -36,26 +38,26 @@ func TestShareTarget(t *testing.T) {
 		{dir + "/nope", "", false, false},
 	}
 	for _, c := range cases {
-		got, folder, err := shareTarget(c.in)
+		got, folder, err := share.ParseTarget(c.in)
 		if (err == nil) != c.ok || got != c.want || folder != c.folder {
-			t.Errorf("shareTarget(%q) = %q, %v, %v; want %q, %v, ok=%v", c.in, got, folder, err, c.want, c.folder, c.ok)
+			t.Errorf("ParseTarget(%q) = %q, %v, %v; want %q, %v, ok=%v", c.in, got, folder, err, c.want, c.folder, c.ok)
 		}
 	}
 	f := dir + "/file"
 	_ = os.WriteFile(f, []byte("x"), 0o600)
-	if _, _, err := shareTarget(f); err == nil {
+	if _, _, err := share.ParseTarget(f); err == nil {
 		t.Errorf("a file should not be shareable as a folder")
 	}
 }
 
 func TestShareNames(t *testing.T) {
 	for _, n := range []string{"blog", "my-notes", "a.blog", "x1"} {
-		if !shareNameRE.MatchString(n) {
+		if !share.NameRE.MatchString(n) {
 			t.Errorf("%q should be a valid share name", n)
 		}
 	}
 	for _, n := range []string{"", "-x", "Blog", "a_b", "x.", "a b"} {
-		if shareNameRE.MatchString(n) {
+		if share.NameRE.MatchString(n) {
 			t.Errorf("%q should not be a valid share name", n)
 		}
 	}
@@ -70,7 +72,7 @@ func TestShareFolderStaysInside(t *testing.T) {
 	if err := os.Symlink(secret, filepath.Join(dir, "leak")); err != nil {
 		t.Skip("no symlinks here:", err)
 	}
-	h, done, err := shareHandler(&state.ShareConfig{Name: "x", Zone: "z.hogman", Target: dir, Folder: true})
+	h, done, err := share.NewHandler(&state.ShareConfig{Name: "x", Zone: "z.hogman", Target: dir, Folder: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,21 +92,21 @@ func TestShareFolderStaysInside(t *testing.T) {
 
 func TestShareNoteResolutionAndFlags(t *testing.T) {
 	// Fresh share without --note has empty note.
-	if got := resolveShareNote(nil, "", false); got != "" {
+	if got := share.ResolveNote(nil, "", false); got != "" {
 		t.Fatalf("fresh omit = %q want empty", got)
 	}
-	if got := resolveShareNote(nil, "  hello  ", true); got != "hello" {
+	if got := share.ResolveNote(nil, "  hello  ", true); got != "hello" {
 		t.Fatalf("fresh --note = %q want hello", got)
 	}
 	// Bare restart preserves saved note; --note updates; --note "" clears.
 	prev := &state.ShareConfig{Note: "saved description"}
-	if got := resolveShareNote(prev, "", false); got != "saved description" {
+	if got := share.ResolveNote(prev, "", false); got != "saved description" {
 		t.Fatalf("restart without --note = %q want saved description", got)
 	}
-	if got := resolveShareNote(prev, "new note", true); got != "new note" {
+	if got := share.ResolveNote(prev, "new note", true); got != "new note" {
 		t.Fatalf("restart with --note = %q want new note", got)
 	}
-	if got := resolveShareNote(prev, "", true); got != "" {
+	if got := share.ResolveNote(prev, "", true); got != "" {
 		t.Fatalf("restart with --note '' = %q want empty", got)
 	}
 
@@ -194,18 +196,18 @@ func TestShareServiceTemplates(t *testing.T) {
 }
 
 func TestSharePermanentErrorClassification(t *testing.T) {
-	if got := shareExitCode(nil); got != 0 {
-		t.Fatalf("shareExitCode(nil) = %d, want 0", got)
+	if got := share.ExitCode(nil); got != 0 {
+		t.Fatalf("ExitCode(nil) = %d, want 0", got)
 	}
-	if got := shareExitCode(errors.New("transient dial error")); got != 1 {
-		t.Fatalf("shareExitCode(transient) = %d, want 1", got)
+	if got := share.ExitCode(errors.New("transient dial error")); got != 1 {
+		t.Fatalf("ExitCode(transient) = %d, want 1", got)
 	}
-	perm := permanentShare(errorf("could not claim blog.bobo.hogman"))
-	if !isPermanentShareError(perm) {
-		t.Fatal("expected isPermanentShareError(perm) = true")
+	perm := share.Permanent(errorf("could not claim blog.bobo.hogman"))
+	if !share.IsPermanent(perm) {
+		t.Fatal("expected IsPermanent(perm) = true")
 	}
-	if got := shareExitCode(perm); got != 0 {
-		t.Fatalf("shareExitCode(perm) = %d, want 0", got)
+	if got := share.ExitCode(perm); got != 0 {
+		t.Fatalf("ExitCode(perm) = %d, want 0", got)
 	}
 
 	statusCases := []struct {
@@ -224,8 +226,8 @@ func TestSharePermanentErrorClassification(t *testing.T) {
 		{http.StatusServiceUnavailable, false},
 	}
 	for _, tc := range statusCases {
-		if got := isPermanentNameStatus(tc.code); got != tc.want {
-			t.Fatalf("isPermanentNameStatus(%d) = %v, want %v", tc.code, got, tc.want)
+		if got := share.IsPermanentNameStatus(tc.code); got != tc.want {
+			t.Fatalf("IsPermanentNameStatus(%d) = %v, want %v", tc.code, got, tc.want)
 		}
 	}
 
@@ -245,8 +247,8 @@ func TestSharePermanentErrorClassification(t *testing.T) {
 		{"transient network timeout", true, "", errors.New("dial tcp: i/o timeout"), false},
 	}
 	for _, tc := range nodeCases {
-		if got := isPermanentNodeError(tc.hasAuthKey, tc.state, tc.err); got != tc.want {
-			t.Fatalf("isPermanentNodeError(%s) = %v, want %v", tc.name, got, tc.want)
+		if got := share.IsPermanentNodeError(tc.hasAuthKey, tc.state, tc.err); got != tc.want {
+			t.Fatalf("IsPermanentNodeError(%s) = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
@@ -262,8 +264,8 @@ func TestShareListState(t *testing.T) {
 		{false, false, "not running"},
 	}
 	for _, tc := range cases {
-		if got := shareListState(tc.running, tc.managed); got != tc.want {
-			t.Fatalf("shareListState(%v, %v) = %q, want %q", tc.running, tc.managed, got, tc.want)
+		if got := share.ListState(tc.running, tc.managed); got != tc.want {
+			t.Fatalf("ListState(%v, %v) = %q, want %q", tc.running, tc.managed, got, tc.want)
 		}
 	}
 }
@@ -275,7 +277,7 @@ func TestWaitShareBackgroundCleansUpOnErrorAndTimeout(t *testing.T) {
 	upDir := t.TempDir()
 	state.WriteShareStatus(upDir, "up", "")
 	stopped := false
-	if err := waitShareBackground(upDir, c, true, 0, 100*time.Millisecond, func() { stopped = true }); err != nil {
+	if err := share.WaitBackground(upDir, c, true, 0, 100*time.Millisecond, ui.Default(), func() { stopped = true }); err != nil {
 		t.Fatalf("expected nil on up status, got %v", err)
 	}
 	if stopped {
@@ -286,7 +288,7 @@ func TestWaitShareBackgroundCleansUpOnErrorAndTimeout(t *testing.T) {
 	errDir := t.TempDir()
 	state.WriteShareStatus(errDir, "error", "could not claim blog.bobo.hogman")
 	stopped = false
-	err := waitShareBackground(errDir, c, true, 0, 100*time.Millisecond, func() { stopped = true })
+	err := share.WaitBackground(errDir, c, true, 0, 100*time.Millisecond, ui.Default(), func() { stopped = true })
 	if err == nil || !strings.Contains(err.Error(), "could not claim") {
 		t.Fatalf("expected claim error, got %v", err)
 	}
@@ -298,7 +300,7 @@ func TestWaitShareBackgroundCleansUpOnErrorAndTimeout(t *testing.T) {
 	slowDir := t.TempDir()
 	state.WriteShareStatus(slowDir, "starting", "")
 	stopped = false
-	err = waitShareBackground(slowDir, c, true, 0, 50*time.Millisecond, func() { stopped = true })
+	err = share.WaitBackground(slowDir, c, true, 0, 50*time.Millisecond, ui.Default(), func() { stopped = true })
 	if err == nil || !strings.Contains(err.Error(), "did not come up in time") {
 		t.Fatalf("expected timeout error, got %v", err)
 	}
@@ -309,14 +311,14 @@ func TestWaitShareBackgroundCleansUpOnErrorAndTimeout(t *testing.T) {
 
 func TestFormatFreshShareCertErrorRateLimit(t *testing.T) {
 	// Wrapped *homeAPIError 429 with Retry-After -> shows verbatim message + human hint.
-	wrappedHourly := fmt.Errorf("certmagic: %w", dnsStepError{
-		err: &penapi.HomeAPIError{
+	wrappedHourly := fmt.Errorf("certmagic: %w", share.DNSStepError{
+		Err: &penapi.HomeAPIError{
 			Status:     http.StatusTooManyRequests,
 			Msg:        "too many new certificate names for this pen in the last hour",
 			RetryAfter: 45 * time.Minute,
 		},
 	})
-	got := formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", "bobo.pens.hogman.network", wrappedHourly, true).Error()
+	got := share.FormatFreshCertError("photos.bobo.pens.hogman.network", "photos", "bobo.pens.hogman.network", wrappedHourly, true).Error()
 	if !strings.Contains(got, "too many new certificate names for this pen in the last hour") {
 		t.Fatalf("missing verbatim message: %s", got)
 	}
@@ -333,7 +335,7 @@ func TestFormatFreshShareCertErrorRateLimit(t *testing.T) {
 		Msg:        "the network is busy; too many new certificate names in the last hour",
 		RetryAfter: 30 * time.Second,
 	}
-	got = formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", "bobo.pens.hogman.network", wrappedGlobal, true).Error()
+	got = share.FormatFreshCertError("photos.bobo.pens.hogman.network", "photos", "bobo.pens.hogman.network", wrappedGlobal, true).Error()
 	if !strings.Contains(got, "try again in about 1 minute") {
 		t.Fatalf("short retry hint wrong: %s", got)
 	}
@@ -344,19 +346,19 @@ func TestFormatFreshShareCertErrorRateLimit(t *testing.T) {
 		Msg:        "this pen's weekly limit on new certificate names is reached",
 		RetryAfter: 6 * 24 * time.Hour,
 	}
-	got = formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", "bobo.pens.hogman.network", wrappedWeekly, true).Error()
+	got = share.FormatFreshCertError("photos.bobo.pens.hogman.network", "photos", "bobo.pens.hogman.network", wrappedWeekly, true).Error()
 	if !strings.Contains(got, "try again in about 6 days") {
 		t.Fatalf("weekly retry hint wrong: %s", got)
 	}
 
 	// Non-429 error keeps original format when rollback succeeded.
-	got = formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", "bobo.pens.hogman.network", errors.New("dns timeout"), true).Error()
+	got = share.FormatFreshCertError("photos.bobo.pens.hogman.network", "photos", "bobo.pens.hogman.network", errors.New("dns timeout"), true).Error()
 	if !strings.Contains(got, "Fix the problem above") || !strings.Contains(got, "Nothing was left behind") {
 		t.Fatalf("non-429 error changed unexpectedly: %s", got)
 	}
 
 	// When rollback was unconfirmed, do not falsely claim nothing was left behind.
-	got = formatFreshShareCertError("photos.bobo.pens.hogman.network", "photos", "bobo.pens.hogman.network", errors.New("dns timeout"), false).Error()
+	got = share.FormatFreshCertError("photos.bobo.pens.hogman.network", "photos", "bobo.pens.hogman.network", errors.New("dns timeout"), false).Error()
 	if strings.Contains(got, "Nothing was left behind") || !strings.Contains(got, "Cleanup could not be fully confirmed") {
 		t.Fatalf("unconfirmed rollback message wrong: %s", got)
 	}
@@ -377,8 +379,8 @@ func TestShareTargetLocalAndLANPolicy(t *testing.T) {
 		"http://cooler-1.local:8080",
 	}
 	for _, in := range allowed {
-		if _, folder, err := shareTarget(in); err != nil || folder {
-			t.Errorf("shareTarget(%q) = folder=%v, err=%v; want allowed URL target", in, folder, err)
+		if _, folder, err := share.ParseTarget(in); err != nil || folder {
+			t.Errorf("ParseTarget(%q) = folder=%v, err=%v; want allowed URL target", in, folder, err)
 		}
 	}
 
@@ -396,19 +398,19 @@ func TestShareTargetLocalAndLANPolicy(t *testing.T) {
 		"http://[::1%25en0]:8080",
 	}
 	for _, in := range rejected {
-		if got, _, err := shareTarget(in); err == nil {
-			t.Errorf("shareTarget(%q) succeeded (%q); want rejection", in, got)
+		if got, _, err := share.ParseTarget(in); err == nil {
+			t.Errorf("ParseTarget(%q) succeeded (%q); want rejection", in, got)
 		}
 	}
 
-	// LAN target must also be accepted by shareHandler (D-27 Work LAN bridging).
-	if _, _, err := shareHandler(&state.ShareConfig{Name: "cooler-1", Zone: "z.hogman", Target: "http://192.168.1.40"}); err != nil {
-		t.Errorf("shareHandler rejected valid LAN target: %v", err)
+	// LAN target must also be accepted by NewHandler (D-27 Work LAN bridging).
+	if _, _, err := share.NewHandler(&state.ShareConfig{Name: "cooler-1", Zone: "z.hogman", Target: "http://192.168.1.40"}); err != nil {
+		t.Errorf("NewHandler rejected valid LAN target: %v", err)
 	}
-	// Public and metadata IPs persisted in share.json must be rejected by shareHandler.
+	// Public and metadata IPs persisted in share.json must be rejected by NewHandler.
 	for _, bad := range []string{"http://93.184.216.34:80", "http://169.254.169.254", "http://metadata.google.internal"} {
-		if _, _, err := shareHandler(&state.ShareConfig{Name: "x", Zone: "z.hogman", Target: bad}); err == nil {
-			t.Errorf("shareHandler(Target=%q) succeeded; want error", bad)
+		if _, _, err := share.NewHandler(&state.ShareConfig{Name: "x", Zone: "z.hogman", Target: bad}); err == nil {
+			t.Errorf("NewHandler(Target=%q) succeeded; want error", bad)
 		}
 	}
 }
@@ -416,7 +418,7 @@ func TestShareTargetLocalAndLANPolicy(t *testing.T) {
 func TestLocalOrLANDialContext(t *testing.T) {
 	// 1. Metadata IP literal is denied without dialing.
 	dialed := ""
-	dialFn := localOrLANDialContext(
+	dialFn := share.LocalOrLANDialContext(
 		func(context.Context, string) ([]net.IPAddr, error) {
 			t.Fatal("lookup should not run for IP literal")
 			return nil, nil
@@ -437,7 +439,7 @@ func TestLocalOrLANDialContext(t *testing.T) {
 	}
 
 	// 2. Hostname that resolves to a public IP (e.g. facebook.com / example.com) is denied.
-	dialFn = localOrLANDialContext(
+	dialFn = share.LocalOrLANDialContext(
 		func(context.Context, string) ([]net.IPAddr, error) {
 			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
 		},
@@ -451,7 +453,7 @@ func TestLocalOrLANDialContext(t *testing.T) {
 	}
 
 	// 3. Hostname that resolves to a cloud metadata IP is denied.
-	dialFn = localOrLANDialContext(
+	dialFn = share.LocalOrLANDialContext(
 		func(context.Context, string) ([]net.IPAddr, error) {
 			return []net.IPAddr{{IP: net.ParseIP("169.254.169.254")}}, nil
 		},
@@ -471,7 +473,7 @@ func TestLocalOrLANDialContext(t *testing.T) {
 	c1, c2 := net.Pipe()
 	defer c1.Close()
 	defer c2.Close()
-	dialFn = localOrLANDialContext(
+	dialFn = share.LocalOrLANDialContext(
 		func(context.Context, string) ([]net.IPAddr, error) {
 			t.Fatal("lookup should not run for IP literal")
 			return nil, nil
@@ -491,7 +493,7 @@ func TestLocalOrLANDialContext(t *testing.T) {
 
 	// 5. Hostname resolving to loopback or LAN IP is allowed and dialed by literal IP.
 	dialed = ""
-	dialFn = localOrLANDialContext(
+	dialFn = share.LocalOrLANDialContext(
 		func(context.Context, string) ([]net.IPAddr, error) {
 			return []net.IPAddr{{IP: net.ParseIP("10.0.1.25")}}, nil
 		},
@@ -506,12 +508,12 @@ func TestLocalOrLANDialContext(t *testing.T) {
 }
 
 func TestShareCertLogNotice(t *testing.T) {
-	got := formatShareCertLogNotice("blog.alpha.pens.example.com")
+	got := share.FormatCertLogNotice("blog.alpha.pens.example.com")
 	if !strings.Contains(got, "blog.alpha.pens.example.com") || !strings.Contains(got, "certificate logs") || strings.Contains(got, "Certificate Transparency") {
 		t.Fatalf("unexpected share cert log notice: %q", got)
 	}
-	if !strings.Contains(shareUsage, "certificate logs") {
-		t.Fatalf("shareUsage missing certificate logs warning")
+	if !strings.Contains(share.Usage, "certificate logs") {
+		t.Fatalf("share.Usage missing certificate logs warning")
 	}
 }
 
@@ -523,7 +525,7 @@ func TestShareForegroundFlagAndConflict(t *testing.T) {
 	if rc != 0 || !gotO.foreground || gotO.background {
 		t.Fatalf("share --foreground: rc=%d o=%+v", rc, gotO)
 	}
-	err := shareStart("blog", "3000", "", options{background: true, foreground: true})
+	err := share.Start("blog", "3000", "", share.StartOptions{Background: true, Foreground: true}, ui.Default(), ensureCanonicalBinary)
 	if err == nil || !strings.Contains(err.Error(), "cannot combine --background and --foreground") {
 		t.Fatalf("expected conflict error, got %v", err)
 	}
@@ -531,7 +533,7 @@ func TestShareForegroundFlagAndConflict(t *testing.T) {
 
 func TestFormatShareListTable(t *testing.T) {
 	var sb strings.Builder
-	formatShareListTable(&sb, []shareListItemJSON{
+	share.FormatListTable(&sb, []share.ListItem{
 		{
 			Name:   "mxlulu",
 			Zone:   "alpha-k32x.pens.example.com",
@@ -552,7 +554,7 @@ func TestFormatShareListTable(t *testing.T) {
 	}
 
 	sb.Reset()
-	formatShareListTable(&sb, []shareListItemJSON{
+	share.FormatListTable(&sb, []share.ListItem{
 		{
 			Name:   "media-hub",
 			Zone:   "ops.pens.example.com",
@@ -593,13 +595,13 @@ func TestFindShareFlexibleLookupAndStopZeroArgs(t *testing.T) {
 		"https://mxlulu.alpha-k32x.pens.example.com",
 		"https://mxlulu.alpha-k32x.pens.example.com/",
 	} {
-		got, err := findShare(query, "")
+		got, err := share.Find(query, "", ui.Default())
 		if err != nil || got != shareDir {
-			t.Fatalf("findShare(%q) = (%q, %v), want %q", query, got, err, shareDir)
+			t.Fatalf("share.Find(%q) = (%q, %v), want %q", query, got, err, shareDir)
 		}
 	}
 
-	if _, err := findShare("mxlulu.alpha", ""); err == nil || !strings.Contains(err.Error(), "hogman share stop mxlulu") {
+	if _, err := share.Find("mxlulu.alpha", "", ui.Default()); err == nil || !strings.Contains(err.Error(), "hogman share stop mxlulu") {
 		t.Fatalf("expected unknown share error to list active share stop command, got: %v", err)
 	}
 
@@ -651,8 +653,8 @@ func TestUndoFreshShare(t *testing.T) {
 		}
 	}
 	node := &closeCounter{}
-	if !undoFreshShare(hc, node, dir, &state.ShareConfig{Name: "hello", Zone: zone}) {
-		t.Fatal("expected undoFreshShare to report clean rollback")
+	if !share.UndoFresh(hc, node, dir, &state.ShareConfig{Name: "hello", Zone: zone}) {
+		t.Fatal("expected UndoFresh to report clean rollback")
 	}
 
 	want := map[string]bool{"DELETE /api/names/hello": false, "GET /api/me": false, "DELETE /api/devices/7": false}
