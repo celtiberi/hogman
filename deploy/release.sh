@@ -205,8 +205,8 @@ if [ "${NO_DEPLOY:-}" != 1 ]; then
         || { echo "SIDECAR_IMAGE_REF tag '$sidecar_tag' does not match release tag '$tag'" >&2; exit 1; }
       printf '\n### Sidecar container image (`linux/amd64`, `linux/arm64`)\n'
       printf -- '- `%s`\n' "$SIDECAR_IMAGE_REF"
-      printf -- '- Verify provenance: `gh attestation verify oci://%s@%s --repo %s`\n' \
-        "$sidecar_img" "$sidecar_dig" "$repo"
+      printf -- '- Verify provenance: `gh attestation verify oci://%s@%s --repo %s --signer-workflow %s/.github/workflows/release.yml`\n' \
+        "$sidecar_img" "$sidecar_dig" "$repo" "$repo"
     fi
     if [ -x "$REPO/deploy/changelog-fold.sh" ]; then
       notes="$(CHANGELOG_REPO="$REPO" "$REPO/deploy/changelog-fold.sh" --notes "$REF")"

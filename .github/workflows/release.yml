@@ -108,11 +108,13 @@ jobs:
           NO_DEPLOY=1 OUT_DIR="$RUNNER_TEMP/out" deploy/release.sh "$FULL"
           ls -l "$RUNNER_TEMP/out"
 
-      # Build and push ghcr.io/<owner>/hogman-sidecar from the exact already-attested
-      # Linux binaries packaged above (never recompiled in Docker, I-48).
-      # GHCR login stays active across push, OCI attestation push, and verify,
-      # then is cleared unconditionally by "Log out of GHCR".
-      - name: Build and push multi-arch sidecar image
+      # Build and push ghcr.io/<owner>/hogman-sidecar by digest only (no tags yet)
+      # from the exact already-attested Linux binaries packaged above (never
+      # recompiled in Docker, I-48). Version and :latest tags are applied only
+      # after Publish succeeds, so a failed attest/verify/publish never leaves
+      # :latest pointing at an unreleased image or blocks a re-run. GHCR login
+      # stays active until "Log out of GHCR" runs unconditionally at the end.
+      - name: Build and push multi-arch sidecar image (by digest)
         id: sidecar
         env:
           FULL: ${{ steps.pick.outputs.full }}
@@ -175,8 +177,9 @@ jobs:
             exit 1
           fi
 
-          # Push multi-arch manifest list (version tag + moving latest); provenance is
-          # attached below via Sigstore-signed actions/attest-build-provenance.
+          # Push multi-arch manifest list by digest only (no tags yet); provenance
+          # is attached below via Sigstore-signed actions/attest-build-provenance,
+          # and :$TAG + :latest are applied only after the GitHub Release publishes.
           meta="$RUNNER_TEMP/sidecar-meta.json"
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
@@ -185,19 +188,18 @@ jobs:
             --build-arg "VERSION=$VER" \
             --build-arg "REVISION=$FULL" \
             -f "$df" \
-            -t "$IMAGE:$TAG" \
-            -t "$IMAGE:latest" \
+            --output "type=image,name=$IMAGE,push-by-digest=true,name-canonical=true,push=true" \
             --metadata-file "$meta" \
-            --push "$ctx"
+            "$ctx"
 
           digest="$(jq -r '.["containerimage.digest"] // empty' "$meta")"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] \
             || { echo "unexpected pushed sidecar digest: $digest" >&2; exit 1; }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          echo "pushed $IMAGE:$TAG@$digest"
+          echo "pushed untagged multi-arch index $IMAGE@$digest"
 
       # SLSA build provenance for the pushed multi-arch manifest list (check with
-      # `gh attestation verify oci://ghcr.io/celtiberi/hogman-sidecar@sha256:... --repo celtiberi/hogman`).
+      # `gh attestation verify oci://ghcr.io/celtiberi/hogman-sidecar@sha256:... --repo celtiberi/hogman --signer-workflow celtiberi/hogman/.github/workflows/release.yml`).
       # Uses ~/.docker/config.json from the GHCR login above to attach the OCI referrer.
       - name: Attest sidecar image
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -245,10 +247,6 @@ jobs:
           [ "$got_ver" = "$VER" ] || { echo "pulled sidecar --version = $ver_out, want $VER" >&2; exit 1; }
           echo "verified pushed $IMAGE@$DIGEST (provenance + OCI bundle OK, amd64+arm64, UID 65532, no shell, $ver_out)"
 
-      - name: Log out of GHCR
-        if: always()
-        run: docker logout ghcr.io >/dev/null 2>&1 || true
-
       # Provenance for the files people actually download: which workflow,
       # commit and runner packaged them. Check with
       # `gh attestation verify FILE --repo celtiberi/hogman`.
@@ -265,3 +263,26 @@ jobs:
         run: |
           set -euo pipefail
           PUBLISH_FROM="$RUNNER_TEMP/out" deploy/release.sh "$FULL"
+
+      # Only expose :$TAG and :latest after the GitHub Release is live.
+      - name: Tag published sidecar image
+        env:
+          TAG: ${{ steps.pick.outputs.tag }}
+          IMAGE: ${{ steps.pick.outputs.image }}
+          DIGEST: ${{ steps.sidecar.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            -t "$IMAGE:$TAG" \
+            -t "$IMAGE:latest" \
+            "$IMAGE@$DIGEST"
+          for ref in "$IMAGE:$TAG" "$IMAGE:latest"; do
+            got="$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "$ref" | jq -r .)"
+            [ "$got" = "$DIGEST" ] \
+              || { echo "$ref resolved to $got, expected $DIGEST" >&2; exit 1; }
+          done
+          echo "tagged $IMAGE:$TAG and $IMAGE:latest -> $DIGEST"
+
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io >/dev/null 2>&1 || true

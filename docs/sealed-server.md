@@ -27,7 +27,9 @@ Run any Dockerized web app inside a container with **zero internet access** (`ne
 Each [GitHub Release](https://github.com/celtiberi/hogman/releases) publishes a multi-arch (`linux/amd64` + `linux/arm64`) scratch image built from the release's verified binaries and records its immutable digest (`ghcr.io/celtiberi/hogman-sidecar:v<ver>@sha256:<digest>`). Verify its Sigstore build provenance and pin by version tag and digest:
 
 ```sh
-gh attestation verify oci://ghcr.io/celtiberi/hogman-sidecar@sha256:<digest> --repo celtiberi/hogman
+gh attestation verify oci://ghcr.io/celtiberi/hogman-sidecar@sha256:<digest> \
+  --repo celtiberi/hogman \
+  --signer-workflow celtiberi/hogman/.github/workflows/release.yml
 export HOGMAN_SIDECAR_IMAGE="ghcr.io/celtiberi/hogman-sidecar:v<ver>@sha256:<digest>"
 ```
 
