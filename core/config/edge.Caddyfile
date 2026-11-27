@@ -36,6 +36,16 @@ http://{$PUBLIC_HOST} {
 		}
 		file_server
 	}
+	handle /start.ps1 {
+		root * /srv/join-page
+		rewrite * /start.ps1
+		header {
+			Content-Type "text/plain; charset=utf-8"
+			X-Content-Type-Options nosniff
+			Cache-Control no-store
+		}
+		file_server
+	}
 	# The page an invite link opens, and the join tool downloads.
 	handle /join {
 		root * /srv/join-page

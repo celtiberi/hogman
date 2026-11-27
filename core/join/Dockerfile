@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     mkdir /out && \
     for t in Darwin-arm64:darwin/arm64 Darwin-x86_64:darwin/amd64 \
              Linux-x86_64:linux/amd64 Linux-aarch64:linux/arm64 \
-             windows-amd64.exe:windows/amd64; do \
+             windows-amd64.exe:windows/amd64 windows-arm64.exe:windows/arm64; do \
       name=${t%%:*}; plat=${t#*:}; \
       GOOS=${plat%/*} GOARCH=${plat#*/} CGO_ENABLED=0 \
         go build -ldflags="-s -w -X main.version=$VERSION" -o /out/hogman-$name . || exit 1; \

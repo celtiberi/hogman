@@ -53,6 +53,25 @@ function applyWorkTheme(doc, zone, forShare) {
     Object.assign(doc.createElement('code'), { textContent: 'hogman' }),
     doc.createTextNode(', or pause the VPN while visiting pen dashboards in Safari.')
   );
+  if ($('win-vpn-note')) {
+    $('win-vpn-note').replaceChildren(
+      Object.assign(doc.createElement('strong'), { textContent: 'Using a corporate VPN (or WireGuard, ProtonVPN, Mullvad)? ' }),
+      doc.createTextNode('Use the '),
+      Object.assign(doc.createElement('a'), {
+        href: CHROME_EXTENSION_URL,
+        target: '_blank',
+        rel: 'noopener noreferrer',
+        textContent: 'Hogman browser extension',
+      }),
+      doc.createTextNode(' (open its popup and turn on '),
+      Object.assign(doc.createElement('code'), { textContent: zone }),
+      doc.createTextNode('; Firefox: coming soon), or set Firefox\u2019s built-in '),
+      Object.assign(doc.createElement('em'), { textContent: 'Automatic proxy configuration URL' }),
+      doc.createTextNode(' to the address printed by '),
+      Object.assign(doc.createElement('code'), { textContent: 'hogman' }),
+      doc.createTextNode('.')
+    );
+  }
 
   $('foot-tagline').textContent = 'Hogman for Work \u00b7 Private HTTPS access';
   replaceLinks(doc, $('foot-links'), [
@@ -107,37 +126,66 @@ export function initJoinPage({
   // Phones can't run the join command. Say so plainly instead of showing it.
   if (/iPhone|iPad|iPod|Android/i.test(nav.userAgent)) {
     err('Phones can\'t join yet: the Hogman phone app is coming soon. ' +
-        'For now, open this link on a macOS or Linux computer.');
+        'For now, open this link on a macOS, Linux, or Windows computer.');
     return Promise.resolve();
   }
 
   const { kind, forShare, cleanLink } = parsed;
   const host = loc.host;
-  let { startCmd: unixCmd, manualCmd: longCmd } = buildJoinCommands({ host, cleanLink, forShare, isWork: false });
+  let isWorkTheme = false;
+  let activeOS = /Windows/.test(nav.userAgent) ? 'win' : 'unix';
+  let {
+    startCmd: unixCmd,
+    manualCmd: longCmd,
+    winStartCmd,
+    winManualCmd,
+  } = buildJoinCommands({ host, cleanLink, forShare, isWork: false });
   $('cmd').textContent = unixCmd;
   $('cmd-manual').textContent = longCmd;
+  if ($('win-cmd')) $('win-cmd').textContent = winStartCmd;
+  if ($('win-cmd-manual')) $('win-cmd-manual').textContent = winManualCmd;
   $('manual').hidden = forShare;
+  if ($('win-manual')) $('win-manual').hidden = forShare;
   // Sharing doesn't need browser proxy setup or VPN coexistence steps.
   $('proxy-note').hidden = forShare;
   $('vpn-note').hidden = forShare;
+  if ($('win-proxy-note')) $('win-proxy-note').hidden = forShare;
+  if ($('win-vpn-note')) $('win-vpn-note').hidden = forShare;
   if (forShare) {
     $('expect-head').textContent = 'What to expect on macOS';
-    $('lead').textContent =
-      'Copy this into a terminal on the computer hosting your app or folder. It downloads hogman (no other software needed):';
+    if ($('win-expect-head')) $('win-expect-head').textContent = 'What to expect on Windows';
   }
 
+  const updateLead = () => {
+    if (forShare) {
+      if (isWorkTheme) {
+        $('lead').textContent = 'Run this command on the on-site computer or bridge machine. It downloads hogman and bridges your LAN controller or internal web app over HTTPS:';
+      } else if (activeOS === 'win') {
+        $('lead').textContent = 'Copy this into PowerShell on the Windows computer hosting your app or folder. It downloads hogman (no other software needed):';
+      } else {
+        $('lead').textContent = 'Copy this into a terminal on the computer hosting your app or folder. It downloads hogman (no other software needed):';
+      }
+      return;
+    }
+    $('lead').textContent = activeOS === 'win'
+      ? 'Open PowerShell on the Windows computer you want to join, and paste this:'
+      : 'Open Terminal on the computer you want to join, and paste this:';
+  };
+
   const show = os => {
-    const isWin = os === 'win';
+    activeOS = os === 'win' ? 'win' : 'unix';
+    const isWin = activeOS === 'win';
     $('unix-panel').hidden = isWin;
     $('win-panel').hidden = !isWin;
-    $('lead').hidden = isWin;
-    $('join-details').hidden = isWin || forShare;
-    $('share-details').hidden = isWin || !forShare;
-    $('sums-line').hidden = isWin;
-    doc.querySelectorAll('.tabs button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.os === os)));
+    $('lead').hidden = false;
+    $('join-details').hidden = forShare;
+    $('share-details').hidden = !forShare;
+    $('sums-line').hidden = false;
+    updateLead();
+    doc.querySelectorAll('.tabs button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.os === activeOS)));
   };
   doc.querySelectorAll('.tabs button').forEach(b => { b.onclick = () => show(b.dataset.os); });
-  show(/Windows/.test(nav.userAgent) ? 'win' : 'unix');
+  show(activeOS);
 
   $('copy').onclick = async () => {
     try {
@@ -147,6 +195,16 @@ export function initJoinPage({
       $('copied').textContent = 'Copy failed — select the command above.';
     }
   };
+  if ($('win-copy')) {
+    $('win-copy').onclick = async () => {
+      try {
+        await nav.clipboard.writeText(winStartCmd);
+        if ($('win-copied')) $('win-copied').textContent = 'Copied.';
+      } catch (_) {
+        if ($('win-copied')) $('win-copied').textContent = 'Copy failed — select the command above.';
+      }
+    };
+  }
   $('redeem').textContent = kind === 'invite' ? 'asks you to pick your name, validates' : 'verifies';
 
   return fetchFn('/hogman/v1/network').then(r => {
@@ -155,18 +213,29 @@ export function initJoinPage({
   }).then(n => {
     if (!n || !n.zone) throw new Error('missing zone');
     const isWork = n.theme === 'work';
+    isWorkTheme = isWork;
     doc.querySelectorAll('.zone').forEach(el => { el.textContent = '.' + n.zone; });
     if ($('proxy-zone')) $('proxy-zone').textContent = n.zone;
     if ($('vpn-zone')) $('vpn-zone').textContent = n.zone;
+    if ($('win-proxy-zone')) $('win-proxy-zone').textContent = n.zone;
+    if ($('win-vpn-zone')) $('win-vpn-zone').textContent = n.zone;
     $('title').textContent = (forShare ? 'Share into ' : 'Join ') + n.zone;
     if (isWork) {
       applyWorkTheme(doc, n.zone, forShare);
       if (forShare) {
-        ({ startCmd: unixCmd, manualCmd: longCmd } = buildJoinCommands({ host, cleanLink, forShare, isWork: true }));
+        ({
+          startCmd: unixCmd,
+          manualCmd: longCmd,
+          winStartCmd,
+          winManualCmd,
+        } = buildJoinCommands({ host, cleanLink, forShare, isWork: true }));
         $('cmd').textContent = unixCmd;
         $('cmd-manual').textContent = longCmd;
+        if ($('win-cmd')) $('win-cmd').textContent = winStartCmd;
+        if ($('win-cmd-manual')) $('win-cmd-manual').textContent = winManualCmd;
       }
     }
+    updateLead();
     $('what').textContent = kind === 'invite'
       ? (isWork ? 'You have been invited to join this private network. This link works once.' : 'You have been invited. This link works once.')
       : kind === 'share'

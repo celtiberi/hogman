@@ -84,6 +84,8 @@ func PlatformBinaryName(goos, goarch string) (string, error) {
 		return "hogman-Linux-aarch64", nil
 	case "windows/amd64":
 		return "hogman-windows-amd64.exe", nil
+	case "windows/arm64":
+		return "hogman-windows-arm64.exe", nil
 	default:
 		return "", link.Errorf("automatic updates are not built for %s/%s", goos, goarch)
 	}

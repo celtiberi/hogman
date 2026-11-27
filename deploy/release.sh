@@ -49,6 +49,7 @@ cli_bins=(
   hogman-Linux-x86_64
   hogman-Linux-aarch64
   hogman-windows-amd64.exe
+  hogman-windows-arm64.exe
 )
 
 package() {
