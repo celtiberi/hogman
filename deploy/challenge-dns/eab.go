@@ -21,7 +21,9 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
-const maxPublicCARespBytes = 64 << 10
+const (
+	maxPublicCARespBytes = 64 << 10
+)
 
 type EABMinter interface {
 	Mint(ctx context.Context) (keyID, hmacB64URL string, err error)

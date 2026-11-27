@@ -10,7 +10,6 @@ import (
 	"mime"
 	"net"
 	"net/http"
-	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -233,40 +232,6 @@ func identifyDirect(s *registrar.Service, resolvePeer func(ctx context.Context, 
 	})
 }
 
-// identify resolves the calling device from its mesh address. In a pen, the
-// portal's Caddy reaches it only over the mounted Unix socket (or loopback TCP
-// in dev/tests) and reports the caller in X-Forwarded-For.
-func identify(s *registrar.Service, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		if ip := net.ParseIP(host); !viaSocket(r.Context()) && (ip == nil || !ip.IsLoopback()) {
-			writeError(s.Logger(), w, httpForbidden("mesh API is only reachable through the portal"))
-			return
-		}
-		xff := r.Header.Get("X-Forwarded-For")
-		parts := strings.Split(xff, ",")
-		src := strings.TrimSpace(parts[len(parts)-1])
-		if src == "" || net.ParseIP(src) == nil {
-			writeError(s.Logger(), w, httpForbidden("this device is not enrolled in the network"))
-			return
-		}
-		m, d, err := s.VerifyLiveCaller(r.Context(), src)
-		if err != nil {
-			if errors.Is(err, registrar.ErrNotFound) {
-				writeError(s.Logger(), w, httpForbidden("this device is not enrolled in the network"))
-				return
-			}
-			writeError(s.Logger(), w, err)
-			return
-		}
-		if m.Status != "active" {
-			writeError(s.Logger(), w, httpForbidden("membership %s", m.Status))
-			return
-		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, caller{member: m, device: d})))
-	})
-}
-
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
@@ -384,47 +349,4 @@ func writeError(logger *slog.Logger, w http.ResponseWriter, err error) {
 	}
 	logger.Error("internal error", "err", err)
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-}
-
-// The mesh API trusts X-Forwarded-For to say who is asking, so who can reach
-// it matters (audit H2). In a pen it listens only on a Unix socket in a folder
-// mounted into the registrar and the portal and nothing else: other services
-// sharing the network namespace (core-mesh) have no way to it, and the kernel
-// enforces that. MESH_ADDR "unix:/path" selects it; a host:port (for
-// development and tests only) listens on loopback TCP instead.
-type viaSocketKey struct{}
-
-// MarkSocketConn tags connections accepted over a Unix domain socket so the
-// legacy mesh API trusts X-Forwarded-For only on mounted socket or loopback peers.
-func MarkSocketConn(ctx context.Context, c net.Conn) context.Context {
-	if _, ok := c.(*net.UnixConn); ok {
-		return context.WithValue(ctx, viaSocketKey{}, true)
-	}
-	return ctx
-}
-
-func viaSocket(ctx context.Context) bool {
-	v, _ := ctx.Value(viaSocketKey{}).(bool)
-	return v
-}
-
-// ListenMesh binds either a Unix domain socket (mode 0600, removing stale socket)
-// for "unix:<path>" or a TCP listener otherwise.
-func ListenMesh(addr string) (net.Listener, error) {
-	path, ok := strings.CutPrefix(addr, "unix:")
-	if !ok {
-		return net.Listen("tcp", addr)
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	ln, err := net.Listen("unix", path)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		ln.Close()
-		return nil, err
-	}
-	return ln, nil
 }

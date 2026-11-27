@@ -73,13 +73,6 @@ type caller struct {
 
 func (c caller) actor() registrar.Actor { return registrar.Actor{Member: c.member} }
 
-// MeshHandler is the legacy IP-only member and admin API, kept strictly behind
-// REGISTRAR_LEGACY_MESH_SOCKET=1 for legacy test/migration harnesses.
-func MeshHandler(s *registrar.Service) http.Handler {
-	api := &meshAPI{svc: s, logger: s.Logger()}
-	return recoverAndLog(api.logger, requireSameOriginAndJSON(s.Zone(), identify(s, api.routes())))
-}
-
 // MeshHandlerDirect is the member and admin API served directly on the
 // embedded tsnet listener (https://home.<zone>/api/). Caller identity comes
 // strictly from the WireGuard connection's RemoteAddr verified via tsnet WhoIs

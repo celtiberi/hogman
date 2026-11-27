@@ -91,7 +91,7 @@ func TestMeshACMEEndpoints(t *testing.T) {
 	_, aliceOtherSrv := e.addDevice(t, "alice", "server", "alice-srv2", "100.64.0.12", "")
 	_, bobSrv := e.addDevice(t, "bob", "server", "bob-srv", "100.64.0.13", "")
 
-	h := api.MeshHandler(e.svc)
+	h := e.meshHandler(e.svc)
 	jsonHdr := map[string]string{"Content-Type": "application/json"}
 	validVal := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
@@ -113,7 +113,7 @@ func TestMeshACMEEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.svc = svcWithACME
-	h = api.MeshHandler(e.svc)
+	h = e.meshHandler(e.svc)
 
 	rec = doMeshReq(h, "POST", "/api/acme/txt", "100.64.0.11", `{"name":"photos","value":"`+validVal+`"}`, jsonHdr)
 	if rec.Code != http.StatusCreated {
@@ -230,7 +230,7 @@ func TestMeshACMERateLimitPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := api.MeshHandler(svcWithACME)
+	h := e.meshHandler(svcWithACME)
 	jsonHdr := map[string]string{"Content-Type": "application/json"}
 	validVal := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 

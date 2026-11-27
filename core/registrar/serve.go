@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,45 +18,26 @@ import (
 
 	"hogman/registrar/internal/acme"
 	"hogman/registrar/internal/api"
-	"hogman/registrar/internal/dns"
 	"hogman/registrar/internal/registrar"
 )
 
 func healthCmd() error {
-	if strings.TrimSpace(os.Getenv("TSNET_STATE_DIR")) != "" {
-		hc := &http.Client{Timeout: 3 * time.Second}
-		resp, err := hc.Get("http://" + embeddedHealthAddr + "/healthz")
-		if err != nil {
-			return fmt.Errorf("embedded mesh health: %w", err)
-		}
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("embedded mesh health: HTTP %d", resp.StatusCode)
-		}
-		pubAddr := env("PUBLIC_ADDR", ":8081")
-		if strings.HasPrefix(pubAddr, ":") {
-			pubAddr = "127.0.0.1" + pubAddr
-		}
-		conn, err := net.DialTimeout("tcp", pubAddr, 2*time.Second)
-		if err != nil {
-			return fmt.Errorf("public API %s: %w", pubAddr, err)
-		}
-		_ = conn.Close()
-		return nil
-	}
-	if homeTLSDir := strings.TrimSpace(os.Getenv("HOME_TLS_DIR")); homeTLSDir != "" {
-		if err := acme.VerifyHomeTLS(homeTLSDir); err != nil {
-			return err
-		}
-	}
-	meshAddr := env("MESH_ADDR", "127.0.0.1:8082")
-	netw, addr := "tcp", meshAddr
-	if sock, ok := strings.CutPrefix(meshAddr, "unix:"); ok {
-		netw, addr = "unix", sock
-	}
-	conn, err := net.DialTimeout(netw, addr, 2*time.Second)
+	hc := &http.Client{Timeout: 3 * time.Second}
+	resp, err := hc.Get("http://" + embeddedHealthAddr + "/healthz")
 	if err != nil {
-		return fmt.Errorf("mesh API %s: %w", meshAddr, err)
+		return fmt.Errorf("embedded mesh health: %w", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("embedded mesh health: HTTP %d", resp.StatusCode)
+	}
+	pubAddr := env("PUBLIC_ADDR", ":8081")
+	if strings.HasPrefix(pubAddr, ":") {
+		pubAddr = "127.0.0.1" + pubAddr
+	}
+	conn, err := net.DialTimeout("tcp", pubAddr, 2*time.Second)
+	if err != nil {
+		return fmt.Errorf("public API %s: %w", pubAddr, err)
 	}
 	_ = conn.Close()
 	return nil
@@ -181,28 +161,9 @@ func serve(s *registrar.Service, logger *slog.Logger) {
 		s.WaitBackground(shut)
 	}()
 
-	tsnetStateDir := strings.TrimSpace(os.Getenv("TSNET_STATE_DIR"))
-	legacyMeshAddr := strings.TrimSpace(os.Getenv("MESH_ADDR"))
-	legacySocket, err := validateServeMode(tsnetStateDir, os.Getenv("REGISTRAR_LEGACY_MESH_SOCKET"), legacyMeshAddr)
+	tsnetStateDir, err := requireTsnetStateDir(os.Getenv("TSNET_STATE_DIR"))
 	if err != nil {
 		log.Fatal(err)
-	}
-	if legacySocket {
-		logger.Warn("REGISTRAR_LEGACY_MESH_SOCKET=1 enabled (test/migration only; trusting X-Forwarded-For)", "addr", legacyMeshAddr)
-		if dnsAddr := env("DNS_ADDR", ":53"); dnsAddr != "" && dnsAddr != "off" {
-			coreV4, err := netip.ParseAddr(strings.TrimSpace(s.CoreIP()))
-			if err != nil || !coreV4.Is4() {
-				log.Fatalf("dns: invalid CORE_MESH_IP %q", s.CoreIP())
-			}
-			dnsSrv, err := dns.NewServer(s.Zone(), coreV4, s)
-			if err != nil {
-				log.Fatalf("dns: %v", err)
-			}
-			if err := dnsSrv.Start(ctx, dnsAddr); err != nil {
-				log.Fatalf("dns on %s: %v", dnsAddr, err)
-			}
-			logger.Info("dns listening", "addr", dnsAddr, "zone", s.Zone())
-		}
 	}
 
 	var homeMgr *acme.HomeCertManager
@@ -219,23 +180,19 @@ func serve(s *registrar.Service, logger *slog.Logger) {
 	// and start DNS + /healthz (returning 503 not-ready) BEFORE initial Headscale
 	// Sync(), so s.CoreIP() is populated and ./hogman up can read mesh-ip,
 	// while the :443 portal stays closed until Sync() completes.
-	var em *embeddedMesh
-	if tsnetStateDir != "" {
-		controlURL := env("TSNET_CONTROL_URL", "https://"+s.PublicHost())
-		hostname := env("TSNET_HOSTNAME", "core")
-		authKeyFile := env("TSNET_AUTH_KEY_FILE", filepath.Join(tsnetStateDir, ".authkey"))
-		portalDir := env("PORTAL_DIR", "/srv/portal")
-		var err error
-		em, err = startEmbeddedMesh(ctx, s, homeMgr, tsnetStateDir, controlURL, hostname, authKeyFile, portalDir, logger)
-		if err != nil {
-			log.Fatalf("embedded mesh: %v", err)
-		}
-		defer func() {
-			shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			em.Shutdown(shut)
-		}()
+	controlURL := env("TSNET_CONTROL_URL", "https://"+s.PublicHost())
+	hostname := env("TSNET_HOSTNAME", "core")
+	authKeyFile := env("TSNET_AUTH_KEY_FILE", filepath.Join(tsnetStateDir, ".authkey"))
+	portalDir := env("PORTAL_DIR", "/srv/portal")
+	em, err := startEmbeddedMesh(ctx, s, homeMgr, tsnetStateDir, controlURL, hostname, authKeyFile, portalDir, logger)
+	if err != nil {
+		log.Fatalf("embedded mesh: %v", err)
 	}
+	defer func() {
+		shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		em.Shutdown(shut)
+	}()
 
 	// Wait for Headscale, backfill node_key/machine_key on existing rows, and
 	// take control of policy before serving HTTP (capped backoff: 1s -> 5s).
@@ -245,10 +202,8 @@ func serve(s *registrar.Service, logger *slog.Logger) {
 
 	// Phase 2: now that initial Sync() succeeded, open https://home.<zone>:443
 	// and flip /healthz to ready.
-	if em != nil {
-		if err := em.StartPortal(ctx); err != nil {
-			log.Fatalf("embedded mesh portal: %v", err)
-		}
+	if err := em.StartPortal(ctx); err != nil {
+		log.Fatalf("embedded mesh portal: %v", err)
 	}
 
 	go runSyncLoop(ctx, s, logger)
@@ -266,33 +221,12 @@ func serve(s *registrar.Service, logger *slog.Logger) {
 		}
 	}()
 
-	var mesh *http.Server
-	if legacySocket {
-		mesh = newHTTPServer(legacyMeshAddr, api.MeshHandler(s))
-		mesh.ConnContext = api.MarkSocketConn
-		ln, err := api.ListenMesh(mesh.Addr)
-		if err != nil {
-			log.Fatal(err)
-		}
-		go func() {
-			logger.Info("legacy mesh API listening", "addr", mesh.Addr)
-			if err := mesh.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Fatal(err)
-			}
-		}()
-	}
-
 	<-ctx.Done()
 	// Phase 1: stop accepting new HTTP requests and drain active handlers while
 	// workerCtx is still alive.
 	httpShut, httpCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = pub.Shutdown(httpShut)
-	if mesh != nil {
-		_ = mesh.Shutdown(httpShut)
-	}
-	if em != nil {
-		em.Shutdown(httpShut)
-	}
+	em.Shutdown(httpShut)
 	httpCancel()
 
 	// Phase 2: freeze new background spawns, then give already-accepted workers

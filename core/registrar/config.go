@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"log/slog"
 	"os"
@@ -79,32 +78,20 @@ func parseCSV(raw string) []string {
 	return out
 }
 
-// validateServeMode enforces that production serve requires TSNET_STATE_DIR
-// unless explicitly configured for legacy Unix-socket test/migration mode.
-func validateServeMode(tsnetStateDir, legacyFlag, meshAddr string) (legacy bool, err error) {
+// requireTsnetStateDir enforces that serve runs with an embedded tsnet state
+// directory (fail closed when unset).
+func requireTsnetStateDir(tsnetStateDir string) (string, error) {
 	tsnetStateDir = strings.TrimSpace(tsnetStateDir)
-	legacy = strings.TrimSpace(legacyFlag) == "1"
-	meshAddr = strings.TrimSpace(meshAddr)
-	if tsnetStateDir == "" && !legacy {
-		return false, errors.New("TSNET_STATE_DIR is required (set REGISTRAR_LEGACY_MESH_SOCKET=1 only for legacy test/migration harnesses)")
+	if tsnetStateDir == "" {
+		return "", errors.New("TSNET_STATE_DIR is required")
 	}
-	if tsnetStateDir != "" && legacy {
-		return false, errors.New("TSNET_STATE_DIR and REGISTRAR_LEGACY_MESH_SOCKET=1 are mutually exclusive")
-	}
-	if legacy {
-		sock, ok := strings.CutPrefix(meshAddr, "unix:")
-		if !ok || strings.TrimSpace(sock) == "" {
-			return false, fmt.Errorf("REGISTRAR_LEGACY_MESH_SOCKET=1 requires MESH_ADDR starting with unix:<path> (got %q)", meshAddr)
-		}
-	}
-	return legacy, nil
+	return tsnetStateDir, nil
 }
 
 func loadHomeCertConfig(s *registrar.Service, homeTLSDir string, logger *slog.Logger) acme.HomeConfig {
 	return acme.HomeConfig{
 		Zone:               s.Zone(),
 		HomeTLSDir:         homeTLSDir,
-		CaddyAdminSocket:   strings.TrimSpace(os.Getenv("CADDY_ADMIN_SOCKET")),
 		StorageDir:         env("ACME_STORAGE_DIR", "/var/lib/registrar/acme"),
 		PrimaryCA:          strings.TrimSpace(os.Getenv("ACME_CA_URL")),
 		FallbackCA:         strings.TrimSpace(os.Getenv("ACME_FALLBACK_CA_URL")),
@@ -120,16 +107,13 @@ func loadHomeCertConfig(s *registrar.Service, homeTLSDir string, logger *slog.Lo
 }
 
 func setup() (*registrar.Service, func() error) {
-	var coreIP string
-	if tsDir := strings.TrimSpace(os.Getenv("TSNET_STATE_DIR")); tsDir != "" {
-		coreIP = strings.TrimSpace(os.Getenv("CORE_MESH_IP"))
-		if coreIP == "" {
+	coreIP := strings.TrimSpace(os.Getenv("CORE_MESH_IP"))
+	if coreIP == "" {
+		if tsDir := strings.TrimSpace(os.Getenv("TSNET_STATE_DIR")); tsDir != "" {
 			if raw, err := os.ReadFile(filepath.Join(tsDir, "mesh-ip")); err == nil {
 				coreIP = strings.TrimSpace(string(raw))
 			}
 		}
-	} else {
-		coreIP = mustEnv("CORE_MESH_IP")
 	}
 	var acmeBackend acme.Backend
 	if chURL := strings.TrimSpace(os.Getenv("CHALLENGE_DNS_URL")); chURL != "" {
