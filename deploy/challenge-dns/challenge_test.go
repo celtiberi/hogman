@@ -222,9 +222,9 @@ func TestHourlyCapAndRollingWindow(t *testing.T) {
 
 func TestGlobalHourlyCapAcrossPens(t *testing.T) {
 	s, now := newTestStore(t)
-	s.hourlyCapNames = 3
-	s.capNames = 10
-	s.globalHourlyCapNames = 4
+	s.caps.HourlyCap = 3
+	s.caps.WeeklyCap = 10
+	s.caps.GlobalHourlyCap = 4
 	a, _ := mustCred(t, s, "pen", penA)
 	b, _ := mustCred(t, s, "pen", penB)
 	host, _ := mustCred(t, s, "host", "")
@@ -269,10 +269,10 @@ func TestGlobalHourlyCapAcrossPens(t *testing.T) {
 
 func TestGlobalSoftHardReservedQuietPenFloor(t *testing.T) {
 	s, now := newTestStore(t)
-	s.hourlyCapNames = 4
-	s.capNames = 10
-	s.globalHourlyCapNames = 4
-	s.globalHardHourlyCapNames = 6
+	s.caps.HourlyCap = 4
+	s.caps.WeeklyCap = 10
+	s.caps.GlobalHourlyCap = 4
+	s.caps.GlobalHardHourlyCap = 6
 	a, _ := mustCred(t, s, "pen", penA)
 	b, _ := mustCred(t, s, "pen", penB)
 	c, _ := mustCred(t, s, "pen", "penc-quiet")
@@ -335,46 +335,8 @@ func TestGlobalSoftHardReservedQuietPenFloor(t *testing.T) {
 }
 
 func TestCapsOverrideAndParse(t *testing.T) {
-	h, w, g, gh, err := parseCapsFromEnv("", "", "", "")
-	if err != nil || h != defaultHourlyCap || w != defaultCapNames || g != defaultGlobalHourlyCap || gh != defaultGlobalHardHourlyCap {
-		t.Fatalf("defaults = (%d,%d,%d,%d,%v), want (%d,%d,%d,%d,nil)",
-			h, w, g, gh, err, defaultHourlyCap, defaultCapNames, defaultGlobalHourlyCap, defaultGlobalHardHourlyCap)
-	}
-	h, w, g, gh, err = parseCapsFromEnv("3", "12", "30", "45")
-	if err != nil || h != 3 || w != 12 || g != 30 || gh != 45 {
-		t.Fatalf("overrides = (%d,%d,%d,%d,%v), want (3,12,30,45,nil)", h, w, g, gh, err)
-	}
-	// Setting only CDNS_WEEKLY_CAP below the default hourly cap clamps hourly down cleanly.
-	h, w, g, gh, err = parseCapsFromEnv("", "3", "", "")
-	if err != nil || h != 3 || w != 3 || g != defaultGlobalHourlyCap || gh != defaultGlobalHardHourlyCap {
-		t.Fatalf("weekly-only clamp = (%d,%d,%d,%d,%v), want (3,3,%d,%d,nil)",
-			h, w, g, gh, err, defaultGlobalHourlyCap, defaultGlobalHardHourlyCap)
-	}
-	// Raising CDNS_GLOBAL_HOURLY_CAP above default hard cap without setting hard lifts hard to match.
-	h, w, g, gh, err = parseCapsFromEnv("", "", "150", "")
-	if err != nil || h != defaultHourlyCap || w != defaultCapNames || g != 150 || gh != 150 {
-		t.Fatalf("soft-above-default-hard = (%d,%d,%d,%d,%v), want (5,20,150,150,nil)", h, w, g, gh, err)
-	}
-	for _, tc := range []struct {
-		name, h, w, g, gh string
-	}{
-		{"hourly > weekly", "6", "5", "40", "60"},
-		{"global < hourly", "5", "20", "4", "60"},
-		{"hard < soft", "5", "20", "50", "40"},
-		{"zero hourly", "0", "20", "40", "60"},
-		{"neg weekly", "5", "-1", "40", "60"},
-		{"huge weekly", "5", "1001", "40", "60"},
-		{"bad global", "5", "20", "10001", "10001"},
-		{"bad hard", "5", "20", "40", "10001"},
-		{"non-int", "abc", "20", "40", "60"},
-	} {
-		if _, _, _, _, err := parseCapsFromEnv(tc.h, tc.w, tc.g, tc.gh); err == nil {
-			t.Errorf("parseCapsFromEnv(%s: %q,%q,%q,%q) succeeded, want error", tc.name, tc.h, tc.w, tc.g, tc.gh)
-		}
-	}
-
 	s, _ := newTestStore(t)
-	s.capNames = 2
+	s.caps.WeeklyCap = 2
 	a, _ := mustCred(t, s, "pen", penA)
 	for i := 0; i < 2; i++ {
 		if err := s.PutTXT(a, ch(fmt.Sprintf("custom%d", i), penA), val1); err != nil {
@@ -522,7 +484,7 @@ func doAPI(t *testing.T, h http.Handler, method, path, tok string, body any) *ht
 func TestAPIStatusCodes(t *testing.T) {
 	s, _ := newTestStore(t)
 	_, tokA := mustCred(t, s, "pen", penA)
-	api := &API{store: s, global: &windowLimiter{perMin: 20, perHour: 90}}
+	api := &API{store: s, limiter: defaultEABLimiter(s.now)}
 	h := api.Handler()
 	n := ch("photos", penA)
 	for _, tc := range []struct {
@@ -550,12 +512,12 @@ func TestAPIStatusCodes(t *testing.T) {
 
 func TestAPIRateLimitRetryAfterHeader(t *testing.T) {
 	s, now := newTestStore(t)
-	s.hourlyCapNames = 2
-	s.capNames = 4
-	s.globalHourlyCapNames = 3
+	s.caps.HourlyCap = 2
+	s.caps.WeeklyCap = 4
+	s.caps.GlobalHourlyCap = 3
 	_, tokA := mustCred(t, s, "pen", penA)
 	_, tokB := mustCred(t, s, "pen", penB)
-	api := &API{store: s, global: &windowLimiter{perMin: 20, perHour: 90}}
+	api := &API{store: s, limiter: defaultEABLimiter(s.now)}
 	h := api.Handler()
 
 	// penA fills its hourly cap (2).
@@ -605,11 +567,11 @@ func TestAPIRateLimitRetryAfterHeader(t *testing.T) {
 
 func TestAPIEABAllowances(t *testing.T) {
 	s, now := newTestStore(t)
-	s.hourlyCapNames = 2
-	s.capNames = 4
+	s.caps.HourlyCap = 2
+	s.caps.WeeklyCap = 4
 	_, tokA := mustCred(t, s, "pen", penA)
 	minted := 0
-	api := &API{store: s, global: &windowLimiter{perMin: 20, perHour: 90},
+	api := &API{store: s, limiter: defaultEABLimiter(s.now),
 		eab:     eabFunc(func() (string, string, error) { minted++; return fmt.Sprintf("kid-%d", minted), "bWFjLWtleQ", nil }),
 		contact: "ops@example.com"}
 	h := api.Handler()
@@ -651,7 +613,7 @@ func TestAPIEABNeedsContact(t *testing.T) {
 	s, _ := newTestStore(t)
 	_, tokA := mustCred(t, s, "pen", penA)
 	minted := 0
-	api := &API{store: s, global: &windowLimiter{perMin: 20, perHour: 90},
+	api := &API{store: s, limiter: defaultEABLimiter(s.now),
 		eab: eabFunc(func() (string, string, error) { minted++; return "kid", "bWFjLWtleQ", nil })}
 	if rec := doAPI(t, api.Handler(), "POST", "/v1/eab", tokA, nil); rec.Code != 503 || minted != 0 {
 		t.Fatalf("no contact: %d, minted %d; want 503 and nothing minted", rec.Code, minted)
@@ -730,12 +692,12 @@ func TestPenNamesAreNeverReused(t *testing.T) {
 
 func TestPerPlanCertCapsAndQuietPenReservation(t *testing.T) {
 	s, now := newTestStore(t)
-	s.hourlyCapNames = 2
-	s.capNames = 4
-	s.workHourlyCapNames = 5
-	s.workCapNames = 10
-	s.globalHourlyCapNames = 6
-	s.globalHardHourlyCapNames = 8
+	s.caps.HourlyCap = 2
+	s.caps.WeeklyCap = 4
+	s.caps.WorkHourlyCap = 5
+	s.caps.WorkWeeklyCap = 10
+	s.caps.GlobalHourlyCap = 6
+	s.caps.GlobalHardHourlyCap = 8
 
 	cPers, _ := mustCred(t, s, "pen", penA)
 	cWork, _, err := s.AddCredWithPlan("pen", penB, "work")
@@ -819,28 +781,12 @@ func TestPerPlanCertCapsAndQuietPenReservation(t *testing.T) {
 	}
 
 	// Admin HTTP API: PUT /admin/creds/{id}/plan downgrades penA back to personal.
-	adm := AdminHandler(s)
+	adm := AdminHandler(s, nil)
 	req := httptest.NewRequest("PUT", "/admin/creds/"+updated.ID+"/plan", strings.NewReader(`{"plan":"personal"}`))
 	rec := httptest.NewRecorder()
 	adm.ServeHTTP(rec, req)
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"plan":"personal"`) {
 		t.Fatalf("PUT plan downgrade: %d %s", rec.Code, rec.Body)
-	}
-}
-
-func TestParseWorkCapsFromEnv(t *testing.T) {
-	if wh, ww, err := parseWorkCapsFromEnv("", "", 80); err != nil || wh != defaultWorkHourlyCap || ww != defaultWorkWeeklyCap {
-		t.Fatalf("defaults = (%d, %d, %v)", wh, ww, err)
-	}
-	// Clamps default work hourly cap down to small globalHourly when unset (backwards compat for tests).
-	if wh, ww, err := parseWorkCapsFromEnv("", "", 6); err != nil || wh != 6 || ww != defaultWorkWeeklyCap {
-		t.Fatalf("clamped = (%d, %d, %v)", wh, ww, err)
-	}
-	if _, _, err := parseWorkCapsFromEnv("20", "10", 80); err == nil {
-		t.Fatal("work hourly > work weekly accepted")
-	}
-	if _, _, err := parseWorkCapsFromEnv("90", "120", 80); err == nil {
-		t.Fatal("work hourly > global hourly accepted")
 	}
 }
 
@@ -935,7 +881,7 @@ func TestRollbackReleaseIfUnused(t *testing.T) {
 	}
 
 	// 5. Admin HTTP API: DELETE /admin/creds/{id}?release_if_unused=1 reports X-Name-Released.
-	adm := AdminHandler(s2)
+	adm := AdminHandler(s2, nil)
 	cHTTPFree, _, err := s2.AddCred("pen", "httpfree")
 	if err != nil {
 		t.Fatal(err)
@@ -962,17 +908,17 @@ func TestRollbackReleaseIfUnused(t *testing.T) {
 
 func TestDefaultWorkAndPersonalCaps(t *testing.T) {
 	s, now := newTestStore(t)
-	if s.hourlyCap() != 5 || s.weeklyCap() != 20 {
-		t.Fatalf("personal defaults = (%d, %d), want (5, 20)", s.hourlyCap(), s.weeklyCap())
+	if s.caps.Hourly() != 5 || s.caps.Weekly() != 20 {
+		t.Fatalf("personal defaults = (%d, %d), want (5, 20)", s.caps.Hourly(), s.caps.Weekly())
 	}
-	if s.workHourlyCap() != 40 || s.workWeeklyCap() != 120 {
-		t.Fatalf("work defaults = (%d, %d), want (40, 120)", s.workHourlyCap(), s.workWeeklyCap())
+	if s.caps.WorkHourly() != 40 || s.caps.WorkWeekly() != 120 {
+		t.Fatalf("work defaults = (%d, %d), want (40, 120)", s.caps.WorkHourly(), s.caps.WorkWeekly())
 	}
-	if s.globalHourlyCap() != 80 || s.globalHardHourlyCap() != 120 {
-		t.Fatalf("global defaults = (%d, %d), want (80, 120)", s.globalHourlyCap(), s.globalHardHourlyCap())
+	if s.caps.GlobalHourly() != 80 || s.caps.GlobalHardHourly() != 120 {
+		t.Fatalf("global defaults = (%d, %d), want (80, 120)", s.caps.GlobalHourly(), s.caps.GlobalHardHourly())
 	}
-	if s.weeklyAlertThreshold() != 240 {
-		t.Fatalf("default weekly alert threshold = %d, want 240 (80%% of 300)", s.weeklyAlertThreshold())
+	if s.caps.WeeklyAlertThreshold() != 240 {
+		t.Fatalf("default weekly alert threshold = %d, want 240 (80%% of 300)", s.caps.WeeklyAlertThreshold())
 	}
 
 	cPersonal, _, err := s.AddCred("pen", penA)
@@ -1049,8 +995,8 @@ func TestGlobalWeeklyBudget80PctNtfyAlert(t *testing.T) {
 	}
 
 	s, now := newTestStore(t)
-	s.leWeeklyAllowance = 10 // 80% threshold = 8
-	s.onWeeklyAlert = newNtfyAlerter(ntfyURL, ntfySrv.Client())
+	s.caps.LEWeeklyAllowance = 10 // 80% threshold = 8
+	s.onWeeklyAlert = newNtfyAlerter(ntfyURL, ntfySrv.Client(), nil)
 
 	cA, _, err := s.AddCredWithPlan("pen", penA, "work")
 	if err != nil {
@@ -1107,8 +1053,8 @@ func TestGlobalWeeklyBudget80PctNtfyAlert(t *testing.T) {
 		t.Fatal(err)
 	}
 	s2.now = func() time.Time { return *now }
-	s2.leWeeklyAllowance = 10
-	s2.onWeeklyAlert = newNtfyAlerter(ntfyURL, ntfySrv.Client())
+	s2.caps.LEWeeklyAllowance = 10
+	s2.onWeeklyAlert = newNtfyAlerter(ntfyURL, ntfySrv.Client(), nil)
 	if err := s2.PutTXT(cB, ch("b6", penB), val1); err != nil {
 		t.Fatal(err)
 	}
@@ -1162,16 +1108,16 @@ func TestDNSServeNoTrailingDotNoPanic(t *testing.T) {
 
 func TestAPIEABMintFailureDoesNotBurnQuotaOrEverChallenged(t *testing.T) {
 	s, _ := newTestStore(t)
-	s.hourlyCapNames = 1
-	s.capNames = 2
+	s.caps.HourlyCap = 1
+	s.caps.WeeklyCap = 2
 	_, tokA := mustCred(t, s, "pen", penA)
 	cB, tokB := mustCred(t, s, "pen", penB)
 	cC, tokC := mustCred(t, s, "pen", "thirdpen1234")
 
 	failNext := true
 	api := &API{
-		store:  s,
-		global: &windowLimiter{perMin: 20, perHour: 90},
+		store:   s,
+		limiter: defaultEABLimiter(s.now),
 		eab: eabFunc(func() (string, string, error) {
 			if failNext {
 				return "", "", errors.New("upstream 502")
@@ -1181,7 +1127,7 @@ func TestAPIEABMintFailureDoesNotBurnQuotaOrEverChallenged(t *testing.T) {
 		contact: "ops@example.com",
 	}
 	h := api.Handler()
-	admin := AdminHandler(s)
+	admin := AdminHandler(s, nil)
 
 	// Upstream Mint failure returns 502 and does NOT consume penA's 1/hr quota.
 	if rec := doAPI(t, h, "POST", "/v1/eab", tokA, nil); rec.Code != http.StatusBadGateway {
@@ -1243,8 +1189,8 @@ func TestAPIEABMintFailureDoesNotBurnQuotaOrEverChallenged(t *testing.T) {
 	_, tokPeer := mustCred(t, s2, "pen", penB)
 	upstreamDown := true
 	api2 := &API{
-		store:  s2,
-		global: &windowLimiter{perMin: 10, perHour: 10},
+		store:   s2,
+		limiter: newEABLimiter(10, 10, defaultCredFailPerMin, defaultCredFailPerHour, s2.now),
 		eab: eabFunc(func() (string, string, error) {
 			if upstreamDown {
 				return "", "", errors.New("upstream 502")
@@ -1277,8 +1223,8 @@ func TestAPIEABMintFailureDoesNotBurnQuotaOrEverChallenged(t *testing.T) {
 	}
 	upstreamCalls := 0
 	api3 := &API{
-		store:  s3,
-		global: &windowLimiter{perMin: 3, perHour: 3},
+		store:   s3,
+		limiter: newEABLimiter(3, 3, defaultCredFailPerMin, defaultCredFailPerHour, s3.now),
 		eab: eabFunc(func() (string, string, error) {
 			upstreamCalls++
 			return "", "", errors.New("upstream quota exhausted")
@@ -1306,7 +1252,7 @@ func TestEABCredFailCooldownPrunesExpiredEntries(t *testing.T) {
 	c2, tok2 := mustCred(t, s, "pen", penB)
 	api := &API{
 		store:   s,
-		global:  &windowLimiter{perMin: 20, perHour: 90},
+		limiter: defaultEABLimiter(s.now),
 		eab:     eabFunc(func() (string, string, error) { return "", "", errors.New("upstream 502") }),
 		contact: "ops@example.com",
 	}
@@ -1315,7 +1261,7 @@ func TestEABCredFailCooldownPrunesExpiredEntries(t *testing.T) {
 	if rec := doAPI(t, h, "POST", "/v1/eab", tok1, nil); rec.Code != http.StatusBadGateway {
 		t.Fatalf("c1 failed mint = %d, want 502", rec.Code)
 	}
-	if _, ok := api.credFails[c1.ID]; !ok {
+	if !api.limiter.hasFailureRecord(c1.ID) {
 		t.Fatalf("expected c1 %q recorded in credFails", c1.ID)
 	}
 
@@ -1329,11 +1275,9 @@ func TestEABCredFailCooldownPrunesExpiredEntries(t *testing.T) {
 	if rec := doAPI(t, h, "POST", "/v1/eab", tok2, nil); rec.Code != http.StatusBadGateway {
 		t.Fatalf("c2 failed mint = %d, want 502", rec.Code)
 	}
-	api.failMu.Lock()
-	_, hasC1 := api.credFails[c1.ID]
-	_, hasC2 := api.credFails[c2.ID]
-	total := len(api.credFails)
-	api.failMu.Unlock()
+	hasC1 := api.limiter.hasFailureRecord(c1.ID)
+	hasC2 := api.limiter.hasFailureRecord(c2.ID)
+	total := api.limiter.trackedFailureCreds()
 	if hasC1 || !hasC2 || total != 1 {
 		t.Fatalf("credFails not pruned after expiry: hasC1=%v hasC2=%v len=%d", hasC1, hasC2, total)
 	}
@@ -1341,7 +1285,7 @@ func TestEABCredFailCooldownPrunesExpiredEntries(t *testing.T) {
 
 func TestAdminCredsEmptyJSONArrayAndErrorCodes(t *testing.T) {
 	s, _ := newTestStore(t)
-	admin := AdminHandler(s)
+	admin := AdminHandler(s, nil)
 
 	// Empty credential list returns [] rather than null.
 	rec := doAPI(t, admin, "GET", "/admin/creds", "", nil)

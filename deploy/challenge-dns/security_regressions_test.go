@@ -48,16 +48,16 @@ func TestAuditRevokedCredPurgesLiveTXTAndRejectsCalls(t *testing.T) {
 
 func TestAuditPerCredEABCheckedBeforeGlobalAndHostExempt(t *testing.T) {
 	s, _ := newTestStore(t)
-	s.hourlyCapNames = 1
-	s.capNames = 4
+	s.caps.HourlyCap = 1
+	s.caps.WeeklyCap = 4
 	_, tokA := mustCred(t, s, "pen", penA)
 	_, tokB := mustCred(t, s, "pen", penB)
 	_, tokHost := mustCred(t, s, "host", "")
 
 	minted := 0
 	api := &API{
-		store:  s,
-		global: &windowLimiter{perMin: 2, perHour: 2},
+		store:   s,
+		limiter: newEABLimiter(2, 2, defaultCredFailPerMin, defaultCredFailPerHour, s.now),
 		eab: eabFunc(func() (string, string, error) {
 			minted++
 			return fmt.Sprintf("kid-%d", minted), "bWFjLWtleQ", nil

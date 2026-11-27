@@ -1,8 +1,8 @@
 package main
 
 // The rules, kept apart from DNS and HTTP so they are easy to test:
-// credentials and what each may write (scope), the weekly cap on new names,
-// and the challenge records themselves (in memory only).
+// credentials and what each may write (scope), the hourly/weekly caps on new
+// names, and the challenge records themselves (in memory only).
 
 import (
 	"crypto/rand"
@@ -28,11 +28,11 @@ const (
 	capWindow                  = 7 * 24 * time.Hour
 	defaultHourlyCap           = 5   // distinct new names per personal pen per rolling hour (CDNS_HOURLY_CAP)
 	defaultCapNames            = 20  // distinct new names per personal pen per 7 days (CDNS_WEEKLY_CAP)
-	defaultWorkHourlyCap       = 40  // distinct new names per work pen per rolling hour (CDNS_WORK_HOURLY_CAP, D-38)
-	defaultWorkWeeklyCap       = 120 // distinct new names per work pen per 7 days (CDNS_WORK_WEEKLY_CAP, D-38)
-	defaultGlobalHourlyCap     = 80  // soft global hourly cap across all pens (CDNS_GLOBAL_HOURLY_CAP, D-38)
-	defaultGlobalHardHourlyCap = 120 // hard global hourly ceiling with reserved quiet-pen floor (CDNS_GLOBAL_HARD_HOURLY_CAP, D-38)
-	defaultLEWeeklyAllowance   = 300 // Let's Encrypt 7-day registered-domain allowance for alerting (CDNS_LE_WEEKLY_ALLOWANCE, D-38)
+	defaultWorkHourlyCap       = 40  // distinct new names per work pen per rolling hour (CDNS_WORK_HOURLY_CAP)
+	defaultWorkWeeklyCap       = 120 // distinct new names per work pen per 7 days (CDNS_WORK_WEEKLY_CAP)
+	defaultGlobalHourlyCap     = 80  // soft global hourly cap across all pens (CDNS_GLOBAL_HOURLY_CAP)
+	defaultGlobalHardHourlyCap = 120 // hard global hourly ceiling with reserved quiet-pen floor (CDNS_GLOBAL_HARD_HOURLY_CAP)
+	defaultLEWeeklyAllowance   = 300 // Let's Encrypt 7-day registered-domain allowance for alerting (CDNS_LE_WEEKLY_ALLOWANCE)
 	weeklyAlertPct             = 80  // alert threshold percentage of LE weekly allowance (240 of 300)
 	weeklyAlertCooldown        = 24 * time.Hour
 	quietPenHourlyFloor        = 2 // pens with <2 new names in the last hour may use soft..hard headroom
@@ -54,7 +54,7 @@ func normalizePlan(raw string) (string, error) {
 }
 
 var (
-	penRE              = regexp.MustCompile(`^[a-z][a-z0-9-]{1,28}[a-z0-9]$`) // the hosted pen-name rule (D-21)
+	penRE              = regexp.MustCompile(`^[a-z][a-z0-9-]{1,28}[a-z0-9]$`)
 	labelRE            = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	valueRE            = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
 	errScope           = errors.New("not allowed for this credential")
@@ -92,7 +92,7 @@ func retryAfterFromOldest(oldest, now time.Time, window time.Duration) time.Dura
 
 // Cred is one API credential. Kind is "pen" (scoped to PenID) or "host"
 // (only the front door's wildcard challenge). Only the token's hash is kept.
-// Plan is "" (personal) or "work" (higher per-pen certificate caps, D-30).
+// Plan is "" (personal) or "work" (higher per-pen certificate caps).
 type Cred struct {
 	ID             string    `json:"id"`
 	Kind           string    `json:"kind"`
@@ -109,8 +109,8 @@ type Cred struct {
 //     7 days (pruned as the window moves);
 //   - recent fallback-key mints in the last 7 days;
 //   - the names of pens that ever had a credential, so a deleted pen's name
-//     is never given out again (D-21). Just the name: it's public in the
-//     certificate logs anyway.
+//     is never given out again. Just the name: it's public in the certificate
+//     logs anyway.
 //
 // Challenge values are never written to disk.
 type state struct {
@@ -121,6 +121,27 @@ type state struct {
 	LastWeeklyAlert time.Time                       `json:"last_weekly_alert,omitempty"` // last 80% global 7-day LE-budget alert
 }
 
+func cloneState(st state) state {
+	out := state{
+		Creds:           append([]Cred(nil), st.Creds...),
+		Seen:            make(map[string]map[string]time.Time, len(st.Seen)),
+		EAB:             make(map[string][]time.Time, len(st.EAB)),
+		Used:            append([]string(nil), st.Used...),
+		LastWeeklyAlert: st.LastWeeklyAlert,
+	}
+	for id, names := range st.Seen {
+		cp := make(map[string]time.Time, len(names))
+		for k, v := range names {
+			cp[k] = v
+		}
+		out.Seen[id] = cp
+	}
+	for id, times := range st.EAB {
+		out.EAB[id] = append([]time.Time(nil), times...)
+	}
+	return out
+}
+
 type txtValue struct {
 	value   string
 	expires time.Time
@@ -128,108 +149,15 @@ type txtValue struct {
 
 // Store holds the state (persisted) and the live challenge records (not).
 type Store struct {
-	mu                       sync.Mutex
-	path                     string
-	zones                    Zones
-	st                       state
-	txt                      map[string][]txtValue // fqdn -> live values
-	inFlightEAB              map[string]int        // cred ID -> in-flight upstream EAB mints
-	now                      func() time.Time
-	hourlyCapNames           int                                  // 0 uses defaultHourlyCap (clamped to weeklyCap)
-	capNames                 int                                  // 0 uses defaultCapNames
-	workHourlyCapNames       int                                  // 0 uses defaultWorkHourlyCap (clamped to workWeeklyCap)
-	workCapNames             int                                  // 0 uses defaultWorkWeeklyCap
-	globalHourlyCapNames     int                                  // 0 uses defaultGlobalHourlyCap (soft global cap)
-	globalHardHourlyCapNames int                                  // 0 uses defaultGlobalHardHourlyCap (or globalHourlyCapNames if set directly)
-	leWeeklyAllowance        int                                  // 0 uses defaultLEWeeklyAllowance
-	onWeeklyAlert            func(used, allowance, threshold int) // invoked outside s.mu when 7-day global usage >= 80% of LE allowance
-}
-
-func (s *Store) weeklyCap() int {
-	if s.capNames > 0 {
-		return s.capNames
-	}
-	return defaultCapNames
-}
-
-func (s *Store) hourlyCap() int {
-	h := s.hourlyCapNames
-	if h <= 0 {
-		h = defaultHourlyCap
-	}
-	if w := s.weeklyCap(); h > w {
-		return w
-	}
-	return h
-}
-
-func (s *Store) workWeeklyCap() int {
-	if s.workCapNames > 0 {
-		return s.workCapNames
-	}
-	return defaultWorkWeeklyCap
-}
-
-func (s *Store) workHourlyCap() int {
-	h := s.workHourlyCapNames
-	if h <= 0 {
-		h = defaultWorkHourlyCap
-	}
-	if w := s.workWeeklyCap(); h > w {
-		return w
-	}
-	return h
-}
-
-func (s *Store) weeklyCapFor(c Cred) int {
-	if c.Plan == planWork {
-		return s.workWeeklyCap()
-	}
-	return s.weeklyCap()
-}
-
-func (s *Store) hourlyCapFor(c Cred) int {
-	if c.Plan == planWork {
-		return s.workHourlyCap()
-	}
-	return s.hourlyCap()
-}
-
-func (s *Store) globalHourlyCap() int {
-	if s.globalHourlyCapNames > 0 {
-		return s.globalHourlyCapNames
-	}
-	return defaultGlobalHourlyCap
-}
-
-func (s *Store) globalHardHourlyCap() int {
-	h := s.globalHardHourlyCapNames
-	if h <= 0 {
-		if s.globalHourlyCapNames > 0 {
-			return s.globalHourlyCapNames
-		}
-		h = defaultGlobalHardHourlyCap
-	}
-	if soft := s.globalHourlyCap(); h < soft {
-		return soft
-	}
-	return h
-}
-
-func (s *Store) leWeeklyAllowanceVal() int {
-	if s.leWeeklyAllowance > 0 {
-		return s.leWeeklyAllowance
-	}
-	return defaultLEWeeklyAllowance
-}
-
-func (s *Store) weeklyAlertThreshold() int {
-	allowance := s.leWeeklyAllowanceVal()
-	t := (allowance*weeklyAlertPct + 99) / 100
-	if t < 1 {
-		return 1
-	}
-	return t
+	mu            sync.Mutex
+	path          string
+	zones         Zones
+	st            state
+	txt           map[string][]txtValue // fqdn -> live values
+	inFlightEAB   map[string]int        // cred ID -> in-flight upstream EAB mints
+	now           func() time.Time
+	caps          CapsConfig
+	onWeeklyAlert func(used, allowance, threshold int) // invoked outside s.mu when 7-day global usage >= 80% of LE allowance
 }
 
 // Zones are the names this server answers for.
@@ -241,8 +169,14 @@ type Zones struct {
 func (z Zones) gateTXT() string { return z.Gate }
 
 func OpenStore(path string, z Zones) (*Store, error) {
-	s := &Store{path: path, zones: z, txt: map[string][]txtValue{}, inFlightEAB: map[string]int{}, now: time.Now,
-		st: state{Seen: map[string]map[string]time.Time{}, EAB: map[string][]time.Time{}}}
+	s := &Store{
+		path:        path,
+		zones:       z,
+		txt:         map[string][]txtValue{},
+		inFlightEAB: map[string]int{},
+		now:         time.Now,
+		st:          state{Seen: map[string]map[string]time.Time{}, EAB: map[string][]time.Time{}},
+	}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, s.saveLocked()
@@ -261,38 +195,62 @@ func OpenStore(path string, z Zones) (*Store, error) {
 	return s, nil
 }
 
+// writeFileAtomic writes data to path via a same-directory temp file, fsyncing
+// both the file and its parent directory so readers never observe partial state.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".state-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
+}
+
 // saveLocked writes the state atomically, readable only by this process.
 func (s *Store) saveLocked() error {
 	b, err := json.MarshalIndent(s.st, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".state-*")
-	if err != nil {
+	return writeFileAtomic(s.path, b, 0o600)
+}
+
+// mutateLocked snapshots persisted state, executes fn, and atomically writes
+// the updated state to disk. Any error from fn or saveLocked rolls back s.st
+// to the pre-mutation snapshot so memory and disk never diverge.
+func (s *Store) mutateLocked(fn func() error) error {
+	prev := cloneState(s.st)
+	if err := fn(); err != nil {
+		s.st = prev
 		return err
 	}
-	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
+	if err := s.saveLocked(); err != nil {
+		s.st = prev
 		return err
-	}
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), s.path); err != nil {
-		return err
-	}
-	if dir, err := os.Open(filepath.Dir(s.path)); err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
 	}
 	return nil
 }
@@ -348,15 +306,13 @@ func (s *Store) AddCredWithPlan(kind, penID, rawPlan string) (Cred, string, erro
 	}
 	tok := "hcd_" + newSecret(32)
 	c := Cred{ID: newSecret(6), Kind: kind, PenID: penID, Plan: plan, Hash: hashToken(tok), Created: s.now().UTC()}
-	s.st.Creds = append(s.st.Creds, c)
-	if kind == "pen" {
-		s.st.Used = append(s.st.Used, penID) // marked the moment it's taken, not only on removal
-	}
-	if err := s.saveLocked(); err != nil {
-		s.st.Creds = s.st.Creds[:len(s.st.Creds)-1]
+	if err := s.mutateLocked(func() error {
+		s.st.Creds = append(s.st.Creds, c)
 		if kind == "pen" {
-			s.st.Used = s.st.Used[:len(s.st.Used)-1]
+			s.st.Used = append(s.st.Used, penID) // marked the moment it's taken, not only on removal
 		}
+		return nil
+	}); err != nil {
 		return Cred{}, "", err
 	}
 	return c, tok, nil
@@ -371,22 +327,29 @@ func (s *Store) SetCredPlan(idOrPen, rawPlan string) (Cred, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	idx := -1
 	for i := range s.st.Creds {
 		c := &s.st.Creds[i]
 		if c.ID == idOrPen || (c.Kind == "pen" && c.PenID == idOrPen) {
 			if c.Kind != "pen" {
 				return Cred{}, fmt.Errorf("credential %q is not a pen credential: %w", idOrPen, errInvalidInput)
 			}
-			prev := c.Plan
-			c.Plan = plan
-			if err := s.saveLocked(); err != nil {
-				c.Plan = prev
-				return Cred{}, err
-			}
-			return *c, nil
+			idx = i
+			break
 		}
 	}
-	return Cred{}, fmt.Errorf("no pen credential %q: %w", idOrPen, errNotFound)
+	if idx < 0 {
+		return Cred{}, fmt.Errorf("no pen credential %q: %w", idOrPen, errNotFound)
+	}
+	var updated Cred
+	if err := s.mutateLocked(func() error {
+		s.st.Creds[idx].Plan = plan
+		updated = s.st.Creds[idx]
+		return nil
+	}); err != nil {
+		return Cred{}, err
+	}
+	return updated, nil
 }
 
 func (s *Store) usedLocked(name string) bool {
@@ -406,7 +369,7 @@ func (s *Store) NameUsed(name string) bool {
 }
 
 // RemoveCred revokes a credential while keeping its pen name permanently
-// retired (D-21).
+// retired.
 func (s *Store) RemoveCred(id string) error {
 	_, err := s.RemoveCredWithOptions(id, false)
 	return err
@@ -417,53 +380,47 @@ func (s *Store) RemoveCred(id string) error {
 // an ACME TXT challenge or minted a fallback EAB key, its pen name is released
 // from Used so a host-side provisioning failure does not burn the buyer's
 // chosen name. Once any challenge or EAB mint occurred, the name stays retired
-// forever (D-21).
+// forever.
 func (s *Store) RemoveCredWithOptions(id string, releaseIfUnused bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	idx := -1
+	var target Cred
 	for i, c := range s.st.Creds {
-		if c.ID != id {
-			continue
+		if c.ID == id {
+			idx, target = i, c
+			break
 		}
-		canRelease := releaseIfUnused && c.Kind == "pen" && !c.EverChallenged &&
-			len(s.st.Seen[id]) == 0 && len(s.st.EAB[id]) == 0 && s.inFlightEAB[id] == 0
-		prevCreds := append([]Cred(nil), s.st.Creds...)
-		prevSeen := s.st.Seen[id]
-		prevEAB := s.st.EAB[id]
-		prevUsed := append([]string(nil), s.st.Used...)
-
-		s.st.Creds = append(s.st.Creds[:i], s.st.Creds[i+1:]...)
+	}
+	if idx < 0 {
+		return false, fmt.Errorf("no credential %q: %w", id, errNotFound)
+	}
+	canRelease := releaseIfUnused && target.Kind == "pen" && !target.EverChallenged &&
+		len(s.st.Seen[id]) == 0 && len(s.st.EAB[id]) == 0 && s.inFlightEAB[id] == 0
+	if err := s.mutateLocked(func() error {
+		s.st.Creds = append(s.st.Creds[:idx], s.st.Creds[idx+1:]...)
 		delete(s.st.Seen, id)
 		delete(s.st.EAB, id)
 		if canRelease {
 			kept := make([]string, 0, len(s.st.Used))
 			for _, n := range s.st.Used {
-				if n != c.PenID {
+				if n != target.PenID {
 					kept = append(kept, n)
 				}
 			}
 			s.st.Used = kept
 		}
-		if err := s.saveLocked(); err != nil {
-			s.st.Creds = prevCreds
-			if prevSeen != nil {
-				s.st.Seen[id] = prevSeen
-			}
-			if prevEAB != nil {
-				s.st.EAB[id] = prevEAB
-			}
-			s.st.Used = prevUsed
-			return false, err
-		}
-		// Immediately purge any live challenge TXT records in scope of the revoked credential.
-		for fqdn := range s.txt {
-			if s.InScope(c, fqdn) {
-				delete(s.txt, fqdn)
-			}
-		}
-		return canRelease, nil
+		return nil
+	}); err != nil {
+		return false, err
 	}
-	return false, fmt.Errorf("no credential %q: %w", id, errNotFound)
+	// Immediately purge any live challenge TXT records in scope of the revoked credential.
+	for fqdn := range s.txt {
+		if s.InScope(target, fqdn) {
+			delete(s.txt, fqdn)
+		}
+	}
+	return canRelease, nil
 }
 
 func (s *Store) credLocked(id string) (Cred, bool) {
@@ -589,8 +546,8 @@ func (s *Store) PutTXT(c Cred, fqdn, value string) error {
 			return err
 		}
 		if alertNeeded {
-			alertAllowance = s.leWeeklyAllowanceVal()
-			alertThreshold = s.weeklyAlertThreshold()
+			alertAllowance = s.caps.LEWeekly()
+			alertThreshold = s.caps.WeeklyAlertThreshold()
 			alertFn = s.onWeeklyAlert
 		}
 	}
@@ -604,10 +561,9 @@ func (s *Store) PutTXT(c Cred, fqdn, value string) error {
 
 // countLocked applies the per-pen weekly cap, per-pen hourly burst cap, and
 // global hourly cap across all pens, and checks whether total 7-day usage
-// across all pens crossed the 80% Let's Encrypt allowance alert threshold
-// (D-38). A name already counted in this pen's 7-day window (retries and
-// renewals) is free; a new name counts on first TXT write (attempts count,
-// not issued certs).
+// across all pens crossed the 80% Let's Encrypt allowance alert threshold.
+// A name already counted in this pen's 7-day window (retries and renewals) is
+// free; a new name counts on first TXT write (attempts count, not issued certs).
 func (s *Store) countLocked(c Cred, fqdn string, now time.Time) (alertNeeded bool, globalWeekly int, err error) {
 	// Prune expired 7-day entries across all credentials so global counts stay accurate.
 	globalHourly := 0
@@ -650,52 +606,45 @@ func (s *Store) countLocked(c Cred, fqdn string, now time.Time) (alertNeeded boo
 				}
 			}
 		}
-		if len(seen) >= s.weeklyCapFor(c) {
+		if len(seen) >= s.caps.WeeklyFor(c) {
 			s.st.Seen[c.ID] = seen
 			return false, globalWeekly, &rateLimitError{cause: errCap, retryAfter: retryAfterFromOldest(oldestWeekly, now, capWindow)}
 		}
-		if penHourly >= s.hourlyCapFor(c) {
+		if penHourly >= s.caps.HourlyFor(c) {
 			s.st.Seen[c.ID] = seen
 			return false, globalWeekly, &rateLimitError{cause: errHourlyCap, retryAfter: retryAfterFromOldest(oldestHourly, now, hourlyWindow)}
 		}
-		if globalHourly >= s.globalHardHourlyCap() {
+		if globalHourly >= s.caps.GlobalHardHourly() {
 			s.st.Seen[c.ID] = seen
 			return false, globalWeekly, &rateLimitError{cause: errGlobalHourlyCap, retryAfter: retryAfterFromOldest(oldestGlobalHourly, now, hourlyWindow)}
 		}
-		if globalHourly >= s.globalHourlyCap() && penHourly >= quietPenHourlyFloor {
+		if globalHourly >= s.caps.GlobalHourly() && penHourly >= quietPenHourlyFloor {
 			s.st.Seen[c.ID] = seen
 			return false, globalWeekly, &rateLimitError{cause: errGlobalHourlyCap, retryAfter: retryAfterFromOldest(oldestGlobalHourly, now, hourlyWindow)}
 		}
-		seen[fqdn] = now
 		globalWeekly++
 	}
-	prevAlert := s.st.LastWeeklyAlert
-	if globalWeekly >= s.weeklyAlertThreshold() && (s.st.LastWeeklyAlert.IsZero() || now.Sub(s.st.LastWeeklyAlert) >= weeklyAlertCooldown) {
-		s.st.LastWeeklyAlert = now
-		alertNeeded = true
-	}
-	if alreadySeen && c.EverChallenged && !alertNeeded {
+	shouldAlert := globalWeekly >= s.caps.WeeklyAlertThreshold() &&
+		(s.st.LastWeeklyAlert.IsZero() || now.Sub(s.st.LastWeeklyAlert) >= weeklyAlertCooldown)
+	if alreadySeen && c.EverChallenged && !shouldAlert {
 		return false, globalWeekly, nil
 	}
-	prevChallenged := c.EverChallenged
-	s.st.Seen[c.ID] = seen
-	s.markChallengedLocked(c.ID)
-	if err := s.saveLocked(); err != nil {
+	if err := s.mutateLocked(func() error {
+		if s.st.Seen[c.ID] == nil {
+			s.st.Seen[c.ID] = seen
+		}
 		if !alreadySeen {
-			delete(seen, fqdn)
+			s.st.Seen[c.ID][fqdn] = now
 		}
-		s.st.LastWeeklyAlert = prevAlert
-		if !prevChallenged {
-			for i := range s.st.Creds {
-				if s.st.Creds[i].ID == c.ID {
-					s.st.Creds[i].EverChallenged = false
-					break
-				}
-			}
+		if shouldAlert {
+			s.st.LastWeeklyAlert = now
 		}
+		s.markChallengedLocked(c.ID)
+		return nil
+	}); err != nil {
 		return false, globalWeekly, err
 	}
-	return alertNeeded, globalWeekly, nil
+	return shouldAlert, globalWeekly, nil
 }
 
 // DeleteTXT removes a value if present. Absent or expired is still success.
@@ -776,7 +725,7 @@ func (s *Store) checkEABLocked(id string, now time.Time) (Cred, []time.Time, err
 		}
 	}
 	inFlight := s.inFlightEAB[id]
-	weeklyCap := s.weeklyCapFor(liveCred)
+	weeklyCap := s.caps.WeeklyFor(liveCred)
 	if len(recent)+inFlight >= weeklyCap {
 		s.st.EAB[id] = recent
 		retry := retryAfterFromOldest(oldestWeekly, now, capWindow)
@@ -785,7 +734,7 @@ func (s *Store) checkEABLocked(id string, now time.Time) (Cred, []time.Time, err
 		}
 		return Cred{}, nil, &rateLimitError{cause: errEABWeeklyCap, retryAfter: retry}
 	}
-	hourlyCap := s.hourlyCapFor(liveCred)
+	hourlyCap := s.caps.HourlyFor(liveCred)
 	if hourly+inFlight >= hourlyCap {
 		s.st.EAB[id] = recent
 		retry := retryAfterFromOldest(oldestHourly, now, hourlyWindow)
@@ -874,8 +823,7 @@ func (r *eabReservation) Commit() error {
 }
 
 func (s *Store) persistEABLocked(id string, now time.Time) error {
-	liveCred, ok := s.credLocked(id)
-	if !ok {
+	if _, ok := s.credLocked(id); !ok {
 		return errRevoked
 	}
 	recent := make([]time.Time, 0, len(s.st.EAB[id])+1)
@@ -884,23 +832,11 @@ func (s *Store) persistEABLocked(id string, now time.Time) error {
 			recent = append(recent, t)
 		}
 	}
-	prevEAB := append([]time.Time(nil), s.st.EAB[id]...)
-	prevChallenged := liveCred.EverChallenged
-	s.st.EAB[id] = append(recent, now)
-	s.markChallengedLocked(id)
-	if err := s.saveLocked(); err != nil {
-		s.st.EAB[id] = prevEAB
-		if !prevChallenged {
-			for i := range s.st.Creds {
-				if s.st.Creds[i].ID == id {
-					s.st.Creds[i].EverChallenged = false
-					break
-				}
-			}
-		}
-		return err
-	}
-	return nil
+	return s.mutateLocked(func() error {
+		s.st.EAB[id] = append(recent, now)
+		s.markChallengedLocked(id)
+		return nil
+	})
 }
 
 // AllowEAB records an EAB mint for a credential, gated by the same per-pen
