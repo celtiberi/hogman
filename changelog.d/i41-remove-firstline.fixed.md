@@ -1,1 +1,0 @@
-- `hogman` CLI: replaced `link.FirstLine` with `link.SingleLine` across all 13 user-facing command/error sites so multi-line errors are joined with `; ` and sanitized for control/BiDi characters instead of dropping lines after the first.

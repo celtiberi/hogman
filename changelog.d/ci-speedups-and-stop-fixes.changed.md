@@ -1,3 +1,0 @@
-- Bound self-device removal (`DELETE /api/devices/<self>`) in `hogman share stop` and `hogman leave` to a 3-second timeout so clients no longer stall for 30s/8s when the pen drops their WireGuard link before the HTTP reply arrives.
-- Detect unreaped Linux zombie processes (`Z`/`X`) in `processAlive()` so stopping background `hogman` agents or shares inside containers exits immediately instead of spinning for 5 seconds.
-- Speed up GitHub Actions CI across `e2e`, `security`, `vuln`, and `build` workflows (fix poisoned Go build cache key, eliminate Go `-trimpath` double-compilation in Dockerfiles and `build-bins.sh`, parallelize builds and negative connectivity probes, add BuildKit GitHub Actions layer caching, and cache immutable legacy-tag and scanner tool binaries).

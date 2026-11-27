@@ -1,1 +1,0 @@
-- `docs`: added `docs/how-hogman-works.md` (architecture map covering every moving part, packet flow, zero-password portal auth, instant revocation, and scaling) and linked it from `README.md`.

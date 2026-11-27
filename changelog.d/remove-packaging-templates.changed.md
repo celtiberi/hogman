@@ -1,1 +1,0 @@
-- Removed unused Homebrew and WinGet manifest templates under `packaging/`, and switched `hogman update` WinGet detection to derive the package ID dynamically from the install path (falling back to `winget upgrade hogman`).

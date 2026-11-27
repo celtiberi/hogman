@@ -1,1 +1,0 @@
-- Remove silent truncation across registrar, join CLI, portal, browser extension, and command tests: reject over-long herd queries and device hostnames, report full SHA-256 digests and error bodies (refusing oversized upstream error bodies without echoing partial content), validate extension metadata lengths instead of slicing, and format UTC dates via Date accessors.

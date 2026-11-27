@@ -1,1 +1,0 @@
-- Split `core/registrar` into focused `internal/` packages (`ratelimit`, `billing`, `headscale`, `dns`, `acme`, `store`, `registrar`, `api`) with a thin `package main` wiring layer, strict error translation at the HTTP edge, and isolated unit tests per package.
