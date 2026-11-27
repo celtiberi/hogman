@@ -191,6 +191,23 @@ if [ "${NO_DEPLOY:-}" != 1 ]; then
   done
   {
     printf 'Release `%s` from commit `%s` (compiled binaries verified via GitHub build provenance).\n' "$ver" "$full"
+    printf '\n### Checksums (`SHA256SUMS`)\n```text\n'
+    cat "$out/SHA256SUMS"
+    printf '```\n'
+    if [ -n "${SIDECAR_IMAGE_REF:-}" ]; then
+      [[ "$SIDECAR_IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._-]+/hogman-sidecar:v[0-9A-Za-z._-]+@sha256:[0-9a-f]{64}$ ]] \
+        || { echo "invalid SIDECAR_IMAGE_REF: $SIDECAR_IMAGE_REF" >&2; exit 1; }
+      sidecar_img="${SIDECAR_IMAGE_REF%%:*}"
+      sidecar_tag_part="${SIDECAR_IMAGE_REF#*:}"
+      sidecar_tag="${sidecar_tag_part%@*}"
+      sidecar_dig="${SIDECAR_IMAGE_REF#*@}"
+      [ "$sidecar_tag" = "$tag" ] \
+        || { echo "SIDECAR_IMAGE_REF tag '$sidecar_tag' does not match release tag '$tag'" >&2; exit 1; }
+      printf '\n### Sidecar container image (`linux/amd64`, `linux/arm64`)\n'
+      printf -- '- `%s`\n' "$SIDECAR_IMAGE_REF"
+      printf -- '- Verify provenance: `gh attestation verify oci://%s@%s --repo %s`\n' \
+        "$sidecar_img" "$sidecar_dig" "$repo"
+    fi
     if [ -x "$REPO/deploy/changelog-fold.sh" ]; then
       notes="$(CHANGELOG_REPO="$REPO" "$REPO/deploy/changelog-fold.sh" --notes "$REF")"
       if [ -n "$notes" ]; then

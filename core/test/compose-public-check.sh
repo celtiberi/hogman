@@ -65,7 +65,8 @@ expected_all="$(
       "$REPO/core/registrar/Dockerfile" \
       "$REPO/core/registrar/Dockerfile.prebuilt" \
       "$REPO/core/join/Dockerfile" \
-      "$REPO/core/join/Dockerfile.sidecar"
+      "$REPO/core/join/Dockerfile.sidecar" \
+      "$REPO/core/join/Dockerfile.sidecar.prebuilt"
   } | sort -u
 )"
 [ -n "$expected_all" ] || fail "found no shipped container images"

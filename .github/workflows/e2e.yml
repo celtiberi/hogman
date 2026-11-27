@@ -118,9 +118,14 @@ jobs:
             --cache-to type=gha,mode=max,scope=join-test \
             -t hogman-join-test core/join >"$RUNNER_TEMP/img-logs/join.log" 2>&1 &
           p_join=$!
+          docker buildx build --progress=plain --load \
+            --cache-from type=gha,scope=join-sidecar \
+            --cache-to type=gha,mode=max,scope=join-sidecar \
+            -f core/join/Dockerfile.sidecar -t hogman-sidecar-src-check core/join >"$RUNNER_TEMP/img-logs/sidecar.log" 2>&1 &
+          p_sidecar=$!
 
           rc=0
-          for item in "registrar:$p_reg" "join:$p_join"; do
+          for item in "registrar:$p_reg" "join:$p_join" "sidecar:$p_sidecar"; do
             name="${item%%:*}"; pid="${item#*:}"
             if ! wait "$pid"; then
               echo "::group::FAILED $name build"
@@ -285,7 +290,7 @@ jobs:
 
   pen-sidecar:
     name: pen sidecar (core/test/sidecar-check.sh)
-    needs: changes
+    needs: [changes, prebuilt]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -293,13 +298,48 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: e2e-prebuilt
+          path: core/prebuilt
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Build sidecar image with BuildKit cache
+      - name: Build multi-arch and local prebuilt sidecar image
         run: |
-          docker buildx build --load \
-            --cache-from type=gha,scope=join-sidecar \
-            --cache-to type=gha,mode=max,scope=join-sidecar \
-            -f core/join/Dockerfile.sidecar -t hogman-sidecar-ci:test core/join
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/sidecar-ctx"
+          mkdir -p "$ctx"
+          want_amd64="$(awk '$2 == "hogman-Linux-x86_64" { print $1 }' core/prebuilt/join/SHA256SUMS)"
+          want_arm64="$(awk '$2 == "hogman-Linux-aarch64" { print $1 }' core/prebuilt/join/SHA256SUMS)"
+          [ -n "$want_amd64" ] && [ -n "$want_arm64" ] || { echo "missing Linux checksums in core/prebuilt/join/SHA256SUMS" >&2; exit 1; }
+          install -m 0755 core/prebuilt/join/hogman-Linux-x86_64 "$ctx/hogman-linux-amd64"
+          install -m 0755 core/prebuilt/join/hogman-Linux-aarch64 "$ctx/hogman-linux-arm64"
+          printf '%s  %s\n%s  %s\n' \
+            "$want_amd64" "$ctx/hogman-linux-amd64" \
+            "$want_arm64" "$ctx/hogman-linux-arm64" \
+            | sha256sum -c --quiet -
+          # Verify multi-arch (linux/amd64 + linux/arm64) builds cleanly without QEMU
+          # and produces an OCI image index containing both architectures.
+          docker buildx build --platform linux/amd64,linux/arm64 \
+            --provenance=false --sbom=false \
+            --output "type=oci,dest=$RUNNER_TEMP/sidecar-oci.tar" \
+            -f core/join/Dockerfile.sidecar.prebuilt "$ctx"
+          mkdir -p "$RUNNER_TEMP/sidecar-oci"
+          tar -xf "$RUNNER_TEMP/sidecar-oci.tar" -C "$RUNNER_TEMP/sidecar-oci"
+          index_dig="$(jq -r '.manifests[0].digest' "$RUNNER_TEMP/sidecar-oci/index.json")"
+          index_blob="$RUNNER_TEMP/sidecar-oci/blobs/sha256/${index_dig#sha256:}"
+          jq -e '[.manifests[].platform | "\(.os)/\(.architecture)"] | contains(["linux/amd64", "linux/arm64"])' "$index_blob" >/dev/null
+          for pair in "amd64:x86-64" "arm64:aarch64"; do
+            arch="${pair%%:*}"; pat="${pair#*:}"
+            mdig="$(jq -r --arg a "$arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a) | .digest' "$index_blob")"
+            ldig="$(jq -r '.layers[0].digest' "$RUNNER_TEMP/sidecar-oci/blobs/sha256/${mdig#sha256:}")"
+            mkdir -p "$RUNNER_TEMP/sidecar-oci/check-$arch"
+            tar -xf "$RUNNER_TEMP/sidecar-oci/blobs/sha256/${ldig#sha256:}" -C "$RUNNER_TEMP/sidecar-oci/check-$arch" hogman
+            file "$RUNNER_TEMP/sidecar-oci/check-$arch/hogman" | grep -q "$pat" \
+              || { echo "sidecar $arch layer binary does not match $pat" >&2; exit 1; }
+          done
+          # Load linux/amd64 locally for the live sealed-container suite.
+          docker buildx build --platform linux/amd64 --load \
+            -f core/join/Dockerfile.sidecar.prebuilt -t hogman-sidecar-ci:test "$ctx"
       - name: Run the sealed sidecar check
         env:
           SIDECAR_PREBUILT_IMG: hogman-sidecar-ci:test

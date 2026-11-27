@@ -19,7 +19,9 @@ chmod 755 "$WORK/sidecar-ca" && chmod 644 "$WORK/sidecar-ca"/*.crt
 
 if [ -f "$SRC/prebuilt/join/hogman-$(uname -s)-$(uname -m)" ] && [ -f "$REPO/core/join/Dockerfile.sidecar.prebuilt" ]; then
   mkdir -p "$WORK/sidecar-ctx"
-  install -m 0755 "$SRC/prebuilt/join/hogman-$(uname -s)-$(uname -m)" "$WORK/sidecar-ctx/hogman.bin"
+  sidecar_arch="$(test_goarch)"
+  sidecar_arch="${sidecar_arch:-amd64}"
+  install -m 0755 "$SRC/prebuilt/join/hogman-$(uname -s)-$(uname -m)" "$WORK/sidecar-ctx/hogman-linux-$sidecar_arch"
   docker build -q -f "$REPO/core/join/Dockerfile.sidecar.prebuilt" -t "$SIDECAR_IMG" "$WORK/sidecar-ctx" >/dev/null
 else
   docker build -q -f "$REPO/core/join/Dockerfile.sidecar" -t "$SIDECAR_IMG" "$REPO/core/join" >/dev/null

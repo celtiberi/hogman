@@ -10,8 +10,10 @@
 # It releases only a commit that is on main and whose build, e2e and vuln runs
 # all succeeded there. deploy/release.sh does the packaging and the checks
 # (GitHub's own build of that commit, provenance on every compiled file, client
-# version, root-owned archives). The packaged files get build provenance of
-# their own before anything is published.
+# version, root-owned archives). The packaged files and the multi-arch
+# ghcr.io/celtiberi/hogman-sidecar container image (built from the exact
+# attested Linux binaries of this run) get build provenance before the GitHub
+# Release is published.
 name: release
 
 on:
@@ -43,6 +45,7 @@ jobs:
       actions: read         # read run results and download the build artifact
       attestations: write   # verify the build's provenance, store the release's
       id-token: write       # sign the release's provenance (Sigstore, keyless)
+      packages: write       # push ghcr.io/celtiberi/hogman-sidecar (I-48)
     env:
       GH_TOKEN: ${{ github.token }}
       COMMIT_INPUT: ${{ inputs.commit }}
@@ -53,8 +56,12 @@ jobs:
           ref: main
           fetch-depth: 0    # release.sh archives the chosen commit from history
 
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
       - name: Choose and check the commit
         id: pick
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
           want="${COMMIT_INPUT:-}"
@@ -76,8 +83,21 @@ jobs:
                     --json event --jq '[.[] | select(.event != "pull_request")] | length')"
             [ "${ok:-0}" -gt 0 ] || { echo "no successful $wf run on main for $full: not releasing" >&2; exit 1; }
           done
+          sha="${full:0:7}"
+          commit_date="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d "$full")"
+          ver="$commit_date-$sha"
+          tag="v$ver"
+          owner_lc="$(printf '%s' "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/$owner_lc/hogman-sidecar"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $tag already exists on $GITHUB_REPOSITORY: not releasing" >&2
+            exit 1
+          fi
           echo "full=$full" >> "$GITHUB_OUTPUT"
-          echo "releasing $full"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "releasing $full ($tag, sidecar $image)"
 
       - name: Package (no publish)
         env:
@@ -87,6 +107,147 @@ jobs:
           mkdir -p "$RUNNER_TEMP/out"
           NO_DEPLOY=1 OUT_DIR="$RUNNER_TEMP/out" deploy/release.sh "$FULL"
           ls -l "$RUNNER_TEMP/out"
+
+      # Build and push ghcr.io/<owner>/hogman-sidecar from the exact already-attested
+      # Linux binaries packaged above (never recompiled in Docker, I-48).
+      # GHCR login stays active across push, OCI attestation push, and verify,
+      # then is cleared unconditionally by "Log out of GHCR".
+      - name: Build and push multi-arch sidecar image
+        id: sidecar
+        env:
+          FULL: ${{ steps.pick.outputs.full }}
+          VER: ${{ steps.pick.outputs.ver }}
+          TAG: ${{ steps.pick.outputs.tag }}
+          IMAGE: ${{ steps.pick.outputs.image }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          # Extract Dockerfile.sidecar.prebuilt from the exact commit being released.
+          df="$RUNNER_TEMP/Dockerfile.sidecar.prebuilt"
+          git show "$FULL:core/join/Dockerfile.sidecar.prebuilt" > "$df"
+
+          # Stage verified Linux binaries and check sha256 against hogman-SHA256SUMS before COPY.
+          ctx="$RUNNER_TEMP/sidecar-ctx"
+          rm -rf "$ctx"
+          mkdir -p "$ctx"
+          want_amd64="$(awk '$2 == "hogman-Linux-x86_64" { print $1 }' "$RUNNER_TEMP/out/hogman-SHA256SUMS")"
+          want_arm64="$(awk '$2 == "hogman-Linux-aarch64" { print $1 }' "$RUNNER_TEMP/out/hogman-SHA256SUMS")"
+          [[ "$want_amd64" =~ ^[0-9a-f]{64}$ ]] || { echo "missing amd64 checksum in hogman-SHA256SUMS" >&2; exit 1; }
+          [[ "$want_arm64" =~ ^[0-9a-f]{64}$ ]] || { echo "missing arm64 checksum in hogman-SHA256SUMS" >&2; exit 1; }
+
+          install -m 0755 "$RUNNER_TEMP/out/hogman-Linux-x86_64" "$ctx/hogman-linux-amd64"
+          install -m 0755 "$RUNNER_TEMP/out/hogman-Linux-aarch64" "$ctx/hogman-linux-arm64"
+          printf '%s  %s\n%s  %s\n' \
+            "$want_amd64" "$ctx/hogman-linux-amd64" \
+            "$want_arm64" "$ctx/hogman-linux-arm64" \
+            | sha256sum -c --quiet -
+
+          file "$ctx/hogman-linux-amd64" | grep -q 'x86-64' \
+            || { echo "hogman-linux-amd64 is not x86-64" >&2; exit 1; }
+          file "$ctx/hogman-linux-arm64" | grep -qE 'ARM aarch64|aarch64' \
+            || { echo "hogman-linux-arm64 is not aarch64" >&2; exit 1; }
+
+          # Pre-push hardening check on local linux/amd64 build: non-root, no shell, exact version.
+          docker buildx build --platform linux/amd64 --provenance=false --sbom=false --load \
+            --build-arg "VERSION=$VER" \
+            --build-arg "REVISION=$FULL" \
+            -f "$df" -t "hogman-sidecar-prepush:$TAG" "$ctx"
+          img_user="$(docker inspect -f '{{.Config.User}}' "hogman-sidecar-prepush:$TAG")"
+          [ "$img_user" = "65532:65532" ] || { echo "unexpected sidecar User: $img_user" >&2; exit 1; }
+          docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "hogman-sidecar-prepush:$TAG" \
+            | grep -qx 'HOGMAN_DISABLE_NETNS=1' || { echo "missing HOGMAN_DISABLE_NETNS=1" >&2; exit 1; }
+          if docker run --rm --entrypoint /bin/sh "hogman-sidecar-prepush:$TAG" -c true >/dev/null 2>&1; then
+            echo "sidecar image unexpectedly contains /bin/sh" >&2
+            exit 1
+          fi
+          ver_out="$(docker run --rm "hogman-sidecar-prepush:$TAG" --version)"
+          got_ver="$(printf '%s\n' "$ver_out" | awk '{print $2}')"
+          got_ver="${got_ver#v}"
+          [ "$got_ver" = "$VER" ] && grep -q 'linux/amd64' <<<"$ver_out" \
+            || { echo "unexpected sidecar --version: $ver_out (want $VER linux/amd64)" >&2; exit 1; }
+          docker rmi -f "hogman-sidecar-prepush:$TAG" >/dev/null 2>&1 || true
+
+          # Authenticate to GHCR with GITHUB_TOKEN only (no PAT) and refuse to overwrite an existing version tag.
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          if docker buildx imagetools inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
+            echo "sidecar image $IMAGE:$TAG already exists in GHCR: refusing to re-push" >&2
+            exit 1
+          fi
+
+          # Push multi-arch manifest list (version tag + moving latest); provenance is
+          # attached below via Sigstore-signed actions/attest-build-provenance.
+          meta="$RUNNER_TEMP/sidecar-meta.json"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --provenance=false \
+            --sbom=false \
+            --build-arg "VERSION=$VER" \
+            --build-arg "REVISION=$FULL" \
+            -f "$df" \
+            -t "$IMAGE:$TAG" \
+            -t "$IMAGE:latest" \
+            --metadata-file "$meta" \
+            --push "$ctx"
+
+          digest="$(jq -r '.["containerimage.digest"] // empty' "$meta")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || { echo "unexpected pushed sidecar digest: $digest" >&2; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "pushed $IMAGE:$TAG@$digest"
+
+      # SLSA build provenance for the pushed multi-arch manifest list (check with
+      # `gh attestation verify oci://ghcr.io/celtiberi/hogman-sidecar@sha256:... --repo celtiberi/hogman`).
+      # Uses ~/.docker/config.json from the GHCR login above to attach the OCI referrer.
+      - name: Attest sidecar image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.pick.outputs.image }}
+          subject-digest: ${{ steps.sidecar.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify pushed sidecar provenance and hardening
+        env:
+          VER: ${{ steps.pick.outputs.ver }}
+          IMAGE: ${{ steps.pick.outputs.image }}
+          DIGEST: ${{ steps.sidecar.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Verify both the GitHub Attestations API record and the OCI referrer
+          # pushed into GHCR (GITHUB_SHA is the workflow commit recorded in the
+          # Sigstore OIDC certificate, even when releasing an older commit on main).
+          gh attestation verify "oci://$IMAGE@$DIGEST" \
+            --repo "$GITHUB_REPOSITORY" \
+            --deny-self-hosted-runners \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA"
+          gh attestation verify "oci://$IMAGE@$DIGEST" \
+            --repo "$GITHUB_REPOSITORY" \
+            --bundle-from-oci \
+            --deny-self-hosted-runners \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA"
+
+          insp="$(docker buildx imagetools inspect "$IMAGE@$DIGEST")"
+          grep -q 'linux/amd64' <<<"$insp" || { echo "manifest list missing linux/amd64" >&2; exit 1; }
+          grep -q 'linux/arm64' <<<"$insp" || { echo "manifest list missing linux/arm64" >&2; exit 1; }
+
+          docker pull -q "$IMAGE@$DIGEST"
+          img_user="$(docker inspect -f '{{.Config.User}}' "$IMAGE@$DIGEST")"
+          [ "$img_user" = "65532:65532" ] || { echo "pulled sidecar User = $img_user, want 65532:65532" >&2; exit 1; }
+          if docker run --rm --entrypoint /bin/sh "$IMAGE@$DIGEST" -c true >/dev/null 2>&1; then
+            echo "pulled sidecar image unexpectedly contains /bin/sh" >&2
+            exit 1
+          fi
+          ver_out="$(docker run --rm "$IMAGE@$DIGEST" --version)"
+          got_ver="$(printf '%s\n' "$ver_out" | awk '{print $2}')"
+          got_ver="${got_ver#v}"
+          [ "$got_ver" = "$VER" ] || { echo "pulled sidecar --version = $ver_out, want $VER" >&2; exit 1; }
+          echo "verified pushed $IMAGE@$DIGEST (provenance + OCI bundle OK, amd64+arm64, UID 65532, no shell, $ver_out)"
+
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io >/dev/null 2>&1 || true
 
       # Provenance for the files people actually download: which workflow,
       # commit and runner packaged them. Check with
@@ -100,6 +261,7 @@ jobs:
       - name: Publish
         env:
           FULL: ${{ steps.pick.outputs.full }}
+          SIDECAR_IMAGE_REF: ${{ steps.pick.outputs.image }}:${{ steps.pick.outputs.tag }}@${{ steps.sidecar.outputs.digest }}
         run: |
           set -euo pipefail
           PUBLISH_FROM="$RUNNER_TEMP/out" deploy/release.sh "$FULL"
