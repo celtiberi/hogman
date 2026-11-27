@@ -9,7 +9,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
-	"errors"
 	"math/big"
 	"net"
 	"net/http"
@@ -20,6 +19,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
 
 	"hogman/join/internal/share"
 )
@@ -176,22 +177,48 @@ func TestSharePublicCertPebbleE2E(t *testing.T) {
 	}
 
 	lookupTXT := func(fqdn string) []string {
-		r := &net.Resolver{
-			PreferGo: true,
-			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, resolverAddr)
-			},
-		}
-		vals, err := r.LookupTXT(context.Background(), fqdn)
+		qname := strings.TrimSuffix(fqdn, ".") + "."
+		name, err := dnsmessage.NewName(qname)
 		if err != nil {
-			var de *net.DNSError
-			if errors.As(err, &de) && de.IsNotFound {
-				return nil
+			t.Fatalf("NewName(%s): %v", qname, err)
+		}
+		query, err := (&dnsmessage.Message{
+			Header: dnsmessage.Header{ID: 0x4242, RecursionDesired: false},
+			Questions: []dnsmessage.Question{{
+				Name:  name,
+				Type:  dnsmessage.TypeTXT,
+				Class: dnsmessage.ClassINET,
+			}},
+		}).Pack()
+		if err != nil {
+			t.Fatalf("pack DNS query for %s: %v", qname, err)
+		}
+		conn, err := (&net.Dialer{Timeout: 5 * time.Second}).Dial("udp", resolverAddr)
+		if err != nil {
+			t.Fatalf("dial %s: %v", resolverAddr, err)
+		}
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		if _, err := conn.Write(query); err != nil {
+			t.Fatalf("write DNS query for %s: %v", qname, err)
+		}
+		buf := make([]byte, 4096)
+		n, err := conn.Read(buf)
+		if err != nil {
+			t.Fatalf("read DNS reply for %s: %v", qname, err)
+		}
+		var resp dnsmessage.Message
+		if err := resp.Unpack(buf[:n]); err != nil {
+			t.Fatalf("unpack DNS reply for %s: %v", qname, err)
+		}
+		if resp.Header.RCode != dnsmessage.RCodeSuccess {
+			t.Fatalf("DNS TXT(%s) RCode = %v, want NOERROR", qname, resp.Header.RCode)
+		}
+		var vals []string
+		for _, ans := range resp.Answers {
+			if txt, ok := ans.Body.(*dnsmessage.TXTResource); ok {
+				vals = append(vals, strings.Join(txt.TXT, ""))
 			}
-			if strings.Contains(err.Error(), "no such host") || strings.Contains(strings.ToLower(err.Error()), "no answer") {
-				return nil
-			}
-			t.Fatalf("LookupTXT(%s): %v", fqdn, err)
 		}
 		return vals
 	}
