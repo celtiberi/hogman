@@ -59,6 +59,7 @@ func TestExeMatchesHogman(t *testing.T) {
 		{"windows replaced .old exe", `C:\Users\Alice\hogman.exe.old`, `C:\Users\Alice\hogman.exe`, "", "windows", true},
 		{"windows legacy hogman-join.exe", `C:\Users\Alice\hogman-join.exe`, `C:\Users\Alice\hogman.exe`, "", "windows", true},
 		{"release binary name", `/tmp/hogman-Linux-x86_64`, `/usr/bin/other`, "", "linux", true},
+		{"renamed deleted stale hogman binary", `/tmp/hogman-stale-deleted (deleted)`, `/root/.config/hogman/bin/hogman`, "", "linux", true},
 		{"unrelated browser on macOS", `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`, `/opt/hogman/hogman`, "", "darwin", false},
 		{"unrelated ping on Windows", `C:\Windows\System32\PING.EXE`, `C:\Users\alice\hogman.exe`, "", "windows", false},
 		{"unrelated sleep on Linux", `/usr/bin/sleep`, `/home/alice/hogman`, "", "linux", false},
@@ -141,21 +142,31 @@ func TestStalePIDFileNeverKillsNonHogmanProcess(t *testing.T) {
 		t.Fatalf("ProcessIsHogman(helper=%d) = false, want true", helperPID)
 	}
 
-	// Mismatched startTag -> treated as stale, removed without killing helper.
-	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d 999999999999999\n", helperPID)), 0o600); err != nil {
+	// Mismatched startTag (in sibling .start file, matching WritePIDFile layout) ->
+	// treated as stale, removed without killing helper.
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(helperPID)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fsutil.PIDStartPath(pidPath), []byte(fmt.Sprintf("%d 999999999999999\n", helperPID)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	StopDetached(dir)
 	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 		t.Fatalf("mismatched-startTag agent.pid was not removed (err=%v)", err)
 	}
+	if _, err := os.Stat(fsutil.PIDStartPath(pidPath)); !os.IsNotExist(err) {
+		t.Fatalf("mismatched-startTag agent.pid.start was not removed (err=%v)", err)
+	}
 	if !ProcessAlive(helperPID) {
 		t.Fatalf("helper %d was killed despite startTag mismatch!", helperPID)
 	}
 
-	// Matching startTag -> cleanly stops helper.
+	// Matching startTag stored via sibling .start file (standard single-PID file) -> cleanly stops helper.
 	realTag := fsutil.ProcessStartTag(helperPID)
-	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d %s\n", helperPID, realTag)), 0o600); err != nil {
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(helperPID)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fsutil.PIDStartPath(pidPath), []byte(fmt.Sprintf("%d %s\n", helperPID, realTag)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	StopDetached(dir)
@@ -166,5 +177,8 @@ func TestStalePIDFileNeverKillsNonHogmanProcess(t *testing.T) {
 	}
 	if ProcessAlive(helperPID) {
 		t.Fatalf("helper %d still alive after StopDetached", helperPID)
+	}
+	if _, err := os.Stat(fsutil.PIDStartPath(pidPath)); !os.IsNotExist(err) {
+		t.Fatalf("agent.pid.start was not removed after StopDetached (err=%v)", err)
 	}
 }

@@ -64,7 +64,7 @@ func Run(dir string) error {
 	defer ln.Close()
 
 	_ = fsutil.WritePIDFile(filepath.Join(dir, "agent.pid"))
-	defer os.Remove(filepath.Join(dir, "agent.pid"))
+	defer fsutil.RemovePIDFile(filepath.Join(dir, "agent.pid"))
 
 	// Rotate status.token atomically on startup and intentionally keep it on
 	// exit so a crashed or stopped agent never leaves status.token missing.

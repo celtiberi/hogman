@@ -17,19 +17,38 @@ func ProcessStartTag(pid int) string {
 	return processStartTag(pid)
 }
 
-// WritePIDFile records the current process's PID (and OS start tag when
-// available) so later stops or liveness checks can reject reused PIDs.
-func WritePIDFile(path string) error {
-	pid := os.Getpid()
-	content := strconv.Itoa(pid)
-	if tag := ProcessStartTag(pid); tag != "" {
-		content = fmt.Sprintf("%d %s", pid, tag)
-	}
-	return WriteFileAtomic(path, []byte(content+"\n"), 0o600)
+// PIDStartPath returns the sibling metadata path recording "<pid> <startTag>"
+// alongside a standard single-integer PID file (agent.pid / share.pid).
+func PIDStartPath(pidPath string) string {
+	return pidPath + ".start"
 }
 
-// ReadPIDFile parses a PID file written by WritePIDFile (or a legacy single-PID
-// file containing only "<pid>").
+// WritePIDFile records the current process's PID in path (as a standard
+// single-integer PID file for compatibility with older binaries and tools) and
+// writes "<pid> <startTag>" to path+".start" when an OS creation tag is
+// available so later stops and liveness checks can reject reused PIDs.
+func WritePIDFile(path string) error {
+	pid := os.Getpid()
+	if err := WriteFileAtomic(path, []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
+		return err
+	}
+	if tag := ProcessStartTag(pid); tag != "" {
+		_ = WriteFileAtomic(PIDStartPath(path), []byte(fmt.Sprintf("%d %s\n", pid, tag)), 0o600)
+	} else {
+		_ = os.Remove(PIDStartPath(path))
+	}
+	return nil
+}
+
+// RemovePIDFile removes both the PID file and its sibling start-tag metadata.
+func RemovePIDFile(path string) {
+	_ = os.Remove(path)
+	_ = os.Remove(PIDStartPath(path))
+}
+
+// ReadPIDFile parses a PID file written by WritePIDFile (accepting either a
+// standard "<pid>" file plus optional sibling "<pid>.start", or an inline
+// "<pid> <startTag>" file).
 func ReadPIDFile(path string) (pid int, startTag string, ok bool) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -45,6 +64,14 @@ func ReadPIDFile(path string) (pid int, startTag string, ok bool) {
 	}
 	if len(fields) >= 2 {
 		return n, fields[1], true
+	}
+	if sb, err := os.ReadFile(PIDStartPath(path)); err == nil {
+		sfields := strings.Fields(string(sb))
+		if len(sfields) >= 2 {
+			if sn, err := strconv.Atoi(sfields[0]); err == nil && sn == n {
+				return n, sfields[1], true
+			}
+		}
 	}
 	return n, "", true
 }

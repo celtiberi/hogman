@@ -176,7 +176,7 @@ func DefaultShareOps(u *ui.UI) ShareOps {
 
 func RestartShareService(s *ShareTargetDir, binPath string, o Options, updated bool, u *ui.UI) error {
 	_ = os.Remove(filepath.Join(s.Dir, "status.json"))
-	_ = os.Remove(filepath.Join(s.Dir, "share.pid"))
+	fsutil.RemovePIDFile(filepath.Join(s.Dir, "share.pid"))
 	managed, pid, err := platform.StartShareServiceWithBinary(binPath, s.Dir, s.Cfg, o.NoService, u.Note)
 	if err != nil {
 		return err

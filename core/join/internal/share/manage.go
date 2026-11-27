@@ -14,6 +14,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"hogman/join/internal/fsutil"
 	"hogman/join/internal/link"
 	"hogman/join/internal/mesh"
 	"hogman/join/internal/penapi"
@@ -411,7 +412,7 @@ func PID(dir string) int {
 
 func runBackground(dir string, c *state.ShareConfig, o StartOptions, u *ui.UI, ensureBin EnsureBinaryFunc) error {
 	_ = os.Remove(filepath.Join(dir, "status.json"))
-	_ = os.Remove(filepath.Join(dir, "share.pid"))
+	fsutil.RemovePIDFile(filepath.Join(dir, "share.pid"))
 	u.Step("Sharing %s as %s, in the background", c.Showing(), c.URL())
 	managed, pid, err := StartBackground(dir, c, o.NoService, u, ensureBin)
 	if err != nil {

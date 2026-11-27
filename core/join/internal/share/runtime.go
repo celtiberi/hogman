@@ -232,7 +232,7 @@ func Serve(ctx context.Context, dir string, u *ui.UI, ready func(*state.ShareCon
 	}
 	pidFile := filepath.Join(dir, "share.pid")
 	_ = fsutil.WritePIDFile(pidFile)
-	defer os.Remove(pidFile)
+	defer fsutil.RemovePIDFile(pidFile)
 	state.WriteShareStatus(dir, "starting", "")
 	fail := func(err error) error { state.WriteShareStatus(dir, "error", err.Error()); return err }
 

@@ -11,17 +11,9 @@ import (
 	"hogman/join/internal/state"
 )
 
-var knownHogmanBinaryNames = map[string]bool{
-	"hogman":                   true,
-	"hogman.exe":               true,
-	"hogman-join":              true,
-	"hogman-join.exe":          true,
-	"hogman-darwin-arm64":      true,
-	"hogman-darwin-x86_64":     true,
-	"hogman-linux-x86_64":      true,
-	"hogman-linux-aarch64":     true,
-	"hogman-windows-amd64.exe": true,
-	"hogman-windows-arm64.exe": true,
+func isHogmanBinaryBase(base string) bool {
+	b := strings.ToLower(base)
+	return b == "hogman" || b == "hogman.exe" || strings.HasPrefix(b, "hogman-") || strings.HasPrefix(b, "hogman.")
 }
 
 func cleanResolvedPath(p string) string {
@@ -78,7 +70,7 @@ func exeMatchesHogmanForOS(gotExe, wantExe, canonicalBin, goos string) bool {
 	if idx := strings.LastIndexAny(base, `/\`); idx >= 0 {
 		base = base[idx+1:]
 	}
-	return knownHogmanBinaryNames[strings.ToLower(base)]
+	return isHogmanBinaryBase(base)
 }
 
 // ProcessIsHogman reports whether pid refers to a live, accessible process
@@ -139,14 +131,15 @@ func ReadLiveHogmanPID(path string) (pid int, stale bool) {
 // removes the file without signalling any process.
 func StopPIDFile(pidPath string, termTimeout time.Duration) {
 	if _, err := os.Stat(pidPath); err != nil {
+		_ = os.Remove(fsutil.PIDStartPath(pidPath))
 		return
 	}
 	pid, startTag, ok := fsutil.ReadPIDFile(pidPath)
 	if ok && ProcessMatchesPIDRecord(pid, startTag, "") {
 		StopProcessVerified(pid, startTag, termTimeout)
-		_ = os.Remove(pidPath)
+		fsutil.RemovePIDFile(pidPath)
 		return
 	}
 	fsutil.DaemonLogger().Info("stale pid file removed", "path", pidPath)
-	_ = os.Remove(pidPath)
+	fsutil.RemovePIDFile(pidPath)
 }
