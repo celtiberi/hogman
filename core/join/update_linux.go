@@ -20,7 +20,7 @@ func startExistingBinary(bin, dir string, c *state.AgentConfig, noService bool) 
 	unit := renderSystemdUnit(c.Zone, bin, dir)
 	if out, err := installSystemdUnit(unitName(c.Zone), unitPath(c.Zone), unit, false); err != nil {
 		if out != "" {
-			note("could not start user service for %s (%s); running in the background until restart", c.Zone, link.FirstLine(out))
+			note("could not start user service for %s (%s); running in the background until restart", c.Zone, link.SingleLine(out))
 		} else {
 			note("could not write user service for %s (%v); running in the background until restart", c.Zone, err)
 		}

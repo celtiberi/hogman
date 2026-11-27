@@ -184,6 +184,24 @@ func TestStatusShareListAndDoctorJSON(t *testing.T) {
 		t.Fatalf("unexpected doctor checks: %+v", rep.Checks)
 	}
 
+	// 2b. Doctor preserves all lines of a 3-line share command/runtime error.
+	errShareDir := filepath.Join(sharesDir, "alpha.pens.example.com", "broken")
+	_ = os.MkdirAll(errShareDir, 0o700)
+	if err := (&state.ShareConfig{Name: "broken", Zone: "alpha.pens.example.com", Target: "http://127.0.0.1:3000"}).Save(errShareDir); err != nil {
+		t.Fatal(err)
+	}
+	state.WriteShareStatus(errShareDir, "error", "line one\nline two\nline three")
+	rep2 := runDoctor(cfgBase, sharesDir, "/opt/homebrew/Cellar/hogman/1.0/bin/hogman")
+	found3Line := false
+	for _, c := range rep2.Checks {
+		if c.Name == "share:broken.alpha.pens.example.com" && c.Status == "fail" && c.Detail == "line one; line two; line three" {
+			found3Line = true
+		}
+	}
+	if !found3Line {
+		t.Fatalf("doctor did not preserve all 3 lines of share error: %+v", rep2.Checks)
+	}
+
 	// 3. CLI flag routing for --json on status, share list, doctor + hogman alias.
 	var gotStatusJSON, gotShareJSON, gotDoctorJSON bool
 	h := cliHandlers{

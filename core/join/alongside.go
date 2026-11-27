@@ -492,7 +492,7 @@ func removeOwnDeviceWith(ctx context.Context, c *http.Client, zone string, check
 		return false
 	default:
 		if res.Err != nil {
-			note("could not remove this computer from your devices: %v", link.FirstLine(res.Err.Error()))
+			note("could not remove this computer from your devices: %v", link.SingleLine(res.Err.Error()))
 		}
 		return false
 	}

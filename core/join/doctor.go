@@ -179,7 +179,7 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 			add(doctorCheck{
 				Name:   "share:" + c.FQDN(),
 				Status: "fail",
-				Detail: link.FirstLine(st.Error),
+				Detail: link.SingleLine(st.Error),
 				Fix:    "check log: " + filepath.Join(d, "share.log"),
 			})
 		} else if running {
