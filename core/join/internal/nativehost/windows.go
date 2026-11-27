@@ -3,14 +3,14 @@
 package nativehost
 
 import (
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
+	"golang.org/x/sys/windows/registry"
+
 	"hogman/join/internal/fsutil"
-	"hogman/join/internal/link"
-	"hogman/join/internal/platform"
 )
 
 func isolateNativeStdout() (*os.File, error) {
@@ -19,14 +19,19 @@ func isolateNativeStdout() (*os.File, error) {
 	return out, nil
 }
 
-var windowsNativeRegKeys = []struct {
-	kind string
-	key  string
+// windowsNativeRegPrefix is the HKCU subkey root (overridable in tests so unit
+// tests never modify the runner's real Chrome/Edge/Firefox registry keys).
+var windowsNativeRegPrefix = "Software"
+
+var windowsNativeBrowsers = []struct {
+	kind   string
+	subkey string
 }{
-	{kind: "chrome", key: `HKCU\Software\Google\Chrome\NativeMessagingHosts\` + HostName},
-	{kind: "chrome", key: `HKCU\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\` + HostName},
-	{kind: "chrome", key: `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\` + HostName},
-	{kind: "firefox", key: `HKCU\Software\Mozilla\NativeMessagingHosts\` + HostName},
+	{kind: "chrome", subkey: `Google\Chrome\NativeMessagingHosts\` + HostName},
+	{kind: "chrome", subkey: `BraveSoftware\Brave-Browser\NativeMessagingHosts\` + HostName},
+	{kind: "chrome", subkey: `Microsoft\Edge\NativeMessagingHosts\` + HostName},
+	{kind: "chrome", subkey: `Chromium\NativeMessagingHosts\` + HostName},
+	{kind: "firefox", subkey: `Mozilla\NativeMessagingHosts\` + HostName},
 }
 
 func InstallBinary(canonicalBin, hostPath string) error {
@@ -37,6 +42,10 @@ func InstallBinary(canonicalBin, hostPath string) error {
 }
 
 func registerNativeManifests(configBase, hostPath string, chromeIDs, firefoxIDs []string, _ func(string, ...any)) (int, error) {
+	return registerNativeManifestsUnder(windowsNativeRegPrefix, configBase, hostPath, chromeIDs, firefoxIDs)
+}
+
+func registerNativeManifestsUnder(regPrefix, configBase, hostPath string, chromeIDs, firefoxIDs []string) (int, error) {
 	binDir := filepath.Join(configBase, "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		return 0, err
@@ -50,7 +59,7 @@ func registerNativeManifests(configBase, hostPath string, chromeIDs, firefoxIDs 
 		if err != nil {
 			return 0, err
 		}
-		if err := os.WriteFile(chromePath, b, 0o644); err != nil {
+		if err := fsutil.WriteFileAtomic(chromePath, b, 0o644); err != nil {
 			return 0, err
 		}
 		hasChrome = true
@@ -61,16 +70,16 @@ func registerNativeManifests(configBase, hostPath string, chromeIDs, firefoxIDs 
 		if err != nil {
 			return 0, err
 		}
-		if err := os.WriteFile(firefoxPath, b, 0o644); err != nil {
+		if err := fsutil.WriteFileAtomic(firefoxPath, b, 0o644); err != nil {
 			return 0, err
 		}
 		hasFirefox = true
 	}
 
 	written := 0
-	for _, rk := range windowsNativeRegKeys {
+	for _, b := range windowsNativeBrowsers {
 		var manifestPath string
-		switch rk.kind {
+		switch b.kind {
 		case "chrome":
 			if !hasChrome {
 				continue
@@ -82,8 +91,15 @@ func registerNativeManifests(configBase, hostPath string, chromeIDs, firefoxIDs 
 			}
 			manifestPath = firefoxPath
 		}
-		if out, err := exec.Command(platform.WinSystem32("reg.exe"), "add", rk.key, "/ve", "/t", "REG_SZ", "/d", manifestPath, "/f").CombinedOutput(); err != nil {
-			return written, fmt.Errorf("register %s: %v (%s)", rk.key, err, link.SingleLine(string(out)))
+		keyPath := regPrefix + `\` + b.subkey
+		k, _, err := registry.CreateKey(registry.CURRENT_USER, keyPath, registry.SET_VALUE)
+		if err != nil {
+			return written, fmt.Errorf("register HKCU\\%s: %w", keyPath, err)
+		}
+		err = k.SetStringValue("", manifestPath)
+		_ = k.Close()
+		if err != nil {
+			return written, fmt.Errorf("register HKCU\\%s: %w", keyPath, err)
 		}
 		written++
 	}
@@ -91,9 +107,15 @@ func registerNativeManifests(configBase, hostPath string, chromeIDs, firefoxIDs 
 }
 
 func unregisterNativeManifests(configBase string) {
-	regExe := platform.WinSystem32("reg.exe")
-	for _, rk := range windowsNativeRegKeys {
-		_ = exec.Command(regExe, "delete", rk.key, "/f").Run()
+	unregisterNativeManifestsUnder(windowsNativeRegPrefix, configBase)
+}
+
+func unregisterNativeManifestsUnder(regPrefix, configBase string) {
+	for _, b := range windowsNativeBrowsers {
+		keyPath := regPrefix + `\` + b.subkey
+		if err := registry.DeleteKey(registry.CURRENT_USER, keyPath); err != nil && !errors.Is(err, registry.ErrNotExist) {
+			continue
+		}
 	}
 	binDir := filepath.Join(configBase, "bin")
 	_ = os.Remove(filepath.Join(binDir, HostName+".chrome.json"))

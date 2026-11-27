@@ -170,21 +170,27 @@ func TestStatusShareListAndDoctorJSON(t *testing.T) {
 	_ = os.MkdirAll(corruptDir, 0o700)
 	_ = os.WriteFile(filepath.Join(corruptDir, "config.json"), []byte("{bad"), 0o600)
 
-	rep := runDoctor(cfgBase, sharesDir, "/opt/homebrew/Cellar/hogman/1.0/bin/hogman")
+	pkgExePath := "/opt/homebrew/Cellar/hogman/1.0/bin/hogman"
+	wantPkgMgr := "Homebrew"
+	if runtime.GOOS == "windows" {
+		pkgExePath = `C:\Users\alice\scoop\apps\hogman\current\hogman.exe`
+		wantPkgMgr = "Scoop"
+	}
+	rep := runDoctor(cfgBase, sharesDir, pkgExePath)
 	if rep.OK {
 		t.Fatal("doctor should report OK=false with corrupt pen config")
 	}
 	foundCorrupt := false
-	foundBrew := false
+	foundPkgMgr := false
 	for _, c := range rep.Checks {
 		if c.Name == "pen-configs" && c.Status == "fail" {
 			foundCorrupt = true
 		}
-		if c.Name == "binary" && strings.Contains(c.Detail, "Homebrew") {
-			foundBrew = true
+		if c.Name == "binary" && strings.Contains(c.Detail, wantPkgMgr) {
+			foundPkgMgr = true
 		}
 	}
-	if !foundCorrupt || !foundBrew {
+	if !foundCorrupt || !foundPkgMgr {
 		t.Fatalf("unexpected doctor checks: %+v", rep.Checks)
 	}
 

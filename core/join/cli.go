@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"hogman/join/internal/agent"
 	"hogman/join/internal/bridge"
+	"hogman/join/internal/fsutil"
 	"hogman/join/internal/link"
 	"hogman/join/internal/platform"
 	"hogman/join/internal/share"
@@ -94,24 +96,25 @@ func normalizeSingleDashFlags(root *cobra.Command, args []string) []string {
 // Production uses defaultCLIHandlers(); tests can substitute recorders and a
 // local *ui.UI to run CLI tests in parallel with no global state mutation.
 type cliHandlers struct {
-	ui           *ui.UI
-	out          io.Writer
-	errOut       io.Writer
-	join         func(raw string, o options) error
-	update       func(args []string, o options) error
-	leave        func(args []string, o options) error
-	leaveAll     func(args []string, o options) error
-	uninstall    func(args []string, o options) error
-	status       func(o options) error
-	doctor       func(o options) error
-	browserSetup func(args []string, o options) error
-	shareStart   func(name, target, rawLink string, o options) error
-	shareList    func(pen string, asJSON bool) error
-	shareStop    func(name string, o options) error
-	bridge       func(bo bridge.Options) error
-	agent        func(dir string) error
-	agentLogout  func(dir string)
-	shareRun     func(dir string) error
+	ui            *ui.UI
+	out           io.Writer
+	errOut        io.Writer
+	join          func(raw string, o options) error
+	update        func(args []string, o options) error
+	leave         func(args []string, o options) error
+	leaveAll      func(args []string, o options) error
+	uninstall     func(args []string, o options) error
+	status        func(o options) error
+	doctor        func(o options) error
+	browserSetup  func(args []string, o options) error
+	shareStart    func(name, target, rawLink string, o options) error
+	shareList     func(pen string, asJSON bool) error
+	shareStop     func(name string, o options) error
+	bridge        func(bo bridge.Options) error
+	agent         func(dir string) error
+	agentLogout   func(dir string)
+	shareRun      func(dir string) error
+	startDetached func(kind, dir string) error
 }
 
 func (h cliHandlers) activeUI() *ui.UI {
@@ -168,6 +171,21 @@ func defaultCLIHandlers() cliHandlers {
 		agent:       agent.Run,
 		agentLogout: agent.Logout,
 		shareRun:    func(dir string) error { return share.RunProcess(dir, u) },
+		startDetached: func(kind, dir string) error {
+			exe, err := fsutil.ResolvedExePath()
+			if err != nil {
+				return err
+			}
+			switch kind {
+			case "agent":
+				return platform.StartDetached(exe, dir)
+			case "share":
+				_, err := platform.SpawnDetached(filepath.Join(dir, "share.log"), exe, "__share-run", dir)
+				return err
+			default:
+				return usageErrorf("unknown detached target %q", kind)
+			}
+		},
 	}
 }
 

@@ -189,5 +189,16 @@ func newInternalServiceCmds(h cliHandlers) []*cobra.Command {
 				return h.shareRun(args[0])
 			},
 		},
+		{
+			Use:    "__start-detached <agent|share> <dir>",
+			Hidden: true,
+			Args:   cobra.ExactArgs(2),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if args[0] != "agent" && args[0] != "share" {
+					return usageErrorf("unknown detached target %q", args[0])
+				}
+				return h.startDetached(args[0], args[1])
+			},
+		},
 	}
 }

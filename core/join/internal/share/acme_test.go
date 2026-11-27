@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -944,7 +945,7 @@ func TestShareACMEPersistentBackoffAcrossRestarts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat %s: %v", retryPath, err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("%s mode = %o, want 0600", retryPath, fi.Mode().Perm())
 	}
 	st := cm1.loadRetryState()

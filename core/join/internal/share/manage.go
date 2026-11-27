@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -401,10 +400,6 @@ func StartBackground(dir string, c *state.ShareConfig, noService bool, u *ui.UI,
 	if err != nil {
 		return false, 0, err
 	}
-	if runtime.GOOS == "windows" {
-		u.Note("on Windows shares do not yet restart by themselves; run this command again after a restart")
-		return platform.StartShareServiceWithBinary(bin, dir, c, true, u.Note)
-	}
 	return platform.StartShareServiceWithBinary(bin, dir, c, noService, u.Note)
 }
 
@@ -455,7 +450,7 @@ func WaitBackground(dir string, c *state.ShareConfig, managed bool, pid int, tim
 		case <-time.After(poll):
 		}
 		st := state.ReadShareStatus(dir)
-		if !managed && st.State != "up" && st.State != "error" && !platform.ProcessAlive(pid) {
+		if (!managed || pid > 0) && st.State != "up" && st.State != "error" && !platform.ProcessAlive(pid) {
 			if stopFn != nil {
 				stopFn()
 			}

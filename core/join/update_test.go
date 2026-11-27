@@ -203,8 +203,12 @@ func TestStageAndVerifyAtomicReplace(t *testing.T) {
 	if !bytes.Equal(got, newBytes) {
 		t.Fatalf("dst content after replace: %q, want %q", got, newBytes)
 	}
-	if fi, err := os.Stat(dst); err != nil || fi.Mode().Perm()&0o100 == 0 {
-		t.Fatalf("dst mode not executable: %v, err=%v", fi.Mode().Perm(), err)
+	fi, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("stat dst: %v", err)
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm()&0o100 == 0 {
+		t.Fatalf("dst mode not executable: %v", fi.Mode().Perm())
 	}
 }
 

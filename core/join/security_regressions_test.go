@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -148,8 +149,11 @@ func TestAuditAgentStateVerifiesStatusTokenHMAC(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(filepath.Join(dir, state.StatusTokenFilename))
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("status.token mode = %v (err=%v), want 0600", info.Mode(), err)
+	if err != nil {
+		t.Fatalf("stat status.token: %v", err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("status.token mode = %v, want 0600", info.Mode())
 	}
 	// Wrong token in agent -> rejected.
 	a.StatusToken = "wrong-token"

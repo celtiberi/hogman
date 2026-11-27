@@ -10,6 +10,7 @@ require (
 	github.com/spf13/pflag v1.1.0
 	go.uber.org/zap v1.28.0
 	golang.org/x/net v0.63.0
+	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
 	tailscale.com v1.104.7
 )
@@ -57,7 +58,6 @@ require (
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
 	golang.org/x/oauth2 v0.38.0 // indirect
 	golang.org/x/sync v0.25.0 // indirect
-	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
