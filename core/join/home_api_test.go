@@ -37,6 +37,18 @@ func TestHomeAPICtxErrorParsingAndRetryAfter(t *testing.T) {
 				Header:     http.Header{},
 				Body:       io.NopCloser(strings.NewReader("")),
 			}, nil
+		case "/api/captive":
+			return &http.Response{
+				StatusCode: http.StatusBadGateway,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader("\x1b[31m<html>\n\t" + strings.Repeat("X", 500) + "\x7f</html>")),
+			}, nil
+		case "/api/json-ctrl":
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(`{"error":"bad \u001b[2Jinput\u007f ` + strings.Repeat("a", 300) + `"}`)),
+			}, nil
 		default:
 			return &http.Response{
 				StatusCode: http.StatusOK,
@@ -66,6 +78,27 @@ func TestHomeAPICtxErrorParsingAndRetryAfter(t *testing.T) {
 	code, err = homeAPICtx(context.Background(), hc, "bobo.pens.example.com", http.MethodDelete, "/empty-ok", nil, &out)
 	if code != http.StatusNoContent || err != nil {
 		t.Fatalf("/empty-ok = (%d, %v), want 204 nil", code, err)
+	}
+
+	// Raw non-JSON captive-portal body and JSON error values are capped at 200 bytes
+	// and have control characters (<0x20, 0x7f) replaced with '?'.
+	for _, path := range []string{"/captive", "/json-ctrl"} {
+		_, err := homeAPICtx(context.Background(), hc, "bobo.pens.example.com", http.MethodGet, path, nil, nil)
+		if err == nil {
+			t.Fatalf("%s: expected error", path)
+		}
+		msg := err.Error()
+		if len(msg) > maxAPIErrorMsgBytes+3 || !strings.HasSuffix(msg, "...") {
+			t.Fatalf("%s: msg len=%d not capped cleanly: %q", path, len(msg), msg)
+		}
+		for _, r := range msg {
+			if r < 0x20 || r == 0x7f {
+				t.Fatalf("%s: unsanitized control char %U in %q", path, r, msg)
+			}
+		}
+		if !strings.Contains(msg, "?[") {
+			t.Fatalf("%s: expected ESC replaced with '?', got %q", path, msg)
+		}
 	}
 }
 

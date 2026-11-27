@@ -47,6 +47,39 @@ func homeAPI(c *http.Client, zone, method, path string, in, out any) (int, error
 	return homeAPICtx(context.Background(), c, zone, method, path, in, out)
 }
 
+const maxAPIErrorMsgBytes = 200
+
+// sanitizeAPIErrorMsg strips terminal control characters (bytes < 0x20 and
+// 0x7f, replacing them with '?') and caps the message length so an unexpected
+// upstream response (e.g. a captive-portal HTML page or escape sequence) cannot
+// flood or manipulate the user's terminal.
+func sanitizeAPIErrorMsg(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(min(len(s), maxAPIErrorMsgBytes))
+	truncated := false
+	for _, r := range s {
+		var out rune
+		if r < 0x20 || r == 0x7f {
+			out = '?'
+		} else {
+			out = r
+		}
+		if b.Len()+len(string(out)) > maxAPIErrorMsgBytes {
+			truncated = true
+			break
+		}
+		b.WriteRune(out)
+	}
+	if truncated {
+		return b.String() + "..."
+	}
+	return b.String()
+}
+
 func homeAPICtx(ctx context.Context, c *http.Client, zone, method, path string, in, out any) (int, error) {
 	var body io.Reader
 	if in != nil {
@@ -77,9 +110,9 @@ func homeAPICtx(ctx context.Context, c *http.Client, zone, method, path string, 
 			Error string `json:"error"`
 		}
 		_ = json.Unmarshal(data, &apiErr)
-		msg := strings.TrimSpace(apiErr.Error)
+		msg := sanitizeAPIErrorMsg(apiErr.Error)
 		if msg == "" {
-			msg = strings.TrimSpace(string(data))
+			msg = sanitizeAPIErrorMsg(string(data))
 		}
 		if msg == "" {
 			msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
