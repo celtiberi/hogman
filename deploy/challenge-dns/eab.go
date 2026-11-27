@@ -14,10 +14,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
+	"unicode"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
+
+const maxPublicCARespBytes = 64 << 10
 
 type EABMinter interface {
 	Mint(ctx context.Context) (keyID, hmacB64URL string, err error)
@@ -62,11 +66,40 @@ func (g *gcpMinter) Mint(ctx context.Context) (string, string, error) {
 		return "", "", err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPublicCARespBytes+1))
+	if err != nil {
+		return "", "", fmt.Errorf("publicca: read response (HTTP %d): %w", resp.StatusCode, err)
+	}
+	if len(body) > maxPublicCARespBytes {
+		return "", "", fmt.Errorf("publicca: HTTP %d response exceeds %d-byte limit", resp.StatusCode, maxPublicCARespBytes)
+	}
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("publicca: HTTP %d: %.200s", resp.StatusCode, body)
+		return "", "", fmt.Errorf("publicca: HTTP %d: %s", resp.StatusCode, singleLine(string(body)))
 	}
 	return parseEAB(body)
+}
+
+// singleLine flattens whitespace and drops control/format characters for safe
+// single-line error reporting without truncating content.
+func singleLine(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	lastSpace := true
+	for _, r := range s {
+		if r == '\r' || r == '\n' || r == '\t' || r == ' ' {
+			if !lastSpace {
+				b.WriteByte(' ')
+				lastSpace = true
+			}
+			continue
+		}
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			continue
+		}
+		b.WriteRune(r)
+		lastSpace = false
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // parseEAB reads Google's reply. b64MacKey is a protobuf bytes field that

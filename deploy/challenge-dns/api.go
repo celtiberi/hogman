@@ -11,60 +11,106 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
+
+const (
+	maxHTTPBodyBytes  = 4 << 10
+	maxAdminRespBytes = 1 << 20
+)
+
+func defaultLogger(l *slog.Logger) *slog.Logger {
+	if l != nil {
+		return l
+	}
+	return slog.New(slog.NewTextHandler(os.Stderr, nil))
+}
+
+type boundaryWrappedKey struct{}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	if !r.wroteHeader {
+		r.status = code
+		r.wroteHeader = true
+	}
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	return r.ResponseWriter.Write(b)
+}
+
+// wrapHTTP applies HTTP boundary hygiene idempotently:
+//   - Cache-Control: no-store on every response
+//   - Request body limit via http.MaxBytesReader
+//   - Panic recovery returning JSON HTTP 500 with structured error logging
+//   - Structured logging for server errors (HTTP >= 500)
+func wrapHTTP(logger *slog.Logger, maxBodyBytes int64, next http.Handler) http.Handler {
+	log := defaultLogger(logger)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Context().Value(boundaryWrappedKey{}) != nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		r = r.WithContext(context.WithValue(r.Context(), boundaryWrappedKey{}, true))
+		w.Header().Set("Cache-Control", "no-store")
+		if maxBodyBytes > 0 && r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		}
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		start := time.Now()
+		defer func() {
+			if p := recover(); p != nil {
+				log.Error("http handler panic",
+					"method", r.Method,
+					"path", r.URL.Path,
+					"panic", fmt.Sprint(p),
+				)
+				if !rec.wroteHeader {
+					fail(rec, http.StatusInternalServerError, "internal error")
+				}
+				return
+			}
+			if rec.status >= http.StatusInternalServerError {
+				log.Error("http server error",
+					"method", r.Method,
+					"path", r.URL.Path,
+					"status", rec.status,
+					"duration_ms", time.Since(start).Milliseconds(),
+				)
+			}
+		}()
+		next.ServeHTTP(rec, r)
+	})
+}
 
 type API struct {
 	store *Store
 	eab   EABMinter // nil when no GTS service account is configured
 	// contact is the operator's address for fallback CA accounts. Google refuses
 	// an account without one, so no key is minted (and none wasted) without it.
-	contact   string
-	global    *windowLimiter
-	failMu    sync.Mutex
-	credFails map[string]*windowLimiter // per-cred in-memory cooldown for failed upstream EAB mints
+	contact string
+	limiter *eabLimiter
+	logger  *slog.Logger
 }
 
-func (a *API) checkCredFailCooldown(credID string, now time.Time) bool {
-	a.failMu.Lock()
-	defer a.failMu.Unlock()
-	lim := a.credFails[credID]
-	if lim == nil {
-		return true
-	}
-	if lim.exceeded(now) {
-		return false
-	}
-	if lim.empty(now) {
-		delete(a.credFails, credID)
-	}
-	return true
-}
-
-func (a *API) recordCredFail(credID string, now time.Time) {
-	a.failMu.Lock()
-	defer a.failMu.Unlock()
-	if a.credFails == nil {
-		a.credFails = map[string]*windowLimiter{}
-	}
-	for id, existing := range a.credFails {
-		if id != credID && existing.empty(now) {
-			delete(a.credFails, id)
-		}
-	}
-	lim := a.credFails[credID]
-	if lim == nil {
-		lim = &windowLimiter{perMin: 5, perHour: 15}
-		a.credFails[credID] = lim
-	}
-	lim.record(now)
+func (a *API) log() *slog.Logger {
+	return defaultLogger(a.logger)
 }
 
 type txtReq struct {
@@ -93,7 +139,6 @@ func failRateLimit(w http.ResponseWriter, rle *rateLimitError) {
 }
 
 func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
@@ -118,116 +163,117 @@ func (a *API) auth(w http.ResponseWriter, r *http.Request) (Cred, bool) {
 }
 
 func (a *API) Handler() http.Handler {
+	if a.limiter == nil {
+		var clock func() time.Time
+		if a.store != nil {
+			clock = a.store.now
+		}
+		a.limiter = defaultEABLimiter(clock)
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/txt", func(w http.ResponseWriter, r *http.Request) {
-		c, ok := a.auth(w, r)
-		if !ok {
-			return
-		}
-		var in txtReq
-		if !readJSON(w, r, &in) {
-			return
-		}
-		var rle *rateLimitError
-		switch err := a.store.PutTXT(c, in.FQDN, in.Value); {
-		case err == nil:
-			log.Printf("txt put %s by %s", normalize(in.FQDN), c.ID)
-			writeJSON(w, http.StatusCreated, map[string]bool{"ok": true})
-		case errors.Is(err, errRevoked):
-			fail(w, http.StatusUnauthorized, "unauthorized")
-		case errors.Is(err, errScope):
-			fail(w, http.StatusForbidden, err.Error())
-		case errors.Is(err, errValue):
-			fail(w, http.StatusBadRequest, err.Error())
-		case errors.As(err, &rle):
-			failRateLimit(w, rle)
-		case errors.Is(err, errFull):
-			fail(w, http.StatusConflict, err.Error())
-		default:
-			log.Printf("txt put: %v", err)
-			fail(w, http.StatusInternalServerError, "internal error")
-		}
-	})
-	mux.HandleFunc("DELETE /v1/txt", func(w http.ResponseWriter, r *http.Request) {
-		c, ok := a.auth(w, r)
-		if !ok {
-			return
-		}
-		var in txtReq
-		if !readJSON(w, r, &in) {
-			return
-		}
-		switch err := a.store.DeleteTXT(c, in.FQDN, in.Value); {
-		case err == nil:
-			w.WriteHeader(http.StatusNoContent)
-		case errors.Is(err, errRevoked):
-			fail(w, http.StatusUnauthorized, "unauthorized")
-		case errors.Is(err, errScope):
-			fail(w, http.StatusForbidden, err.Error())
-		default:
-			fail(w, http.StatusInternalServerError, "internal error")
-		}
-	})
-	mux.HandleFunc("POST /v1/eab", func(w http.ResponseWriter, r *http.Request) {
-		c, ok := a.auth(w, r)
-		if !ok {
-			return
-		}
-		if a.eab == nil {
-			fail(w, http.StatusServiceUnavailable, "no fallback certificate authority is configured")
-			return
-		}
-		if a.contact == "" {
-			fail(w, http.StatusServiceUnavailable, "the fallback certificate authority has no contact address configured (CDNS_GTS_CONTACT)")
-			return
-		}
-		// Reserve per-credential EAB cap BEFORE consuming the shared global
-		// burst limiter so one exhausted pen cannot starve other pens or host failover,
-		// and do not persist quota or EverChallenged until upstream Mint succeeds.
-		res, err := a.store.ReserveEAB(c)
-		if err != nil {
-			writeEABError(w, c.ID, "reserve", err)
-			return
-		}
-		defer res.Cancel()
-		now := a.store.now()
-		if c.Kind != "host" && !a.checkCredFailCooldown(c.ID, now) {
-			w.Header().Set("Retry-After", "60")
-			fail(w, http.StatusTooManyRequests, "fallback account key requests are cooling down after upstream errors; try later")
-			return
-		}
-		// Exempt the host gate-cert credential from the shared pen global limiter.
-		// Keep the global slot consumed even if upstream Mint fails so fleet-wide
-		// upstream calls remain bounded during a Google outage or quota lockout;
-		// the per-cred cooldown prevents any single pen from exhausting the global
-		// cap alone, while defer res.Cancel() preserves the pen's weekly quota.
-		if c.Kind != "host" && !a.global.allow(now) {
-			w.Header().Set("Retry-After", "60")
-			fail(w, http.StatusTooManyRequests, "fallback account keys are rate-limited; try later")
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-		kid, hmac, err := a.eab.Mint(ctx)
-		if err != nil {
-			if c.Kind != "host" {
-				a.recordCredFail(c.ID, a.store.now())
-			}
-			log.Printf("eab mint for %s: %v", c.ID, err)
-			fail(w, http.StatusBadGateway, "could not get a fallback account key")
-			return
-		}
-		if err := res.Commit(); err != nil {
-			writeEABError(w, c.ID, "commit", err)
-			return
-		}
-		log.Printf("eab minted for %s", c.ID)
-		writeJSON(w, http.StatusCreated, map[string]string{"kid": kid, "hmac_b64url": hmac, "contact": a.contact})
-	})
-	return mux
+	mux.HandleFunc("POST /v1/txt", a.handlePutTXT)
+	mux.HandleFunc("DELETE /v1/txt", a.handleDeleteTXT)
+	mux.HandleFunc("POST /v1/eab", a.handlePostEAB)
+	return wrapHTTP(a.logger, maxHTTPBodyBytes, mux)
 }
 
-func writeEABError(w http.ResponseWriter, credID, op string, err error) {
+func (a *API) handlePutTXT(w http.ResponseWriter, r *http.Request) {
+	c, ok := a.auth(w, r)
+	if !ok {
+		return
+	}
+	var in txtReq
+	if !readJSON(w, r, &in) {
+		return
+	}
+	var rle *rateLimitError
+	switch err := a.store.PutTXT(c, in.FQDN, in.Value); {
+	case err == nil:
+		a.log().Info("txt put", "fqdn", normalize(in.FQDN), "cred_id", c.ID)
+		writeJSON(w, http.StatusCreated, map[string]bool{"ok": true})
+	case errors.Is(err, errRevoked):
+		fail(w, http.StatusUnauthorized, "unauthorized")
+	case errors.Is(err, errScope):
+		fail(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, errValue):
+		fail(w, http.StatusBadRequest, err.Error())
+	case errors.As(err, &rle):
+		failRateLimit(w, rle)
+	case errors.Is(err, errFull):
+		fail(w, http.StatusConflict, err.Error())
+	default:
+		a.log().Error("txt put failed", "cred_id", c.ID, "err", err)
+		fail(w, http.StatusInternalServerError, "internal error")
+	}
+}
+
+func (a *API) handleDeleteTXT(w http.ResponseWriter, r *http.Request) {
+	c, ok := a.auth(w, r)
+	if !ok {
+		return
+	}
+	var in txtReq
+	if !readJSON(w, r, &in) {
+		return
+	}
+	switch err := a.store.DeleteTXT(c, in.FQDN, in.Value); {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, errRevoked):
+		fail(w, http.StatusUnauthorized, "unauthorized")
+	case errors.Is(err, errScope):
+		fail(w, http.StatusForbidden, err.Error())
+	default:
+		a.log().Error("txt delete failed", "cred_id", c.ID, "err", err)
+		fail(w, http.StatusInternalServerError, "internal error")
+	}
+}
+
+func (a *API) handlePostEAB(w http.ResponseWriter, r *http.Request) {
+	c, ok := a.auth(w, r)
+	if !ok {
+		return
+	}
+	if a.eab == nil {
+		fail(w, http.StatusServiceUnavailable, "no fallback certificate authority is configured")
+		return
+	}
+	if a.contact == "" {
+		fail(w, http.StatusServiceUnavailable, "the fallback certificate authority has no contact address configured (CDNS_GTS_CONTACT)")
+		return
+	}
+	// Reserve per-credential EAB cap BEFORE consuming the shared global
+	// burst limiter so one exhausted pen cannot starve other pens or host failover,
+	// and do not persist quota or EverChallenged until upstream Mint succeeds.
+	res, err := a.store.ReserveEAB(c)
+	if err != nil {
+		a.writeEABError(w, c.ID, "reserve", err)
+		return
+	}
+	defer res.Cancel()
+	if allowed, reason := a.limiter.Allow(c.Kind, c.ID); !allowed {
+		w.Header().Set("Retry-After", "60")
+		fail(w, http.StatusTooManyRequests, reason)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	kid, hmac, err := a.eab.Mint(ctx)
+	if err != nil {
+		a.limiter.RecordFailure(c.Kind, c.ID)
+		a.log().Error("eab mint failed", "cred_id", c.ID, "err", err)
+		fail(w, http.StatusBadGateway, "could not get a fallback account key")
+		return
+	}
+	if err := res.Commit(); err != nil {
+		a.writeEABError(w, c.ID, "commit", err)
+		return
+	}
+	a.log().Info("eab minted", "cred_id", c.ID)
+	writeJSON(w, http.StatusCreated, map[string]string{"kid": kid, "hmac_b64url": hmac, "contact": a.contact})
+}
+
+func (a *API) writeEABError(w http.ResponseWriter, credID, op string, err error) {
 	var rle *rateLimitError
 	switch {
 	case errors.Is(err, errRevoked):
@@ -235,13 +281,14 @@ func writeEABError(w http.ResponseWriter, credID, op string, err error) {
 	case errors.As(err, &rle):
 		failRateLimit(w, rle)
 	default:
-		log.Printf("eab %s for %s: %v", op, credID, err)
+		a.log().Error("eab operation failed", "op", op, "cred_id", credID, "err", err)
 		fail(w, http.StatusInternalServerError, "internal error")
 	}
 }
 
 // AdminHandler manages credentials. Served only on the root-only socket.
-func AdminHandler(s *Store) http.Handler {
+func AdminHandler(s *Store, logger *slog.Logger) http.Handler {
+	log := defaultLogger(logger)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /admin/creds", func(w http.ResponseWriter, r *http.Request) {
 		type view struct {
@@ -272,7 +319,7 @@ func AdminHandler(s *Store) http.Handler {
 			if errors.Is(err, errInvalidInput) {
 				fail(w, http.StatusBadRequest, err.Error())
 			} else {
-				log.Printf("add cred %s/%s: %v", in.Kind, in.PenID, err)
+				log.Error("add cred failed", "kind", in.Kind, "pen_id", in.PenID, "err", err)
 				fail(w, http.StatusInternalServerError, "internal error")
 			}
 			return
@@ -298,7 +345,7 @@ func AdminHandler(s *Store) http.Handler {
 			case errors.Is(err, errInvalidInput):
 				fail(w, http.StatusBadRequest, err.Error())
 			default:
-				log.Printf("set cred plan %s: %v", r.PathValue("id"), err)
+				log.Error("set cred plan failed", "id", r.PathValue("id"), "err", err)
 				fail(w, http.StatusInternalServerError, "internal error")
 			}
 			return
@@ -320,7 +367,7 @@ func AdminHandler(s *Store) http.Handler {
 			if errors.Is(err, errNotFound) {
 				fail(w, http.StatusNotFound, err.Error())
 			} else {
-				log.Printf("remove cred %s: %v", r.PathValue("id"), err)
+				log.Error("remove cred failed", "id", r.PathValue("id"), "err", err)
 				fail(w, http.StatusInternalServerError, "internal error")
 			}
 			return
@@ -332,60 +379,7 @@ func AdminHandler(s *Store) http.Handler {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	return mux
-}
-
-// windowLimiter allows at most perMin events a minute and perHour an hour.
-type windowLimiter struct {
-	mu              sync.Mutex
-	perMin, perHour int
-	events          []time.Time
-}
-
-func (l *windowLimiter) pruneLocked(now time.Time) (min int) {
-	kept := l.events[:0]
-	for _, t := range l.events {
-		if now.Sub(t) < time.Hour {
-			kept = append(kept, t)
-			if now.Sub(t) < time.Minute {
-				min++
-			}
-		}
-	}
-	l.events = kept
-	return min
-}
-
-func (l *windowLimiter) allow(now time.Time) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	min := l.pruneLocked(now)
-	if min >= l.perMin || len(l.events) >= l.perHour {
-		return false
-	}
-	l.events = append(l.events, now)
-	return true
-}
-
-func (l *windowLimiter) exceeded(now time.Time) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	min := l.pruneLocked(now)
-	return min >= l.perMin || len(l.events) >= l.perHour
-}
-
-func (l *windowLimiter) empty(now time.Time) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.pruneLocked(now)
-	return len(l.events) == 0
-}
-
-func (l *windowLimiter) record(now time.Time) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.pruneLocked(now)
-	l.events = append(l.events, now)
+	return wrapHTTP(log, maxHTTPBodyBytes, mux)
 }
 
 // listenUnix listens on a socket path with the given mode and group.
@@ -424,21 +418,34 @@ func adminDo(sock, method, path string, body any) ([]byte, int, error) {
 }
 
 func adminDoWithHeaders(sock, method, path string, body any) ([]byte, int, http.Header, error) {
+	return adminDoWithClient(adminClient(sock), "http://admin"+path, method, body)
+}
+
+func adminDoWithClient(hc *http.Client, targetURL, method string, body any) ([]byte, int, http.Header, error) {
 	var rd io.Reader
 	if body != nil {
-		b, _ := json.Marshal(body)
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, 0, nil, err
+		}
 		rd = strings.NewReader(string(b))
 	}
-	req, err := http.NewRequest(method, "http://admin"+path, rd)
+	req, err := http.NewRequest(method, targetURL, rd)
 	if err != nil {
 		return nil, 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := adminClient(sock).Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("is the server running? %w", err)
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxAdminRespBytes+1))
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("read admin response: %w", err)
+	}
+	if len(b) > maxAdminRespBytes {
+		return nil, 0, nil, fmt.Errorf("admin response exceeds %d-byte limit", maxAdminRespBytes)
+	}
 	return b, resp.StatusCode, resp.Header, nil
 }

@@ -1,7 +1,7 @@
 // challenge-dns: the authoritative DNS server for ACME DNS-01 challenges
 // under the delegated pens zone and the front door's challenge name, with a
 // small API that lets each pen write only its own challenge records.
-// Design: docs/security/public-certificates.md (D-18, D-19).
+// Design: docs/security/public-certificates.md.
 //
 //	challenge-dns serve
 //	challenge-dns cred add pen <penname> | cred add host | cred rm <id> | cred list
@@ -12,10 +12,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
-	"net/mail"
 	"net/url"
 	"os"
 	"os/signal"
@@ -27,13 +26,6 @@ import (
 
 	"github.com/miekg/dns"
 )
-
-func env(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
-}
 
 const usage = `challenge-dns: DNS-01 challenge server for Hogman pens
 
@@ -96,132 +88,11 @@ func main() {
 	}
 }
 
-func zonesFromEnv() Zones {
-	return Zones{
-		Pens: normalize(env("CDNS_PENS_ZONE", "pens.hogman.network")),
-		Gate: normalize(env("CDNS_GATE_NAME", "_acme-challenge.gate.hogman.network")),
-	}
-}
-
-// parseContact checks the operator's contact address for fallback CA accounts:
-// a bare address (no display name), or empty for none.
-func parseContact(raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", nil
-	}
-	a, err := mail.ParseAddress(raw)
-	if err != nil || a.Name != "" || a.Address != raw || strings.ContainsAny(raw, " ,;<>") {
-		return "", fmt.Errorf("CDNS_GTS_CONTACT must be a plain email address like ops@example.com (got %q)", raw)
-	}
-	return raw, nil
-}
-
-func parseCap(envName, raw string, def, max int) (int, error) {
-	if raw == "" {
-		return def, nil
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 1 || n > max {
-		return 0, fmt.Errorf("%s must be an integer between 1 and %d (got %q)", envName, max, raw)
-	}
-	return n, nil
-}
-
-func parseWeeklyCap(raw string) (int, error) {
-	return parseCap("CDNS_WEEKLY_CAP", raw, defaultCapNames, 1000)
-}
-
-func parseCapsFromEnv(hourlyRaw, weeklyRaw, globalHourlyRaw, globalHardHourlyRaw string) (hourly, weekly, globalHourly, globalHardHourly int, err error) {
-	weekly, err = parseWeeklyCap(weeklyRaw)
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-	hourlyDef := defaultHourlyCap
-	if hourlyRaw == "" && weekly < hourlyDef {
-		hourlyDef = weekly
-	}
-	hourly, err = parseCap("CDNS_HOURLY_CAP", hourlyRaw, hourlyDef, 1000)
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-	if hourly > weekly {
-		return 0, 0, 0, 0, fmt.Errorf("CDNS_HOURLY_CAP (%d) must not exceed CDNS_WEEKLY_CAP (%d)", hourly, weekly)
-	}
-	globalHourly, err = parseCap("CDNS_GLOBAL_HOURLY_CAP", globalHourlyRaw, defaultGlobalHourlyCap, 10000)
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-	if globalHourly < hourly {
-		return 0, 0, 0, 0, fmt.Errorf("CDNS_GLOBAL_HOURLY_CAP (%d) must be at least CDNS_HOURLY_CAP (%d)", globalHourly, hourly)
-	}
-	globalHardDef := defaultGlobalHardHourlyCap
-	if globalHardHourlyRaw == "" && globalHourly > globalHardDef {
-		globalHardDef = globalHourly
-	}
-	globalHardHourly, err = parseCap("CDNS_GLOBAL_HARD_HOURLY_CAP", globalHardHourlyRaw, globalHardDef, 10000)
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-	if globalHardHourly < globalHourly {
-		return 0, 0, 0, 0, fmt.Errorf("CDNS_GLOBAL_HARD_HOURLY_CAP (%d) must be at least CDNS_GLOBAL_HOURLY_CAP (%d)", globalHardHourly, globalHourly)
-	}
-	return hourly, weekly, globalHourly, globalHardHourly, nil
-}
-
-func parseWorkCapsFromEnv(workHourlyRaw, workWeeklyRaw string, globalHourly int) (workHourly, workWeekly int, err error) {
-	workWeekly, err = parseCap("CDNS_WORK_WEEKLY_CAP", workWeeklyRaw, defaultWorkWeeklyCap, 1000)
-	if err != nil {
-		return 0, 0, err
-	}
-	workHourlyDef := defaultWorkHourlyCap
-	if workHourlyRaw == "" {
-		if workWeekly < workHourlyDef {
-			workHourlyDef = workWeekly
-		}
-		if globalHourly < workHourlyDef {
-			workHourlyDef = globalHourly
-		}
-	}
-	workHourly, err = parseCap("CDNS_WORK_HOURLY_CAP", workHourlyRaw, workHourlyDef, 1000)
-	if err != nil {
-		return 0, 0, err
-	}
-	if workHourly > workWeekly {
-		return 0, 0, fmt.Errorf("CDNS_WORK_HOURLY_CAP (%d) must not exceed CDNS_WORK_WEEKLY_CAP (%d)", workHourly, workWeekly)
-	}
-	if workHourly > globalHourly {
-		return 0, 0, fmt.Errorf("CDNS_WORK_HOURLY_CAP (%d) must not exceed CDNS_GLOBAL_HOURLY_CAP (%d)", workHourly, globalHourly)
-	}
-	return workHourly, workWeekly, nil
-}
-
-func parseLEWeeklyAllowance(raw string) (int, error) {
-	return parseCap("CDNS_LE_WEEKLY_ALLOWANCE", raw, defaultLEWeeklyAllowance, 100000)
-}
-
-func parseNtfyURL(raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", nil
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.Path == "" || u.Path == "/" {
-		return "", fmt.Errorf("CDNS_NTFY_URL must be an https:// URL with a topic path (got %q)", raw)
-	}
-	if u.Scheme != "https" {
-		host := u.Hostname()
-		if u.Scheme != "http" || (host != "127.0.0.1" && host != "::1") {
-			return "", fmt.Errorf("CDNS_NTFY_URL must use https:// (got %q)", raw)
-		}
-	}
-	return raw, nil
-}
-
-func newNtfyAlerter(ntfyURL string, hc *http.Client) func(used, allowance, threshold int) {
+func newNtfyAlerter(ntfyURL string, hc *http.Client, logger *slog.Logger) func(used, allowance, threshold int) {
 	if hc == nil {
 		hc = &http.Client{Timeout: 10 * time.Second}
 	}
+	log := defaultLogger(logger)
 	sem := make(chan struct{}, 2)
 	return func(used, allowance, threshold int) {
 		pct := 0
@@ -230,14 +101,19 @@ func newNtfyAlerter(ntfyURL string, hc *http.Client) func(used, allowance, thres
 		}
 		msg := fmt.Sprintf("Hogman challenge-dns: %d/%d (%d%%) of Let's Encrypt 7-day certificate allowance used across all pens (alert threshold %d). Google Trust Services fallback handles HTTP 429 overflow automatically.",
 			used, allowance, pct, threshold)
-		log.Printf("WARNING: %s", msg)
+		log.Warn("weekly certificate budget alert",
+			"used", used,
+			"allowance", allowance,
+			"pct", pct,
+			"threshold", threshold,
+		)
 		if ntfyURL == "" {
 			return
 		}
 		select {
 		case sem <- struct{}{}:
 		default:
-			log.Printf("ntfy: skipping 7-day budget alert (too many pushes in flight)")
+			log.Warn("ntfy alert skipped: too many pushes in flight")
 			return
 		}
 		go func() {
@@ -246,7 +122,7 @@ func newNtfyAlerter(ntfyURL string, hc *http.Client) func(used, allowance, thres
 			defer cancel()
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, ntfyURL, strings.NewReader(msg))
 			if err != nil {
-				log.Printf("ntfy: build request: %v", err)
+				log.Error("ntfy build request failed", "err", err)
 				return
 			}
 			req.Header.Set("Title", "Hogman: Let's Encrypt 7-day cert budget >= 80%")
@@ -254,40 +130,24 @@ func newNtfyAlerter(ntfyURL string, hc *http.Client) func(used, allowance, thres
 			req.Header.Set("Tags", "warning")
 			resp, err := hc.Do(req)
 			if err != nil {
-				log.Printf("ntfy: push failed: %v", err)
+				log.Error("ntfy push failed", "err", err)
 				return
 			}
 			_ = resp.Body.Close()
 			if resp.StatusCode >= 300 {
-				log.Printf("ntfy: push returned HTTP %d", resp.StatusCode)
+				log.Error("ntfy push returned non-2xx", "status", resp.StatusCode)
 			}
 		}()
 	}
 }
 
 func serve() error {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	listen := os.Getenv("CDNS_LISTEN")
 	if listen == "" {
 		return errors.New("set CDNS_LISTEN to the public address to answer on, e.g. 203.0.113.10:53 (not 127.0.0.53, where systemd-resolved sits)")
 	}
-	hourlyCap, weeklyCap, globalHourlyCap, globalHardHourlyCap, err := parseCapsFromEnv(
-		os.Getenv("CDNS_HOURLY_CAP"),
-		os.Getenv("CDNS_WEEKLY_CAP"),
-		os.Getenv("CDNS_GLOBAL_HOURLY_CAP"),
-		os.Getenv("CDNS_GLOBAL_HARD_HOURLY_CAP"),
-	)
-	if err != nil {
-		return err
-	}
-	workHourlyCap, workWeeklyCap, err := parseWorkCapsFromEnv(
-		os.Getenv("CDNS_WORK_HOURLY_CAP"),
-		os.Getenv("CDNS_WORK_WEEKLY_CAP"),
-		globalHourlyCap,
-	)
-	if err != nil {
-		return err
-	}
-	leWeeklyAllowance, err := parseLEWeeklyAllowance(os.Getenv("CDNS_LE_WEEKLY_ALLOWANCE"))
+	caps, err := CapsConfigFromEnv(os.Getenv)
 	if err != nil {
 		return err
 	}
@@ -304,39 +164,45 @@ func serve() error {
 	if err != nil {
 		return err
 	}
-	store.hourlyCapNames = hourlyCap
-	store.capNames = weeklyCap
-	store.workHourlyCapNames = workHourlyCap
-	store.workCapNames = workWeeklyCap
-	store.globalHourlyCapNames = globalHourlyCap
-	store.globalHardHourlyCapNames = globalHardHourlyCap
-	store.leWeeklyAllowance = leWeeklyAllowance
-	store.onWeeklyAlert = newNtfyAlerter(ntfyURL, nil)
-	log.Printf("certificate caps: personal %d/hour %d/7d, work %d/hour %d/7d, global %d/hour soft (%d/hour hard with quiet-pen floor); 7d alert at %d/%d (ntfy=%v)",
-		store.hourlyCap(), store.weeklyCap(), store.workHourlyCap(), store.workWeeklyCap(), store.globalHourlyCap(), store.globalHardHourlyCap(),
-		store.weeklyAlertThreshold(), store.leWeeklyAllowanceVal(), ntfyURL != "")
+	store.caps = caps
+	store.onWeeklyAlert = newNtfyAlerter(ntfyURL, nil, logger)
+	logger.Info("certificate caps configured",
+		"personal_hourly", caps.Hourly(),
+		"personal_weekly", caps.Weekly(),
+		"work_hourly", caps.WorkHourly(),
+		"work_weekly", caps.WorkWeekly(),
+		"global_soft_hourly", caps.GlobalHourly(),
+		"global_hard_hourly", caps.GlobalHardHourly(),
+		"weekly_alert_threshold", caps.WeeklyAlertThreshold(),
+		"le_weekly_allowance", caps.LEWeekly(),
+		"ntfy_enabled", ntfyURL != "",
+	)
 	d := &DNS{store: store, zones: zones, ns: env("CDNS_NS", "ns1.hogman.network"),
 		mbox: env("CDNS_MBOX", "hostmaster.hogman.network"), caa: defaultCAA()}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	api := &API{store: store, global: &windowLimiter{perMin: 20, perHour: 90}}
+	api := &API{
+		store:   store,
+		limiter: defaultEABLimiter(store.now),
+		logger:  logger,
+	}
 	if kf := os.Getenv("CDNS_GCP_KEY"); kf != "" {
 		m, err := newGCPMinter(ctx, kf)
 		if err != nil {
 			return fmt.Errorf("CDNS_GCP_KEY: %w", err)
 		}
 		api.eab = m
-		log.Printf("fallback CA account keys: Google project %s", m.project)
+		logger.Info("fallback CA account keys configured", "gcp_project", m.project)
 		contact, err := parseContact(os.Getenv("CDNS_GTS_CONTACT"))
 		if err != nil {
 			return err
 		}
 		if api.contact = contact; contact == "" {
-			log.Printf("warning: CDNS_GTS_CONTACT is not set; Google refuses accounts without a contact, so no fallback account keys will be handed out")
+			logger.Warn("CDNS_GTS_CONTACT is not set; Google refuses accounts without a contact, so no fallback account keys will be handed out")
 		} else {
-			log.Printf("fallback CA account contact: %s", contact)
+			logger.Info("fallback CA account contact configured", "contact", contact)
 		}
 	}
 
@@ -346,7 +212,7 @@ func serve() error {
 		go func() { errc <- fmt.Errorf("dns %s: %w", srv.Net, srv.ListenAndServe()) }()
 		defer srv.Shutdown()
 	}
-	log.Printf("answering for %s and %s on %s", zones.Pens, zones.Gate, listen)
+	logger.Info("dns server listening", "pens_zone", zones.Pens, "gate_name", zones.Gate, "listen", listen)
 
 	serveHTTP := func(name string, ln net.Listener, h http.Handler) {
 		srv := &http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
@@ -357,7 +223,7 @@ func serve() error {
 			}
 		}()
 		go func() { <-ctx.Done(); _ = srv.Close() }()
-		log.Printf("%s on %s", name, ln.Addr())
+		logger.Info("http listener started", "name", name, "addr", ln.Addr().String())
 	}
 
 	gid, err := strconv.Atoi(env("CDNS_API_GID", "65532"))
@@ -382,7 +248,7 @@ func serve() error {
 	if err != nil {
 		return fmt.Errorf("admin socket: %w", err)
 	}
-	serveHTTP("admin", adminLn, AdminHandler(store))
+	serveHTTP("admin", adminLn, AdminHandler(store, logger))
 
 	if addr := os.Getenv("CDNS_HTTP_ADDR"); addr != "" {
 		ln, err := net.Listen("tcp", addr)
