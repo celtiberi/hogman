@@ -1,1 +1,0 @@
-- Added `--zone-suffix <suffix>` to `browser-ext/build.py` to generate unpacked-only staging/test browser extensions (`Hogman (staging)`) scoped strictly to a custom pens suffix without widening the store build's permissions or default native-host allowlist.

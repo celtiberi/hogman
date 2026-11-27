@@ -1,1 +1,0 @@
-- Upgraded the Chrome Web Store install link on the `/join` page into a styled button displaying the same-origin Hogman icon (`hogman-icon.webp`) for both Personal and Work themes.
