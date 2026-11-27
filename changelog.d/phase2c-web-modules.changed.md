@@ -1,2 +1,0 @@
-- Split `core/join-page/join.js` into native ES modules (`commands.js` + `join.js`) and update `core/test/zsh-commands.sh` and `core/test/render-join-cmd.sh` to import `commands.js` directly in Node instead of scraping JS with `sed`.
-- Split `core/portal/portal.js` into isolated native ES modules under `core/portal/js/` (`api.js`, `dom.js`, `theme.js`, `billing.js`, `directory.js`, `devices.js`, `members.js`), fix the `Renew now` button re-enabling during navigation, and run `core/test/web/*_test.mjs` in CI `quick-checks`.

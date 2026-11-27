@@ -1,1 +1,0 @@
-- Browser extension: bump manifest version from `0.1.0` to `0.1.1` for the updated circular gold-ring icon store packages.

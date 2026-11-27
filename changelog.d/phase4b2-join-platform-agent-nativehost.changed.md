@@ -1,1 +1,0 @@
-- Decompose `core/join` agent runtime, OS platform/service/proxy/VPN/Tailscale helpers, and browser native messaging host into focused internal packages (`internal/agent`, `internal/platform`, `internal/nativehost`) with unit tests.

@@ -1,1 +1,0 @@
-- Decompose `core/join` share runtime/ACME, release updater, CLI command builders, and interactive UI seams into focused internal packages (`internal/share`, `internal/updater`, `internal/ui`), removing package-global test seams and enforcing strict stdin link size rejection (no truncation).

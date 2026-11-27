@@ -1,1 +1,0 @@
-- Split `core/registrar/http.go` and `core/registrar/main.go` into focused files (`billing.go`, `limiter.go`, `http_middleware.go`, `http.go`, `config.go`, `serve.go`, `cli.go`, `gatecert.go`, `main.go`) with declarative per-route auth/renew-only policies, unified bounded sliding-window rate limiting, and panic-recovering structured HTTP boundary logging.

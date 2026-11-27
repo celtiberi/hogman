@@ -1,1 +1,0 @@
-- Extract shared semantic CSS tokens (`tokens.css`) and base chrome/primitives (`base.css`) across `core/portal/` and `core/join-page/`, replacing ~650 lines of duplicated Work-theme selector overrides with token overrides, updating `core/config/edge.Caddyfile`'s `/join/assets/*` allowlist, and adding a CI sync check in `quick-checks`.

@@ -1,1 +1,0 @@
-- Privacy: the `hogman` app and the registrar now opt out of Tailscale's built-in log upload, so no Hogman logs are ever sent to Tailscale Inc. (`log.tailscale.com`); logs stay on your machine or our server.
