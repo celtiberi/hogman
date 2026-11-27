@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"tailscale.com/tsnet"
 )
@@ -49,10 +50,11 @@ func homeAPI(c *http.Client, zone, method, path string, in, out any) (int, error
 
 const maxAPIErrorMsgBytes = 200
 
-// sanitizeAPIErrorMsg strips terminal control characters (bytes < 0x20 and
-// 0x7f, replacing them with '?') and caps the message length so an unexpected
-// upstream response (e.g. a captive-portal HTML page or escape sequence) cannot
-// flood or manipulate the user's terminal.
+// sanitizeAPIErrorMsg strips terminal control characters (including C0/DEL and
+// C1 controls such as U+009B CSI via unicode.IsControl, replacing them with '?')
+// and caps the message length so an unexpected upstream response (e.g. a
+// captive-portal HTML page or escape sequence) cannot flood or manipulate the
+// user's terminal.
 func sanitizeAPIErrorMsg(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -62,11 +64,9 @@ func sanitizeAPIErrorMsg(raw string) string {
 	b.Grow(min(len(s), maxAPIErrorMsgBytes))
 	truncated := false
 	for _, r := range s {
-		var out rune
-		if r < 0x20 || r == 0x7f {
+		out := r
+		if unicode.IsControl(r) {
 			out = '?'
-		} else {
-			out = r
 		}
 		if b.Len()+len(string(out)) > maxAPIErrorMsgBytes {
 			truncated = true

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 )
 
 func TestHomeAPICtxErrorParsingAndRetryAfter(t *testing.T) {
@@ -41,13 +42,13 @@ func TestHomeAPICtxErrorParsingAndRetryAfter(t *testing.T) {
 			return &http.Response{
 				StatusCode: http.StatusBadGateway,
 				Header:     http.Header{},
-				Body:       io.NopCloser(strings.NewReader("\x1b[31m<html>\n\t" + strings.Repeat("X", 500) + "\x7f</html>")),
+				Body:       io.NopCloser(strings.NewReader("\x1b[31m\u009b31m<html>\n\t" + strings.Repeat("X", 500) + "\x7f</html>")),
 			}, nil
 		case "/api/json-ctrl":
 			return &http.Response{
 				StatusCode: http.StatusBadRequest,
 				Header:     http.Header{},
-				Body:       io.NopCloser(strings.NewReader(`{"error":"bad \u001b[2Jinput\u007f ` + strings.Repeat("a", 300) + `"}`)),
+				Body:       io.NopCloser(strings.NewReader(`{"error":"bad \u001b[2J\u009b2Jinput\u007f ` + strings.Repeat("a", 300) + `"}`)),
 			}, nil
 		default:
 			return &http.Response{
@@ -92,7 +93,7 @@ func TestHomeAPICtxErrorParsingAndRetryAfter(t *testing.T) {
 			t.Fatalf("%s: msg len=%d not capped cleanly: %q", path, len(msg), msg)
 		}
 		for _, r := range msg {
-			if r < 0x20 || r == 0x7f {
+			if unicode.IsControl(r) {
 				t.Fatalf("%s: unsanitized control char %U in %q", path, r, msg)
 			}
 		}
