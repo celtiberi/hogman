@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -75,53 +74,6 @@ func pickLocalAddr(_ string) (string, error) {
 		return l.Addr().String(), nil
 	}
 	return "", fmt.Errorf("no free local port in %d-%d", basePort, basePort+span-1)
-}
-
-func agentState(c *agentConfig) (*agentStatus, error) {
-	return agentStateInDir(stateDir(c.Zone), c)
-}
-
-func agentStateInDir(dir string, c *agentConfig) (*agentStatus, error) {
-	tokBytes, err := os.ReadFile(filepath.Join(dir, statusTokenFilename))
-	token := strings.TrimSpace(string(tokBytes))
-	if err != nil || token == "" {
-		return nil, fmt.Errorf("missing agent status token for %s", c.Zone)
-	}
-	nonce, err := generateHexToken(16)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequest(http.MethodGet, c.proxyURL()+"/status", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("X-Hogman-Challenge", nonce)
-	client := &http.Client{
-		Timeout:       2 * time.Second,
-		Transport:     loopbackStatusTransport,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("something else is listening on %s", c.ProxyAddr)
-	}
-	var st agentStatus
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 16*1024)).Decode(&st); err != nil {
-		return nil, err
-	}
-	if st.Zone != c.Zone {
-		return nil, fmt.Errorf("something else is listening on %s", c.ProxyAddr)
-	}
-	gotProof := strings.TrimSpace(resp.Header.Get("X-Hogman-Proof"))
-	wantProof := computeStatusProof(token, nonce, c.Zone)
-	if gotProof == "" || !hmac.Equal([]byte(gotProof), []byte(wantProof)) {
-		return nil, fmt.Errorf("unverified process listening on %s", c.ProxyAddr)
-	}
-	return &st, nil
 }
 
 type agentJoinError struct{ msg string }
@@ -534,34 +486,23 @@ func removeOwnDevice(zone string) bool {
 }
 
 func removeOwnDeviceWith(ctx context.Context, c *http.Client, zone string, checkNeedsLogin func(context.Context) bool) bool {
-	var me meView
-	if _, err := homeAPICtx(ctx, c, zone, "GET", "/me", nil, &me); err != nil || me.ThisDevice.ID == 0 {
-		note("could not remove this computer from your devices (the keeper can, on the home page)")
-		return false
-	}
-	delCtx, delCancel := context.WithTimeout(ctx, selfDeleteTimeout)
-	defer delCancel()
-	delClient := *c
-	if delClient.Timeout == 0 || delClient.Timeout > selfDeleteTimeout {
-		delClient.Timeout = selfDeleteTimeout
-	}
-	code, err := homeAPICtx(delCtx, &delClient, zone, "DELETE", "/devices/"+strconv.FormatInt(me.ThisDevice.ID, 10), nil, nil)
-	if err == nil || code == http.StatusNotFound {
+	res := deleteSelfDevice(ctx, c, zone, 0, checkNeedsLogin)
+	switch res.outcome {
+	case selfDeleteRemoved:
 		note("removed this computer from your devices")
 		return true
-	}
-	if code == 0 && ctx.Err() == nil {
-		if confirmDeviceRemoved(ctx, c, zone, checkNeedsLogin) {
-			note("removed this computer from your devices")
-			return true
-		}
+	case selfDeleteLookupFailed, selfDeleteMissingID:
+		note("could not remove this computer from your devices (the keeper can, on the home page)")
+		return false
+	case selfDeleteUnconfirmed:
 		note("could not confirm removal from your devices; check Devices on home.%s", zone)
 		return false
+	default:
+		if res.err != nil {
+			note("could not remove this computer from your devices: %v", firstLine(res.err.Error()))
+		}
+		return false
 	}
-	if err != nil {
-		note("could not remove this computer from your devices: %v", firstLine(err.Error()))
-	}
-	return false
 }
 
 // penClient talks to the pen's home page as this computer, through its own
@@ -689,29 +630,10 @@ func stopDetached(dir string) {
 	pidPath := filepath.Join(dir, "agent.pid")
 	if b, err := os.ReadFile(pidPath); err == nil {
 		pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-		if err != nil || pid <= 0 {
-			_ = os.Remove(pidPath)
-		} else {
-			if p, err := os.FindProcess(pid); err == nil {
-				_ = p.Signal(syscall.SIGTERM)
-				for i := 0; i < 20; i++ {
-					if !processAlive(pid) {
-						break
-					}
-					time.Sleep(200 * time.Millisecond)
-				}
-				if processAlive(pid) {
-					_ = p.Kill()
-					for i := 0; i < 10; i++ {
-						if !processAlive(pid) {
-							break
-						}
-						time.Sleep(100 * time.Millisecond)
-					}
-				}
-			}
-			_ = os.Remove(pidPath)
+		if err == nil && pid > 0 {
+			stopProcess(pid, 4*time.Second)
 		}
+		_ = os.Remove(pidPath)
 	}
 	stopOrphanAgentForDir(dir)
 }

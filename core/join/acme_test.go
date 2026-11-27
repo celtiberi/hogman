@@ -213,7 +213,7 @@ func TestShouldFailoverACME(t *testing.T) {
 	}{
 		{"nil", nil, false},
 		{"canceled", context.Canceled, false},
-		{"dns step wrapping registrar 429 cap", dnsStepError{err: &meshAPIError{Status: http.StatusTooManyRequests, Msg: "weekly cap"}}, false},
+		{"dns step wrapping registrar 429 cap", dnsStepError{err: &homeAPIError{Status: http.StatusTooManyRequests, Msg: "weekly cap"}}, false},
 		{"dns step wrapping acme 429", dnsStepError{err: acme.Problem{Status: http.StatusTooManyRequests}}, false},
 		{"acme 429", acme.Problem{Status: http.StatusTooManyRequests}, true},
 		{"acme rateLimited urn", acme.Problem{Status: http.StatusBadRequest, Type: "urn:ietf:params:acme:error:rateLimited"}, true},
@@ -1516,15 +1516,15 @@ func TestMeshJSONParsesRetryAfter(t *testing.T) {
 		return origTr.RoundTrip(req2)
 	})
 
-	err := meshJSON(context.Background(), hc, "bobo.pens.example.com", http.MethodPost, "/acme/txt", map[string]string{"name": "photos", "value": "x"}, nil)
-	var me *meshAPIError
+	_, err := homeAPICtx(context.Background(), hc, "bobo.pens.example.com", http.MethodPost, "/acme/txt", map[string]string{"name": "photos", "value": "x"}, nil)
+	var me *homeAPIError
 	if !errors.As(err, &me) {
-		t.Fatalf("expected *meshAPIError, got %T: %v", err, err)
+		t.Fatalf("expected *homeAPIError, got %T: %v", err, err)
 	}
 	if me.Status != http.StatusTooManyRequests || me.RetryAfter != 45*time.Minute {
-		t.Fatalf("meshAPIError = %+v, want status=429 retryAfter=45m", me)
+		t.Fatalf("homeAPIError = %+v, want status=429 retryAfter=45m", me)
 	}
 	if me.Msg != "too many new certificate names for this pen in the last hour" {
-		t.Fatalf("meshAPIError.Msg = %q", me.Msg)
+		t.Fatalf("homeAPIError.Msg = %q", me.Msg)
 	}
 }

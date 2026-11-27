@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -77,8 +77,11 @@ func loadAgentConfig(dir string) (*agentConfig, error) {
 }
 
 func (c *agentConfig) save(dir string) error {
-	b, _ := json.MarshalIndent(c, "", "  ")
-	return os.WriteFile(filepath.Join(dir, "config.json"), b, 0o600)
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(filepath.Join(dir, "config.json"), b, 0o600)
 }
 
 func (c *agentConfig) proxyURL() string { return "http://" + c.ProxyAddr }
@@ -88,15 +91,10 @@ func (c *agentConfig) pacURL() string   { return "http://" + c.ProxyAddr + "/pro
 func (c *agentConfig) pac() string { return renderPAC([]*agentConfig{c}) }
 
 func loadInstalledPenConfigs(configBase string) []*agentConfig {
-	matches, err := filepath.Glob(filepath.Join(configBase, "*", "config.json"))
-	if err != nil {
-		return nil
-	}
-	var pens []*agentConfig
-	for _, m := range matches {
-		if cfg, err := loadAgentConfig(filepath.Dir(m)); err == nil {
-			pens = append(pens, cfg)
-		}
+	scanned := scanInstalledPens(configBase)
+	pens := make([]*agentConfig, 0, len(scanned.Pens))
+	for _, p := range scanned.Pens {
+		pens = append(pens, p.Config)
 	}
 	return normalizePenConfigs(pens, nil)
 }
@@ -136,8 +134,9 @@ func newNode(dir string, c *agentConfig, authKey string) *tsnet.Server {
 		UserLogf:   func(string, ...any) {},
 	}
 	if os.Getenv("HOGMAN_DEBUG") != "" {
-		s.Logf = log.Printf
-		s.UserLogf = log.Printf
+		dbgLogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		s.Logf = slogLogf(dbgLogger, "tsnet")
+		s.UserLogf = slogLogf(dbgLogger, "tsnet.user")
 	}
 	return s
 }
@@ -328,32 +327,7 @@ func writeStatusToken(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	f, err := os.CreateTemp(dir, ".status.token.*")
-	if err != nil {
-		return "", err
-	}
-	tmp := f.Name()
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return "", err
-	}
-	if _, err := f.WriteString(tok); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return "", err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return "", err
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return "", err
-	}
-	if err := os.Rename(tmp, filepath.Join(dir, statusTokenFilename)); err != nil {
-		_ = os.Remove(tmp)
+	if err := writeFileAtomic(filepath.Join(dir, statusTokenFilename), []byte(tok), 0o600); err != nil {
 		return "", err
 	}
 	return tok, nil
@@ -403,6 +377,7 @@ func runAgent(dir string) error {
 	srv := &http.Server{Handler: a, ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
 
+	logger := daemonLogger()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
@@ -411,7 +386,7 @@ func runAgent(dir string) error {
 		defer a.mu.Unlock()
 		if err != nil {
 			a.err = err.Error()
-			log.Printf("could not join the pen: %v", err)
+			logger.Error("could not join pen", "zone", c.Zone, "err", err)
 			return
 		}
 		_ = os.Remove(keyFile) // single use, and now spent
@@ -419,7 +394,7 @@ func runAgent(dir string) error {
 			a.ips = append(a.ips, ip.String())
 		}
 		a.up = true
-		log.Printf("on %s as %s", c.Zone, strings.Join(a.ips, ", "))
+		logger.Info("agent online", "zone", c.Zone, "ips", strings.Join(a.ips, ", "))
 		// A computer joins as a personal device only. Things that serve the pen
 		// are shares, each a device of its own (D-11): nothing on this computer
 		// is ever exposed to the pen. If the pen made this a server (an old,

@@ -32,6 +32,23 @@ func haveUserSystemd() bool {
 	return err == nil
 }
 
+// installSystemdUnit writes content atomically to path, reloads systemd --user,
+// and enables + starts unit. If removeOnFail is true, path is removed and
+// daemon-reload is re-run when enable fails.
+func installSystemdUnit(unit, path, content string, removeOnFail bool) (string, error) {
+	if err := writeFileAtomic(path, []byte(content), 0o644); err != nil {
+		return "", err
+	}
+	sc := systemctlBin()
+	_, _ = run(sc, "--user", "daemon-reload")
+	out, err := run(sc, "--user", "enable", "--now", unit)
+	if err != nil && removeOnFail {
+		_ = os.Remove(path)
+		_, _ = run(sc, "--user", "daemon-reload")
+	}
+	return out, err
+}
+
 // startAgent runs the agent as a systemd user service where there is one,
 // otherwise as a plain background process. Always stops any previous agent
 // (including a legacy hogman-join process holding the proxy port) first.
@@ -51,16 +68,10 @@ func startAgent(dir string, c *agentConfig, o options) error {
 		return startDetached(bin, dir)
 	}
 	unit := renderSystemdUnit(c.Zone, bin, dir)
-	path := unitPath(c.Zone)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
-		return err
-	}
-	sc := systemctlBin()
-	_, _ = run(sc, "--user", "daemon-reload")
-	if out, err := run(sc, "--user", "enable", "--now", unitName(c.Zone)); err != nil {
+	if out, err := installSystemdUnit(unitName(c.Zone), unitPath(c.Zone), unit, false); err != nil {
+		if out == "" {
+			return err
+		}
 		return errorf("could not start the background service: %v\n%s", err, out)
 	}
 	note("it will start by itself when you log in")
@@ -121,24 +132,7 @@ func stopOrphanAgentForDir(dir string) {
 		if string(parts[1]) != "agent" || filepath.Clean(string(parts[2])) != cleanDir {
 			continue
 		}
-		if p, err := os.FindProcess(pid); err == nil {
-			_ = p.Signal(syscall.SIGTERM)
-			for i := 0; i < 20; i++ {
-				if !processAlive(pid) {
-					break
-				}
-				time.Sleep(150 * time.Millisecond)
-			}
-			if processAlive(pid) {
-				_ = p.Kill()
-				for i := 0; i < 10; i++ {
-					if !processAlive(pid) {
-						break
-					}
-					time.Sleep(100 * time.Millisecond)
-				}
-			}
-		}
+		stopProcess(pid, 3*time.Second)
 	}
 }
 
@@ -193,18 +187,10 @@ func startShareServiceWithBinary(bin, dir string, c *shareConfig, noService bool
 		return false, pid, err
 	}
 	unit := renderShareSystemdUnit(c, bin, dir)
-	path := shareUnitPath(c)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return false, 0, err
-	}
-	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
-		return false, 0, err
-	}
-	sc := systemctlBin()
-	_, _ = run(sc, "--user", "daemon-reload")
-	if out, err := run(sc, "--user", "enable", "--now", shareUnitName(c)); err != nil {
-		_ = os.Remove(path)
-		_, _ = run(sc, "--user", "daemon-reload")
+	if out, err := installSystemdUnit(shareUnitName(c), shareUnitPath(c), unit, true); err != nil {
+		if out == "" {
+			return false, 0, err
+		}
 		return false, 0, errorf("could not start the background service: %v\n%s", err, out)
 	}
 	note("it will start by itself when you log in")

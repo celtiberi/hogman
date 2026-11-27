@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -9,15 +8,13 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/mail"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,67 +27,6 @@ import (
 )
 
 const defaultFallbackACMECA = "https://dv.acme-v02.api.pki.goog/directory"
-
-type meshAPIError struct {
-	Status     int
-	Msg        string
-	RetryAfter time.Duration
-}
-
-func (e *meshAPIError) Error() string { return e.Msg }
-
-func meshJSON(ctx context.Context, hc *http.Client, zone, method, path string, in, out any) error {
-	var body io.Reader
-	if in != nil {
-		b, err := json.Marshal(in)
-		if err != nil {
-			return err
-		}
-		body = bytes.NewReader(b)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, "https://home."+zone+"/api"+path, body)
-	if err != nil {
-		return err
-	}
-	if in != nil || method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := hc.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode >= 300 {
-		var apiErr struct {
-			Error string `json:"error"`
-		}
-		_ = json.Unmarshal(data, &apiErr)
-		msg := strings.TrimSpace(apiErr.Error)
-		if msg == "" {
-			msg = strings.TrimSpace(string(data))
-		}
-		if msg == "" {
-			msg = http.StatusText(resp.StatusCode)
-		}
-		var retryAfter time.Duration
-		if raw := strings.TrimSpace(resp.Header.Get("Retry-After")); raw != "" {
-			if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
-				retryAfter = time.Duration(secs) * time.Second
-			}
-		}
-		return &meshAPIError{Status: resp.StatusCode, Msg: msg, RetryAfter: retryAfter}
-	}
-	if out != nil && len(bytes.TrimSpace(data)) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
-			return fmt.Errorf("unreadable answer: %w", err)
-		}
-	}
-	return nil
-}
 
 // meshTXTProvider writes and cleans up DNS-01 TXT records through the pen
 // registrar's /api/acme/txt mesh endpoint using the share's own mesh identity.
@@ -129,9 +65,9 @@ func (p *meshTXTProvider) AppendRecords(ctx context.Context, zone string, recs [
 			return nil, err
 		}
 		reqBody := txtReq{Name: name, Value: rr.Data}
-		if err := meshJSON(ctx, p.hc, p.penZone, http.MethodPost, "/acme/txt", reqBody, nil); err != nil {
+		if _, err := homeAPICtx(ctx, p.hc, p.penZone, http.MethodPost, "/acme/txt", reqBody, nil); err != nil {
 			for _, prev := range created {
-				_ = meshJSON(context.Background(), p.hc, p.penZone, http.MethodDelete, "/acme/txt", prev, nil)
+				_, _ = homeAPICtx(context.Background(), p.hc, p.penZone, http.MethodDelete, "/acme/txt", prev, nil)
 			}
 			return nil, err
 		}
@@ -157,9 +93,9 @@ func (p *meshTXTProvider) DeleteRecords(ctx context.Context, zone string, recs [
 			return out, err
 		}
 		reqBody := txtReq{Name: name, Value: rr.Data}
-		err = meshJSON(ctx, p.hc, p.penZone, http.MethodDelete, "/acme/txt", reqBody, nil)
+		_, err = homeAPICtx(ctx, p.hc, p.penZone, http.MethodDelete, "/acme/txt", reqBody, nil)
 		if err != nil {
-			var me *meshAPIError
+			var me *homeAPIError
 			if !errors.As(err, &me) || me.Status != http.StatusNotFound {
 				return out, err
 			}
@@ -246,6 +182,7 @@ type shareACMEConfig struct {
 	PropagationDelay   time.Duration
 	PropagationTimeout time.Duration
 	HTTPClient         *http.Client
+	Logger             *slog.Logger
 }
 
 func parseCSVEnv(raw string) []string {
@@ -363,6 +300,7 @@ type shareCertManager struct {
 	solver  acmez.Solver
 	roots   *x509.CertPool
 	logger  *zap.Logger
+	slogger *slog.Logger
 	cache   *certmagic.Cache
 
 	primaryCfg  *certmagic.Config
@@ -417,6 +355,10 @@ func newShareCertManager(cfg shareACMEConfig) (*shareCertManager, error) {
 	}
 
 	logger := zap.NewNop()
+	slogger := cfg.Logger
+	if slogger == nil {
+		slogger = daemonLogger()
+	}
 	m := &shareCertManager{
 		cfg:     cfg,
 		host:    cfg.Host,
@@ -435,6 +377,7 @@ func newShareCertManager(cfg shareACMEConfig) (*shareCertManager, error) {
 		},
 		roots:                roots,
 		logger:               logger,
+		slogger:              slogger,
 		failoverCh:           make(chan struct{}, 1),
 		backoff:              append([]time.Duration(nil), defaultShareACMEBackoff...),
 		maxInProcessWait:     defaultShareACMEMaxInProcessWait,
@@ -504,7 +447,7 @@ func (m *shareCertManager) newManagedConfig(caURL string, withEAB bool) (*certma
 				HMACB64URL string `json:"hmac_b64url"`
 				Contact    string `json:"contact"`
 			}
-			if err := meshJSON(ctx, m.cfg.HTTPClient, m.cfg.Zone, http.MethodPost, "/acme/eab", nil, &pair); err != nil {
+			if _, err := homeAPICtx(ctx, m.cfg.HTTPClient, m.cfg.Zone, http.MethodPost, "/acme/eab", nil, &pair); err != nil {
 				return acct, err
 			}
 			if strings.TrimSpace(pair.KID) == "" || strings.TrimSpace(pair.HMACB64URL) == "" {
@@ -616,47 +559,22 @@ func (m *shareCertManager) loadRetryState() acmeRetryState {
 	return st
 }
 
-func (m *shareCertManager) saveRetryState(st acmeRetryState) {
-	if err := os.MkdirAll(m.cfg.StorageDir, 0o700); err != nil {
-		log.Printf("acme: could not prepare retry state dir: %v", err)
-		return
+func (m *shareCertManager) log() *slog.Logger {
+	if m != nil && m.slogger != nil {
+		return m.slogger
 	}
+	return slog.Default()
+}
+
+func (m *shareCertManager) saveRetryState(st acmeRetryState) {
 	data, err := json.Marshal(st)
 	if err != nil {
-		log.Printf("acme: could not encode retry state: %v", err)
+		m.log().Warn("acme: could not encode retry state", "host", m.host, "err", err)
 		return
 	}
-	tmp, err := os.CreateTemp(m.cfg.StorageDir, "retry-*.tmp")
-	if err != nil {
-		log.Printf("acme: could not create retry state temp file: %v", err)
-		return
+	if err := writeFileAtomic(m.retryStatePath(), data, 0o600); err != nil {
+		m.log().Warn("acme: could not save retry state", "host", m.host, "err", err)
 	}
-	tmpName := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		log.Printf("acme: could not set retry state permissions: %v", err)
-		return
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		log.Printf("acme: could not write retry state: %v", err)
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		log.Printf("acme: could not close retry state: %v", err)
-		return
-	}
-	if err := os.Rename(tmpName, m.retryStatePath()); err != nil {
-		log.Printf("acme: could not save retry state: %v", err)
-		return
-	}
-	cleanup = false
 }
 
 func (m *shareCertManager) clearRetryState() {
@@ -738,7 +656,7 @@ func (m *shareCertManager) Ensure(ctx context.Context) error {
 		return err
 	}
 
-	log.Printf("acme: primary CA failed for %s (%v); failing over to fallback CA", m.host, err)
+	m.log().Warn("acme: primary CA failed; failing over to fallback CA", "host", m.host, "err", err)
 	fbErr := m.syncCert(ctx, m.fallbackCfg, m.fallbackIss)
 	if fbErr != nil {
 		return fmt.Errorf("primary failed (%w); fallback failed: %v", err, fbErr)
@@ -749,7 +667,7 @@ func (m *shareCertManager) Ensure(ctx context.Context) error {
 }
 
 func isRegistrarCapErr(err error) bool {
-	var me *meshAPIError
+	var me *homeAPIError
 	return errors.As(err, &me) && me.Status == http.StatusTooManyRequests
 }
 
@@ -760,7 +678,7 @@ func isNonRetryableShareCertErr(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return true
 	}
-	var me *meshAPIError
+	var me *homeAPIError
 	if errors.As(err, &me) {
 		switch me.Status {
 		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,
@@ -787,7 +705,8 @@ func (m *shareCertManager) EnsureWithBackoff(ctx context.Context) error {
 	state := m.loadRetryState()
 	if !state.NextAttempt.IsZero() {
 		if wait := m.cappedWait(state.NextAttempt); wait > 0 {
-			log.Printf("acme: backing off certificate retry for %s for %s (until %s)", m.host, wait.Round(time.Second), state.NextAttempt.UTC().Format(time.RFC3339))
+			m.log().Info("acme: backing off certificate retry",
+				"host", m.host, "wait", wait.Round(time.Second), "until", state.NextAttempt.UTC().Format(time.RFC3339))
 			if err := m.wait(ctx, wait); err != nil {
 				return err
 			}
@@ -815,7 +734,8 @@ func (m *shareCertManager) EnsureWithBackoff(ctx context.Context) error {
 			state.Failures++
 			state.NextAttempt = m.currentTime().UTC().Add(delay)
 			m.saveRetryState(state)
-			log.Printf("acme: registrar certificate limit reached for %s (%v); next retry after %s", m.host, last, delay)
+			m.log().Warn("acme: registrar certificate limit reached",
+				"host", m.host, "err", last, "next_retry", delay)
 			return last
 		}
 		if isNonRetryableShareCertErr(last) {
@@ -828,10 +748,10 @@ func (m *shareCertManager) EnsureWithBackoff(ctx context.Context) error {
 		m.saveRetryState(state)
 
 		if attempt+1 >= maxAttempts || (m.maxInProcessWait > 0 && delay > m.maxInProcessWait) {
-			log.Printf("acme: certificate for %s failed (%v); next retry after %s", m.host, last, delay)
+			m.log().Warn("acme: certificate failed", "host", m.host, "err", last, "next_retry", delay)
 			return last
 		}
-		log.Printf("acme: certificate for %s failed (%v); retrying in %s", m.host, last, delay)
+		m.log().Warn("acme: certificate failed; retrying", "host", m.host, "err", last, "retry_in", delay)
 		if err := m.wait(ctx, delay); err != nil {
 			return err
 		}
@@ -853,7 +773,7 @@ func (m *shareCertManager) RunFailoverLoop(ctx context.Context) {
 		case <-m.failoverCh:
 			m.renewMu.Lock()
 			if err := m.syncCert(ctx, m.fallbackCfg, m.fallbackIss); err != nil {
-				log.Printf("acme: fallback renewal failed for %s: %v", m.host, err)
+				m.log().Warn("acme: fallback renewal failed", "host", m.host, "err", err)
 			} else {
 				_, _ = m.fallbackCfg.CacheManagedCertificate(ctx, m.host)
 			}

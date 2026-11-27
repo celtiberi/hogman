@@ -411,15 +411,11 @@ type updatePlan struct {
 }
 
 func loadPenTargets(configBase string) []penTarget {
+	scanned := scanInstalledPens(configBase)
 	var pens []penTarget
-	if pattern, err := filepath.Glob(filepath.Join(configBase, "*", "config.json")); err == nil {
-		sort.Strings(pattern)
-		for _, f := range pattern {
-			dir := filepath.Dir(f)
-			if c, err := loadAgentConfig(dir); err == nil && c.LoginServer != "" &&
-				c.Zone != "" && c.Zone == filepath.Base(dir) && validPACZone(c.Zone) {
-				pens = append(pens, penTarget{zone: c.Zone, dir: dir, cfg: c})
-			}
+	for _, p := range scanned.Pens {
+		if p.Config.LoginServer != "" {
+			pens = append(pens, penTarget{zone: p.Zone, dir: p.Dir, cfg: p.Config})
 		}
 	}
 	return pens
@@ -948,24 +944,7 @@ func writeUpdatingMarker(dir string, hadService bool) {
 	if hadService {
 		val = "service\n"
 	}
-	tmp, err := os.CreateTemp(dir, ".updating-*")
-	if err != nil {
-		return
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.WriteString(val); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-		return
-	}
-	_ = tmp.Chmod(0o600)
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return
-	}
-	if err := os.Rename(tmpPath, filepath.Join(dir, updatingMarkerName)); err != nil {
-		_ = os.Remove(tmpPath)
-	}
+	_ = writeFileAtomic(filepath.Join(dir, updatingMarkerName), []byte(val), 0o600)
 }
 
 func clearUpdatingMarker(dir string) {
