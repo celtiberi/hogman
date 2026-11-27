@@ -6,7 +6,7 @@ The code in this repository is licensed under the GNU Affero General Public Lice
 
 ## Bug reports, questions, and ideas
 
-Bug reports, questions, and design discussions are welcome in [GitHub Issues](https://github.com/celtiberi/hogman/issues). Include your OS, `hogman --version` output, and clear steps to reproduce when reporting a bug.
+Bug reports, questions, and design discussions are welcome in [GitHub Issues](https://github.com/celtiberi/hogman/issues). Include your OS, `hogman --version` output, and clear steps to reproduce when reporting a bug. **Never paste invite or device links (`#t=` / `#k=`) or logs containing them**, since those grant access to your pen.
 
 ## Security vulnerabilities
 
