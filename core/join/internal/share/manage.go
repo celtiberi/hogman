@@ -67,6 +67,9 @@ func Start(name, what, rawLink string, o StartOptions, u *ui.UI, ensureBin Ensur
 	if o.EnrollOnly && o.Background {
 		return link.Errorf("--enroll-only cannot be combined with --background")
 	}
+	if strings.TrimSpace(o.StateDir) != "" && o.Background {
+		return link.Errorf("--background is not supported with --state-dir; run the container in the foreground")
+	}
 
 	var cfg *state.ShareConfig
 	key := ""
@@ -244,6 +247,12 @@ func Start(name, what, rawLink string, o StartOptions, u *ui.UI, ensureBin Ensur
 		}
 	}
 
+	if cfg.IdentityHeaders {
+		if warn := FormatIdentityTCPWarning(cfg.Target); warn != "" {
+			u.Say("\n⚠ Warning: %s", warn)
+		}
+	}
+
 	if o.EnrollOnly {
 		if cfg.Name != "" {
 			u.Step("Enrolling %s into %s", cfg.URL(), dir)
@@ -258,9 +267,6 @@ func Start(name, what, rawLink string, o StartOptions, u *ui.UI, ensureBin Ensur
 			u.Say("\n✓ Enrolled %s in %s.", c.URL(), dir)
 			cancelReady()
 		})
-	}
-	if explicitDir != "" && o.Background {
-		return link.Errorf("--background is not supported with --state-dir; run the container in the foreground")
 	}
 	if !o.Foreground && explicitDir == "" {
 		err := runBackground(dir, cfg, o, u, ensureBin)

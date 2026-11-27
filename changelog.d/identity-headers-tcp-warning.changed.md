@@ -1,0 +1,1 @@
+- `hogman share --identity-headers` now prints a one-time warning when targeting a loopback TCP port (where local processes or DNS-rebinding pages can reach the port directly) and steers automatic sign-in setups to sealed mode (`network_mode: none` + `unix://` bridge), documented in `docs/sealed-server.md#automatic-sign-in-safely` and `README.md`.

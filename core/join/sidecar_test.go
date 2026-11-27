@@ -22,6 +22,7 @@ import (
 	"hogman/join/internal/fsutil"
 	"hogman/join/internal/share"
 	"hogman/join/internal/state"
+	"hogman/join/internal/ui"
 )
 
 func TestUnixSocketShareTargetValidation(t *testing.T) {
@@ -437,4 +438,121 @@ func TestShareIdentityHeaders(t *testing.T) {
 	if rc := runCLI([]string{"share", "fleet", "8080", "--identity-headers"}, h); rc != 0 || !gotO.identityHeaders {
 		t.Fatalf("share --identity-headers: rc=%d flag=%v err=%s", rc, gotO.identityHeaders, errBuf.String())
 	}
+}
+
+func TestShareIdentityHeadersTCPWarning(t *testing.T) {
+	// 1. FormatIdentityTCPWarning covers loopback TCP ports and stays silent for unix://.
+	for _, tc := range []struct {
+		target   string
+		wantPort string
+	}{
+		{"http://127.0.0.1:8080", "port 8080"},
+		{"http://localhost:3000", "port 3000"},
+		{"http://[::1]:9000", "port 9000"},
+		{"http://127.0.0.1", "port 80"},
+		{"https://localhost", "port 443"},
+	} {
+		got := share.FormatIdentityTCPWarning(tc.target)
+		if !strings.Contains(got, tc.wantPort) ||
+			!strings.Contains(got, "claim to be any pen member") ||
+			!strings.Contains(got, "docs/sealed-server.md") {
+			t.Fatalf("FormatIdentityTCPWarning(%q) = %q, missing expected warning details", tc.target, got)
+		}
+	}
+	if got := share.FormatIdentityTCPWarning("unix:///run/hogman-in/app.sock"); got != "" {
+		t.Fatalf("FormatIdentityTCPWarning(unix) = %q, want empty", got)
+	}
+	if got := share.FormatIdentityTCPWarning(""); got != "" {
+		t.Fatalf("FormatIdentityTCPWarning(empty) = %q, want empty", got)
+	}
+
+	// 2. share.Start emits the warning once for loopback TCP with --identity-headers,
+	// stays silent for unix:// or when --identity-headers is off, and fails fast on
+	// --state-dir + --background without printing the warning.
+	makeEnrolledDir := func(t *testing.T) (string, func()) {
+		t.Helper()
+		dir := t.TempDir()
+		cfg := &state.ShareConfig{
+			Name:        "notes",
+			Zone:        "ops.pens.example.com",
+			LoginServer: "https://ops.gate.example.com",
+			DNSServer:   "100.64.0.1",
+			Target:      "http://127.0.0.1:8080",
+		}
+		if err := cfg.Save(dir); err != nil {
+			t.Fatalf("Save share.json: %v", err)
+		}
+		unlock, err := fsutil.AcquireShareLock(dir)
+		if err != nil {
+			t.Fatalf("AcquireShareLock: %v", err)
+		}
+		return dir, unlock
+	}
+
+	t.Run("tcp with identity-headers warns once", func(t *testing.T) {
+		dir, unlock := makeEnrolledDir(t)
+		defer unlock()
+		var outBuf, errBuf bytes.Buffer
+		u := &ui.UI{Out: &outBuf, Err: &errBuf}
+		_ = share.Start("notes", "8080", "", share.StartOptions{
+			StateDir:        dir,
+			IdentityHeaders: true,
+		}, u, nil)
+		out := outBuf.String()
+		if strings.Count(out, "Warning: --identity-headers over loopback TCP:") != 1 {
+			t.Fatalf("expected exactly one loopback TCP warning, got stdout=%q stderr=%q", out, errBuf.String())
+		}
+		if !strings.Contains(out, "port 8080") || !strings.Contains(out, "docs/sealed-server.md") {
+			t.Fatalf("warning missing port or sealed-server doc link: %q", out)
+		}
+	})
+
+	t.Run("unix with identity-headers does not warn", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("unix:// sockets not supported on windows")
+		}
+		dir, unlock := makeEnrolledDir(t)
+		defer unlock()
+		var outBuf, errBuf bytes.Buffer
+		u := &ui.UI{Out: &outBuf, Err: &errBuf}
+		_ = share.Start("notes", "unix:///run/hogman-in/app.sock", "", share.StartOptions{
+			StateDir:        dir,
+			IdentityHeaders: true,
+		}, u, nil)
+		if strings.Contains(outBuf.String(), "Warning:") || strings.Contains(errBuf.String(), "Warning:") {
+			t.Fatalf("unexpected warning for unix:// target: stdout=%q stderr=%q", outBuf.String(), errBuf.String())
+		}
+	})
+
+	t.Run("tcp without identity-headers does not warn", func(t *testing.T) {
+		dir, unlock := makeEnrolledDir(t)
+		defer unlock()
+		var outBuf, errBuf bytes.Buffer
+		u := &ui.UI{Out: &outBuf, Err: &errBuf}
+		_ = share.Start("notes", "8080", "", share.StartOptions{
+			StateDir:        dir,
+			IdentityHeaders: false,
+		}, u, nil)
+		if strings.Contains(outBuf.String(), "Warning:") || strings.Contains(errBuf.String(), "Warning:") {
+			t.Fatalf("unexpected warning without --identity-headers: stdout=%q stderr=%q", outBuf.String(), errBuf.String())
+		}
+	})
+
+	t.Run("invalid state-dir + background fails fast before warning", func(t *testing.T) {
+		dir, unlock := makeEnrolledDir(t)
+		defer unlock()
+		var outBuf, errBuf bytes.Buffer
+		u := &ui.UI{Out: &outBuf, Err: &errBuf}
+		err := share.Start("notes", "8080", "", share.StartOptions{
+			StateDir:        dir,
+			Background:      true,
+			IdentityHeaders: true,
+		}, u, nil)
+		if err == nil {
+			t.Fatal("expected error for --state-dir + --background")
+		}
+		if strings.Contains(outBuf.String(), "Warning:") {
+			t.Fatalf("warning printed despite early flag validation failure: %q", outBuf.String())
+		}
+	})
 }

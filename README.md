@@ -115,6 +115,11 @@ and private LAN addresses (loopback, RFC 1918, ULA, and link-local); public inte
 metadata endpoints, and CGNAT/Tailscale addresses (`100.64.0.0/10`) are refused after DNS
 resolution. Take a share down anytime with `~/hogman share stop app`.
 
+For automatic sign-in via verified caller headers (`--identity-headers`), use **sealed mode**
+(`network_mode: none` with the Unix-socket sidecar bridge — see
+[Automatic sign-in safely](docs/sealed-server.md#automatic-sign-in-safely)): host loopback TCP ports
+cannot distinguish Hogman's connections from other local processes or DNS-rebinding pages.
+
 Full guides: [Quickstart](https://work.hogman.network/docs/) ·
 [Joining a pen](https://work.hogman.network/docs/join.html) ·
 [Hosting HTTPS servers](https://work.hogman.network/docs/share.html) ·

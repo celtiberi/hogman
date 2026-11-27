@@ -149,7 +149,118 @@ Apps behind `hogman share` (or `hogman-sidecar`) can identify who in the pen is 
   - `X-Hogman-Node` — the peer's device name (display/audit only — **never** use `X-Hogman-Node` for access decisions).
   - `X-Hogman-IP` — the peer's mesh IP address.
   - `X-Hogman-Tags` — comma-separated ACL tags (e.g. `tag:server`), omitted for personal devices.
-- **Fail closed in your app:** only accept traffic on the local socket or loopback interface reachable by the sidecar, read caller identity **only** from `X-Hogman-Handle`, and return `403 Forbidden` whenever `X-Hogman-Handle` is missing or not on your allowlist (and reject requests with `X-Hogman-Tags` if only personal devices should have access).
+- **Fail closed in your app:** only accept traffic from the sealed bridge socket (never publish host `ports:`), read caller identity **only** from `X-Hogman-Handle`, and return `403 Forbidden` whenever `X-Hogman-Handle` is missing or not on your allowlist (and reject requests with `X-Hogman-Tags` if only personal devices should have access).
+
+### Automatic sign-in safely
+
+**Do not enable header-based automatic sign-in over a host loopback TCP port (`hogman share app 8080 --identity-headers`).** Hogman strips forged `X-Hogman-*` headers coming from the pen, **but the app listening on `127.0.0.1:8080` cannot tell Hogman's connection apart from any other connection to `127.0.0.1:8080`**:
+
+- Any local process or OS user on the sharing computer can connect directly to `127.0.0.1:<port>` and send `X-Hogman-Handle: <any-member>`.
+- A DNS-rebinding web page opened in a browser on the sharing machine may also be able to reach `127.0.0.1:<port>` (browser protections vary).
+- For apps that auto-sign-in from a proxy header (such as Filebrowser `authMethod: proxy`, Forgejo reverse-proxy auth, or JupyterHub remote-user), that means forging any member's account — up to admin takeover or code execution. `hogman share` prints a one-time warning whenever `--identity-headers` targets loopback TCP.
+
+**Supported pattern — sealed mode (`network_mode: none` + Unix-socket bridge):**
+
+Run the app inside the 3-container sealed topology with **no host `ports:`** published. Because `app` shares `hogman-bridge`'s `network_mode: none` namespace (`lo` only), neither host processes, other Docker containers, nor browser DNS-rebinding pages can reach `127.0.0.1:8080`. The only ingress path is `/run/hogman-in/app.sock` (`0600`, inside a `0700` UID `65532` named volume), mounted `:ro` exclusively by `hogman-sidecar`.
+
+1. Verify and pin the sidecar image digest from the [GitHub Release](https://github.com/celtiberi/hogman/releases):
+
+```sh
+gh attestation verify oci://ghcr.io/celtiberi/hogman-sidecar@sha256:<digest> \
+  --repo celtiberi/hogman \
+  --signer-workflow celtiberi/hogman/.github/workflows/release.yml
+export HOGMAN_SIDECAR_IMAGE="ghcr.io/celtiberi/hogman-sidecar:v<ver>@sha256:<digest>"
+```
+
+2. Use `docker-compose.yml` with `--identity-headers` on `hogman-sidecar` and your header-auth app in `network_mode: service:hogman-bridge` (binding only `127.0.0.1:8080`, zero `ports:`):
+
+```yaml
+services:
+  hogman-sidecar:
+    image: ${HOGMAN_SIDECAR_IMAGE:?pin ghcr.io/celtiberi/hogman-sidecar:v<ver>@sha256:<digest>}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 192m
+    pids_limit: 128
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    volumes:
+      - hogman_state:/var/lib/hogman
+      - hogman_ingress:/run/hogman-in:ro
+    command:
+      - share
+      - my-app
+      - unix:///run/hogman-in/app.sock
+      - --state-dir=/var/lib/hogman
+      - --identity-headers
+    depends_on:
+      hogman-bridge:
+        condition: service_healthy
+    restart: unless-stopped
+
+  hogman-bridge:
+    image: ${HOGMAN_SIDECAR_IMAGE:?pin ghcr.io/celtiberi/hogman-sidecar:v<ver>@sha256:<digest>}
+    network_mode: none
+    hostname: my-app
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    pids_limit: 64
+    tmpfs:
+      - /tmp:size=4m,noexec,nosuid,nodev
+    volumes:
+      - hogman_ingress:/run/hogman-in
+    command:
+      - bridge
+      - --listen-unix=/run/hogman-in/app.sock
+      - --forward-tcp=127.0.0.1:8080
+    healthcheck:
+      test: ["CMD", "/hogman", "bridge", "--check", "/run/hogman-in/app.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    # Replace with your header-auth app image configured to trust X-Hogman-Handle
+    # and listen on 127.0.0.1:8080 (never publish host ports:).
+    image: my-header-auth-app:pinned
+    network_mode: service:hogman-bridge
+    depends_on:
+      hogman-bridge:
+        condition: service_healthy
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    pids_limit: 256
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    volumes:
+      - ./data:/data:ro
+    restart: unless-stopped
+
+volumes:
+  hogman_state:
+  hogman_ingress:
+```
+
+3. Enroll once via stdin and start the stack:
+
+```sh
+docker compose run --rm -i hogman-sidecar \
+  share my-app unix:///run/hogman-in/app.sock \
+  --state-dir=/var/lib/hogman --identity-headers --enroll-only --link-stdin
+docker compose up -d
+```
+
+**Additional app-specific boundaries to keep in mind:**
+
+- **Code-execution apps (e.g., JupyterHub):** any pen member signed into a notebook can execute arbitrary code inside the app container, and code in one member's notebook can call the hub on `127.0.0.1:8080` with any `X-Hogman-Handle` — so with header-based sign-in, members can impersonate each other (including admins). Sealed mode stops outsiders on the host or network, not insiders running code inside the same sealed namespace; treat pen membership as full trust inside that container.
+- **Auto-registration / username matching (e.g., Forgejo):** header-based auto-registration binds to any existing account with the same username, including an existing admin account — verify username and admin role mappings before enabling it.
+- **Direct `unix://` outside Docker sealed mode:** if you share a host Unix socket with `--identity-headers` without `network_mode: none`, place the socket in a `0700` directory accessible only to the sharing user and app user so other local OS users cannot connect and forge headers.
 
 ## Private Site Names (`--private-name`) & Headless Discovery
 
