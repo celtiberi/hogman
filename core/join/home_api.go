@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -48,36 +49,52 @@ func homeAPI(c *http.Client, zone, method, path string, in, out any) (int, error
 	return homeAPICtx(context.Background(), c, zone, method, path, in, out)
 }
 
-const maxAPIErrorMsgBytes = 200
+const maxHomeAPIRespBytes = 1 << 20 // 1 MiB
 
-// sanitizeAPIErrorMsg strips terminal control characters (including C0/DEL and
-// C1 controls such as U+009B CSI via unicode.IsControl, replacing them with '?')
-// and caps the message length so an unexpected upstream response (e.g. a
-// captive-portal HTML page or escape sequence) cannot flood or manipulate the
-// user's terminal.
+// sanitizeAPIErrorMsg replaces terminal control characters (C0/DEL and C1
+// controls such as U+009B CSI via unicode.IsControl) with '?' while keeping
+// the full message intact without truncation.
 func sanitizeAPIErrorMsg(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return ""
 	}
 	var b strings.Builder
-	b.Grow(min(len(s), maxAPIErrorMsgBytes))
-	truncated := false
+	b.Grow(len(s))
 	for _, r := range s {
-		out := r
 		if unicode.IsControl(r) {
-			out = '?'
+			b.WriteByte('?')
+		} else {
+			b.WriteRune(r)
 		}
-		if b.Len()+len(string(out)) > maxAPIErrorMsgBytes {
-			truncated = true
-			break
-		}
-		b.WriteRune(out)
-	}
-	if truncated {
-		return b.String() + "..."
 	}
 	return b.String()
+}
+
+func formatNonJSONAPIError(status int, contentType string, hasBody bool) string {
+	ct := strings.TrimSpace(contentType)
+	if ct != "" {
+		if mt, _, err := mime.ParseMediaType(ct); err == nil && mt != "" {
+			ct = mt
+		}
+		ct = sanitizeAPIErrorMsg(ct)
+	}
+	if !hasBody {
+		if ct != "" {
+			return fmt.Sprintf("HTTP %d (%s)", status, ct)
+		}
+		return fmt.Sprintf("HTTP %d", status)
+	}
+	if ct != "" {
+		if strings.EqualFold(ct, "text/html") || strings.EqualFold(ct, "application/xhtml+xml") {
+			return fmt.Sprintf("HTTP %d (%s): not the pen's API — are you behind a Wi-Fi login page?", status, ct)
+		}
+		if strings.EqualFold(ct, "application/json") {
+			return fmt.Sprintf("HTTP %d (%s)", status, ct)
+		}
+		return fmt.Sprintf("HTTP %d (%s): unexpected non-JSON response from pen API", status, ct)
+	}
+	return fmt.Sprintf("HTTP %d: unexpected non-JSON response from pen API", status)
 }
 
 func homeAPICtx(ctx context.Context, c *http.Client, zone, method, path string, in, out any) (int, error) {
@@ -101,21 +118,26 @@ func homeAPICtx(ctx context.Context, c *http.Client, zone, method, path string, 
 		return 0, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxHomeAPIRespBytes+1))
 	if err != nil {
 		return 0, err
+	}
+	if len(data) > maxHomeAPIRespBytes {
+		return resp.StatusCode, &homeAPIError{
+			Status: resp.StatusCode,
+			Msg:    fmt.Sprintf("HTTP %d: response body exceeded %d bytes (not read)", resp.StatusCode, maxHomeAPIRespBytes),
+		}
 	}
 	if resp.StatusCode >= 300 {
 		var apiErr struct {
 			Error string `json:"error"`
 		}
-		_ = json.Unmarshal(data, &apiErr)
-		msg := sanitizeAPIErrorMsg(apiErr.Error)
-		if msg == "" {
-			msg = sanitizeAPIErrorMsg(string(data))
+		msg := ""
+		if json.Unmarshal(data, &apiErr) == nil {
+			msg = sanitizeAPIErrorMsg(apiErr.Error)
 		}
 		if msg == "" {
-			msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
+			msg = formatNonJSONAPIError(resp.StatusCode, resp.Header.Get("Content-Type"), len(bytes.TrimSpace(data)) > 0)
 		}
 		var retryAfter time.Duration
 		if raw := strings.TrimSpace(resp.Header.Get("Retry-After")); raw != "" {
