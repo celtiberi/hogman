@@ -45,6 +45,27 @@ test("sanitizeNativeSnapshot enforces hosted zones, integer port bounds, and squ
   assert.equal(snap.osProxyConflict, true);
   assert.equal(snap.osProxyKind, "http,pac");
 
+  // Over-long metadata fields are rejected as empty instead of silently truncated.
+  const overlong = sanitizeNativeSnapshot({
+    ok: true,
+    version: "1",
+    os_proxy_kind: "k".repeat(65),
+    vpn_interface: "v".repeat(33),
+    pens: [],
+  });
+  assert.equal(overlong.osProxyKind, "");
+  assert.equal(overlong.vpnInterface, "");
+
+  const exact = sanitizeNativeSnapshot({
+    ok: true,
+    version: "1",
+    os_proxy_kind: "k".repeat(64),
+    vpn_interface: "v".repeat(32),
+    pens: [],
+  });
+  assert.equal(exact.osProxyKind, "k".repeat(64));
+  assert.equal(exact.vpnInterface, "v".repeat(32));
+
   const byZone = Object.fromEntries(snap.pens.map((p) => [p.zone, p]));
   assert.equal(Object.keys(byZone).length, 6);
   assert.equal(byZone["farm2.pens.hogman.network"].port, 25148);

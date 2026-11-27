@@ -256,11 +256,21 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 		return errorf("this pen's server is too old for side-by-side mode (it does not publish its DNS address)")
 	}
 	dir := stateDir(n.Zone)
-	hostname := defaultHostname()
+	var hostname string
 	if strings.TrimSpace(o.hostname) != "" {
-		hostname = sanitizeHostname(o.hostname)
+		var err error
+		hostname, err = sanitizeHostname(o.hostname)
+		if err != nil {
+			return err
+		}
 		if hostname == "" {
 			return errorf("--hostname %q contains no letters or digits", o.hostname)
+		}
+	} else {
+		var err error
+		hostname, err = defaultHostname()
+		if err != nil {
+			return err
 		}
 	}
 	note("%s", why)

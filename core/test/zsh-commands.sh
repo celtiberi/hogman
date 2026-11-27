@@ -28,7 +28,7 @@ while IFS= read -r cmd || [ -n "$cmd" ]; do
   [ -n "$cmd" ] || continue
   join_count=$((join_count + 1))
   cmd="$(printf '%s' "$cmd" | sed -e 's|&& \./hogman .*|\&\& true|')"
-  check "commands.js: ${cmd:0:60}" "$cmd"
+  check "commands.js: $cmd" "$cmd"
 done < <(node --input-type=module -e '
 import { buildJoinCommands } from "./core/join-page/commands.js";
 const host = process.argv[1];
@@ -55,7 +55,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   [ -n "$line" ] || continue
   readme_count=$((readme_count + 1))
   cmd="$(printf '%s' "${line#\$ }" | sed -e "s|<your-pen>|example|g")"
-  check "README: ${cmd:0:60}" "$cmd"
+  check "README: $cmd" "$cmd"
 done < <(grep -E '^\$ curl ' README.md || true)
 if [ "$readme_count" -eq 0 ]; then
   echo "FAIL README.md: extracted 0 '\$ curl ' commands" >&2

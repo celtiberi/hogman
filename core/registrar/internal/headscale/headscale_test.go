@@ -9,10 +9,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"unicode/utf8"
 )
 
 func TestClientNodeValidationAndErrors(t *testing.T) {
+	longErrBody := strings.Repeat("é", 4096) + "-END"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer secret" {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -30,7 +30,7 @@ func TestClientNodeValidationAndErrors(t *testing.T) {
 			_, _ = w.Write([]byte(`{"users":[{"id":"1","name":"bob"}]}`))
 		default:
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(strings.Repeat("é", maxErrorBytes)))
+			_, _ = w.Write([]byte(longErrBody))
 		}
 	}))
 	defer srv.Close()
@@ -61,8 +61,8 @@ func TestClientNodeValidationAndErrors(t *testing.T) {
 		t.Fatal("expected 500 error on /health")
 	} else {
 		var he *Error
-		if !errors.As(err, &he) || he.Status != 500 || !strings.HasSuffix(he.Body, "...(truncated)") || !utf8.ValidString(he.Body) {
-			t.Fatalf("unexpected truncated error: %v", err)
+		if !errors.As(err, &he) || he.Status != 500 || he.Body != longErrBody {
+			t.Fatalf("expected full error body without truncation, got status=%d len=%d", he.Status, len(he.Body))
 		}
 	}
 }
@@ -96,8 +96,8 @@ func TestHeadscaleClientHardening(t *testing.T) {
 	}
 	_, err := hs.Policy(context.Background())
 	var he *Error
-	if !errors.As(err, &he) || !strings.HasSuffix(he.Body, "...(truncated)") || len(he.Body) > maxErrorBytes+32 {
-		t.Fatalf("oversized error body not truncated properly: err=%v len=%d", err, len(he.Body))
+	if !errors.As(err, &he) || he.Status != 500 || !strings.Contains(he.Body, "not read") || strings.Contains(he.Body, "EEEE") {
+		t.Fatalf("oversized error body should refuse without partial content: err=%v", err)
 	}
 	for _, badID := range []string{"  ", ".", "..", "1/2", "1\\2"} {
 		if _, err := hs.Node(context.Background(), badID); err == nil {

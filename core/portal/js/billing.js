@@ -1,4 +1,4 @@
-import { el } from './dom.js';
+import { el, formatUTCDate, formatUTCTime } from './dom.js';
 
 export function renderBillingBanner({ doc, api, navigate, now = () => Date.now() }, me, st) {
   const banner = doc.getElementById('billing-banner');
@@ -48,7 +48,7 @@ export function renderBillingBanner({ doc, api, navigate, now = () => Date.now()
       const d = new Date(st.wake_until);
       if (!Number.isNaN(d.getTime())) {
         const mins = Math.max(0, Math.ceil((d.getTime() - now()) / 60000));
-        until = `${d.toISOString().slice(11, 16)} UTC (${mins} min left)`;
+        until = `${formatUTCTime(d)} UTC (${mins} min left)`;
       }
     }
     p.append(doc.createTextNode(
@@ -69,7 +69,7 @@ export function renderBillingBanner({ doc, api, navigate, now = () => Date.now()
     const d = new Date(st.grace_until);
     if (!Number.isNaN(d.getTime())) {
       const days = Math.max(0, Math.ceil((d.getTime() - now()) / 86400000));
-      until = `${d.toISOString().slice(0, 10)} (${days} day${days === 1 ? '' : 's'} left)`;
+      until = `${formatUTCDate(d)} (${days} day${days === 1 ? '' : 's'} left)`;
     }
   }
   if (me && me.is_admin) {

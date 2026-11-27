@@ -513,6 +513,9 @@ func TestHerdPagedAndSearched(t *testing.T) {
 	if rec := doMeshReq(h, "GET", "/api/admin/herd?q=a%25", "100.64.0.10", "", nil); rec.Code != 400 {
 		t.Fatalf("a search with %% should be refused, got %d", rec.Code)
 	}
+	if rec := doMeshReq(h, "GET", "/api/admin/herd?q="+strings.Repeat("a", 33), "100.64.0.10", "", nil); rec.Code != 400 {
+		t.Fatalf("a search longer than 32 chars should be refused with 400, got %d", rec.Code)
+	}
 	e.addDevice(t, "pig102", "personal", "d", "100.64.1.4", "")
 	if rec := doMeshReq(h, "GET", "/api/admin/herd", "100.64.1.4", "", nil); rec.Code != 403 {
 		t.Fatalf("a member listed the herd: %d", rec.Code)

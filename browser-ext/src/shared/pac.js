@@ -53,14 +53,16 @@ export function sanitizeNativeSnapshot(raw) {
     });
   }
   pens.sort((a, b) => (b.zone.length - a.zone.length) || a.zone.localeCompare(b.zone));
+  const rawProxyKind = typeof (raw && raw.os_proxy_kind) === "string" ? raw.os_proxy_kind : "";
+  const rawVpnIface = typeof (raw && raw.vpn_interface) === "string" ? raw.vpn_interface : "";
   return {
     ok: Boolean(raw && raw.ok),
     version: typeof (raw && raw.version) === "string" ? raw.version : "",
     pens,
     osProxyConflict: Boolean(raw && raw.os_proxy_conflict),
-    osProxyKind: typeof (raw && raw.os_proxy_kind) === "string" ? raw.os_proxy_kind.slice(0, 64) : "",
+    osProxyKind: rawProxyKind.length <= 64 ? rawProxyKind : "",
     vpnOverride: Boolean(raw && raw.vpn_override),
-    vpnInterface: typeof (raw && raw.vpn_interface) === "string" ? raw.vpn_interface.slice(0, 32) : "",
+    vpnInterface: rawVpnIface.length <= 32 ? rawVpnIface : "",
   };
 }
 

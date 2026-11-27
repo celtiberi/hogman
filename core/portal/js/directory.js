@@ -1,4 +1,4 @@
-import { el, presenceBadge } from './dom.js';
+import { el, formatUTCDate, presenceBadge } from './dom.js';
 
 export function renderOverview(doc, { me, herd, cachedSites, cachedAdminDevices }) {
   if (!me || !me.is_admin) return;
@@ -53,8 +53,9 @@ export function renderOverview(doc, { me, herd, cachedSites, cachedAdminDevices 
   planSub.classList.remove('warn-text');
   if (b && b.state === 'grace') {
     $('stat-plan').textContent = planLabel ? `${planLabel} · Grace` : 'Grace period';
-    planSub.textContent = b.grace_until
-      ? `Sleeps ${String(b.grace_until).slice(0, 10)}`
+    const graceDate = formatUTCDate(b.grace_until);
+    planSub.textContent = graceDate
+      ? `Sleeps ${graceDate}`
       : 'Renewal needed';
     planSub.classList.add('warn-text');
   } else if (b && b.state === 'renew_only') {
@@ -63,8 +64,9 @@ export function renderOverview(doc, { me, herd, cachedSites, cachedAdminDevices 
     planSub.classList.add('warn-text');
   } else if (b && b.state === 'active') {
     $('stat-plan').textContent = planLabel || 'Active';
-    planSub.textContent = b.paid_until
-      ? `Paid until ${String(b.paid_until).slice(0, 10)}`
+    const paidDate = formatUTCDate(b.paid_until);
+    planSub.textContent = paidDate
+      ? `Paid until ${paidDate}`
       : 'Current';
   } else {
     $('stat-plan').textContent = planLabel || 'Active';
