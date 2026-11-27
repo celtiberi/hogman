@@ -144,9 +144,19 @@ test('initJoinPage tolerates a throwing sessionStorage getter when storage is om
   assert.equal(elems.get('vpn-zone').textContent, 'demo.pens.hogman.network');
 });
 
-test('join-page extension copy instructs opening the popup to turn on the pen', () => {
+test('join-page extension install button and copy use same-origin icon and official store URL', () => {
   const html = fs.readFileSync(new URL('../../join-page/index.html', import.meta.url), 'utf8');
+  const storeURL = 'https://chromewebstore.google.com/detail/hogman/mgokdogedagoejnjmjpmbcmicbmhplkk';
   assert.ok(!html.includes('nothing else to set'), 'join-page must not claim nothing else to set');
+  assert.ok(
+    html.includes(`<a class="ext-btn" href="${storeURL}" target="_blank" rel="noopener noreferrer">`),
+    'join-page must render a real anchor button pointing to the official Chrome Web Store URL',
+  );
+  assert.ok(
+    html.includes('<img class="ext-btn-icon" src="/join/assets/hogman-icon.webp" width="32" height="32" alt="">'),
+    'join-page extension button must use the same-origin D-46 icon with empty alt',
+  );
+  assert.ok(html.includes('Install Hogman Extension'));
   assert.ok(html.includes('open its popup and turn on <code id="proxy-zone">this pen</code>. No proxy settings needed'));
   assert.ok(html.includes('open its popup and turn on <code id="vpn-zone">this pen</code>'));
 });
