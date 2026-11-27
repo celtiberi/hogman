@@ -7,6 +7,7 @@ import {
   HOGMAN_PORT_MAX,
   HOGMAN_PORT_MIN,
   HOSTED_ZONE_RE,
+  ZONE_SUFFIX,
 } from "./constants.js";
 
 export {
@@ -15,6 +16,7 @@ export {
   HOGMAN_PORT_MAX,
   HOGMAN_PORT_MIN,
   HOSTED_ZONE_RE,
+  ZONE_SUFFIX,
 };
 
 export function normalizeHost(host) {
@@ -120,7 +122,7 @@ export function buildPACScript(routes = {}) {
     "    var z = ZONES[i];",
     '    if (host === z || dnsDomainIs(host, "." + z)) return ROUTES[z];',
     "  }",
-    '  if (host === "pens.hogman.network" || dnsDomainIs(host, ".pens.hogman.network")) return FAIL_CLOSED;',
+    `  if (host === ${JSON.stringify(ZONE_SUFFIX)} || dnsDomainIs(host, ${JSON.stringify("." + ZONE_SUFFIX)})) return FAIL_CLOSED;`,
     '  return "DIRECT";',
     "}",
     "",
@@ -161,7 +163,7 @@ export function resolveFirefoxProxy(rawHost, routes = {}) {
       return FAIL_CLOSED_FIREFOX;
     }
   }
-  if (host === "pens.hogman.network" || host.endsWith(".pens.hogman.network")) {
+  if (host === ZONE_SUFFIX || host.endsWith("." + ZONE_SUFFIX)) {
     return FAIL_CLOSED_FIREFOX;
   }
   return undefined;

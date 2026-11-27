@@ -3,6 +3,8 @@
 Minimal Manifest V3 browser extension for Chrome, Brave, Edge, Arc, Vivaldi, Chromium, Firefox (128+), and LibreWolf that routes your Hogman pen sites (`*.pens.hogman.network`) straight to your local `hogman` proxy — even while an OS VPN (ProtonVPN, Mullvad, corporate VPNs) is connected and overriding macOS system proxy settings.
 
 > **Status:** Published on the Chrome Web Store (`mgokdogedagoejnjmjpmbcmicbmhplkk`), with Firefox Add-ons (AMO, `hogman-browser@hogman.network`) review pending. Developers can also build and load unpacked builds locally from `browser-ext/dist/` using the steps below.
+>
+> **Scope (hosted `*.pens.hogman.network` only):** The published store builds cover hosted `*.pens.hogman.network` pens exclusively so extension permissions stay minimal (no `<all_urls>`). Pens on any other domain (such as staging environments or custom/self-hosted domains) are ignored by the store build — use the automatic proxy URL (`proxy.pac`) method, or build an unpacked staging extension with `--zone-suffix` below.
 
 Ordinary browsing is never routed through Hogman: non-pen traffic returns `DIRECT` (on Chrome/Brave/Edge) or passes through untouched (on Firefox), so it continues riding through your VPN as normal.
 
@@ -49,3 +51,24 @@ python3 browser-ext/build.py
      ```
    - Open `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on**, and select `browser-ext/dist/firefox/manifest.json`.
    - Note: Firefox removes temporary add-ons when the browser restarts (until a signed AMO build is installed). Open the Hogman popup and enable the pen(s) you want in that profile.
+
+## Staging / custom-domain unpacked test build
+
+To test the extension against a non-production pens zone (without widening the published store build's permissions), pass `--zone-suffix` to `build.py`:
+
+```bash
+python3 browser-ext/build.py --zone-suffix pens.staging.example
+```
+
+This creates **unpacked-only** builds (`Hogman (staging)`) under `browser-ext/dist/staging/chrome/` and `browser-ext/dist/staging/firefox/` — no `.zip` archives or `SHA256SUMS` are produced, and `browser-ext/src/` is never modified. Its `HOSTED_ZONE_RE`, Firefox `host_permissions`, fail-closed PAC rule, and popup labels are scoped exclusively to `*.<zone-suffix>`.
+
+1. Load the unpacked directory into a **separate browser profile** so staging pens stay isolated from production profiles.
+2. Explicitly register the staging extension ID with the native messaging host (staging IDs are never allowed by default):
+   - Chrome / Chromium: copy the 32-character unpacked ID from `chrome://extensions` and run:
+     ```bash
+     ~/hogman browser-setup --chrome-id <32-char-id>
+     ```
+   - Firefox: register the staging Gecko ID printed by `build.py`:
+     ```bash
+     ~/hogman browser-setup --firefox-id hogman-browser-staging@pens.staging.example
+     ```
