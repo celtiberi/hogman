@@ -258,7 +258,7 @@ docker compose up -d
 
 **Additional app-specific boundaries to keep in mind:**
 
-- **Code-execution apps (e.g., JupyterHub):** any pen member signed into a notebook can execute arbitrary code inside the app container, and code inside the container shares its loopback namespace — treat pen membership as code-execution trust in that container.
+- **Code-execution apps (e.g., JupyterHub):** any pen member signed into a notebook can execute arbitrary code inside the app container, and code in one member's notebook can call the hub on `127.0.0.1:8080` with any `X-Hogman-Handle` — so with header-based sign-in, members can impersonate each other (including admins). Sealed mode stops outsiders on the host or network, not insiders running code inside the same sealed namespace; treat pen membership as full trust inside that container.
 - **Auto-registration / username matching (e.g., Forgejo):** header-based auto-registration binds to any existing account with the same username, including an existing admin account — verify username and admin role mappings before enabling it.
 - **Direct `unix://` outside Docker sealed mode:** if you share a host Unix socket with `--identity-headers` without `network_mode: none`, place the socket in a `0700` directory accessible only to the sharing user and app user so other local OS users cannot connect and forge headers.
 
