@@ -20,7 +20,22 @@ Run any Dockerized web app inside a container with **zero internet access** (`ne
 
 ## Quick Start
 
-### 1. Build the sidecar image
+### 1. Choose the sidecar image
+
+**Option A — Prebuilt attested multi-arch image from GHCR (recommended):**
+
+Each [GitHub Release](https://github.com/celtiberi/hogman/releases) publishes a multi-arch (`linux/amd64` + `linux/arm64`) scratch image built from the release's verified binaries and records its immutable digest (`ghcr.io/celtiberi/hogman-sidecar:v<ver>@sha256:<digest>`). Verify its Sigstore build provenance and pin by version tag and digest:
+
+```sh
+gh attestation verify oci://ghcr.io/celtiberi/hogman-sidecar@sha256:<digest> \
+  --repo celtiberi/hogman \
+  --signer-workflow celtiberi/hogman/.github/workflows/release.yml
+export HOGMAN_SIDECAR_IMAGE="ghcr.io/celtiberi/hogman-sidecar:v<ver>@sha256:<digest>"
+```
+
+*(For a quick throwaway evaluation only, `ghcr.io/celtiberi/hogman-sidecar:latest` tracks the newest release; always pin `:v<ver>@sha256:<digest>` in real `docker-compose.yml` stacks.)*
+
+**Option B — Build from source:**
 
 ```sh
 docker build -f core/join/Dockerfile.sidecar -t hogman-sidecar core/join
@@ -31,7 +46,10 @@ docker build -f core/join/Dockerfile.sidecar -t hogman-sidecar core/join
 ```yaml
 services:
   hogman-sidecar:
-    image: hogman-sidecar
+    # Pin to the version + digest from GitHub Releases (recommended):
+    #   HOGMAN_SIDECAR_IMAGE=ghcr.io/celtiberi/hogman-sidecar:v<ver>@sha256:<digest>
+    # Or build locally as `hogman-sidecar` (Option B above).
+    image: ${HOGMAN_SIDECAR_IMAGE:-hogman-sidecar}
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -57,7 +75,7 @@ services:
     restart: unless-stopped
 
   hogman-bridge:
-    image: hogman-sidecar
+    image: ${HOGMAN_SIDECAR_IMAGE:-hogman-sidecar}
     network_mode: none
     hostname: lab-notes
     read_only: true

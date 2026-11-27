@@ -61,6 +61,21 @@ grep -q "linux/$want_arch" <<<"$got_ver" || {
 }
 echo "✓ Image binary architecture matches host ($got_ver)"
 
+img_user="$(docker inspect -f '{{.Config.User}}' "$IMG")"
+test "$img_user" = "65532:65532" || {
+  echo "expected non-root image User 65532:65532, got: $img_user" >&2
+  exit 1
+}
+docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$IMG" | grep -qx 'HOGMAN_DISABLE_NETNS=1' || {
+  echo "expected HOGMAN_DISABLE_NETNS=1 in sidecar image environment" >&2
+  exit 1
+}
+if docker run --rm --entrypoint /bin/sh "$IMG" -c true >/dev/null 2>&1; then
+  echo "UNEXPECTED SUCCESS executing /bin/sh in scratch sidecar image" >&2
+  exit 1
+fi
+echo "✓ Sidecar image runs as 65532:65532 with HOGMAN_DISABLE_NETNS=1 and no shell"
+
 echo "• Creating empty ingress volume (Docker initializes UID 65532 mode 0700 from image)..."
 docker volume create "$VOL" >/dev/null
 
