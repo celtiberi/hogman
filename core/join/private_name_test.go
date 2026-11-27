@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"hogman/join/internal/state"
 )
 
 func TestCLIPrivateNameShareParsing(t *testing.T) {
@@ -157,7 +159,7 @@ func TestClaimShareNamePrivateAndRestart(t *testing.T) {
 	})
 
 	dir := t.TempDir()
-	cfg := &shareConfig{
+	cfg := &state.ShareConfig{
 		PrivateName: true,
 		Zone:        "acme.pens.example.com",
 		Note:        "Cooler 3",
@@ -168,9 +170,9 @@ func TestClaimShareNamePrivateAndRestart(t *testing.T) {
 	if cfg.Name != "k7p3m9x2q4v8" {
 		t.Fatalf("cfg.Name = %q, want k7p3m9x2q4v8", cfg.Name)
 	}
-	saved, err := loadShare(dir)
+	saved, err := state.LoadShare(dir)
 	if err != nil {
-		t.Fatalf("loadShare failed: %v", err)
+		t.Fatalf("LoadShare failed: %v", err)
 	}
 	if saved.Name != "k7p3m9x2q4v8" || !saved.PrivateName || saved.Note != "Cooler 3" {
 		t.Fatalf("unexpected saved share.json: %+v", saved)
@@ -201,16 +203,16 @@ func TestAllSharesInSkipsPendingDirsAndStateDirRejectsMismatch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := (&shareConfig{Name: "", PrivateName: true, Zone: zone}).save(pendingDir); err != nil {
+	if err := (&state.ShareConfig{Name: "", PrivateName: true, Zone: zone}).Save(pendingDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&shareConfig{Name: "k7p3m9x2q4v8", PrivateName: true, Zone: zone, Target: "http://127.0.0.1:3000", Note: "Cooler 3"}).save(realDir); err != nil {
+	if err := (&state.ShareConfig{Name: "k7p3m9x2q4v8", PrivateName: true, Zone: zone, Target: "http://127.0.0.1:3000", Note: "Cooler 3"}).Save(realDir); err != nil {
 		t.Fatal(err)
 	}
 
-	dirs := allSharesIn(base, "")
+	dirs := state.AllSharesIn(base, "")
 	if len(dirs) != 1 || dirs[0] != realDir {
-		t.Fatalf("allSharesIn = %v, want [%s]", dirs, realDir)
+		t.Fatalf("AllSharesIn = %v, want [%s]", dirs, realDir)
 	}
 	items := collectShareListItems(dirs)
 	if len(items) != 1 || !items[0].Private || items[0].Note != "Cooler 3" {
@@ -219,7 +221,7 @@ func TestAllSharesInSkipsPendingDirsAndStateDirRejectsMismatch(t *testing.T) {
 
 	// State-dir enrolled for a non-private share must refuse --private-name.
 	namedDir := t.TempDir()
-	if err := (&shareConfig{Name: "blog", PrivateName: false, Zone: zone}).save(namedDir); err != nil {
+	if err := (&state.ShareConfig{Name: "blog", PrivateName: false, Zone: zone}).Save(namedDir); err != nil {
 		t.Fatal(err)
 	}
 	err := shareStart("", "3000", "", options{privateName: true, stateDir: namedDir})

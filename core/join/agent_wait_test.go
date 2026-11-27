@@ -11,18 +11,20 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"hogman/join/internal/state"
 )
 
-func newVerifiedStatusServer(t *testing.T, zone string, fn func(call int32) agentStatus) *agentConfig {
+func newVerifiedStatusServer(t *testing.T, zone string, fn func(call int32) agentStatus) *state.AgentConfig {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", home)
-	dir := stateDir(zone)
+	dir := state.StateDir(zone)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	tok, err := writeStatusToken(dir)
+	tok, err := state.WriteStatusToken(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,13 +32,13 @@ func newVerifiedStatusServer(t *testing.T, zone string, fn func(call int32) agen
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := calls.Add(1)
 		if nonce := strings.TrimSpace(r.Header.Get("X-Hogman-Challenge")); nonce != "" {
-			w.Header().Set("X-Hogman-Proof", computeStatusProof(tok, nonce, zone))
+			w.Header().Set("X-Hogman-Proof", state.ComputeStatusProof(tok, nonce, zone))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(fn(n))
 	}))
 	t.Cleanup(srv.Close)
-	return &agentConfig{
+	return &state.AgentConfig{
 		Zone:      zone,
 		ProxyAddr: strings.TrimPrefix(srv.URL, "http://"),
 	}
@@ -142,7 +144,7 @@ func TestWaitAgentUpFailsFastOnStartupErrorAndReportsTransientTimeout(t *testing
 
 func TestAgentStatusSetsEnrolledOnLiveStatusOverride(t *testing.T) {
 	a := &agent{
-		cfg: &agentConfig{Zone: "bobo.pens.example.com", DNSServer: "100.64.0.1", ProxyAddr: "127.0.0.1:18123"},
+		cfg: &state.AgentConfig{Zone: "bobo.pens.example.com", DNSServer: "100.64.0.1", ProxyAddr: "127.0.0.1:18123"},
 		up:  true,
 		ips: []string{"100.64.0.9"},
 		liveStatus: func(context.Context) (bool, bool, string, bool) {

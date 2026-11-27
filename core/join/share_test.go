@@ -14,6 +14,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"hogman/join/internal/mesh"
+	"hogman/join/internal/penapi"
+	"hogman/join/internal/state"
 )
 
 func TestShareTarget(t *testing.T) {
@@ -65,7 +69,7 @@ func TestShareFolderStaysInside(t *testing.T) {
 	if err := os.Symlink(secret, filepath.Join(dir, "leak")); err != nil {
 		t.Skip("no symlinks here:", err)
 	}
-	h, done, err := shareHandler(&shareConfig{Name: "x", Zone: "z.hogman", Target: dir, Folder: true})
+	h, done, err := shareHandler(&state.ShareConfig{Name: "x", Zone: "z.hogman", Target: dir, Folder: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +96,7 @@ func TestShareNoteResolutionAndFlags(t *testing.T) {
 		t.Fatalf("fresh --note = %q want hello", got)
 	}
 	// Bare restart preserves saved note; --note updates; --note "" clears.
-	prev := &shareConfig{Note: "saved description"}
+	prev := &state.ShareConfig{Note: "saved description"}
 	if got := resolveShareNote(prev, "", false); got != "saved description" {
 		t.Fatalf("restart without --note = %q want saved description", got)
 	}
@@ -134,7 +138,7 @@ func TestShareNoteResolutionAndFlags(t *testing.T) {
 }
 
 func TestShareServiceTemplates(t *testing.T) {
-	c := &shareConfig{Name: "blog", Zone: "bobo.hogman"}
+	c := &state.ShareConfig{Name: "blog", Zone: "bobo.hogman"}
 	if got, pen := shareLaunchLabel(c), launchLabel(c.Zone); got == pen || got != "network.hogman.share.blog.bobo.hogman" {
 		t.Fatalf("shareLaunchLabel = %q, pen label = %q", got, pen)
 	}
@@ -233,7 +237,7 @@ func TestSharePermanentErrorClassification(t *testing.T) {
 	}{
 		{"nil error", false, "NeedsLogin", nil, false},
 		{"removed device needs login without key", false, "NeedsLogin", errors.New("context deadline exceeded"), true},
-		{"fast-fail errDeviceRemoved", false, "", errDeviceRemoved, true},
+		{"fast-fail errDeviceRemoved", false, "", mesh.ErrDeviceRemoved, true},
 		{"initial join with key briefly needs login", true, "NeedsLogin", errors.New("context deadline exceeded"), false},
 		{"offline at boot while starting", false, "Starting", errors.New("context deadline exceeded"), false},
 		{"invalid authkey message", true, "", errors.New("tsnet.Up: backend: invalid authkey"), true},
@@ -264,11 +268,11 @@ func TestShareListState(t *testing.T) {
 }
 
 func TestWaitShareBackgroundCleansUpOnErrorAndTimeout(t *testing.T) {
-	c := &shareConfig{Name: "blog", Zone: "bobo.hogman", Target: "http://127.0.0.1:3000"}
+	c := &state.ShareConfig{Name: "blog", Zone: "bobo.hogman", Target: "http://127.0.0.1:3000"}
 
 	// 1. Healthy "up" status -> returns nil without calling stopFn.
 	upDir := t.TempDir()
-	writeShareStatus(upDir, "up", "")
+	state.WriteShareStatus(upDir, "up", "")
 	stopped := false
 	if err := waitShareBackground(upDir, c, true, 0, 100*time.Millisecond, func() { stopped = true }); err != nil {
 		t.Fatalf("expected nil on up status, got %v", err)
@@ -279,7 +283,7 @@ func TestWaitShareBackgroundCleansUpOnErrorAndTimeout(t *testing.T) {
 
 	// 2. "error" status -> returns error AND calls stopFn to unload/cleanup service.
 	errDir := t.TempDir()
-	writeShareStatus(errDir, "error", "could not claim blog.bobo.hogman")
+	state.WriteShareStatus(errDir, "error", "could not claim blog.bobo.hogman")
 	stopped = false
 	err := waitShareBackground(errDir, c, true, 0, 100*time.Millisecond, func() { stopped = true })
 	if err == nil || !strings.Contains(err.Error(), "could not claim") {
@@ -291,7 +295,7 @@ func TestWaitShareBackgroundCleansUpOnErrorAndTimeout(t *testing.T) {
 
 	// 3. Timed out while "starting" -> returns timeout error AND calls stopFn.
 	slowDir := t.TempDir()
-	writeShareStatus(slowDir, "starting", "")
+	state.WriteShareStatus(slowDir, "starting", "")
 	stopped = false
 	err = waitShareBackground(slowDir, c, true, 0, 50*time.Millisecond, func() { stopped = true })
 	if err == nil || !strings.Contains(err.Error(), "did not come up in time") {
@@ -305,7 +309,7 @@ func TestWaitShareBackgroundCleansUpOnErrorAndTimeout(t *testing.T) {
 func TestFormatFreshShareCertErrorRateLimit(t *testing.T) {
 	// Wrapped *homeAPIError 429 with Retry-After -> shows verbatim message + human hint.
 	wrappedHourly := fmt.Errorf("certmagic: %w", dnsStepError{
-		err: &homeAPIError{
+		err: &penapi.HomeAPIError{
 			Status:     http.StatusTooManyRequests,
 			Msg:        "too many new certificate names for this pen in the last hour",
 			RetryAfter: 45 * time.Minute,
@@ -323,7 +327,7 @@ func TestFormatFreshShareCertErrorRateLimit(t *testing.T) {
 	}
 
 	// Global hourly cap with short Retry-After.
-	wrappedGlobal := &homeAPIError{
+	wrappedGlobal := &penapi.HomeAPIError{
 		Status:     http.StatusTooManyRequests,
 		Msg:        "the network is busy; too many new certificate names in the last hour",
 		RetryAfter: 30 * time.Second,
@@ -334,7 +338,7 @@ func TestFormatFreshShareCertErrorRateLimit(t *testing.T) {
 	}
 
 	// Weekly cap (~6 days).
-	wrappedWeekly := &homeAPIError{
+	wrappedWeekly := &penapi.HomeAPIError{
 		Status:     http.StatusTooManyRequests,
 		Msg:        "this pen's weekly limit on new certificate names is reached",
 		RetryAfter: 6 * 24 * time.Hour,
@@ -397,12 +401,12 @@ func TestShareTargetLocalAndLANPolicy(t *testing.T) {
 	}
 
 	// LAN target must also be accepted by shareHandler (D-27 Work LAN bridging).
-	if _, _, err := shareHandler(&shareConfig{Name: "cooler-1", Zone: "z.hogman", Target: "http://192.168.1.40"}); err != nil {
+	if _, _, err := shareHandler(&state.ShareConfig{Name: "cooler-1", Zone: "z.hogman", Target: "http://192.168.1.40"}); err != nil {
 		t.Errorf("shareHandler rejected valid LAN target: %v", err)
 	}
 	// Public and metadata IPs persisted in share.json must be rejected by shareHandler.
 	for _, bad := range []string{"http://93.184.216.34:80", "http://169.254.169.254", "http://metadata.google.internal"} {
-		if _, _, err := shareHandler(&shareConfig{Name: "x", Zone: "z.hogman", Target: bad}); err == nil {
+		if _, _, err := shareHandler(&state.ShareConfig{Name: "x", Zone: "z.hogman", Target: bad}); err == nil {
 			t.Errorf("shareHandler(Target=%q) succeeded; want error", bad)
 		}
 	}
@@ -567,16 +571,16 @@ func TestFindShareFlexibleLookupAndStopZeroArgs(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", home)
-	shareDir := filepath.Join(sharesBase(), "alpha-k32x.pens.example.com", "mxlulu")
+	shareDir := filepath.Join(state.SharesBase(), "alpha-k32x.pens.example.com", "mxlulu")
 	if err := os.MkdirAll(shareDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&shareConfig{
+	if err := (&state.ShareConfig{
 		Name:   "mxlulu",
 		Zone:   "alpha-k32x.pens.example.com",
 		Target: "/tmp/site",
 		Folder: true,
-	}).save(shareDir); err != nil {
+	}).Save(shareDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -646,7 +650,7 @@ func TestUndoFreshShare(t *testing.T) {
 		}
 	}
 	node := &closeCounter{}
-	if !undoFreshShare(hc, node, dir, &shareConfig{Name: "hello", Zone: zone}) {
+	if !undoFreshShare(hc, node, dir, &state.ShareConfig{Name: "hello", Zone: zone}) {
 		t.Fatal("expected undoFreshShare to report clean rollback")
 	}
 

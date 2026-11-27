@@ -20,6 +20,11 @@ import (
 
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/types/key"
+
+	"hogman/join/internal/link"
+	"hogman/join/internal/mesh"
+	"hogman/join/internal/penapi"
+	"hogman/join/internal/state"
 )
 
 func TestPickLocalAddr(t *testing.T) {
@@ -89,7 +94,7 @@ func TestAgentConnectHalfClose(t *testing.T) {
 		}
 	}()
 
-	cfg := &agentConfig{Zone: "bobo.hogman"}
+	cfg := &state.AgentConfig{Zone: "bobo.hogman"}
 	a := newAgent(cfg, nil)
 	a.lookupDNS = func(context.Context, string) ([]string, error) {
 		return []string{"100.64.0.50"}, nil
@@ -145,7 +150,7 @@ func TestAgentConnectAndForwardZoneGuards(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	cfg := &agentConfig{Zone: "bobo.hogman"}
+	cfg := &state.AgentConfig{Zone: "bobo.hogman"}
 	a := newAgent(cfg, nil)
 	a.lookupDNS = func(_ context.Context, host string) ([]string, error) {
 		if host == "alice.bobo.hogman" {
@@ -225,7 +230,7 @@ func TestAgentConnectAndForwardZoneGuards(t *testing.T) {
 }
 
 func TestAgentDialNodesMagicDNSFallback(t *testing.T) {
-	cfg := &agentConfig{Zone: "bobo.hogman"}
+	cfg := &state.AgentConfig{Zone: "bobo.hogman"}
 	a := newAgent(cfg, nil)
 
 	st := &ipnstate.Status{
@@ -296,8 +301,8 @@ func TestValidPACProxyAddrLoopbackOnly(t *testing.T) {
 		"[::1]:18123",
 		"localhost:18123",
 	} {
-		if !validPACProxyAddr(valid) {
-			t.Fatalf("validPACProxyAddr(%q) = false, want true", valid)
+		if !state.ValidPACProxyAddr(valid) {
+			t.Fatalf("state.ValidPACProxyAddr(%q) = false, want true", valid)
 		}
 	}
 	for _, bad := range []string{
@@ -313,17 +318,17 @@ func TestValidPACProxyAddrLoopbackOnly(t *testing.T) {
 		"127.0.0.1:0",
 		"127.0.0.1:65536",
 	} {
-		if validPACProxyAddr(bad) {
-			t.Fatalf("validPACProxyAddr(%q) = true, want false", bad)
+		if state.ValidPACProxyAddr(bad) {
+			t.Fatalf("state.ValidPACProxyAddr(%q) = true, want false", bad)
 		}
 	}
 }
 
 func TestShouldLeaveAutoProxy(t *testing.T) {
-	p1 := &agentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}
-	p2 := &agentConfig{Zone: "zebra.hogman", ProxyAddr: "127.0.0.1:18124"}
-	tampered := &agentConfig{Zone: "evil.hogman", ProxyAddr: "198.51.100.1:8080"}
-	known := []*agentConfig{p1, p2, tampered}
+	p1 := &state.AgentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}
+	p2 := &state.AgentConfig{Zone: "zebra.hogman", ProxyAddr: "127.0.0.1:18124"}
+	tampered := &state.AgentConfig{Zone: "evil.hogman", ProxyAddr: "198.51.100.1:8080"}
+	known := []*state.AgentConfig{p1, p2, tampered}
 	if !shouldLeaveAutoProxy("http://corp.example/proxy.pac", true, known) {
 		t.Fatal("must leave active corporate /proxy.pac alone")
 	}
@@ -342,10 +347,10 @@ func TestShouldLeaveAutoProxy(t *testing.T) {
 	if shouldLeaveAutoProxy("http://127.0.0.1:19999/proxy.pac", false, known) {
 		t.Fatal("disabled leftover PAC should not block setup")
 	}
-	if shouldLeaveAutoProxy(p1.pacURL(), true, known) {
+	if shouldLeaveAutoProxy(p1.PACURL(), true, known) {
 		t.Fatal("legacy Hogman pen PAC should not be flagged as foreign")
 	}
-	if shouldLeaveAutoProxy(p2.pacURL()+"?v=deadbeef", true, known) {
+	if shouldLeaveAutoProxy(p2.PACURL()+"?v=deadbeef", true, known) {
 		t.Fatal("versioned Hogman pen PAC should not be flagged as foreign")
 	}
 }
@@ -370,7 +375,7 @@ func TestRenderLaunchPlist(t *testing.T) {
 }
 
 func TestFetchNetworkValidation(t *testing.T) {
-	var payload networkInfo
+	var payload penapi.NetworkInfo
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(payload)
 	}))
@@ -386,7 +391,7 @@ func TestFetchNetworkValidation(t *testing.T) {
 		}),
 	}
 
-	baseValid := networkInfo{
+	baseValid := penapi.NetworkInfo{
 		Zone:        "bobo.pens.example.com",
 		LoginServer: "https://" + host,
 		CertMode:    "public",
@@ -394,34 +399,34 @@ func TestFetchNetworkValidation(t *testing.T) {
 		DNSServer:   "100.64.0.2",
 	}
 	payload = baseValid
-	if _, err := fetchNetwork(c, host); err != nil {
+	if _, err := penapi.FetchNetwork(c, host); err != nil {
 		t.Fatalf("valid public networkInfo rejected: %v", err)
 	}
 	payload.CertMode = ""
-	if _, err := fetchNetwork(c, host); err != nil {
+	if _, err := penapi.FetchNetwork(c, host); err != nil {
 		t.Fatalf("public networkInfo with omitted cert_mode rejected: %v", err)
 	}
 
 	cases := []struct {
 		name   string
-		mutate func(*networkInfo)
+		mutate func(*penapi.NetworkInfo)
 	}{
-		{"private cert_mode", func(n *networkInfo) { n.CertMode = "private" }},
-		{"unknown cert_mode", func(n *networkInfo) { n.CertMode = "bogus" }},
-		{"cross-pen zone", func(n *networkInfo) {
+		{"private cert_mode", func(n *penapi.NetworkInfo) { n.CertMode = "private" }},
+		{"unknown cert_mode", func(n *penapi.NetworkInfo) { n.CertMode = "bogus" }},
+		{"cross-pen zone", func(n *penapi.NetworkInfo) {
 			n.Zone = "alice.pens.example.com"
 			n.Portal = "https://home.alice.pens.example.com"
 		}},
-		{"non-public zone", func(n *networkInfo) { n.Zone = "bobo.hogman"; n.Portal = "https://home.bobo.hogman" }},
-		{"mismatched login_server", func(n *networkInfo) { n.LoginServer = "https://evil.example" }},
-		{"foreign portal", func(n *networkInfo) { n.Portal = "https://evil.example/phish" }},
-		{"non-mesh dns_server", func(n *networkInfo) { n.DNSServer = "8.8.8.8" }},
+		{"non-public zone", func(n *penapi.NetworkInfo) { n.Zone = "bobo.hogman"; n.Portal = "https://home.bobo.hogman" }},
+		{"mismatched login_server", func(n *penapi.NetworkInfo) { n.LoginServer = "https://evil.example" }},
+		{"foreign portal", func(n *penapi.NetworkInfo) { n.Portal = "https://evil.example/phish" }},
+		{"non-mesh dns_server", func(n *penapi.NetworkInfo) { n.DNSServer = "8.8.8.8" }},
 	}
 	for _, tc := range cases {
 		bad := baseValid
 		tc.mutate(&bad)
 		payload = bad
-		if _, err := fetchNetwork(c, host); err == nil {
+		if _, err := penapi.FetchNetwork(c, host); err == nil {
 			t.Errorf("%s: expected fetchNetwork to reject payload", tc.name)
 		}
 		payload = baseValid
@@ -441,8 +446,8 @@ func TestValidatePublicZoneAndNetworkInfo(t *testing.T) {
 		{"login.corp.example.co.uk", "bobo.example.co.uk"},
 	}
 	for _, tc := range hostedOK {
-		if err := validatePublicZone(tc.host, tc.zone); err != nil {
-			t.Errorf("validatePublicZone(%q, %q) unexpected error: %v", tc.host, tc.zone, err)
+		if err := link.ValidatePublicZone(tc.host, tc.zone); err != nil {
+			t.Errorf("link.ValidatePublicZone(%q, %q) unexpected error: %v", tc.host, tc.zone, err)
 		}
 	}
 
@@ -464,14 +469,14 @@ func TestValidatePublicZoneAndNetworkInfo(t *testing.T) {
 		{"127.0.0.1:8443", "bobo.example.com"},
 	}
 	for _, tc := range hostedBad {
-		if err := validatePublicZone(tc.host, tc.zone); err == nil {
-			t.Errorf("validatePublicZone(%q, %q) expected error, got nil", tc.host, tc.zone)
+		if err := link.ValidatePublicZone(tc.host, tc.zone); err == nil {
+			t.Errorf("link.ValidatePublicZone(%q, %q) expected error, got nil", tc.host, tc.zone)
 		}
 	}
 }
 
 func TestAgentForwardRejectsHTTPSScheme(t *testing.T) {
-	a := newAgent(&agentConfig{Zone: "bobo.hogman"}, nil)
+	a := newAgent(&state.AgentConfig{Zone: "bobo.hogman"}, nil)
 	req := httptest.NewRequest(http.MethodGet, "https://alice.bobo.hogman/", nil)
 	rec := httptest.NewRecorder()
 	a.ServeHTTP(rec, req)
@@ -492,7 +497,7 @@ func TestRenderSystemdUnitQuotesSpaces(t *testing.T) {
 // dialed: never loopback, the LAN, or a 100.x address of another tailnet
 // (tsnet's Dial would reach those through the computer's own network).
 func TestAgentDialsOnlyPenDevices(t *testing.T) {
-	a := newAgent(&agentConfig{Zone: "bobo.hogman"}, nil)
+	a := newAgent(&state.AgentConfig{Zone: "bobo.hogman"}, nil)
 	peer := netip.MustParseAddr("100.70.0.5")
 	a.isPeer = func(_ context.Context, ip netip.Addr) bool { return ip == peer }
 	answers := map[string][]string{
@@ -534,7 +539,7 @@ func TestAgentDialsOnlyPenDevices(t *testing.T) {
 // peers up by the exact address, and the mapped form would miss and fall
 // back to the host network.
 func TestAgentDialsUnmapped(t *testing.T) {
-	a := newAgent(&agentConfig{Zone: "bobo.hogman"}, nil)
+	a := newAgent(&state.AgentConfig{Zone: "bobo.hogman"}, nil)
 	peer := netip.MustParseAddr("100.70.0.5")
 	a.isPeer = func(_ context.Context, ip netip.Addr) bool { return ip == peer }
 	a.lookupDNS = func(context.Context, string) ([]string, error) { return []string{"::ffff:100.70.0.5"}, nil }
@@ -562,7 +567,7 @@ func TestAgentDialsUnmapped(t *testing.T) {
 // address (or localhost), so a page that rebinds a DNS name to 127.0.0.1
 // can't read /status or /proxy.pac.
 func TestAgentOwnPagesCheckHost(t *testing.T) {
-	a := newAgent(&agentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}, nil)
+	a := newAgent(&state.AgentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}, nil)
 	for host, want := range map[string]int{
 		"127.0.0.1:18123":         http.StatusOK,
 		"localhost:18123":         http.StatusOK,
@@ -582,8 +587,8 @@ func TestAgentOwnPagesCheckHost(t *testing.T) {
 }
 
 func TestRenderPACSingleAndMulti(t *testing.T) {
-	p1 := &agentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}
-	single := renderPAC([]*agentConfig{p1})
+	p1 := &state.AgentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}
+	single := state.RenderPAC([]*state.AgentConfig{p1})
 	if !strings.Contains(single, "only names in bobo.hogman use the pen") {
 		t.Fatalf("unexpected single-pen PAC header:\n%s", single)
 	}
@@ -591,18 +596,18 @@ func TestRenderPACSingleAndMulti(t *testing.T) {
 		t.Fatalf("missing single-pen rule:\n%s", single)
 	}
 
-	nested := &agentConfig{Zone: "team.bobo.hogman", ProxyAddr: "127.0.0.1:18125"}
-	p2 := &agentConfig{Zone: "a.hogman", ProxyAddr: "127.0.0.1:18124"}
-	p3 := &agentConfig{Zone: "b.hogman", ProxyAddr: "127.0.0.1:18126"}
-	badZone := &agentConfig{Zone: "bad\";return \"PROXY evil", ProxyAddr: "127.0.0.1:18127"}
-	badDot := &agentConfig{Zone: ".bobo.hogman", ProxyAddr: "127.0.0.1:18128"}
-	badAddr := &agentConfig{Zone: "z.hogman", ProxyAddr: "evil.example:8080"}
-	badRemote := &agentConfig{Zone: "remote.hogman", ProxyAddr: "198.51.100.1:8080"}
-	badPort := &agentConfig{Zone: "z2.hogman", ProxyAddr: "127.0.0.1:99999"}
-	override := &agentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:19123"}
+	nested := &state.AgentConfig{Zone: "team.bobo.hogman", ProxyAddr: "127.0.0.1:18125"}
+	p2 := &state.AgentConfig{Zone: "a.hogman", ProxyAddr: "127.0.0.1:18124"}
+	p3 := &state.AgentConfig{Zone: "b.hogman", ProxyAddr: "127.0.0.1:18126"}
+	badZone := &state.AgentConfig{Zone: "bad\";return \"PROXY evil", ProxyAddr: "127.0.0.1:18127"}
+	badDot := &state.AgentConfig{Zone: ".bobo.hogman", ProxyAddr: "127.0.0.1:18128"}
+	badAddr := &state.AgentConfig{Zone: "z.hogman", ProxyAddr: "evil.example:8080"}
+	badRemote := &state.AgentConfig{Zone: "remote.hogman", ProxyAddr: "198.51.100.1:8080"}
+	badPort := &state.AgentConfig{Zone: "z2.hogman", ProxyAddr: "127.0.0.1:99999"}
+	override := &state.AgentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:19123"}
 
-	multi := renderPAC(normalizePenConfigs(
-		[]*agentConfig{p1, p3, p2, nested, badZone, badDot, badAddr, badRemote, badPort},
+	multi := state.RenderPAC(state.NormalizePenConfigs(
+		[]*state.AgentConfig{p1, p3, p2, nested, badZone, badDot, badAddr, badRemote, badPort},
 		override,
 	))
 	if !strings.Contains(multi, "only pen names use their pen's proxy") {
@@ -632,14 +637,14 @@ func TestRenderPACSingleAndMulti(t *testing.T) {
 
 func TestAgentServesCombinedPAC(t *testing.T) {
 	base := t.TempDir()
-	bobo := &agentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}
-	zebra := &agentConfig{Zone: "zebra.hogman", ProxyAddr: "127.0.0.1:18124"}
-	for _, c := range []*agentConfig{bobo, zebra} {
+	bobo := &state.AgentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}
+	zebra := &state.AgentConfig{Zone: "zebra.hogman", ProxyAddr: "127.0.0.1:18124"}
+	for _, c := range []*state.AgentConfig{bobo, zebra} {
 		dir := filepath.Join(base, c.Zone)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := c.save(dir); err != nil {
+		if err := c.Save(dir); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -647,7 +652,7 @@ func TestAgentServesCombinedPAC(t *testing.T) {
 	if err := os.MkdirAll(badDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&agentConfig{Zone: "bad zone", ProxyAddr: "127.0.0.1:18125"}).save(badDir); err != nil {
+	if err := (&state.AgentConfig{Zone: "bad zone", ProxyAddr: "127.0.0.1:18125"}).Save(badDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -695,17 +700,17 @@ func TestHogmanPACMatchingAndClearSystemProxyNilLeaving(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", home)
 
-	p1 := &agentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}
-	p2 := &agentConfig{Zone: "zebra.hogman", ProxyAddr: "127.0.0.1:18124"}
-	known := []*agentConfig{p1, p2}
+	p1 := &state.AgentConfig{Zone: "bobo.hogman", ProxyAddr: "127.0.0.1:18123"}
+	p2 := &state.AgentConfig{Zone: "zebra.hogman", ProxyAddr: "127.0.0.1:18124"}
+	known := []*state.AgentConfig{p1, p2}
 
-	if !isHogmanPACURL(p1.pacURL(), known) {
-		t.Fatalf("expected %s to match known pens", p1.pacURL())
+	if !state.IsHogmanPACURL(p1.PACURL(), known) {
+		t.Fatalf("expected %s to match known pens", p1.PACURL())
 	}
-	if !isHogmanPACURL(p2.pacURL()+"?v=deadbeef", known) {
+	if !state.IsHogmanPACURL(p2.PACURL()+"?v=deadbeef", known) {
 		t.Fatalf("expected versioned legacy PAC URL to still match known pens")
 	}
-	if isHogmanPACURL("http://corp.example/proxy.pac", known) {
+	if state.IsHogmanPACURL("http://corp.example/proxy.pac", known) {
 		t.Fatal("corporate PAC URL must not match Hogman pens")
 	}
 
@@ -714,9 +719,9 @@ func TestHogmanPACMatchingAndClearSystemProxyNilLeaving(t *testing.T) {
 		if got := clearSystemProxy(nil, nil); got != "" {
 			t.Fatalf("clearSystemProxy(nil, nil) = %q, want empty", got)
 		}
-		got := clearSystemProxy(nil, []*agentConfig{p2})
-		if !strings.Contains(got, p2.pacURL()) || !strings.Contains(got, p2.Zone) {
-			t.Fatalf("clearSystemProxy(nil, [p2]) = %q, want %s and %s", got, p2.pacURL(), p2.Zone)
+		got := clearSystemProxy(nil, []*state.AgentConfig{p2})
+		if !strings.Contains(got, p2.PACURL()) || !strings.Contains(got, p2.Zone) {
+			t.Fatalf("clearSystemProxy(nil, [p2]) = %q, want %s and %s", got, p2.PACURL(), p2.Zone)
 		}
 	}
 }
@@ -732,12 +737,12 @@ func TestEvaluateLiveNodeStatus(t *testing.T) {
 			peerKey: {TailscaleIPs: []netip.Addr{dnsIP}},
 		},
 	}
-	if up, nl, reason := evaluateLiveNodeStatus(running, dnsIP.String()); !up || nl || reason != "" {
+	if up, nl, reason := mesh.EvaluateLiveNodeStatus(running, dnsIP.String()); !up || nl || reason != "" {
 		t.Fatalf("running with DNS peer: got (%v, %v, %q), want (true, false, \"\")", up, nl, reason)
 	}
 
 	needsLogin := &ipnstate.Status{BackendState: "NeedsLogin"}
-	if up, nl, reason := evaluateLiveNodeStatus(needsLogin, dnsIP.String()); up || !nl || !strings.Contains(reason, "removed") {
+	if up, nl, reason := mesh.EvaluateLiveNodeStatus(needsLogin, dnsIP.String()); up || !nl || !strings.Contains(reason, "removed") {
 		t.Fatalf("NeedsLogin: got (%v, %v, %q), want (false, true, removed)", up, nl, reason)
 	}
 
@@ -748,7 +753,7 @@ func TestEvaluateLiveNodeStatus(t *testing.T) {
 			peerKey: {TailscaleIPs: []netip.Addr{dnsIP}},
 		},
 	}
-	if up, nl, reason := evaluateLiveNodeStatus(expired, dnsIP.String()); up || nl || !strings.Contains(reason, "expired") {
+	if up, nl, reason := mesh.EvaluateLiveNodeStatus(expired, dnsIP.String()); up || nl || !strings.Contains(reason, "expired") {
 		t.Fatalf("expired self: got (%v, %v, %q), want (false, false, expired)", up, nl, reason)
 	}
 
@@ -757,18 +762,18 @@ func TestEvaluateLiveNodeStatus(t *testing.T) {
 		Self:         &ipnstate.PeerStatus{TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.2")}},
 		Peer:         map[key.NodePublic]*ipnstate.PeerStatus{},
 	}
-	if up, nl, reason := evaluateLiveNodeStatus(noDNSPeer, dnsIP.String()); up || nl || strings.Contains(reason, "removed") || reason != "not connected to pen" {
+	if up, nl, reason := mesh.EvaluateLiveNodeStatus(noDNSPeer, dnsIP.String()); up || nl || strings.Contains(reason, "removed") || reason != "not connected to pen" {
 		t.Fatalf("missing DNS peer: got (%v, %v, %q), want (false, false, 'not connected to pen')", up, nl, reason)
 	}
 
 	stopped := &ipnstate.Status{BackendState: "Stopped"}
-	if up, nl, reason := evaluateLiveNodeStatus(stopped, dnsIP.String()); up || nl || !strings.Contains(reason, "Stopped") {
+	if up, nl, reason := mesh.EvaluateLiveNodeStatus(stopped, dnsIP.String()); up || nl || !strings.Contains(reason, "Stopped") {
 		t.Fatalf("Stopped: got (%v, %v, %q), want (false, false, Stopped)", up, nl, reason)
 	}
 }
 
 func TestAgentStatusReflectsPostKickRevocation(t *testing.T) {
-	cfg := &agentConfig{Zone: "bobo.pens.example", ProxyAddr: "127.0.0.1:18125", DNSServer: "100.64.0.1"}
+	cfg := &state.AgentConfig{Zone: "bobo.pens.example", ProxyAddr: "127.0.0.1:18125", DNSServer: "100.64.0.1"}
 	a := newAgent(cfg, nil)
 	a.up = true
 	a.ips = []string{"100.64.0.2"}

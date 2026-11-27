@@ -15,7 +15,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -39,6 +38,13 @@ import (
 
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tsnet"
+
+	"hogman/join/internal/bridge"
+	"hogman/join/internal/fsutil"
+	"hogman/join/internal/link"
+	"hogman/join/internal/mesh"
+	"hogman/join/internal/penapi"
+	"hogman/join/internal/state"
 )
 
 const shareUsage = `hogman share: put something on your pen under its own name
@@ -65,99 +71,6 @@ options:
   --identity-headers  pass verified X-Hogman-* caller identity headers to a local upstream target
   --force             with stop, remove local files even if the pen cannot be reached
 `
-
-type shareConfig struct {
-	Name              string `json:"name"`
-	PrivateName       bool   `json:"private_name,omitempty"`
-	BootstrapHostname string `json:"bootstrap_hostname,omitempty"`
-	Zone              string `json:"zone"`
-	LoginServer       string `json:"login_server"`
-	DNSServer         string `json:"dns_server"`
-	Target            string `json:"target"` // http://host:port, unix:///path/to.sock, or an absolute folder path
-	Folder            bool   `json:"folder,omitempty"`
-	Note              string `json:"note,omitempty"`
-	ControlCA         string `json:"control_ca,omitempty"`
-	UpstreamHost      string `json:"upstream_host,omitempty"`
-	IdentityHeaders   bool   `json:"identity_headers,omitempty"`
-}
-
-func (c *shareConfig) fqdn() string { return c.Name + "." + c.Zone }
-func (c *shareConfig) url() string  { return "https://" + c.fqdn() }
-
-func (c *shareConfig) agentConfig() *agentConfig {
-	host := c.Name
-	if host == "" {
-		host = c.BootstrapHostname
-	}
-	if host == "" {
-		host = "site"
-	}
-	return &agentConfig{Zone: c.Zone, LoginServer: c.LoginServer, DNSServer: c.DNSServer,
-		Hostname: host, ControlCA: c.ControlCA}
-}
-
-func (c *shareConfig) showing() string {
-	if c.Folder {
-		return "the folder " + c.Target
-	}
-	return c.Target
-}
-
-// Shares live apart from the pen connections (stateDir), so leaving a pen
-// and sharing on it don't trip over each other.
-func sharesBase() string {
-	return filepath.Join(filepath.Dir(filepath.Dir(stateDir("x"))), "hogman-shares")
-}
-
-func shareDir(zone, name string) string {
-	return filepath.Clean(filepath.Join(sharesBase(), zone, name))
-}
-
-func loadShare(dir string) (*shareConfig, error) {
-	b, err := os.ReadFile(filepath.Join(dir, "share.json"))
-	if err != nil {
-		return nil, err
-	}
-	var c shareConfig
-	return &c, json.Unmarshal(b, &c)
-}
-
-func (c *shareConfig) save(dir string) error {
-	b, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(filepath.Join(dir, "share.json"), b, 0o600)
-}
-
-// allSharesIn lists share directories under a given shares root, optionally for one pen.
-func allSharesIn(base, zone string) []string {
-	pattern := filepath.Join(base, "*", "*", "share.json")
-	if zone != "" {
-		clean, err := validatePenQuery(zone)
-		if err != nil {
-			return nil
-		}
-		pattern = filepath.Join(base, clean, "*", "share.json")
-	}
-	m, _ := filepath.Glob(pattern)
-	sort.Strings(m)
-	out := make([]string, 0, len(m))
-	for _, f := range m {
-		d := filepath.Dir(f)
-		// Skip transient staging directories (e.g. .pending-<hex> during --private-name claim).
-		if strings.HasPrefix(filepath.Base(d), ".") {
-			continue
-		}
-		out = append(out, d)
-	}
-	return out
-}
-
-// allShares lists this computer's shares, optionally for one pen.
-func allShares(zone string) []string {
-	return allSharesIn(sharesBase(), zone)
-}
 
 var (
 	shareNameRE      = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?){0,3}$`)
@@ -329,7 +242,7 @@ func shareTarget(what string) (target string, folder bool, err error) {
 	}
 	if strings.HasPrefix(what, "unix://") {
 		rawPath := strings.TrimPrefix(what, "unix://")
-		clean, err := validateUnixSocketPath(rawPath)
+		clean, err := bridge.ValidateUnixSocketPath(rawPath)
 		if err != nil {
 			return "", false, err
 		}
@@ -369,7 +282,7 @@ func shareTarget(what string) (target string, folder bool, err error) {
 	return abs, true, nil
 }
 
-func resolveShareNote(old *shareConfig, note string, noteSet bool) string {
+func resolveShareNote(old *state.ShareConfig, note string, noteSet bool) string {
 	if noteSet {
 		return strings.TrimSpace(note)
 	}
@@ -405,7 +318,7 @@ func shareStart(name, what, rawLink string, o options) error {
 		return errorf("--enroll-only cannot be combined with --background")
 	}
 
-	var cfg *shareConfig
+	var cfg *state.ShareConfig
 	key := ""
 	explicitDir := strings.TrimSpace(o.stateDir)
 	if explicitDir != "" {
@@ -417,7 +330,7 @@ func shareStart(name, what, rawLink string, o options) error {
 	}
 
 	if explicitDir != "" && rawLink == "" {
-		if old, err := loadShare(explicitDir); err == nil {
+		if old, err := state.LoadShare(explicitDir); err == nil {
 			if o.privateName {
 				if !old.PrivateName {
 					return errorf("state directory %s is enrolled for share %q (not --private-name)", explicitDir, old.Name)
@@ -471,23 +384,23 @@ func shareStart(name, what, rawLink string, o options) error {
 	}
 
 	var dir string
-	var prev *shareConfig
+	var prev *state.ShareConfig
 	fresh := true
 	if o.privateName && explicitDir == "" && cfg.Name == "" {
 		if key == "" {
 			return errorf("no way to add a device for this share")
 		}
-		randHex, err := generateHexToken(4)
+		randHex, err := state.GenerateHexToken(4)
 		if err != nil {
 			return err
 		}
 		cfg.BootstrapHostname = "site-" + randHex
 		cfg.Note = resolveShareNote(nil, o.note, o.noteSet)
-		stagingDir := filepath.Join(sharesBase(), cfg.Zone, ".pending-"+randHex)
+		stagingDir := filepath.Join(state.SharesBase(), cfg.Zone, ".pending-"+randHex)
 		if err := os.MkdirAll(stagingDir, 0o700); err != nil {
 			return err
 		}
-		if err := cfg.save(stagingDir); err != nil {
+		if err := cfg.Save(stagingDir); err != nil {
 			_ = os.RemoveAll(stagingDir)
 			return err
 		}
@@ -506,25 +419,25 @@ func shareStart(name, what, rawLink string, o options) error {
 			_ = os.RemoveAll(stagingDir)
 			return err
 		}
-		dir = shareDir(cfg.Zone, cfg.Name)
+		dir = state.ShareDir(cfg.Zone, cfg.Name)
 		if err := os.Rename(stagingDir, dir); err != nil {
 			_ = os.RemoveAll(stagingDir)
 			return errorf("could not move private share state into %s: %v", dir, err)
 		}
-		say("%s", formatSharePrivateNameNotice(cfg.fqdn()))
+		say("%s", formatSharePrivateNameNotice(cfg.FQDN()))
 	} else {
-		dir = shareDir(cfg.Zone, cfg.Name)
+		dir = state.ShareDir(cfg.Zone, cfg.Name)
 		if explicitDir != "" {
 			dir = explicitDir
 		}
-		if old, err := loadShare(dir); err == nil {
+		if old, err := state.LoadShare(dir); err == nil {
 			if explicitDir == "" {
 				if pid := sharePID(dir); pid != 0 && pid != os.Getpid() {
-					return errorf("%s is already being shared from this computer (process %d). Stop it first: hogman share stop %s", old.url(), pid, cfg.Name)
+					return errorf("%s is already being shared from this computer (process %d). Stop it first: hogman share stop %s", old.URL(), pid, cfg.Name)
 				}
 			}
 			_, hasUnspentKey := os.Stat(filepath.Join(dir, "authkey"))
-			st := readShareStatus(dir)
+			st := state.ReadShareStatus(dir)
 			staleDevice := hasUnspentKey == nil || (st.State == "error" && st.Error != "" && isPermanentNodeError(false, "", errors.New(st.Error)))
 			if rawLink != "" && key != "" && staleDevice {
 				// Replacing a dead/aborted share with a fresh server link.
@@ -554,7 +467,7 @@ func shareStart(name, what, rawLink string, o options) error {
 			return errorf("no way to add a device for this share")
 		}
 		if cfg.PrivateName && cfg.Name == "" && cfg.BootstrapHostname == "" {
-			if randHex, rerr := generateHexToken(4); rerr == nil {
+			if randHex, rerr := state.GenerateHexToken(4); rerr == nil {
 				cfg.BootstrapHostname = "site-" + randHex
 			}
 		}
@@ -562,7 +475,7 @@ func shareStart(name, what, rawLink string, o options) error {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		if err := cfg.save(dir); err != nil {
+		if err := cfg.Save(dir); err != nil {
 			return err
 		}
 		if key != "" {
@@ -576,14 +489,14 @@ func shareStart(name, what, rawLink string, o options) error {
 					say("%s", formatSharePrivateNoteTip())
 				}
 			} else {
-				say("%s", formatShareCertLogNotice(cfg.fqdn()))
+				say("%s", formatShareCertLogNotice(cfg.FQDN()))
 			}
 		}
 	}
 
 	if o.enrollOnly {
 		if cfg.Name != "" {
-			step("Enrolling %s into %s", cfg.url(), dir)
+			step("Enrolling %s into %s", cfg.URL(), dir)
 		} else {
 			step("Enrolling a private-name share on %s into %s", cfg.Zone, dir)
 		}
@@ -591,8 +504,8 @@ func shareStart(name, what, rawLink string, o options) error {
 		defer stop()
 		ctx, cancelReady := context.WithCancel(ctx)
 		defer cancelReady()
-		return serveShare(ctx, dir, func(c *shareConfig) {
-			say("\n✓ Enrolled %s in %s.", c.url(), dir)
+		return serveShare(ctx, dir, func(c *state.ShareConfig) {
+			say("\n✓ Enrolled %s in %s.", c.URL(), dir)
 			cancelReady()
 		})
 	}
@@ -614,13 +527,13 @@ func shareStart(name, what, rawLink string, o options) error {
 		stopShareService(cfg)
 	}
 	if cfg.Name != "" {
-		step("Sharing %s as %s", cfg.showing(), cfg.url())
+		step("Sharing %s as %s", cfg.Showing(), cfg.URL())
 	} else {
-		step("Sharing %s under a private hostname on %s", cfg.showing(), cfg.Zone)
+		step("Sharing %s under a private hostname on %s", cfg.Showing(), cfg.Zone)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serveShare(ctx, dir, func(c *shareConfig) {
+	return serveShare(ctx, dir, func(c *state.ShareConfig) {
 		shareReady(c, false, false)
 		if c.PrivateName && explicitDir == "" {
 			say("  Stop: Ctrl-C. The name stays yours: run 'hogman share %s %s --foreground' to bring it back.", c.Name, what)
@@ -642,10 +555,10 @@ func formatSharePrivateNoteTip() string {
 	return `• Tip: pass --note "Label" so members see a readable name in the portal directory instead of the random hostname.`
 }
 
-func shareReady(c *shareConfig, background, managed bool) {
-	say("\n✓ %s is up.", c.url())
+func shareReady(c *state.ShareConfig, background, managed bool) {
+	say("\n✓ %s is up.", c.URL())
 	say("  Everyone in the pen can open it.")
-	say("  It shows %s.", c.showing())
+	say("  It shows %s.", c.Showing())
 	if background {
 		if managed {
 			say("  It runs in the background and starts by itself when you log in.")
@@ -661,27 +574,27 @@ func shareReady(c *shareConfig, background, managed bool) {
 }
 
 // shareFromLink sets up a share on a computer that only has a server link.
-func shareFromLink(name, raw string, o options) (*shareConfig, string, error) {
-	link, err := ParseLink(raw)
+func shareFromLink(name, raw string, o options) (*state.ShareConfig, string, error) {
+	l, err := link.Parse(raw)
 	if err != nil {
 		return nil, "", errorf("%v", err)
 	}
-	if link.DeviceKey == "" {
+	if l.DeviceKey == "" {
 		return nil, "", errorf("that is an invite. Use a share link: on your pen's home page, press Get a share link")
 	}
-	client, err := controlClient(o.controlCA)
+	client, err := penapi.ControlClient(o.controlCA)
 	if err != nil {
 		return nil, "", err
 	}
-	step("Checking the network at %s", link.Host)
-	n, err := fetchNetwork(client, link.Host)
+	step("Checking the network at %s", l.Host)
+	n, err := penapi.FetchNetwork(client, l.Host)
 	if err != nil {
 		return nil, "", err
 	}
 	if n.DNSServer == "" {
 		return nil, "", errorf("this pen's server is too old to share from here (it does not publish its DNS address)")
 	}
-	cfg := &shareConfig{Name: name, Zone: n.Zone, LoginServer: n.LoginServer, DNSServer: n.DNSServer}
+	cfg := &state.ShareConfig{Name: name, Zone: n.Zone, LoginServer: n.LoginServer, DNSServer: n.DNSServer}
 	if o.controlCA != "" {
 		b, err := os.ReadFile(o.controlCA)
 		if err != nil {
@@ -689,7 +602,7 @@ func shareFromLink(name, raw string, o options) (*shareConfig, string, error) {
 		}
 		cfg.ControlCA = string(b)
 	}
-	return cfg, link.DeviceKey, nil
+	return cfg, l.DeviceKey, nil
 }
 
 type penConn struct {
@@ -701,12 +614,12 @@ type penConn struct {
 
 // myPens finds the pens this computer is on (each has its own connection).
 func myPens() []penConn {
-	scanned := scanInstalledPens(hogmanConfigBase())
+	scanned := state.ScanInstalledPens(state.ConfigBase())
 	out := make([]penConn, 0, len(scanned.Pens))
 	for _, p := range scanned.Pens {
 		out = append(out, penConn{
 			zone:        p.Zone,
-			proxy:       p.Config.proxyURL(),
+			proxy:       p.Config.ProxyURL(),
 			controlCA:   p.Config.ControlCA,
 			loginServer: p.Config.LoginServer,
 		})
@@ -729,7 +642,7 @@ func (p *penConn) memberClient() (*http.Client, error) {
 		}
 		tr.Proxy = http.ProxyURL(pu)
 	}
-	pool, err := testACMECAPool()
+	pool, err := penapi.TestACMECAPool()
 	if err != nil {
 		return nil, err
 	}
@@ -739,7 +652,7 @@ func (p *penConn) memberClient() (*http.Client, error) {
 
 // shareFromMembership sets up a share using this computer's place on the pen:
 // it asks the pen for a server key in the member's name.
-func shareFromMembership(name string, o options) (*shareConfig, string, error) {
+func shareFromMembership(name string, o options) (*state.ShareConfig, string, error) {
 	p, err := pickPen(o.pen)
 	if err != nil {
 		return nil, "", err
@@ -748,24 +661,24 @@ func shareFromMembership(name string, o options) (*shareConfig, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	var me meView
-	if _, err := homeAPI(c, p.zone, "GET", "/me", nil, &me); err != nil {
+	var me penapi.MeView
+	if _, err := penapi.HomeAPI(c, p.zone, "GET", "/me", nil, &me); err != nil {
 		return nil, "", errorf("could not reach home.%s as you: %v", p.zone, err)
 	}
 	if me.Network == nil || me.Network.DNSServer == "" {
 		return nil, "", errorf("this pen's server is too old for sharing; ask its keeper to upgrade it")
 	}
 	loginHost := strings.TrimPrefix(p.loginServer, "https://")
-	if err := validateNetworkInfo(loginHost, me.Network); err != nil {
+	if err := penapi.ValidateNetworkInfo(loginHost, me.Network); err != nil {
 		return nil, "", err
 	}
 	if me.Network.Zone != p.zone || me.Network.LoginServer != p.loginServer {
 		return nil, "", errorf("refusing: %s returned mismatched network identity (%s at %s)", p.zone, me.Network.Zone, me.Network.LoginServer)
 	}
-	cfg := &shareConfig{Name: name, Zone: p.zone, LoginServer: me.Network.LoginServer,
+	cfg := &state.ShareConfig{Name: name, Zone: p.zone, LoginServer: me.Network.LoginServer,
 		DNSServer: me.Network.DNSServer, ControlCA: p.controlCA}
 	if name != "" {
-		if old, err := loadShare(shareDir(p.zone, name)); err == nil && old.Zone == p.zone {
+		if old, err := state.LoadShare(state.ShareDir(p.zone, name)); err == nil && old.Zone == p.zone {
 			return cfg, "", nil // already has its device
 		}
 	}
@@ -780,7 +693,7 @@ func shareFromMembership(name string, o options) (*shareConfig, string, error) {
 	var dk struct {
 		AuthKey string `json:"auth_key"`
 	}
-	if _, err := homeAPI(c, p.zone, "POST", "/devices", map[string]string{"kind": "server"}, &dk); err != nil {
+	if _, err := penapi.HomeAPI(c, p.zone, "POST", "/devices", map[string]string{"kind": "server"}, &dk); err != nil {
 		return nil, "", errorf("the pen would not add a server: %v", err)
 	}
 	return cfg, dk.AuthKey, nil
@@ -822,7 +735,7 @@ func isPermanentNodeError(hasAuthKey bool, backendState string, err error) bool 
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, errDeviceRemoved) {
+	if errors.Is(err, mesh.ErrDeviceRemoved) {
 		return true
 	}
 	if !hasAuthKey && backendState == "NeedsLogin" {
@@ -839,15 +752,15 @@ func isPermanentNodeError(hasAuthKey bool, backendState string, err error) bool 
 
 // shareNode brings a share's own device onto the pen and returns it with a
 // client for reaching the pen through it.
-func shareNode(ctx context.Context, dir string, c *shareConfig) (*tsnet.Server, *agent, *http.Client, error) {
-	ac := c.agentConfig()
-	ac.trustControlCA()
+func shareNode(ctx context.Context, dir string, c *state.ShareConfig) (*tsnet.Server, *agent, *http.Client, error) {
+	ac := c.AgentConfig()
+	ac.TrustControlCA()
 	key, _ := os.ReadFile(filepath.Join(dir, "authkey"))
 	authKey := strings.TrimSpace(string(key))
-	node := newNode(dir, ac, authKey)
+	node := mesh.NewNode(dir, ac, authKey)
 	upCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	st, err := upNode(upCtx, node, authKey != "")
+	st, err := mesh.UpNode(upCtx, node, authKey != "")
 	if err != nil {
 		var backendState string
 		if lc, lerr := node.LocalClient(); lerr == nil {
@@ -876,7 +789,7 @@ func shareNode(ctx context.Context, dir string, c *shareConfig) (*tsnet.Server, 
 		return nil, nil, nil, permanentShare(errorf("that link adds a personal device, which can't be visited. Use a share link (Get a share link on your home page)"))
 	}
 	a := newAgent(ac, node)
-	pool, err := testACMECAPool()
+	pool, err := penapi.TestACMECAPool()
 	if err != nil {
 		node.Close()
 		return nil, nil, nil, permanentShare(err)
@@ -907,7 +820,7 @@ func untilOK(ctx context.Context, d time.Duration, fn func() (retry bool, err er
 
 // claimShareName registers c's name on the pen (allocating a random private
 // label via POST /api/names {"private": true} when c.PrivateName && c.Name == "").
-func claimShareName(ctx context.Context, hc *http.Client, c *shareConfig, dir string) (int, error) {
+func claimShareName(ctx context.Context, hc *http.Client, c *state.ShareConfig, dir string) (int, error) {
 	var lastCode int
 	err := untilOK(ctx, 90*time.Second, func() (bool, error) {
 		if c.PrivateName && c.Name == "" {
@@ -915,7 +828,7 @@ func claimShareName(ctx context.Context, hc *http.Client, c *shareConfig, dir st
 				Name string `json:"name"`
 			}
 			body := map[string]any{"private": true, "note": c.Note}
-			code, err := homeAPI(hc, c.Zone, "POST", "/names", body, &resp)
+			code, err := penapi.HomeAPI(hc, c.Zone, "POST", "/names", body, &resp)
 			lastCode = code
 			if err != nil {
 				return code == 0 || strings.Contains(err.Error(), "not enrolled"), err
@@ -925,12 +838,12 @@ func claimShareName(ctx context.Context, hc *http.Client, c *shareConfig, dir st
 				return false, fmt.Errorf("pen returned invalid private name %q", resp.Name)
 			}
 			c.Name = label
-			if saveErr := c.save(dir); saveErr != nil {
+			if saveErr := c.Save(dir); saveErr != nil {
 				return false, saveErr
 			}
 			return false, nil
 		}
-		code, err := homeAPI(hc, c.Zone, "POST", "/names", map[string]string{"name": c.Name, "note": c.Note}, nil)
+		code, err := penapi.HomeAPI(hc, c.Zone, "POST", "/names", map[string]string{"name": c.Name, "note": c.Note}, nil)
 		lastCode = code
 		if err == nil {
 			return false, nil
@@ -945,7 +858,7 @@ func claimShareName(ctx context.Context, hc *http.Client, c *shareConfig, dir st
 // directory, claims its random label, saves share.json, and closes tsnet cleanly
 // so the caller can move the directory to shareDir(zone, label) without renaming
 // open state files.
-func claimPrivateNameBootstrap(ctx context.Context, stagingDir string, c *shareConfig) error {
+func claimPrivateNameBootstrap(ctx context.Context, stagingDir string, c *state.ShareConfig) error {
 	node, _, hc, err := shareNode(ctx, stagingDir, c)
 	if err != nil {
 		return err
@@ -953,8 +866,8 @@ func claimPrivateNameBootstrap(ctx context.Context, stagingDir string, c *shareC
 	lastCode, err := claimShareName(ctx, hc, c, stagingDir)
 	if err != nil {
 		cleanCtx, cleanCancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
-		if derr := giveBackDeviceWith(cleanCtx, hc, c, 0, tsnetNeedsLogin(node)); derr != nil {
-			daemonLogger().Warn("share bootstrap cleanup failed", "err", derr)
+		if derr := giveBackDeviceWith(cleanCtx, hc, c, 0, mesh.TsnetNeedsLogin(node)); derr != nil {
+			fsutil.DaemonLogger().Warn("share bootstrap cleanup failed", "err", derr)
 		}
 		cleanCancel()
 		_ = node.Close()
@@ -970,13 +883,13 @@ func claimPrivateNameBootstrap(ctx context.Context, stagingDir string, c *shareC
 
 // serveShare runs a share until ctx ends. ready is called once its name and
 // certificate are in place.
-func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error {
-	c, err := loadShare(dir)
+func serveShare(ctx context.Context, dir string, ready func(*state.ShareConfig)) error {
+	c, err := state.LoadShare(dir)
 	if err != nil {
-		writeShareStatus(dir, "error", err.Error())
+		state.WriteShareStatus(dir, "error", err.Error())
 		return permanentShare(err)
 	}
-	unlock, err := acquireShareLock(dir)
+	unlock, err := fsutil.AcquireShareLock(dir)
 	if err != nil {
 		return err
 	}
@@ -986,15 +899,15 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 	// whose status indicates it is actively starting or up (ignoring stale PIDs
 	// from a prior crash whose PID number may have been recycled by the OS).
 	if existing := sharePID(dir); existing != 0 && existing != os.Getpid() {
-		if st := readShareStatus(dir); st.State == "up" || st.State == "starting" {
-			return errorf("%s is already running (process %d)", c.url(), existing)
+		if st := state.ReadShareStatus(dir); st.State == "up" || st.State == "starting" {
+			return errorf("%s is already running (process %d)", c.URL(), existing)
 		}
 	}
 	pidFile := filepath.Join(dir, "share.pid")
 	_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
 	defer os.Remove(pidFile)
-	writeShareStatus(dir, "starting", "")
-	fail := func(err error) error { writeShareStatus(dir, "error", err.Error()); return err }
+	state.WriteShareStatus(dir, "starting", "")
+	fail := func(err error) error { state.WriteShareStatus(dir, "error", err.Error()); return err }
 
 	certStateDir := filepath.Join(dir, "acme")
 	_, statErr := os.Stat(certStateDir)
@@ -1013,15 +926,15 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 			// A brand-new share that can't have its name: take its device back
 			// out, so nothing is left behind on the pen or here.
 			cleanCtx, cleanCancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
-			if derr := giveBackDeviceWith(cleanCtx, hc, c, 0, tsnetNeedsLogin(node)); derr != nil {
-				daemonLogger().Warn("share cleanup failed", "fqdn", c.fqdn(), "err", derr)
+			if derr := giveBackDeviceWith(cleanCtx, hc, c, 0, mesh.TsnetNeedsLogin(node)); derr != nil {
+				fsutil.DaemonLogger().Warn("share cleanup failed", "fqdn", c.FQDN(), "err", derr)
 			}
 			cleanCancel()
 			node.Close()
 			_ = os.RemoveAll(filepath.Join(dir, "node"))
 			_ = os.Remove(filepath.Join(dir, "share.json"))
 		}
-		targetName := c.fqdn()
+		targetName := c.FQDN()
 		if !hadName && c.Name == "" {
 			targetName = "a private name on " + c.Zone
 		}
@@ -1032,7 +945,7 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 		return fail(out)
 	}
 	if !hadName && c.PrivateName {
-		say("%s", formatSharePrivateNameNotice(c.fqdn()))
+		say("%s", formatSharePrivateNameNotice(c.FQDN()))
 	}
 
 	h, closeH, err := shareHandlerWithResolver(c, tsnetPeerResolver(node))
@@ -1052,7 +965,7 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 	}
 	quiet := slog.NewLogLogger(slog.DiscardHandler, slog.LevelError)
 
-	cm, err := newShareCertManager(shareACMEConfigFromEnv(c.Zone, c.fqdn(), certStateDir, hc))
+	cm, err := newShareCertManager(shareACMEConfigFromEnv(c.Zone, c.FQDN(), certStateDir, hc))
 	if err != nil {
 		_ = ln443.Close()
 		if fresh {
@@ -1064,7 +977,7 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 	if err := cm.EnsureWithBackoff(ctx); err != nil {
 		_ = ln443.Close()
 		permanent := isNonRetryableShareCertErr(err) && ctx.Err() == nil
-		out := errorf("no certificate for %s: %v", c.fqdn(), err)
+		out := errorf("no certificate for %s: %v", c.FQDN(), err)
 		// A brand-new share that never got a certificate leaves nothing behind:
 		// its name goes back, so it isn't listed as a site that doesn't answer,
 		// and its server leaves the pen. Foreground or --background alike: the
@@ -1074,7 +987,7 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 		if fresh {
 			cm.Close()
 			clean := undoFreshShare(hc, node, dir, c)
-			out = formatFreshShareCertError(c.fqdn(), c.Name, c.Zone, err, clean)
+			out = formatFreshShareCertError(c.FQDN(), c.Name, c.Zone, err, clean)
 			return fail(permanentShare(out))
 		}
 		if permanent {
@@ -1093,12 +1006,12 @@ func serveShare(ctx context.Context, dir string, ready func(*shareConfig)) error
 	}
 	go func() { _ = tlsSrv.ServeTLS(ln443, "", "") }()
 	defer tlsSrv.Close()
-	writeShareStatus(dir, "up", "")
+	state.WriteShareStatus(dir, "up", "")
 	if ready != nil {
 		ready(c)
 	}
 	<-ctx.Done()
-	writeShareStatus(dir, "stopped", "")
+	state.WriteShareStatus(dir, "stopped", "")
 	return nil
 }
 
@@ -1125,7 +1038,7 @@ func retryAfterHint(d time.Duration) string {
 }
 
 func formatFreshShareCertError(fqdn, name, zone string, err error, cleanRollback bool) error {
-	var me *homeAPIError
+	var me *penapi.HomeAPIError
 	rollbackNote := fmt.Sprintf("Nothing was left behind: the name %s is free again.", name)
 	if !cleanRollback {
 		rollbackNote = fmt.Sprintf("Cleanup could not be fully confirmed; check Sites and Devices on home.%s before sharing again.", zone)
@@ -1329,11 +1242,11 @@ func stripHogmanHeaders(h http.Header) {
 	}
 }
 
-func shareHandler(c *shareConfig) (http.Handler, func(), error) {
+func shareHandler(c *state.ShareConfig) (http.Handler, func(), error) {
 	return shareHandlerWithResolver(c, nil)
 }
 
-func shareHandlerWithResolver(c *shareConfig, resolve sharePeerResolver) (http.Handler, func(), error) {
+func shareHandlerWithResolver(c *state.ShareConfig, resolve sharePeerResolver) (http.Handler, func(), error) {
 	if c.IdentityHeaders {
 		if err := validateIdentityTarget(c.Target, c.Folder); err != nil {
 			return nil, nil, permanentShare(err)
@@ -1358,15 +1271,15 @@ func shareHandlerWithResolver(c *shareConfig, resolve sharePeerResolver) (http.H
 	var targetURL *url.URL
 	var rewriteHost string
 	if strings.HasPrefix(c.Target, "unix://") {
-		sockPath, err := validateUnixSocketPath(strings.TrimPrefix(c.Target, "unix://"))
+		sockPath, err := bridge.ValidateUnixSocketPath(strings.TrimPrefix(c.Target, "unix://"))
 		if err != nil {
 			return nil, nil, permanentShare(err)
 		}
 		tr.ResponseHeaderTimeout = 60 * time.Second
-		tr.DialContext = unixSocketDialContext(sockPath)
+		tr.DialContext = bridge.UnixSocketDialContext(sockPath)
 		rewriteHost = strings.TrimSpace(c.UpstreamHost)
 		if rewriteHost == "" {
-			rewriteHost = c.fqdn()
+			rewriteHost = c.FQDN()
 		}
 		targetURL = &url.URL{Scheme: "http", Host: rewriteHost}
 	} else {
@@ -1413,7 +1326,7 @@ func shareHandlerWithResolver(c *shareConfig, resolve sharePeerResolver) (http.H
 			if clientIP, _, err := net.SplitHostPort(pr.In.RemoteAddr); err == nil && clientIP != "" {
 				pr.Out.Header.Set("X-Forwarded-For", clientIP)
 			}
-			pr.Out.Header.Set("X-Forwarded-Host", c.fqdn())
+			pr.Out.Header.Set("X-Forwarded-Host", c.FQDN())
 			pr.Out.Header.Set("X-Forwarded-Proto", "https")
 			if c.IdentityHeaders {
 				if id, ok := pr.In.Context().Value(shareIdentityCtxKey{}).(*sharePeerIdentity); ok && id != nil {
@@ -1435,7 +1348,7 @@ func shareHandlerWithResolver(c *shareConfig, resolve sharePeerResolver) (http.H
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusBadGateway)
-			fmt.Fprintf(w, "%s is shared from a computer where the app isn't answering right now.\n", c.fqdn())
+			fmt.Fprintf(w, "%s is shared from a computer where the app isn't answering right now.\n", c.FQDN())
 		},
 		ErrorLog: slog.NewLogLogger(slog.DiscardHandler, slog.LevelError),
 	}
@@ -1465,23 +1378,6 @@ func shareHandlerWithResolver(c *shareConfig, resolve sharePeerResolver) (http.H
 
 // ------------------------------------------------- background, status --
 
-type shareStatus struct {
-	State string `json:"state"`
-	Error string `json:"error,omitempty"`
-}
-
-func writeShareStatus(dir, state, msg string) {
-	b, _ := json.Marshal(shareStatus{State: state, Error: msg})
-	_ = writeFileAtomic(filepath.Join(dir, "status.json"), b, 0o600)
-}
-
-func readShareStatus(dir string) shareStatus {
-	var st shareStatus
-	b, _ := os.ReadFile(filepath.Join(dir, "status.json"))
-	_ = json.Unmarshal(b, &st)
-	return st
-}
-
 // sharePID is the process serving a share in the background, or 0.
 func sharePID(dir string) int {
 	b, err := os.ReadFile(filepath.Join(dir, "share.pid"))
@@ -1495,10 +1391,10 @@ func sharePID(dir string) int {
 	return pid
 }
 
-func shareBackground(dir string, c *shareConfig, o options) error {
+func shareBackground(dir string, c *state.ShareConfig, o options) error {
 	_ = os.Remove(filepath.Join(dir, "status.json"))
 	_ = os.Remove(filepath.Join(dir, "share.pid"))
-	step("Sharing %s as %s, in the background", c.showing(), c.url())
+	step("Sharing %s as %s, in the background", c.Showing(), c.URL())
 	managed, pid, err := startShareBackground(dir, c, o)
 	if err != nil {
 		return err
@@ -1508,7 +1404,7 @@ func shareBackground(dir string, c *shareConfig, o options) error {
 	})
 }
 
-func waitShareBackground(dir string, c *shareConfig, managed bool, pid int, timeout time.Duration, stopFn func()) error {
+func waitShareBackground(dir string, c *state.ShareConfig, managed bool, pid int, timeout time.Duration, stopFn func()) error {
 	logPath := filepath.Join(dir, "share.log")
 	poll := time.Second
 	if timeout < poll {
@@ -1525,10 +1421,10 @@ func waitShareBackground(dir string, c *shareConfig, managed bool, pid int, time
 			if stopFn != nil {
 				stopFn()
 			}
-			return errorf("cancelled while starting %s", c.url())
+			return errorf("cancelled while starting %s", c.URL())
 		case <-time.After(poll):
 		}
-		st := readShareStatus(dir)
+		st := state.ReadShareStatus(dir)
 		if !managed && st.State != "up" && st.State != "error" && !processAlive(pid) {
 			if stopFn != nil {
 				stopFn()
@@ -1560,12 +1456,12 @@ func waitShareBackground(dir string, c *shareConfig, managed bool, pid int, time
 func runShareProcess(dir string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serveShare(ctx, dir, func(c *shareConfig) {
-		daemonLogger().Info("share online", "url", c.url(), "target", c.showing())
+	return serveShare(ctx, dir, func(c *state.ShareConfig) {
+		fsutil.DaemonLogger().Info("share online", "url", c.URL(), "target", c.Showing())
 	})
 }
 
-func stopShare(dir string, c *shareConfig) {
+func stopShare(dir string, c *state.ShareConfig) {
 	stopShareService(c)
 	stopShareProcess(dir)
 }
@@ -1611,43 +1507,35 @@ type shareListItemJSON struct {
 func collectShareListItems(dirs []string) []shareListItemJSON {
 	items := make([]shareListItemJSON, 0, len(dirs))
 	for _, d := range dirs {
-		c, err := loadShare(d)
+		c, err := state.LoadShare(d)
 		if err != nil {
 			continue
 		}
 		running := sharePID(d) != 0
 		managed := shareServiceConfigured(c)
-		state := shareListState(running, managed)
+		stateLabel := shareListState(running, managed)
 		errMsg := ""
 		if !running {
-			if st := readShareStatus(d); st.State == "error" && st.Error != "" {
-				errMsg = firstLine(st.Error)
-				state += ": " + errMsg
+			if st := state.ReadShareStatus(d); st.State == "error" && st.Error != "" {
+				errMsg = link.FirstLine(st.Error)
+				stateLabel += ": " + errMsg
 			}
 		}
 		items = append(items, shareListItemJSON{
 			Name:    c.Name,
 			Zone:    c.Zone,
-			URL:     c.url(),
+			URL:     c.URL(),
 			Target:  c.Target,
 			Folder:  c.Folder,
 			Note:    c.Note,
 			Private: c.PrivateName,
 			Running: running,
 			Managed: managed,
-			State:   state,
+			State:   stateLabel,
 			Error:   errMsg,
 		})
 	}
 	return items
-}
-
-func shortPenLabel(zone string) string {
-	z := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(zone)), ".")
-	if first, _, ok := strings.Cut(z, "."); ok && first != "" {
-		return first
-	}
-	return z
 }
 
 func formatShareListTable(w io.Writer, items []shareListItemJSON) {
@@ -1665,7 +1553,7 @@ func formatShareListTable(w io.Writer, items []shareListItemJSON) {
 		fmt.Fprintln(tw, "NAME\tPEN\tURL\tTARGET\tSTATUS")
 	}
 	for _, item := range items {
-		pen := shortPenLabel(item.Zone)
+		pen := link.ShortPenLabel(item.Zone)
 		if hasNote {
 			noteCol := item.Note
 			if noteCol == "" {
@@ -1680,12 +1568,12 @@ func formatShareListTable(w io.Writer, items []shareListItemJSON) {
 }
 
 func shareList(zone string, asJSON bool) error {
-	all := allShares("")
+	all := state.AllShares("")
 	resolvedZone, err := resolveShareZoneFilter(all, zone)
 	if err != nil {
 		return err
 	}
-	dirs := allShares(resolvedZone)
+	dirs := state.AllShares(resolvedZone)
 	if asJSON {
 		return writeJSON(os.Stdout, collectShareListItems(dirs))
 	}
@@ -1720,7 +1608,7 @@ func shareMatchesLookup(shareName, shareZone, query string) bool {
 	if query == sn || query == sn+"."+sz {
 		return true
 	}
-	if pen := shortPenLabel(sz); pen != "" && query == sn+"."+pen {
+	if pen := link.ShortPenLabel(sz); pen != "" && query == sn+"."+pen {
 		return true
 	}
 	return false
@@ -1735,16 +1623,16 @@ func formatActiveSharesHint(dirs []string) string {
 	for _, d := range dirs {
 		name := filepath.Base(d)
 		zone := filepath.Base(filepath.Dir(d))
-		fmt.Fprintf(&sb, "\n    hogman share stop %s   (%s)", name, shortPenLabel(zone))
+		fmt.Fprintf(&sb, "\n    hogman share stop %s   (%s)", name, link.ShortPenLabel(zone))
 	}
 	return sb.String()
 }
 
 func shareStopUsageError(zone string) error {
-	all := allShares("")
+	all := state.AllShares("")
 	dirs := all
 	if resolvedZone, err := resolveShareZoneFilter(all, zone); err == nil {
-		dirs = allShares(resolvedZone)
+		dirs = state.AllShares(resolvedZone)
 	}
 	if len(dirs) == 0 {
 		return usageErrorf("usage: hogman share stop <name>\n  This computer currently shares nothing.")
@@ -1754,12 +1642,12 @@ func shareStopUsageError(zone string) error {
 
 func findShare(name, zone string) (string, error) {
 	query := normalizeShareLookup(name)
-	all := allShares("")
+	all := state.AllShares("")
 	resolvedZone, err := resolveShareZoneFilter(all, zone)
 	if err != nil {
 		return "", err
 	}
-	dirs := allShares(resolvedZone)
+	dirs := state.AllShares(resolvedZone)
 	var hits []string
 	for _, d := range dirs {
 		if shareMatchesLookup(filepath.Base(d), filepath.Base(filepath.Dir(d)), query) {
@@ -1795,18 +1683,18 @@ func shareStop(name string, o options) error {
 	if err != nil {
 		return err
 	}
-	c, err := loadShare(dir)
+	c, err := state.LoadShare(dir)
 	if err != nil {
 		return err
 	}
-	step("Taking down %s", c.url())
+	step("Taking down %s", c.URL())
 	if err := removeShareWithOptions(dir, c, 30*time.Second, o.force); err != nil {
 		return err
 	}
 	if c.PrivateName {
-		say("\n✓ %s is down, and its private name is retired.", c.url())
+		say("\n✓ %s is down, and its private name is retired.", c.URL())
 	} else {
-		say("\n✓ %s is down, and the name is free again.", c.url())
+		say("\n✓ %s is down, and the name is free again.", c.URL())
 	}
 	return nil
 }
@@ -1814,16 +1702,16 @@ func shareStop(name string, o options) error {
 // removeShareForLeave tears down a share during `hogman leave`, bounding
 // network wait and cleaning up local state even if the pen already removed it
 // or is unreachable.
-func removeShareForLeave(dir string, c *shareConfig) error {
+func removeShareForLeave(dir string, c *state.ShareConfig) error {
 	return removeShareWithOptions(dir, c, 15*time.Second, true)
 }
 
-func removeShareWithOptions(dir string, c *shareConfig, timeout time.Duration, cleanupOnUnreachable bool) error {
+func removeShareWithOptions(dir string, c *state.ShareConfig, timeout time.Duration, cleanupOnUnreachable bool) error {
 	stopShare(dir, c)
 	// Never got as far as joining the pen (its one-time key is still unused,
 	// or has expired): there's nothing on the pen to give back.
 	if _, err := os.Stat(filepath.Join(dir, "authkey")); err == nil {
-		note("%s never came up; removed it from this computer", c.url())
+		note("%s never came up; removed it from this computer", c.URL())
 		return os.RemoveAll(dir)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -1831,20 +1719,20 @@ func removeShareWithOptions(dir string, c *shareConfig, timeout time.Duration, c
 	node, _, hc, err := shareNode(ctx, dir, c)
 	if err != nil {
 		if isPermanentShareError(err) {
-			note("%s was already removed from the pen; cleaned up local files", c.url())
+			note("%s was already removed from the pen; cleaned up local files", c.URL())
 			return os.RemoveAll(dir)
 		}
 		if cleanupOnUnreachable {
-			note("could not reach the pen for %s (%v); cleaned up local files (check your home page to remove the server if it is still listed)", c.url(), firstLine(err.Error()))
+			note("could not reach the pen for %s (%v); cleaned up local files (check your home page to remove the server if it is still listed)", c.URL(), link.FirstLine(err.Error()))
 			return os.RemoveAll(dir)
 		}
 		return errorf("could not reach the pen (%v).\n  Remove the server on your home page instead, then delete %s", err, dir)
 	}
-	err = giveBackWith(ctx, hc, c, tsnetNeedsLogin(node))
+	err = giveBackWith(ctx, hc, c, mesh.TsnetNeedsLogin(node))
 	node.Close()
 	if err != nil {
 		if cleanupOnUnreachable {
-			note("could not give back %s (%v); cleaned up local files", c.url(), firstLine(err.Error()))
+			note("could not give back %s (%v); cleaned up local files", c.URL(), link.FirstLine(err.Error()))
 			return os.RemoveAll(dir)
 		}
 		return errorf("%v\n  Local files remain in %s; run 'hogman share stop %s --force' to remove them.", err, dir, c.Name)
@@ -1852,19 +1740,19 @@ func removeShareWithOptions(dir string, c *shareConfig, timeout time.Duration, c
 	return os.RemoveAll(dir)
 }
 
-func giveBackWith(ctx context.Context, hc *http.Client, c *shareConfig, checkNeedsLogin func(context.Context) bool) error {
-	var me meView
+func giveBackWith(ctx context.Context, hc *http.Client, c *state.ShareConfig, checkNeedsLogin func(context.Context) bool) error {
+	var me penapi.MeView
 	err := untilOK(ctx, 60*time.Second, func() (bool, error) {
-		code, err := homeAPICtx(ctx, hc, c.Zone, "GET", "/me", nil, &me)
+		code, err := penapi.HomeAPICtx(ctx, hc, c.Zone, "GET", "/me", nil, &me)
 		return code == 0, err
 	})
 	if err != nil {
 		return errorf("could not reach home.%s from the share: %v", c.Zone, err)
 	}
-	if code, err := homeAPICtx(ctx, hc, c.Zone, "DELETE", "/names/"+url.PathEscape(c.Name), nil, nil); err != nil && code != 404 {
-		return errorf("could not give back %s: %v", c.fqdn(), err)
+	if code, err := penapi.HomeAPICtx(ctx, hc, c.Zone, "DELETE", "/names/"+url.PathEscape(c.Name), nil, nil); err != nil && code != 404 {
+		return errorf("could not give back %s: %v", c.FQDN(), err)
 	}
-	note("gave back the name %s", c.fqdn())
+	note("gave back the name %s", c.FQDN())
 	if err := giveBackDeviceWith(ctx, hc, c, me.ThisDevice.ID, checkNeedsLogin); err != nil {
 		return err
 	}
@@ -1876,23 +1764,23 @@ func giveBackWith(ctx context.Context, hc *http.Client, c *shareConfig, checkNee
 // of the pen, then forgets it here. Best effort, on its own short clock: it
 // also runs after Ctrl-C. Reports whether both server-side cleanup steps were
 // confirmed so callers do not claim "nothing was left behind" on partial failure.
-func undoFreshShare(hc *http.Client, node io.Closer, dir string, c *shareConfig) bool {
+func undoFreshShare(hc *http.Client, node io.Closer, dir string, c *state.ShareConfig) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var checkNL func(context.Context) bool
 	if ts, ok := node.(*tsnet.Server); ok {
-		checkNL = tsnetNeedsLogin(ts)
+		checkNL = mesh.TsnetNeedsLogin(ts)
 	}
-	logger := daemonLogger()
+	logger := fsutil.DaemonLogger()
 	nameOK := true
-	if code, err := homeAPICtx(ctx, hc, c.Zone, "DELETE", "/names/"+url.PathEscape(c.Name), nil, nil); err != nil && code != 404 {
+	if code, err := penapi.HomeAPICtx(ctx, hc, c.Zone, "DELETE", "/names/"+url.PathEscape(c.Name), nil, nil); err != nil && code != 404 {
 		nameOK = false
-		logger.Warn("could not release share name", "fqdn", c.fqdn(), "err", err)
+		logger.Warn("could not release share name", "fqdn", c.FQDN(), "err", err)
 	}
 	devOK := true
 	if err := giveBackDeviceWith(ctx, hc, c, 0, checkNL); err != nil {
 		devOK = false
-		logger.Warn("could not remove share device", "fqdn", c.fqdn(), "err", err)
+		logger.Warn("could not remove share device", "fqdn", c.FQDN(), "err", err)
 	}
 	_ = node.Close()
 	for _, f := range []string{"node", "acme", "share.json", "authkey"} {
@@ -1902,24 +1790,24 @@ func undoFreshShare(hc *http.Client, node io.Closer, dir string, c *shareConfig)
 }
 
 // giveBackDevice removes the share's own device from the pen.
-func giveBackDevice(ctx context.Context, hc *http.Client, c *shareConfig) error {
+func giveBackDevice(ctx context.Context, hc *http.Client, c *state.ShareConfig) error {
 	return giveBackDeviceWith(ctx, hc, c, 0, nil)
 }
 
-func giveBackDeviceWith(ctx context.Context, hc *http.Client, c *shareConfig, deviceID int64, checkNeedsLogin func(context.Context) bool) error {
-	res := deleteSelfDevice(ctx, hc, c.Zone, deviceID, checkNeedsLogin)
-	switch res.outcome {
-	case selfDeleteRemoved:
+func giveBackDeviceWith(ctx context.Context, hc *http.Client, c *state.ShareConfig, deviceID int64, checkNeedsLogin func(context.Context) bool) error {
+	res := penapi.DeleteSelfDevice(ctx, hc, c.Zone, deviceID, checkNeedsLogin)
+	switch res.Outcome {
+	case penapi.SelfDeleteRemoved:
 		return nil
-	case selfDeleteCanceled:
-		return res.err
-	case selfDeleteLookupFailed:
-		return errorf("could not reach home.%s from the share: %v", c.Zone, res.err)
-	case selfDeleteMissingID:
+	case penapi.SelfDeleteCanceled:
+		return res.Err
+	case penapi.SelfDeleteLookupFailed:
+		return errorf("could not reach home.%s from the share: %v", c.Zone, res.Err)
+	case penapi.SelfDeleteMissingID:
 		return errorf("home.%s did not report this share's device ID", c.Zone)
-	case selfDeleteUnconfirmed:
+	case penapi.SelfDeleteUnconfirmed:
 		return errorf("could not confirm removal of the share's server on %s; check Devices on home.%s", c.Zone, c.Zone)
 	default:
-		return errorf("the pen would not remove the share's server: %v", res.err)
+		return errorf("the pen would not remove the share's server: %v", res.Err)
 	}
 }

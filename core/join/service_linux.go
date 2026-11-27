@@ -9,6 +9,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"hogman/join/internal/fsutil"
+	"hogman/join/internal/state"
 )
 
 func unitPath(zone string) string {
@@ -36,7 +39,7 @@ func haveUserSystemd() bool {
 // and enables + starts unit. If removeOnFail is true, path is removed and
 // daemon-reload is re-run when enable fails.
 func installSystemdUnit(unit, path, content string, removeOnFail bool) (string, error) {
-	if err := writeFileAtomic(path, []byte(content), 0o644); err != nil {
+	if err := fsutil.WriteFileAtomic(path, []byte(content), 0o644); err != nil {
 		return "", err
 	}
 	sc := systemctlBin()
@@ -52,7 +55,7 @@ func installSystemdUnit(unit, path, content string, removeOnFail bool) (string, 
 // startAgent runs the agent as a systemd user service where there is one,
 // otherwise as a plain background process. Always stops any previous agent
 // (including a legacy hogman-join process holding the proxy port) first.
-func startAgent(dir string, c *agentConfig, o options) error {
+func startAgent(dir string, c *state.AgentConfig, o options) error {
 	if currentAgentHealthy(dir, c) {
 		return nil
 	}
@@ -78,7 +81,7 @@ func startAgent(dir string, c *agentConfig, o options) error {
 	return nil
 }
 
-func stopAgent(dir string, c *agentConfig) {
+func stopAgent(dir string, c *state.AgentConfig) {
 	if haveUserSystemd() {
 		sc := systemctlBin()
 		_, _ = run(sc, "--user", "disable", "--now", unitName(c.Zone))
@@ -136,12 +139,12 @@ func stopOrphanAgentForDir(dir string) {
 	}
 }
 
-func shareUnitPath(c *shareConfig) string {
+func shareUnitPath(c *state.ShareConfig) string {
 	base, _ := os.UserConfigDir()
 	return filepath.Join(base, "systemd", "user", shareUnitName(c))
 }
 
-func shareServiceConfigured(c *shareConfig) bool {
+func shareServiceConfigured(c *state.ShareConfig) bool {
 	_, err := os.Stat(shareUnitPath(c))
 	return err == nil
 }
@@ -169,7 +172,7 @@ func linuxLingerEnabled() bool {
 	return err == nil && strings.EqualFold(strings.TrimSpace(out), "yes")
 }
 
-func startShareBackground(dir string, c *shareConfig, o options) (bool, int, error) {
+func startShareBackground(dir string, c *state.ShareConfig, o options) (bool, int, error) {
 	bin, err := installedBinary(dir)
 	if err != nil {
 		return false, 0, err
@@ -177,7 +180,7 @@ func startShareBackground(dir string, c *shareConfig, o options) (bool, int, err
 	return startShareServiceWithBinary(bin, dir, c, o.noService)
 }
 
-func startShareServiceWithBinary(bin, dir string, c *shareConfig, noService bool) (bool, int, error) {
+func startShareServiceWithBinary(bin, dir string, c *state.ShareConfig, noService bool) (bool, int, error) {
 	logPath := filepath.Join(dir, "share.log")
 	if noService || !haveUserSystemd() {
 		if !noService {
@@ -204,7 +207,7 @@ func startShareServiceWithBinary(bin, dir string, c *shareConfig, noService bool
 	return true, 0, nil
 }
 
-func stopShareService(c *shareConfig) {
+func stopShareService(c *state.ShareConfig) {
 	path := shareUnitPath(c)
 	if haveUserSystemd() {
 		sc := systemctlBin()
@@ -223,25 +226,25 @@ func startDetached(bin, dir string) error {
 
 // Linux desktops each keep proxy settings in their own place, so the member
 // sets it in the browser. The message says how.
-func setSystemProxy(c *agentConfig, pens []*agentConfig) (string, bool, error) {
-	pens = normalizePenConfigs(pens, c)
-	stableURL := c.pacURL()
+func setSystemProxy(c *state.AgentConfig, pens []*state.AgentConfig) (string, bool, error) {
+	pens = state.NormalizePenConfigs(pens, c)
+	stableURL := c.PACURL()
 	if host := pickPACHost(pens); host != nil {
-		stableURL = host.pacURL()
+		stableURL = host.PACURL()
 	}
-	return formatBrowserProxyInstructions("linux", stableURL, c.Zone, penZoneNames(pens), nil), false, nil
+	return formatBrowserProxyInstructions("linux", stableURL, c.Zone, state.PenZoneNames(pens), nil), false, nil
 }
 
-func clearSystemProxy(leaving *agentConfig, remaining []*agentConfig) string {
-	remaining = normalizePenConfigs(remaining, nil)
+func clearSystemProxy(leaving *state.AgentConfig, remaining []*state.AgentConfig) string {
+	remaining = state.NormalizePenConfigs(remaining, nil)
 	host := pickPACHost(remaining)
 	if host == nil {
 		return ""
 	}
 	if leaving == nil {
-		return "make sure your browser's automatic proxy configuration points to " + host.pacURL() +
-			" for your remaining pen(s): " + strings.Join(penZoneNames(remaining), ", ")
+		return "make sure your browser's automatic proxy configuration points to " + host.PACURL() +
+			" for your remaining pen(s): " + strings.Join(state.PenZoneNames(remaining), ", ")
 	}
-	return "if your browser's automatic proxy configuration was pointing at " + leaving.pacURL() +
-		", update it to " + host.pacURL() + " for your remaining pen(s): " + strings.Join(penZoneNames(remaining), ", ")
+	return "if your browser's automatic proxy configuration was pointing at " + leaving.PACURL() +
+		", update it to " + host.PACURL() + " for your remaining pen(s): " + strings.Join(state.PenZoneNames(remaining), ", ")
 }

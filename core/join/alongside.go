@@ -21,21 +21,14 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"hogman/join/internal/fsutil"
+	"hogman/join/internal/link"
+	"hogman/join/internal/penapi"
+	"hogman/join/internal/state"
 )
 
-// stateDir is where one pen's side-by-side agent keeps its identity and settings.
-func stateDir(zone string) string {
-	base, err := os.UserConfigDir()
-	if err != nil {
-		home, _ := os.UserHomeDir()
-		base = filepath.Join(home, ".config")
-	}
-	return filepath.Join(base, "hogman", zone)
-}
-
-func hogmanConfigBase() string { return filepath.Dir(stateDir("x")) }
-
-func pickPACHost(remaining []*agentConfig) *agentConfig {
+func pickPACHost(remaining []*state.AgentConfig) *state.AgentConfig {
 	if len(remaining) == 0 {
 		return nil
 	}
@@ -80,11 +73,11 @@ type agentJoinError struct{ msg string }
 
 func (e *agentJoinError) Error() string { return e.msg }
 
-func waitAgentUp(c *agentConfig, d time.Duration) (*agentStatus, error) {
+func waitAgentUp(c *state.AgentConfig, d time.Duration) (*agentStatus, error) {
 	return waitAgentUpCtx(context.Background(), c, d)
 }
 
-func waitAgentUpCtx(ctx context.Context, c *agentConfig, d time.Duration) (*agentStatus, error) {
+func waitAgentUpCtx(ctx context.Context, c *state.AgentConfig, d time.Duration) (*agentStatus, error) {
 	deadline := time.Now().Add(d)
 	lastStatusErr := ""
 	for {
@@ -108,9 +101,9 @@ func waitAgentUpCtx(ctx context.Context, c *agentConfig, d time.Duration) (*agen
 		}
 		if time.Now().After(deadline) {
 			if lastStatusErr != "" {
-				return nil, errorf("enrolled on %s, but the pen connection did not come up within %s (last status: %s).\n  Saved credentials were kept so this device is not orphaned; re-run hogman to retry, or run 'hogman leave %s' to remove it.\n  Log: %s", c.Zone, d, lastStatusErr, c.Zone, filepath.Join(stateDir(c.Zone), "agent.log"))
+				return nil, errorf("enrolled on %s, but the pen connection did not come up within %s (last status: %s).\n  Saved credentials were kept so this device is not orphaned; re-run hogman to retry, or run 'hogman leave %s' to remove it.\n  Log: %s", c.Zone, d, lastStatusErr, c.Zone, filepath.Join(state.StateDir(c.Zone), "agent.log"))
 			}
-			return nil, errorf("the pen connection did not come up within %s. Log: %s", d, filepath.Join(stateDir(c.Zone), "agent.log"))
+			return nil, errorf("the pen connection did not come up within %s. Log: %s", d, filepath.Join(state.StateDir(c.Zone), "agent.log"))
 		}
 		select {
 		case <-ctx.Done():
@@ -124,14 +117,14 @@ func waitAgentUpCtx(ctx context.Context, c *agentConfig, d time.Duration) (*agen
 // agent explicitly proves (via verified status.token HMAC) that the control
 // plane rejected this device (NeedsLogin). Unspent authkeys from an interrupted
 // join are NOT treated as stale so we retry them without burning a fresh invite.
-func existingPenNeedsReenroll(dir string, cfg *agentConfig) bool {
+func existingPenNeedsReenroll(dir string, cfg *state.AgentConfig) bool {
 	if cfg == nil {
 		return false
 	}
 	if _, err := os.Stat(filepath.Join(dir, "authkey")); err == nil {
 		return false
 	}
-	if state, detail := verifyAgentEndpointDetail(dir, cfg); state == agentEndpointDown && detail.verified && detail.needsLogin {
+	if st, detail := verifyAgentEndpointDetail(dir, cfg); st == agentEndpointDown && detail.verified && detail.needsLogin {
 		return true
 	}
 	return false
@@ -140,7 +133,7 @@ func existingPenNeedsReenroll(dir string, cfg *agentConfig) bool {
 // reenrollExistingPen acquires the new authkey BEFORE touching existing local
 // state (so a failed invite redeem never destroys the saved pen setup), then
 // stops the old agent and swaps in the fresh credentials.
-func reenrollExistingPen(dir string, existing *agentConfig, n *networkInfo, hostname string, o options, acquireKey func() (key, handle string, err error), stopFn func(string, *agentConfig)) (*agentConfig, string, error) {
+func reenrollExistingPen(dir string, existing *state.AgentConfig, n *penapi.NetworkInfo, hostname string, o options, acquireKey func() (key, handle string, err error), stopFn func(string, *state.AgentConfig)) (*state.AgentConfig, string, error) {
 	key, handle, err := acquireKey()
 	if err != nil {
 		return nil, "", err
@@ -157,7 +150,7 @@ func reenrollExistingPen(dir string, existing *agentConfig, n *networkInfo, host
 			return nil, "", err
 		}
 	}
-	cfg := &agentConfig{
+	cfg := &state.AgentConfig{
 		Zone:        n.Zone,
 		LoginServer: n.LoginServer,
 		DNSServer:   n.DNSServer,
@@ -172,10 +165,10 @@ func reenrollExistingPen(dir string, existing *agentConfig, n *networkInfo, host
 		}
 		cfg.ControlCA = string(pemBytes)
 	}
-	if err := cfg.save(dir); err != nil {
+	if err := cfg.Save(dir); err != nil {
 		return nil, "", err
 	}
-	if _, err := writeStatusToken(dir); err != nil {
+	if _, err := state.WriteStatusToken(dir); err != nil {
 		return nil, "", err
 	}
 	if err := os.WriteFile(filepath.Join(dir, "authkey"), []byte(key), 0o600); err != nil {
@@ -203,15 +196,15 @@ func shouldRollbackFreshJoin(freshJoin bool, dir string, err error) bool {
 
 // joinAlongside sets up side-by-side mode. why explains, in a few words, why
 // this mode was chosen.
-func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, why string) error {
+func joinAlongside(l *link.Link, n *penapi.NetworkInfo, client *http.Client, o options, why string) error {
 	if n.DNSServer == "" {
 		return errorf("this pen's server is too old for side-by-side mode (it does not publish its DNS address)")
 	}
-	dir := stateDir(n.Zone)
+	dir := state.StateDir(n.Zone)
 	var hostname string
 	if strings.TrimSpace(o.hostname) != "" {
 		var err error
-		hostname, err = sanitizeHostname(o.hostname)
+		hostname, err = link.SanitizeHostname(o.hostname)
 		if err != nil {
 			return err
 		}
@@ -220,7 +213,7 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 		}
 	} else {
 		var err error
-		hostname, err = defaultHostname()
+		hostname, err = link.DefaultHostname()
 		if err != nil {
 			return err
 		}
@@ -228,15 +221,15 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	note("%s", why)
 	note("joining side by side: only names ending in .%s use the pen; nothing else on this computer changes", n.Zone)
 
-	existing, _ := loadAgentConfig(dir)
-	reenroll := existing != nil && (link.InviteToken != "" || link.DeviceKey != "") && existingPenNeedsReenroll(dir, existing)
+	existing, _ := state.LoadAgentConfig(dir)
+	reenroll := existing != nil && (l.InviteToken != "" || l.DeviceKey != "") && existingPenNeedsReenroll(dir, existing)
 	var oldSameServer []penTarget
 	if existing == nil {
-		oldSameServer = findLegacySameServerPens(hogmanConfigBase(), n.Zone, n.LoginServer)
+		oldSameServer = findLegacySameServerPens(state.ConfigBase(), n.Zone, n.LoginServer)
 	}
 	if o.dryRun {
 		step("Dry run: nothing changed. Would:")
-		if (existing == nil || reenroll) && link.InviteToken != "" {
+		if (existing == nil || reenroll) && l.InviteToken != "" {
 			note("redeem the invite (handle: %s)", orAsk(o.handle))
 		}
 		note("verify %s using this computer's built-in trusted certificates", n.Zone)
@@ -248,16 +241,16 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	}
 
 	acquireKey := func() (string, string, error) {
-		if link.InviteToken != "" {
+		if l.InviteToken != "" {
 			step("Redeeming the invite")
-			en, err := redeemWithHandle(client, link, o)
+			en, err := redeemWithHandle(client, l, o)
 			if err != nil {
 				return "", "", err
 			}
 			note("welcome, %s", en.Handle)
 			return en.AuthKey, en.Handle, nil
 		}
-		return link.DeviceKey, "", nil
+		return l.DeviceKey, "", nil
 	}
 
 	handle := ""
@@ -273,12 +266,12 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 		freshJoin = true
 	} else if cfg != nil {
 		step("This computer is already set up for %s", n.Zone)
-		if link.InviteToken != "" {
+		if l.InviteToken != "" {
 			note("not using the invite; it stays valid for another device or person")
 		}
 		if cfg.LoginServer != n.LoginServer {
 			cfg.LoginServer = n.LoginServer
-			if err := cfg.save(dir); err != nil {
+			if err := cfg.Save(dir); err != nil {
 				return err
 			}
 		}
@@ -295,7 +288,7 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		cfg = &agentConfig{Zone: n.Zone, LoginServer: n.LoginServer, DNSServer: n.DNSServer, Hostname: hostname, ProxyAddr: addr}
+		cfg = &state.AgentConfig{Zone: n.Zone, LoginServer: n.LoginServer, DNSServer: n.DNSServer, Hostname: hostname, ProxyAddr: addr}
 		if o.controlCA != "" {
 			pemBytes, err := os.ReadFile(o.controlCA)
 			if err != nil {
@@ -303,10 +296,10 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 			}
 			cfg.ControlCA = string(pemBytes)
 		}
-		if err := cfg.save(dir); err != nil {
+		if err := cfg.Save(dir); err != nil {
 			return err
 		}
-		if _, err := writeStatusToken(dir); err != nil {
+		if _, err := state.WriteStatusToken(dir); err != nil {
 			return err
 		}
 		if err := os.WriteFile(filepath.Join(dir, "authkey"), []byte(key), 0o600); err != nil {
@@ -345,7 +338,7 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	note("online as %s", strings.Join(st.IPs, ", "))
 
 	step("Checking %s loads securely", n.Portal)
-	who, err := checkPortalViaCtx(ctx, n.Portal, cfg.proxyURL())
+	who, err := checkPortalViaCtx(ctx, n.Portal, cfg.ProxyURL())
 	if err != nil {
 		if ctx.Err() == nil && shouldRollbackFreshJoin(freshJoin, dir, err) {
 			leaveAlongside(n.Zone, false)
@@ -357,11 +350,11 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	}
 	retireLegacySameServerPens(oldSameServer, defaultLegacyRetireOps())
 
-	pens := normalizePenConfigs(loadInstalledPenConfigs(hogmanConfigBase()), cfg)
-	if _, _, err := installNativeHost(hogmanConfigBase(), nil, nil); err != nil {
+	pens := state.NormalizePenConfigs(state.LoadInstalledPenConfigs(state.ConfigBase()), cfg)
+	if _, _, err := installNativeHost(state.ConfigBase(), nil, nil); err != nil {
 		note("could not register browser extension host: %v", err)
 	}
-	browsers := "set your browser's automatic proxy configuration to " + cfg.pacURL()
+	browsers := "set your browser's automatic proxy configuration to " + cfg.PACURL()
 	proxyConfigured := false
 	if !o.noSystemProxy {
 		if msg, ok, err := setSystemProxy(cfg, pens); err != nil {
@@ -377,24 +370,24 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 	say("  Start at %s", n.Portal)
 	say("")
 	say("  Browsers: %s", browsers)
-	if !o.noSystemProxy && !extensionRecentlySeen(hogmanConfigBase(), 7*24*time.Hour) {
+	if !o.noSystemProxy && !extensionRecentlySeen(state.ConfigBase(), 7*24*time.Hour) {
 		if sys := detectSystemProxyState(pens); sys.VPNOverride {
 			say("  ! VPN active (%s): macOS hides automatic proxy settings while a VPN is connected.", sys.VPNInterface)
 			say("    Install the Hogman browser extension (%s; Firefox: coming soon), then open its popup and turn on %s to browse pen sites with your VPN on (Safari requires pausing the VPN).", chromeExtensionStoreURL, n.Zone)
 		}
 	}
-	say("  Other tools reach the pen through its proxy, %s", cfg.proxyURL())
+	say("  Other tools reach the pen through its proxy, %s", cfg.ProxyURL())
 	// Per command, not exported: the proxy only serves the pen, so a global
 	// https_proxy would break everything else in that shell.
-	say("    curl / most CLIs:  https_proxy=%s curl https://<site>.%s", cfg.proxyURL(), n.Zone)
-	say("    git:               git config --global http.https://%s/.proxy %s   (per site)", "<site>."+n.Zone, cfg.proxyURL())
+	say("    curl / most CLIs:  https_proxy=%s curl https://<site>.%s", cfg.ProxyURL(), n.Zone)
+	say("    git:               git config --global http.https://%s/.proxy %s   (per site)", "<site>."+n.Zone, cfg.ProxyURL())
 	say("  The pen carries HTTPS only.")
 	say("  To leave: hogman leave '<this link>'")
 	if !o.noOpen {
 		// On macOS, only auto-open home.<zone> when a Hogman proxy or browser
 		// extension is already configured; otherwise opening immediately would
 		// flash a broken DNS error tab before the user pastes the PAC URL.
-		shouldOpen := runtime.GOOS != "darwin" || proxyConfigured || extensionRecentlySeen(hogmanConfigBase(), 7*24*time.Hour)
+		shouldOpen := runtime.GOOS != "darwin" || proxyConfigured || extensionRecentlySeen(state.ConfigBase(), 7*24*time.Hour)
 		if shouldOpen {
 			openURL(n.Portal)
 		}
@@ -403,7 +396,7 @@ func joinAlongside(link *Link, n *networkInfo, client *http.Client, o options, w
 }
 
 func checkPortalViaCtx(ctx context.Context, portal, proxy string) (string, error) {
-	pool, err := testACMECAPool()
+	pool, err := penapi.TestACMECAPool()
 	if err != nil {
 		return "", err
 	}
@@ -462,70 +455,55 @@ func pollPortalCtx(ctx context.Context, c *http.Client, portal string, d time.Du
 // device. Best effort: leaving still works if the pen can't be reached. It
 // reports whether the pen accepted that.
 func removeOwnDevice(zone string) bool {
-	dir := stateDir(zone)
-	cfg, err := loadAgentConfig(dir)
+	dir := state.StateDir(zone)
+	cfg, err := state.LoadAgentConfig(dir)
 	if err != nil {
 		return false
 	}
 	// Only skip device removal / logout when the running agent passes HMAC
 	// status.token verification AND the control plane explicitly reports NeedsLogin.
-	if state, detail := verifyAgentEndpointDetail(dir, cfg); state == agentEndpointDown && detail.verified && detail.needsLogin {
+	if st, detail := verifyAgentEndpointDetail(dir, cfg); st == agentEndpointDown && detail.verified && detail.needsLogin {
 		note("this computer was already removed from the pen")
 		return true
 	}
-	c, err := penClient(cfg)
+	c, err := penapi.PenClient(cfg)
 	if err != nil {
 		note("could not reach the pen while leaving: %v", err)
 		return false
 	}
 	checkNeedsLogin := func(_ context.Context) bool {
-		state, detail := verifyAgentEndpointDetail(dir, cfg)
-		return state == agentEndpointDown && detail.verified && detail.needsLogin
+		st, detail := verifyAgentEndpointDetail(dir, cfg)
+		return st == agentEndpointDown && detail.verified && detail.needsLogin
 	}
 	return removeOwnDeviceWith(context.Background(), c, zone, checkNeedsLogin)
 }
 
 func removeOwnDeviceWith(ctx context.Context, c *http.Client, zone string, checkNeedsLogin func(context.Context) bool) bool {
-	res := deleteSelfDevice(ctx, c, zone, 0, checkNeedsLogin)
-	switch res.outcome {
-	case selfDeleteRemoved:
+	res := penapi.DeleteSelfDevice(ctx, c, zone, 0, checkNeedsLogin)
+	switch res.Outcome {
+	case penapi.SelfDeleteRemoved:
 		note("removed this computer from your devices")
 		return true
-	case selfDeleteLookupFailed, selfDeleteMissingID:
+	case penapi.SelfDeleteLookupFailed, penapi.SelfDeleteMissingID:
 		note("could not remove this computer from your devices (the keeper can, on the home page)")
 		return false
-	case selfDeleteUnconfirmed:
+	case penapi.SelfDeleteUnconfirmed:
 		note("could not confirm removal from your devices; check Devices on home.%s", zone)
 		return false
 	default:
-		if res.err != nil {
-			note("could not remove this computer from your devices: %v", firstLine(res.err.Error()))
+		if res.Err != nil {
+			note("could not remove this computer from your devices: %v", link.FirstLine(res.Err.Error()))
 		}
 		return false
 	}
-}
-
-// penClient talks to the pen's home page as this computer, through its own
-// running connection.
-func penClient(cfg *agentConfig) (*http.Client, error) {
-	pool, err := testACMECAPool()
-	if err != nil {
-		return nil, fmt.Errorf("reading HOGMAN_ACME_CA_ROOT: %w", err)
-	}
-	pu, err := url.Parse(cfg.proxyURL())
-	if err != nil {
-		return nil, err
-	}
-	return &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{
-		Proxy: http.ProxyURL(pu), TLSClientConfig: &tls.Config{RootCAs: pool}}}, nil
 }
 
 // leaveAlongside undoes side-by-side mode for a pen. Reports whether there was
 // anything to undo. deviceGone: the pen already removed this device, so logging
 // it out (a fresh connection that can only time out) is skipped.
 func leaveAlongside(zone string, deviceGone bool) bool {
-	dir := stateDir(zone)
-	cfg, err := loadAgentConfig(dir)
+	dir := state.StateDir(zone)
+	cfg, err := state.LoadAgentConfig(dir)
 	if err != nil {
 		return false
 	}
@@ -536,9 +514,9 @@ func leaveAlongside(zone string, deviceGone bool) bool {
 		}
 	}
 	_ = os.RemoveAll(dir)
-	remaining := loadInstalledPenConfigs(hogmanConfigBase())
+	remaining := state.LoadInstalledPenConfigs(state.ConfigBase())
 	if len(remaining) == 0 {
-		removeNativeHost(hogmanConfigBase())
+		removeNativeHost(state.ConfigBase())
 	}
 	if msg := clearSystemProxy(cfg, remaining); msg != "" {
 		note("%s", msg)
@@ -561,7 +539,7 @@ func findLegacySameServerPens(configBase, newZone, loginServer string) []penTarg
 }
 
 type legacyRetireOps struct {
-	stop   func(dir string, c *agentConfig)
+	stop   func(dir string, c *state.AgentConfig)
 	logout func(dir string)
 }
 
@@ -595,7 +573,7 @@ func retireLegacySameServerPens(oldPens []penTarget, ops legacyRetireOps) {
 }
 
 func hasLegacyPenBinary(dir string) bool {
-	p := filepath.Join(dir, legacyBinaryName(runtime.GOOS))
+	p := filepath.Join(dir, state.LegacyBinaryName(runtime.GOOS))
 	_, err := os.Stat(p)
 	return err == nil
 }
@@ -603,7 +581,7 @@ func hasLegacyPenBinary(dir string) bool {
 // currentAgentHealthy reports whether the pen's agent is already up, passes
 // HMAC status verification, and is NOT accompanied by a legacy per-pen
 // hogman-join copy that still needs replacing.
-func currentAgentHealthy(dir string, c *agentConfig) bool {
+func currentAgentHealthy(dir string, c *state.AgentConfig) bool {
 	if c == nil || hasLegacyPenBinary(dir) {
 		return false
 	}
@@ -612,10 +590,10 @@ func currentAgentHealthy(dir string, c *agentConfig) bool {
 }
 
 func cleanupLegacyPenBinary(dir string) {
-	p := filepath.Join(dir, legacyBinaryName(runtime.GOOS))
-	self, _ := resolvedExePath()
-	canon := canonicalBinaryPath(hogmanConfigBase())
-	if sameFilePath(p, self) || sameFilePath(p, canon) {
+	p := filepath.Join(dir, state.LegacyBinaryName(runtime.GOOS))
+	self, _ := fsutil.ResolvedExePath()
+	canon := state.CanonicalBinaryPath(state.ConfigBase())
+	if fsutil.SameFilePath(p, self) || fsutil.SameFilePath(p, canon) {
 		return
 	}
 	if _, err := os.Stat(p); err == nil {
@@ -638,12 +616,6 @@ func stopDetached(dir string) {
 	stopOrphanAgentForDir(dir)
 }
 
-// canonicalBinaryPath is the single managed hogman binary shared by all
-// pen agents and background shares on this computer.
-func canonicalBinaryPath(configBase string) string {
-	return filepath.Join(configBase, "bin", installedBinaryName(runtime.GOOS))
-}
-
 // ensureCanonicalBinary ensures the single canonical managed binary under
 // <configBase>/bin/hogman is up to date atomically, while refusing to let an
 // older CLI binary silently downgrade a newer canonical binary shared by other
@@ -653,11 +625,11 @@ func ensureCanonicalBinary(configBase string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dst := canonicalBinaryPath(configBase)
+	dst := state.CanonicalBinaryPath(configBase)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return "", err
 	}
-	if sameFilePath(self, dst) {
+	if fsutil.SameFilePath(self, dst) {
 		return dst, nil
 	}
 	// Never let an older CLI binary (e.g. a forgotten ~/hogman-join or old ~/hogman)
@@ -670,7 +642,7 @@ func ensureCanonicalBinary(configBase string) (string, error) {
 			}
 		}
 	}
-	if err := copyExecutableAtomic(self, dst); err != nil {
+	if err := fsutil.CopyExecutableAtomic(self, dst); err != nil {
 		return "", err
 	}
 	return dst, nil
@@ -680,5 +652,5 @@ func ensureCanonicalBinary(configBase string) (string, error) {
 // <configBase>/bin/hogman is up to date atomically, so all pen agents and
 // background shares share one copy instead of duplicating a binary per pen/share.
 func installedBinary(_ string) (string, error) {
-	return ensureCanonicalBinary(hogmanConfigBase())
+	return ensureCanonicalBinary(state.ConfigBase())
 }

@@ -9,6 +9,10 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"hogman/join/internal/fsutil"
+	"hogman/join/internal/link"
+	"hogman/join/internal/state"
 )
 
 type doctorCheck struct {
@@ -56,14 +60,14 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 	}
 
 	// 2. Legacy duplicate per-pen / per-share binaries (including old hogman-join copies)
-	instName := installedBinaryName(runtime.GOOS)
-	oldInstName := legacyBinaryName(runtime.GOOS)
-	canon := canonicalBinaryPath(configBase)
+	instName := state.InstalledBinaryName(runtime.GOOS)
+	oldInstName := state.LegacyBinaryName(runtime.GOOS)
+	canon := state.CanonicalBinaryPath(configBase)
 	var dupes []string
 	checkLegacy := func(dir, label string) {
 		for _, name := range []string{instName, oldInstName} {
 			legacy := filepath.Join(dir, name)
-			if _, err := os.Stat(legacy); err == nil && !sameFilePath(legacy, exePath) && !sameFilePath(legacy, canon) {
+			if _, err := os.Stat(legacy); err == nil && !fsutil.SameFilePath(legacy, exePath) && !fsutil.SameFilePath(legacy, canon) {
 				dupes = append(dupes, label)
 				return
 			}
@@ -72,11 +76,11 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 	for _, p := range loadPenTargets(configBase) {
 		checkLegacy(p.dir, p.zone)
 	}
-	for _, d := range allSharesIn(sharesDir, "") {
+	for _, d := range state.AllSharesIn(sharesDir, "") {
 		checkLegacy(d, filepath.Base(d))
 	}
 	oldCanon := filepath.Join(configBase, "bin", oldInstName)
-	if _, err := os.Stat(oldCanon); err == nil && !sameFilePath(oldCanon, exePath) && !sameFilePath(oldCanon, canon) {
+	if _, err := os.Stat(oldCanon); err == nil && !fsutil.SameFilePath(oldCanon, exePath) && !fsutil.SameFilePath(oldCanon, canon) {
 		dupes = append(dupes, oldInstName)
 	}
 	if len(dupes) > 0 {
@@ -95,7 +99,7 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 	}
 
 	// 3. Corrupt pen configs
-	if bad := corruptPenConfigs(configBase); len(bad) > 0 {
+	if bad := state.CorruptPenConfigs(configBase); len(bad) > 0 {
 		add(doctorCheck{
 			Name:   "pen-configs",
 			Status: "fail",
@@ -135,7 +139,7 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 			default:
 				reason := p.statusReason
 				penDir := filepath.Join(configBase, p.Zone)
-				if interrupted, _ := readUpdatingMarker(penDir); interrupted {
+				if interrupted, _ := state.ReadUpdatingMarker(penDir); interrupted {
 					reason = "interrupted update left agent stopped"
 				} else if reason == "" {
 					if !serviceConfigured(p.Zone) {
@@ -159,8 +163,8 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 	}
 
 	// 5. Local shares
-	for _, d := range allSharesIn(sharesDir, "") {
-		c, err := loadShare(d)
+	for _, d := range state.AllSharesIn(sharesDir, "") {
+		c, err := state.LoadShare(d)
 		if err != nil {
 			add(doctorCheck{
 				Name:   "share:" + filepath.Base(d),
@@ -170,19 +174,19 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 			continue
 		}
 		running := sharePID(d) != 0
-		st := readShareStatus(d)
+		st := state.ReadShareStatus(d)
 		if !running && st.State == "error" && st.Error != "" {
 			add(doctorCheck{
-				Name:   "share:" + c.fqdn(),
+				Name:   "share:" + c.FQDN(),
 				Status: "fail",
-				Detail: firstLine(st.Error),
+				Detail: link.FirstLine(st.Error),
 				Fix:    "check log: " + filepath.Join(d, "share.log"),
 			})
 		} else if running {
 			add(doctorCheck{
-				Name:   "share:" + c.fqdn(),
+				Name:   "share:" + c.FQDN(),
 				Status: "ok",
-				Detail: "running -> " + c.showing(),
+				Detail: "running -> " + c.Showing(),
 			})
 		}
 	}
@@ -192,7 +196,7 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 	if sys.StalePAC != "" {
 		fix := "turn off \"Automatic proxy configuration\" in System Settings → Network → Wi-Fi (or Ethernet) → Details… → Proxies"
 		if host := pickPACHost(configs); host != nil {
-			fix = "update \"Automatic proxy configuration\" in System Settings → Network → Wi-Fi (or Ethernet) → Details… → Proxies to " + host.pacURL()
+			fix = "update \"Automatic proxy configuration\" in System Settings → Network → Wi-Fi (or Ethernet) → Details… → Proxies to " + host.PACURL()
 		}
 		add(doctorCheck{
 			Name:   "system-proxy",
@@ -210,7 +214,7 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 		svcList := formatServiceList(sys.MissingProxyServices)
 		fix := "turn on \"Automatic proxy configuration\" in System Settings → Network → " + svcList + " → Details… → Proxies"
 		if host := pickPACHost(configs); host != nil {
-			fix += " and paste " + host.pacURL()
+			fix += " and paste " + host.PACURL()
 		}
 		add(doctorCheck{
 			Name:   "system-proxy",
@@ -260,8 +264,8 @@ func runDoctor(configBase, sharesDir, exePath string) doctorReport {
 }
 
 func doctorCmd(o options) error {
-	exePath, _ := resolvedExePath()
-	rep := runDoctor(hogmanConfigBase(), sharesBase(), exePath)
+	exePath, _ := fsutil.ResolvedExePath()
+	rep := runDoctor(state.ConfigBase(), state.SharesBase(), exePath)
 	if o.jsonOut {
 		return writeJSON(os.Stdout, rep)
 	}

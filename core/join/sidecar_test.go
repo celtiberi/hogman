@@ -17,6 +17,10 @@ import (
 
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tailcfg"
+
+	"hogman/join/internal/bridge"
+	"hogman/join/internal/fsutil"
+	"hogman/join/internal/state"
 )
 
 func TestUnixSocketShareTargetValidation(t *testing.T) {
@@ -78,7 +82,7 @@ func TestBridgeAndUnixShareHandlerEndToEnd(t *testing.T) {
 	ready := make(chan struct{})
 	bridgeErr := make(chan error, 1)
 	go func() {
-		bridgeErr <- runBridge(ctx, sockPath, strings.TrimPrefix(appSrv.URL, "http://"), 16, func() {
+		bridgeErr <- bridge.Run(ctx, sockPath, strings.TrimPrefix(appSrv.URL, "http://"), 16, func() {
 			close(ready)
 		})
 	}()
@@ -96,12 +100,12 @@ func TestBridgeAndUnixShareHandlerEndToEnd(t *testing.T) {
 	if fi.Mode().Perm() != 0o600 {
 		t.Fatalf("socket mode = %o, want 0600", fi.Mode().Perm())
 	}
-	if err := bridgeCmd(bridgeOptions{checkUnix: sockPath}); err != nil {
+	if err := bridge.RunCommand(bridge.Options{CheckUnix: sockPath}); err != nil {
 		t.Fatalf("bridge --check failed: %v", err)
 	}
 
 	// Build shareHandler pointing at unix://sockPath and verify forwarding + header stripping.
-	h, closeH, err := shareHandler(&shareConfig{
+	h, closeH, err := shareHandler(&state.ShareConfig{
 		Name:   "lab-notes",
 		Zone:   "lab.pens.example.com",
 		Target: "unix://" + sockPath,
@@ -138,7 +142,7 @@ func TestBridgeAndUnixShareHandlerEndToEnd(t *testing.T) {
 	if err := os.Symlink(sockPath, symPath); err != nil {
 		t.Fatal(err)
 	}
-	hSym, closeSym, err := shareHandler(&shareConfig{
+	hSym, closeSym, err := shareHandler(&state.ShareConfig{
 		Name:   "lab-notes",
 		Zone:   "lab.pens.example.com",
 		Target: "unix://" + symPath,
@@ -156,7 +160,7 @@ func TestBridgeAndUnixShareHandlerEndToEnd(t *testing.T) {
 	// Graceful shutdown removes the socket file.
 	cancel()
 	if err := <-bridgeErr; err != nil {
-		t.Fatalf("runBridge returned error on cancel: %v", err)
+		t.Fatalf("bridge.Run returned error on cancel: %v", err)
 	}
 	if _, err := os.Lstat(sockPath); !os.IsNotExist(err) {
 		t.Fatalf("socket %s was not cleaned up on shutdown (err=%v)", sockPath, err)
@@ -166,13 +170,13 @@ func TestBridgeAndUnixShareHandlerEndToEnd(t *testing.T) {
 func TestBridgeValidation(t *testing.T) {
 	// Reject non-loopback --forward-tcp targets.
 	for _, bad := range []string{"192.168.1.10:8080", "169.254.169.254:80", "0.0.0.0:8080", "example.com:80", "127.0.0.1:0"} {
-		if _, err := validateLoopbackTCPTarget(bad); err == nil {
-			t.Errorf("validateLoopbackTCPTarget(%q) succeeded, want error", bad)
+		if _, err := bridge.ValidateLoopbackTCPTarget(bad); err == nil {
+			t.Errorf("ValidateLoopbackTCPTarget(%q) succeeded, want error", bad)
 		}
 	}
 	for _, good := range []string{"127.0.0.1:8080", "[::1]:8080"} {
-		if _, err := validateLoopbackTCPTarget(good); err != nil {
-			t.Errorf("validateLoopbackTCPTarget(%q) failed: %v", good, err)
+		if _, err := bridge.ValidateLoopbackTCPTarget(good); err != nil {
+			t.Errorf("ValidateLoopbackTCPTarget(%q) failed: %v", good, err)
 		}
 	}
 }
@@ -180,24 +184,24 @@ func TestBridgeValidation(t *testing.T) {
 func TestShareLockAndContainerCLIFlags(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		dir := t.TempDir()
-		unlock1, err := acquireShareLock(dir)
+		unlock1, err := fsutil.AcquireShareLock(dir)
 		if err != nil {
-			t.Fatalf("first acquireShareLock failed: %v", err)
+			t.Fatalf("first AcquireShareLock failed: %v", err)
 		}
-		if _, err := acquireShareLock(dir); err == nil {
-			t.Fatal("second concurrent acquireShareLock should fail")
+		if _, err := fsutil.AcquireShareLock(dir); err == nil {
+			t.Fatal("second concurrent AcquireShareLock should fail")
 		}
 		unlock1()
-		unlock2, err := acquireShareLock(dir)
+		unlock2, err := fsutil.AcquireShareLock(dir)
 		if err != nil {
-			t.Fatalf("acquireShareLock after unlock failed: %v", err)
+			t.Fatalf("AcquireShareLock after unlock failed: %v", err)
 		}
 		unlock2()
 	}
 
 	// CLI flag wiring for --state-dir, --enroll-only, --upstream-host, and `bridge`.
 	var gotO options
-	var gotBridge bridgeOptions
+	var gotBridge bridge.Options
 	var errBuf bytes.Buffer
 	h := cliHandlers{
 		errOut: &errBuf,
@@ -205,7 +209,7 @@ func TestShareLockAndContainerCLIFlags(t *testing.T) {
 			gotO = o
 			return nil
 		},
-		bridge: func(bo bridgeOptions) error {
+		bridge: func(bo bridge.Options) error {
 			gotBridge = bo
 			return nil
 		},
@@ -230,7 +234,7 @@ func TestShareLockAndContainerCLIFlags(t *testing.T) {
 	// `hogman bridge` CLI flag routing.
 	errBuf.Reset()
 	rc = runCLI([]string{"bridge", "--listen-unix", "/run/hogman-in/app.sock", "--forward-tcp", "127.0.0.1:8080", "--max-conns", "64"}, h)
-	if rc != 0 || gotBridge.listenUnix != "/run/hogman-in/app.sock" || gotBridge.forwardTCP != "127.0.0.1:8080" || gotBridge.maxConns != 64 {
+	if rc != 0 || gotBridge.ListenUnix != "/run/hogman-in/app.sock" || gotBridge.ForwardTCP != "127.0.0.1:8080" || gotBridge.MaxConns != 64 {
 		t.Fatalf("bridge flags: rc=%d bo=%+v err=%s", rc, gotBridge, errBuf.String())
 	}
 }
@@ -266,7 +270,7 @@ func TestShareIdentityHeaders(t *testing.T) {
 
 	// 1. Default OFF: inbound X-Hogman-* headers (including underscore variants) are ALWAYS stripped and resolver is not called.
 	resolverCalls := 0
-	hOff, closeOff, err := shareHandlerWithResolver(&shareConfig{
+	hOff, closeOff, err := shareHandlerWithResolver(&state.ShareConfig{
 		Name:   "fleet",
 		Zone:   "ops.pens.example.com",
 		Target: upstream.URL,
@@ -290,7 +294,7 @@ func TestShareIdentityHeaders(t *testing.T) {
 
 	// 2. Enabled ON with personal device (including Headscale trailing '@' on LoginName):
 	// spoofed hyphen/underscore/mixed headers are stripped and replaced with verified peer identity.
-	hOn, closeOn, err := shareHandlerWithResolver(&shareConfig{
+	hOn, closeOn, err := shareHandlerWithResolver(&state.ShareConfig{
 		Name:            "fleet",
 		Zone:            "ops.pens.example.com",
 		Target:          upstream.URL,
@@ -328,7 +332,7 @@ func TestShareIdentityHeaders(t *testing.T) {
 	}
 
 	// 3. Tagged server node: emits X-Hogman-Tags, never X-Hogman-Handle (even if LoginName is set).
-	hSrv, closeSrv, err := shareHandlerWithResolver(&shareConfig{
+	hSrv, closeSrv, err := shareHandlerWithResolver(&state.ShareConfig{
 		Name:            "fleet",
 		Zone:            "ops.pens.example.com",
 		Target:          upstream.URL,
@@ -359,7 +363,7 @@ func TestShareIdentityHeaders(t *testing.T) {
 	}
 
 	// 4. WhoIs lookup error: fail closed with 503 and never forward to the upstream app.
-	hErr, closeErr, err := shareHandlerWithResolver(&shareConfig{
+	hErr, closeErr, err := shareHandlerWithResolver(&state.ShareConfig{
 		Name:            "fleet",
 		Zone:            "ops.pens.example.com",
 		Target:          upstream.URL,
@@ -385,7 +389,7 @@ func TestShareIdentityHeaders(t *testing.T) {
 	}
 
 	// 5. Local-target restriction: refuses folder shares and non-loopback LAN targets.
-	if _, _, err := shareHandlerWithResolver(&shareConfig{
+	if _, _, err := shareHandlerWithResolver(&state.ShareConfig{
 		Name:            "docs",
 		Zone:            "ops.pens.example.com",
 		Target:          t.TempDir(),
@@ -394,7 +398,7 @@ func TestShareIdentityHeaders(t *testing.T) {
 	}, nil); err == nil {
 		t.Fatal("expected IdentityHeaders=true on folder share to fail")
 	}
-	if _, _, err := shareHandlerWithResolver(&shareConfig{
+	if _, _, err := shareHandlerWithResolver(&state.ShareConfig{
 		Name:            "lan",
 		Zone:            "ops.pens.example.com",
 		Target:          "http://192.168.1.40:8080",

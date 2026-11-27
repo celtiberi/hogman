@@ -3,10 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+
+	"hogman/join/internal/link"
+	"hogman/join/internal/state"
 )
 
 // Seams for unit tests of interactive TTY pen picking, link prompting, and notices.
@@ -16,50 +18,15 @@ var (
 	noteFn       = note
 )
 
-var penQueryRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
-
-// validatePenQuery ensures a --pen / HOGMAN_PEN value is a valid DNS label or
-// zone name before it is matched or used in filesystem globs.
-func validatePenQuery(raw string) (string, error) {
-	q := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
-	if q == "" || len(q) > 253 || !penQueryRE.MatchString(q) {
-		return "", errorf("invalid pen name %q: must be a DNS name or short pen label (letters, digits, dashes, dots)", raw)
-	}
-	return q, nil
-}
-
-// penMatchesQuery reports whether a pen (zone + optional control host) matches
-// a user query: exact full zone, exact control host, or exact short name (first
-// DNS label before '.', never a partial prefix).
-func penMatchesQuery(zone, loginServer, query string) bool {
-	q := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(query)), ".")
-	if q == "" {
-		return false
-	}
-	z := strings.ToLower(zone)
-	if q == z {
-		return true
-	}
-	if h := hostOf(loginServer); h != "" && q == h {
-		return true
-	}
-	if !strings.Contains(q, ".") {
-		if first, _, ok := strings.Cut(z, "."); ok && first == q {
-			return true
-		}
-	}
-	return false
-}
-
 // effectivePenQuery returns the validated --pen flag value, falling back to
 // HOGMAN_PEN when --pen is empty, and reports whether HOGMAN_PEN supplied it.
 func effectivePenQuery(flagVal string) (query string, fromEnv bool, err error) {
 	if raw := strings.TrimSpace(flagVal); raw != "" {
-		q, err := validatePenQuery(raw)
+		q, err := link.ValidatePenQuery(raw)
 		return q, false, err
 	}
 	if raw := strings.TrimSpace(os.Getenv("HOGMAN_PEN")); raw != "" {
-		q, err := validatePenQuery(raw)
+		q, err := link.ValidatePenQuery(raw)
 		return q, true, err
 	}
 	return "", false, nil
@@ -79,7 +46,7 @@ func resolvePenConn(pens []penConn, want string) (*penConn, error) {
 	if query != "" {
 		var matches []penConn
 		for _, p := range sorted {
-			if penMatchesQuery(p.zone, p.loginServer, query) {
+			if link.PenMatchesQuery(p.zone, p.loginServer, query) {
 				matches = append(matches, p)
 			}
 		}
@@ -147,7 +114,7 @@ func resolveShareZoneFilter(dirs []string, want string) (string, error) {
 	}
 	zoneHost := map[string]string{}
 	for _, d := range dirs {
-		if c, err := loadShare(d); err == nil && c.Zone != "" {
+		if c, err := state.LoadShare(d); err == nil && c.Zone != "" {
 			zoneHost[c.Zone] = c.LoginServer
 		}
 	}
@@ -158,7 +125,7 @@ func resolveShareZoneFilter(dirs []string, want string) (string, error) {
 	}
 	var matches []string
 	for z, ls := range zoneHost {
-		if penMatchesQuery(z, ls, query) {
+		if link.PenMatchesQuery(z, ls, query) {
 			matches = append(matches, z)
 		}
 	}

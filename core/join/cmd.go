@@ -11,6 +11,9 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"hogman/join/internal/bridge"
+	"hogman/join/internal/link"
 )
 
 func init() {
@@ -83,13 +86,6 @@ func normalizeSingleDashFlags(root *cobra.Command, args []string) []string {
 	return out
 }
 
-// usageError marks CLI syntax / flag / argument errors that should exit with code 2.
-type usageError struct{ msg string }
-
-func (e *usageError) Error() string { return e.msg }
-
-func usageErrorf(f string, a ...any) error { return &usageError{msg: fmt.Sprintf(f, a...)} }
-
 // cliHandlers holds the execution callbacks invoked by the Cobra command tree.
 // Production uses defaultCLIHandlers(); tests can substitute recorders to verify
 // exact argument parsing, flag routing, and hidden service commands offline.
@@ -107,7 +103,7 @@ type cliHandlers struct {
 	shareStart   func(name, target, rawLink string, o options) error
 	shareList    func(pen string, asJSON bool) error
 	shareStop    func(name string, o options) error
-	bridge       func(bo bridgeOptions) error
+	bridge       func(bo bridge.Options) error
 	agent        func(dir string) error
 	agentLogout  func(dir string)
 	shareRun     func(dir string) error
@@ -128,7 +124,7 @@ func defaultCLIHandlers() cliHandlers {
 		shareStart:   shareStart,
 		shareList:    shareList,
 		shareStop:    shareStop,
-		bridge:       bridgeCmd,
+		bridge:       bridge.RunCommand,
 		agent:        runAgent,
 		agentLogout:  agentLogout,
 		shareRun:     runShareProcess,
@@ -216,10 +212,10 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 					return h.join(raw, o)
 				}
 				_ = cmd.Help()
-				return &usageError{msg: ""}
+				return &link.UsageError{}
 			}
 			if len(args) == 1 {
-				trimmed := trimMatchingQuotes(args[0])
+				trimmed := link.TrimMatchingQuotes(args[0])
 				if strings.Contains(trimmed, "://") {
 					if o.linkStdin {
 						return usageErrorf("cannot pass both a join link argument and --link-stdin")
@@ -366,7 +362,7 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 				if len(args) != 1 && len(args) != 2 {
 					return usageErrorf("usage: hogman share --private-name <target> ['<server link>'] [--note \"Label\"]\n  (run 'hogman share --help' for more)")
 				}
-				if len(args) == 2 && !strings.Contains(trimMatchingQuotes(args[1]), "://") {
+				if len(args) == 2 && !strings.Contains(link.TrimMatchingQuotes(args[1]), "://") {
 					return usageErrorf("cannot pass both a share name (%q) and --private-name; use: hogman share --private-name %s [--note %q]", args[0], args[1], args[0])
 				}
 				link := ""
@@ -446,7 +442,7 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 	shareC.AddCommand(shareListC, shareStopC)
 
 	// `bridge` (Unix socket <-> loopback TCP bridge for sealed container deployments)
-	var bo bridgeOptions
+	var bo bridge.Options
 	bridgeC := &cobra.Command{
 		Use:   "bridge",
 		Short: "Bridge a Unix domain socket to a loopback TCP port (for sealed containers)",
@@ -455,10 +451,10 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 			return h.bridge(bo)
 		},
 	}
-	bridgeC.Flags().StringVar(&bo.listenUnix, "listen-unix", "", "absolute filesystem path for the listening Unix domain socket")
-	bridgeC.Flags().StringVar(&bo.forwardTCP, "forward-tcp", "", "loopback TCP target to forward connections to (e.g. 127.0.0.1:8080)")
-	bridgeC.Flags().StringVar(&bo.checkUnix, "check", "", "healthcheck mode: verify the given Unix socket is accepting connections and exit 0")
-	bridgeC.Flags().IntVar(&bo.maxConns, "max-conns", 256, "maximum concurrent forwarded connections")
+	bridgeC.Flags().StringVar(&bo.ListenUnix, "listen-unix", "", "absolute filesystem path for the listening Unix domain socket")
+	bridgeC.Flags().StringVar(&bo.ForwardTCP, "forward-tcp", "", "loopback TCP target to forward connections to (e.g. 127.0.0.1:8080)")
+	bridgeC.Flags().StringVar(&bo.CheckUnix, "check", "", "healthcheck mode: verify the given Unix socket is accepting connections and exit 0")
+	bridgeC.Flags().IntVar(&bo.MaxConns, "max-conns", 256, "maximum concurrent forwarded connections")
 
 	// `version`
 	versionC := &cobra.Command{
@@ -564,16 +560,16 @@ func runCLI(args []string, h cliHandlers) int {
 		fmt.Fprintln(h.errOut, err.Error())
 		return 1
 	}
-	var ue *usageError
+	var ue *link.UsageError
 	if errors.As(err, &ue) {
-		if ue.msg != "" {
-			fmt.Fprintf(h.errOut, "\n✗ %s\n", ue.msg)
+		if ue.Msg != "" {
+			fmt.Fprintf(h.errOut, "\n✗ %s\n", ue.Msg)
 		}
 		return 2
 	}
-	var u *userError
+	var u *link.UserError
 	if errors.As(err, &u) {
-		fmt.Fprintf(h.errOut, "\n✗ %s\n", u.msg)
+		fmt.Fprintf(h.errOut, "\n✗ %s\n", u.Msg)
 		return 1
 	}
 	// Cobra/pflag flag or argument validation errors exit 2.

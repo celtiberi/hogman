@@ -2,12 +2,16 @@ package main
 
 import (
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+
+	"hogman/join/internal/fsutil"
+	"hogman/join/internal/link"
+	"hogman/join/internal/penapi"
+	"hogman/join/internal/state"
 )
 
 type leaveRisk int
@@ -32,40 +36,31 @@ var (
 type leaveTarget struct {
 	zone string
 	host string
-	cfg  *agentConfig // nil when only shares are on this pen
+	cfg  *state.AgentConfig // nil when only shares are on this pen
 	// legacyTS: joined through this computer's Tailscale app (the old way),
 	// so its ownership can't be checked through Hogman's own connection.
 	legacyTS bool
-}
-
-// hostOf returns the bare host name of a control URL ("" if it has none).
-func hostOf(raw string) string {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
-		return ""
-	}
-	return strings.ToLower(u.Hostname())
 }
 
 // localLeaveTargets lists every pen this computer has joined or shares into,
 // from its own saved settings: no network needed.
 func localLeaveTargets() []leaveTarget {
 	byZone := map[string]*leaveTarget{}
-	for _, p := range loadPenTargets(hogmanConfigBase()) {
-		byZone[p.zone] = &leaveTarget{zone: p.zone, host: hostOf(p.cfg.LoginServer), cfg: p.cfg}
+	for _, p := range loadPenTargets(state.ConfigBase()) {
+		byZone[p.zone] = &leaveTarget{zone: p.zone, host: link.HostOf(p.cfg.LoginServer), cfg: p.cfg}
 	}
-	for _, dir := range allShares("") {
-		c, err := loadShare(dir)
+	for _, dir := range state.AllShares("") {
+		c, err := state.LoadShare(dir)
 		if err != nil || c.Zone == "" {
 			continue
 		}
 		if t, ok := byZone[c.Zone]; ok {
 			if t.host == "" {
-				t.host = hostOf(c.LoginServer)
+				t.host = link.HostOf(c.LoginServer)
 			}
 			continue
 		}
-		byZone[c.Zone] = &leaveTarget{zone: c.Zone, host: hostOf(c.LoginServer)}
+		byZone[c.Zone] = &leaveTarget{zone: c.Zone, host: link.HostOf(c.LoginServer)}
 	}
 	out := make([]leaveTarget, 0, len(byZone))
 	for _, t := range byZone {
@@ -80,7 +75,7 @@ func localLeaveTargets() []leaveTarget {
 func leaveKey(arg string) string {
 	arg = strings.TrimSpace(arg)
 	if strings.Contains(arg, "://") {
-		return hostOf(arg)
+		return link.HostOf(arg)
 	}
 	arg = strings.ToLower(arg)
 	if i := strings.IndexAny(arg, "/#?"); i >= 0 {
@@ -128,11 +123,11 @@ func leaveCmd(args []string, o options) error {
 		if !strings.Contains(key, ".") {
 			return errorf("this computer isn't in a pen called %s (pens here: %s)", key, zoneList(local))
 		}
-		client, err := controlClient(o.controlCA)
+		client, err := penapi.ControlClient(o.controlCA)
 		if err != nil {
 			return err
 		}
-		n, err := fetchNetwork(client, key)
+		n, err := penapi.FetchNetwork(client, key)
 		if err != nil {
 			return errorf("this computer isn't in a pen called %s (pens here: %s)", key, zoneList(local))
 		}
@@ -162,17 +157,17 @@ func cleanupOrphanCanonicalBinary() {
 	if len(localLeaveTargets()) > 0 {
 		return
 	}
-	cfgBase := hogmanConfigBase()
+	cfgBase := state.ConfigBase()
 	removeNativeHost(cfgBase)
-	selfPath, _ := resolvedExePath()
-	canon := canonicalBinaryPath(cfgBase)
+	selfPath, _ := fsutil.ResolvedExePath()
+	canon := state.CanonicalBinaryPath(cfgBase)
 	nh := nativeHostBinaryPath(cfgBase)
 	if fi, err := os.Lstat(nh); err == nil {
-		if fi.Mode()&os.ModeSymlink != 0 || !sameFilePath(nh, selfPath) {
+		if fi.Mode()&os.ModeSymlink != 0 || !fsutil.SameFilePath(nh, selfPath) {
 			_ = os.Remove(nh)
 		}
 	}
-	if !sameFilePath(canon, selfPath) {
+	if !fsutil.SameFilePath(canon, selfPath) {
 		_ = os.Remove(canon)
 	}
 	_ = os.Remove(filepath.Join(cfgBase, "bin"))
@@ -257,7 +252,7 @@ var sweepStaleProxyFn = func() {
 	if runtime.GOOS != "darwin" {
 		return
 	}
-	if msg := clearSystemProxy(nil, loadInstalledPenConfigs(hogmanConfigBase())); msg != "" {
+	if msg := clearSystemProxy(nil, state.LoadInstalledPenConfigs(state.ConfigBase())); msg != "" {
 		note("%s", msg)
 	}
 }
@@ -342,18 +337,18 @@ func typedConfirm(zone, warning string) bool {
 
 // assessLeaveRisk asks the pen, as this computer, whether leaving would strand
 // the pen with no owner left.
-func assessLeaveRisk(cfg *agentConfig) leaveRisk {
+func assessLeaveRisk(cfg *state.AgentConfig) leaveRisk {
 	// Already removed from the pen (the agent proves it and the pen says log
 	// in again): nothing left to protect.
-	if state, d := verifyAgentEndpointDetail(stateDir(cfg.Zone), cfg); state == agentEndpointDown && d.verified && d.needsLogin {
+	if st, d := verifyAgentEndpointDetail(state.StateDir(cfg.Zone), cfg); st == agentEndpointDown && d.verified && d.needsLogin {
 		return leaveRiskNone
 	}
-	c, err := penClient(cfg)
+	c, err := penapi.PenClient(cfg)
 	if err != nil {
 		return leaveRiskUnknown
 	}
-	var me meView
-	if _, err := homeAPI(c, cfg.Zone, "GET", "/me", nil, &me); err != nil || me.Member.Handle == "" {
+	var me penapi.MeView
+	if _, err := penapi.HomeAPI(c, cfg.Zone, "GET", "/me", nil, &me); err != nil || me.Member.Handle == "" {
 		return leaveRiskUnknown
 	}
 	return leaveRiskFromMe(me)
@@ -361,7 +356,7 @@ func assessLeaveRisk(cfg *agentConfig) leaveRisk {
 
 // leaveRiskFromMe decides from /api/me whether leaving this device would leave
 // the pen without an owner. Fails closed on older registrars that omit is_owner.
-func leaveRiskFromMe(me meView) leaveRisk {
+func leaveRiskFromMe(me penapi.MeView) leaveRisk {
 	if me.IsOwner == nil {
 		return leaveRiskUnknown
 	}
@@ -406,12 +401,12 @@ func zoneList(ts []leaveTarget) string {
 func leaveOne(t leaveTarget) error {
 	step("Leaving %s", t.zone)
 	// Shares go first, while they can still give their names back.
-	for _, dir := range allShares(t.zone) {
-		if c, err := loadShare(dir); err == nil {
+	for _, dir := range state.AllShares(t.zone) {
+		if c, err := state.LoadShare(dir); err == nil {
 			if err := removeShareForLeave(dir, c); err != nil {
-				note("could not take down %s: %v", c.url(), firstLine(err.Error()))
+				note("could not take down %s: %v", c.URL(), link.FirstLine(err.Error()))
 			} else {
-				note("took down %s", c.url())
+				note("took down %s", c.URL())
 			}
 		}
 	}
@@ -426,7 +421,7 @@ func leaveOne(t leaveTarget) error {
 		if st, err := ts.Status(); err == nil && st.OnNetwork(t.zone) {
 			if err := ts.Logout(); err != nil {
 				_ = ts.Down()
-				note("disconnected, but could not log out (%v)", firstLine(err.Error()))
+				note("disconnected, but could not log out (%v)", link.FirstLine(err.Error()))
 				note("the network still lists this device until an admin removes it")
 			} else {
 				note("logged out of %s", t.zone)
@@ -439,7 +434,7 @@ func leaveOne(t leaveTarget) error {
 			}
 		}
 	}
-	_ = os.Remove(filepath.Join(sharesBase(), t.zone)) // only if now empty
+	_ = os.Remove(filepath.Join(state.SharesBase(), t.zone)) // only if now empty
 	say("\n✓ Left %s.", t.zone)
 	return nil
 }
@@ -476,8 +471,8 @@ func uninstallCmd(args []string, o options) error {
 		return err // a pen failed to leave: remove nothing
 	}
 	step("Removing Hogman's settings from this computer")
-	removeNativeHost(hogmanConfigBase())
-	for _, dir := range []string{hogmanConfigBase(), sharesBase()} {
+	removeNativeHost(state.ConfigBase())
+	for _, dir := range []string{state.ConfigBase(), state.SharesBase()} {
 		if err := os.RemoveAll(dir); err != nil {
 			note("could not remove %s: %v", dir, err)
 		} else {
@@ -517,7 +512,7 @@ func leftoverHogmanBinaries(self, home string) []string {
 			return
 		}
 		for _, prev := range out {
-			if sameFilePath(prev, p) {
+			if fsutil.SameFilePath(prev, p) {
 				return
 			}
 		}
@@ -527,7 +522,7 @@ func leftoverHogmanBinaries(self, home string) []string {
 		addUnique(self)
 	}
 	if home != "" {
-		candidates := []string{cliBinaryName(), legacyBinaryName(runtime.GOOS)}
+		candidates := []string{cliBinaryName(), state.LegacyBinaryName(runtime.GOOS)}
 		for _, name := range candidates {
 			p := filepath.Join(home, name)
 			if fi, err := os.Stat(p); err == nil && !fi.IsDir() {

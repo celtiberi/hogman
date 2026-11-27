@@ -24,6 +24,9 @@ import (
 	"github.com/mholt/acmez/v3"
 	"github.com/mholt/acmez/v3/acme"
 	"go.uber.org/zap"
+
+	"hogman/join/internal/fsutil"
+	"hogman/join/internal/penapi"
 )
 
 const defaultFallbackACMECA = "https://dv.acme-v02.api.pki.goog/directory"
@@ -65,9 +68,9 @@ func (p *meshTXTProvider) AppendRecords(ctx context.Context, zone string, recs [
 			return nil, err
 		}
 		reqBody := txtReq{Name: name, Value: rr.Data}
-		if _, err := homeAPICtx(ctx, p.hc, p.penZone, http.MethodPost, "/acme/txt", reqBody, nil); err != nil {
+		if _, err := penapi.HomeAPICtx(ctx, p.hc, p.penZone, http.MethodPost, "/acme/txt", reqBody, nil); err != nil {
 			for _, prev := range created {
-				_, _ = homeAPICtx(context.Background(), p.hc, p.penZone, http.MethodDelete, "/acme/txt", prev, nil)
+				_, _ = penapi.HomeAPICtx(context.Background(), p.hc, p.penZone, http.MethodDelete, "/acme/txt", prev, nil)
 			}
 			return nil, err
 		}
@@ -93,9 +96,9 @@ func (p *meshTXTProvider) DeleteRecords(ctx context.Context, zone string, recs [
 			return out, err
 		}
 		reqBody := txtReq{Name: name, Value: rr.Data}
-		_, err = homeAPICtx(ctx, p.hc, p.penZone, http.MethodDelete, "/acme/txt", reqBody, nil)
+		_, err = penapi.HomeAPICtx(ctx, p.hc, p.penZone, http.MethodDelete, "/acme/txt", reqBody, nil)
 		if err != nil {
-			var me *homeAPIError
+			var me *penapi.HomeAPIError
 			if !errors.As(err, &me) || me.Status != http.StatusNotFound {
 				return out, err
 			}
@@ -357,7 +360,7 @@ func newShareCertManager(cfg shareACMEConfig) (*shareCertManager, error) {
 	logger := zap.NewNop()
 	slogger := cfg.Logger
 	if slogger == nil {
-		slogger = daemonLogger()
+		slogger = fsutil.DaemonLogger()
 	}
 	m := &shareCertManager{
 		cfg:     cfg,
@@ -447,7 +450,7 @@ func (m *shareCertManager) newManagedConfig(caURL string, withEAB bool) (*certma
 				HMACB64URL string `json:"hmac_b64url"`
 				Contact    string `json:"contact"`
 			}
-			if _, err := homeAPICtx(ctx, m.cfg.HTTPClient, m.cfg.Zone, http.MethodPost, "/acme/eab", nil, &pair); err != nil {
+			if _, err := penapi.HomeAPICtx(ctx, m.cfg.HTTPClient, m.cfg.Zone, http.MethodPost, "/acme/eab", nil, &pair); err != nil {
 				return acct, err
 			}
 			if strings.TrimSpace(pair.KID) == "" || strings.TrimSpace(pair.HMACB64URL) == "" {
@@ -572,7 +575,7 @@ func (m *shareCertManager) saveRetryState(st acmeRetryState) {
 		m.log().Warn("acme: could not encode retry state", "host", m.host, "err", err)
 		return
 	}
-	if err := writeFileAtomic(m.retryStatePath(), data, 0o600); err != nil {
+	if err := fsutil.WriteFileAtomic(m.retryStatePath(), data, 0o600); err != nil {
 		m.log().Warn("acme: could not save retry state", "host", m.host, "err", err)
 	}
 }
@@ -667,7 +670,7 @@ func (m *shareCertManager) Ensure(ctx context.Context) error {
 }
 
 func isRegistrarCapErr(err error) bool {
-	var me *homeAPIError
+	var me *penapi.HomeAPIError
 	return errors.As(err, &me) && me.Status == http.StatusTooManyRequests
 }
 
@@ -678,7 +681,7 @@ func isNonRetryableShareCertErr(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return true
 	}
-	var me *homeAPIError
+	var me *penapi.HomeAPIError
 	if errors.As(err, &me) {
 		switch me.Status {
 		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,

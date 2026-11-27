@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"hogman/join/internal/state"
 )
 
 func TestAgentRunningStaleBinaryAndMigrateRestartsStaleAgent(t *testing.T) {
@@ -19,17 +21,17 @@ func TestAgentRunningStaleBinaryAndMigrateRestartsStaleAgent(t *testing.T) {
 	const oldHex = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 	makeAgent := func(zone, reportedHex string) penTarget {
-		dir := stateDir(zone)
+		dir := state.StateDir(zone)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		tok, err := writeStatusToken(dir)
+		tok, err := state.WriteStatusToken(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if nonce := strings.TrimSpace(r.Header.Get("X-Hogman-Challenge")); nonce != "" {
-				w.Header().Set("X-Hogman-Proof", computeStatusProof(tok, nonce, zone))
+				w.Header().Set("X-Hogman-Proof", state.ComputeStatusProof(tok, nonce, zone))
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(agentStatus{
@@ -39,7 +41,7 @@ func TestAgentRunningStaleBinaryAndMigrateRestartsStaleAgent(t *testing.T) {
 			})
 		}))
 		t.Cleanup(srv.Close)
-		cfg := &agentConfig{
+		cfg := &state.AgentConfig{
 			Zone:        zone,
 			LoginServer: "https://gate.example.test",
 			ProxyAddr:   strings.TrimPrefix(srv.URL, "http://"),
@@ -70,13 +72,13 @@ func TestAgentRunningStaleBinaryAndMigrateRestartsStaleAgent(t *testing.T) {
 	pDead := penTarget{
 		zone: "aaa-deleted.pens.example.test",
 		dir:  filepath.Join(home, "aaa-deleted"),
-		cfg:  &agentConfig{Zone: "aaa-deleted.pens.example.test", LoginServer: deadSrv.URL},
+		cfg:  &state.AgentConfig{Zone: "aaa-deleted.pens.example.test", LoginServer: deadSrv.URL},
 	}
 
 	var restarted []string
 	var startedNoWait []string
 	ops := penUpdateOps{
-		isRunning: func(string, *agentConfig) bool { return true },
+		isRunning: func(string, *state.AgentConfig) bool { return true },
 		runningStale: func(p *penTarget) bool {
 			return p.zone == pDead.zone || agentRunningStaleBinary(p, wantHex)
 		},
@@ -87,7 +89,7 @@ func TestAgentRunningStaleBinaryAndMigrateRestartsStaleAgent(t *testing.T) {
 			}
 			return nil
 		},
-		stop: func(string, *agentConfig) {},
+		stop: func(string, *state.AgentConfig) {},
 		startNoWait: func(p *penTarget, _ string, _ bool, _ options) error {
 			startedNoWait = append(startedNoWait, p.zone)
 			return nil

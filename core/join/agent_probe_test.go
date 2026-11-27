@@ -9,17 +9,19 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"hogman/join/internal/state"
 )
 
 func TestProbeAgentStatusMatrix(t *testing.T) {
 	const zone = "bobo.pens.example.com"
 
-	newServer := func(t *testing.T, handler http.HandlerFunc) (*agentConfig, string) {
+	newServer := func(t *testing.T, handler http.HandlerFunc) (*state.AgentConfig, string) {
 		t.Helper()
 		srv := httptest.NewServer(handler)
 		t.Cleanup(srv.Close)
 		dir := t.TempDir()
-		cfg := &agentConfig{
+		cfg := &state.AgentConfig{
 			Zone:      zone,
 			ProxyAddr: strings.TrimPrefix(srv.URL, "http://"),
 		}
@@ -30,11 +32,11 @@ func TestProbeAgentStatusMatrix(t *testing.T) {
 		var tok string
 		cfg, dir := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 			nonce := r.Header.Get("X-Hogman-Challenge")
-			w.Header().Set("X-Hogman-Proof", computeStatusProof(tok, nonce, zone))
+			w.Header().Set("X-Hogman-Proof", state.ComputeStatusProof(tok, nonce, zone))
 			_ = json.NewEncoder(w).Encode(agentStatus{Zone: zone, Up: true, IPs: []string{"100.64.0.2"}})
 		})
 		var err error
-		tok, err = writeStatusToken(dir)
+		tok, err = state.WriteStatusToken(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -48,21 +50,21 @@ func TestProbeAgentStatusMatrix(t *testing.T) {
 		var tok string
 		cfg, dir := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 			nonce := r.Header.Get("X-Hogman-Challenge")
-			w.Header().Set("X-Hogman-Proof", computeStatusProof(tok, nonce, zone))
+			w.Header().Set("X-Hogman-Proof", state.ComputeStatusProof(tok, nonce, zone))
 			_ = json.NewEncoder(w).Encode(agentStatus{Zone: zone, Up: false, NeedsLogin: true, Error: "device removed"})
 		})
 		var err error
-		tok, err = writeStatusToken(dir)
+		tok, err = state.WriteStatusToken(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		state, detail := verifyAgentEndpointDetail(dir, cfg)
-		if state != agentEndpointDown || !detail.verified || !detail.needsLogin || detail.reason != "device removed" {
-			t.Fatalf("got (%v, %+v), want verified down NeedsLogin", state, detail)
+		st, detail := verifyAgentEndpointDetail(dir, cfg)
+		if st != agentEndpointDown || !detail.verified || !detail.needsLogin || detail.reason != "device removed" {
+			t.Fatalf("got (%v, %+v), want verified down NeedsLogin", st, detail)
 		}
-		st, err := agentStateInDir(dir, cfg)
-		if err != nil || !st.NeedsLogin {
-			t.Fatalf("agentStateInDir = (%+v, %v), want NeedsLogin without error", st, err)
+		status, err := agentStateInDir(dir, cfg)
+		if err != nil || !status.NeedsLogin {
+			t.Fatalf("agentStateInDir = (%+v, %v), want NeedsLogin without error", status, err)
 		}
 	})
 
@@ -70,9 +72,9 @@ func TestProbeAgentStatusMatrix(t *testing.T) {
 		cfg, dir := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(agentStatus{Zone: zone, Up: true})
 		})
-		state, detail := verifyAgentEndpointDetail(dir, cfg)
-		if state != agentEndpointSquatted || detail.verified {
-			t.Fatalf("got (%v, %+v), want squatted unverified", state, detail)
+		st, detail := verifyAgentEndpointDetail(dir, cfg)
+		if st != agentEndpointSquatted || detail.verified {
+			t.Fatalf("got (%v, %+v), want squatted unverified", st, detail)
 		}
 		if _, err := agentStateInDir(dir, cfg); err == nil {
 			t.Fatal("agentStateInDir succeeded without status.token")
@@ -84,7 +86,7 @@ func TestProbeAgentStatusMatrix(t *testing.T) {
 			w.Header().Set("X-Hogman-Proof", "deadbeef")
 			_ = json.NewEncoder(w).Encode(agentStatus{Zone: zone, Up: true})
 		})
-		if _, err := writeStatusToken(dir); err != nil {
+		if _, err := state.WriteStatusToken(dir); err != nil {
 			t.Fatal(err)
 		}
 		res := probeAgentStatus(dir, cfg, time.Second)
@@ -97,11 +99,11 @@ func TestProbeAgentStatusMatrix(t *testing.T) {
 		var tok string
 		cfg, dir := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 			nonce := r.Header.Get("X-Hogman-Challenge")
-			w.Header().Set("X-Hogman-Proof", computeStatusProof(tok, nonce, "other.pens.example.com"))
+			w.Header().Set("X-Hogman-Proof", state.ComputeStatusProof(tok, nonce, "other.pens.example.com"))
 			_ = json.NewEncoder(w).Encode(agentStatus{Zone: "other.pens.example.com", Up: true})
 		})
 		var err error
-		tok, err = writeStatusToken(dir)
+		tok, err = state.WriteStatusToken(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -115,7 +117,7 @@ func TestProbeAgentStatusMatrix(t *testing.T) {
 		cfg, dir := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/other", http.StatusFound)
 		})
-		_ = os.WriteFile(filepath.Join(dir, statusTokenFilename), []byte("abc"), 0o600)
+		_ = os.WriteFile(filepath.Join(dir, state.StatusTokenFilename), []byte("abc"), 0o600)
 		res := probeAgentStatus(dir, cfg, time.Second)
 		if res.state != agentEndpointSquatted || res.verified {
 			t.Fatalf("got %+v, want squatted on redirect", res)

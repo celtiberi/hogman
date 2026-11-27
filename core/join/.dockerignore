@@ -1,0 +1,10 @@
+# Allowlist build context for Dockerfile, Dockerfile.sidecar, Dockerfile.e2e,
+# and Dockerfile.sidecar.prebuilt (COPY hogman.bin ...) so stray local files
+# are never baked into image layers.
+*
+!go.mod
+!go.sum
+!*.go
+!internal/
+!internal/**/*.go
+!hogman.bin

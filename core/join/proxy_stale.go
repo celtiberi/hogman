@@ -7,11 +7,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
-)
 
-// pacMarker starts every rules file a Hogman agent serves, whatever its
-// number of pens (renderPAC's headers all begin this way).
-const pacMarker = "// Hogman: "
+	"hogman/join/internal/state"
+)
 
 // staleHogmanPAC reports whether an automatic-proxy address is Hogman's own,
 // left behind by a pen this computer no longer runs: http://127.0.0.1:<port>/proxy.pac
@@ -37,7 +35,7 @@ var staleHogmanPAC = func(raw string) bool {
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return resp.StatusCode == http.StatusOK && strings.HasPrefix(string(b), pacMarker)
+	return resp.StatusCode == http.StatusOK && strings.HasPrefix(string(b), state.PACMarker)
 }
 
 // hogmanShapedPACURL: the exact shape Hogman writes, http://127.0.0.1:<port>/proxy.pac
@@ -51,7 +49,7 @@ func hogmanShapedPACURL(raw string) bool {
 		return false
 	}
 	p, err := strconv.Atoi(u.Port())
-	if err != nil || p < hogmanPortMin || p > hogmanPortMax { // only ports Hogman hands out
+	if err != nil || p < state.PortMin || p > state.PortMax { // only ports Hogman hands out
 		return false
 	}
 	for k := range u.Query() {
