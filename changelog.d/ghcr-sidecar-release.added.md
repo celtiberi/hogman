@@ -1,1 +1,0 @@
-- Added multi-arch (`linux/amd64`, `linux/arm64`) `ghcr.io/celtiberi/hogman-sidecar` container publishing and Sigstore build provenance attestation to `.github/workflows/release.yml` using `core/join/Dockerfile.sidecar.prebuilt` and the release's verified Linux binaries, recording the immutable manifest digest in GitHub Release notes.

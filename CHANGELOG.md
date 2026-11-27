@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2026.11.27-eacf7d9] - 2026-11-27
+
+### Security
+- `hogman` now verifies that any PID read from `agent.pid` or `share.pid` still belongs to our `hogman` binary (via `QueryFullProcessImageName` on Windows, `/proc/<pid>/exe` on Linux, and `KERN_PROCARGS2` on macOS) and matches its recorded OS process start time before stopping it or reporting it alive, preventing stale PID files after a reboot from killing unrelated user applications.
+
+### Added
+- Added `--zone-suffix <suffix>` to `browser-ext/build.py` to generate unpacked-only staging/test browser extensions (`Hogman (staging)`) scoped strictly to a custom pens suffix without widening the store build's permissions or default native-host allowlist.
+- Added multi-arch (`linux/amd64`, `linux/arm64`) `ghcr.io/celtiberi/hogman-sidecar` container publishing and Sigstore build provenance attestation to `.github/workflows/release.yml` using `core/join/Dockerfile.sidecar.prebuilt` and the release's verified Linux binaries, recording the immutable manifest digest in GitHub Release notes.
+- Added native Windows client hardening and CI (`windows-latest`): `hogman` now spawns detached Windows agents/shares with `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` (no lingering console window), checks process liveness via `WaitForSingleObject` / `GetExitCodeProcess`, enforces exclusive share directory locking via `LockFileEx`, registers unprivileged per-user login autostart under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` via `golang.org/x/sys/windows/registry` (also used for browser Native Messaging manifests without spawning `reg.exe`), and runs the full `core/join` Go test suite on `windows-latest` in `.github/workflows/e2e.yml`.
+- Add Windows PowerShell installer (`/start.ps1`), activate the `/join` Windows tab with verified PowerShell join/share commands and extension/proxy instructions, and ship `windows/arm64` client binaries alongside `windows/amd64`.
+
+### Changed
+- Upgraded the Chrome Web Store install link on the `/join` page into a styled button displaying the same-origin Hogman icon (`hogman-icon.webp`) for both Personal and Work themes.
+- `hogman share --identity-headers` now prints a one-time warning when targeting a loopback TCP port (where local processes or DNS-rebinding pages can reach the port directly) and steers automatic sign-in setups to sealed mode (`network_mode: none` + `unix://` bridge), documented in `docs/sealed-server.md#automatic-sign-in-safely` and `README.md`.
+
 ## [2026.11.27-7278419] - 2026-11-27
 
 ### Added
