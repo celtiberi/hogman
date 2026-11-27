@@ -322,8 +322,9 @@ func TestServeListWatchCachingAndPrivacy(t *testing.T) {
 
 func TestRenderManifestsAndSavedIDs(t *testing.T) {
 	t.Parallel()
+	absHost := filepath.Join(t.TempDir(), "hogman-native-host")
 	id := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	cb, err := RenderChromeManifest("/abs/path/hogman-native-host", []string{id})
+	cb, err := RenderChromeManifest(absHost, []string{id})
 	if err != nil {
 		t.Fatalf("RenderChromeManifest: %v", err)
 	}
@@ -333,12 +334,12 @@ func TestRenderManifestsAndSavedIDs(t *testing.T) {
 	if _, err := RenderChromeManifest("relative/path", []string{id}); err == nil {
 		t.Fatal("expected relative path rejection")
 	}
-	if _, err := RenderChromeManifest("/abs/path", []string{"not-valid-id"}); err == nil {
+	if _, err := RenderChromeManifest(absHost, []string{"not-valid-id"}); err == nil {
 		t.Fatal("expected invalid chrome ID rejection")
 	}
 
 	ffID := "hogman-browser@hogman.network"
-	fb, err := RenderFirefoxManifest("/abs/path/hogman-native-host", []string{ffID})
+	fb, err := RenderFirefoxManifest(absHost, []string{ffID})
 	if err != nil {
 		t.Fatalf("RenderFirefoxManifest: %v", err)
 	}

@@ -48,10 +48,7 @@ func ProcessAlive(pid int) bool {
 	}
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, uint32(pid))
 	if err != nil {
-		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return true
-		}
-		return false
+		return errors.Is(err, windows.ERROR_ACCESS_DENIED)
 	}
 	defer windows.CloseHandle(h)
 	if event, err := windows.WaitForSingleObject(h, 0); err == nil {

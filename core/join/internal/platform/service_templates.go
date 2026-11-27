@@ -3,7 +3,7 @@ package platform
 import (
 	"encoding/xml"
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 
 	"hogman/join/internal/state"
@@ -31,10 +31,10 @@ func WindowsShareRunValueName(c *state.ShareConfig) string { return "Hogman.shar
 
 func winQuoteArg(s string) (string, error) {
 	if s == "" {
-		return "", fmt.Errorf("empty Windows command argument")
+		return "", fmt.Errorf("empty windows command argument")
 	}
 	if strings.ContainsAny(s, "\r\n\x00\"") {
-		return "", fmt.Errorf("Windows command argument contains disallowed control or quote characters")
+		return "", fmt.Errorf("windows command argument contains disallowed control or quote characters")
 	}
 	// Per Win32 CommandLineToArgvW rules, backslashes immediately preceding the
 	// closing double-quote must be doubled so the closing quote is not escaped.
@@ -73,7 +73,7 @@ func RenderLaunchPlist(label, bin, dir, logPath string) (string, error) {
 
 // RenderShareLaunchPlist builds a macOS LaunchAgent plist for a managed share.
 func RenderShareLaunchPlist(c *state.ShareConfig, bin, dir string) (string, error) {
-	return renderLaunchPlistArgs(ShareLaunchLabel(c), bin, []string{"__share-run", dir}, filepath.Join(dir, "share.log"), true)
+	return renderLaunchPlistArgs(ShareLaunchLabel(c), bin, []string{"__share-run", dir}, path.Join(dir, "share.log"), true)
 }
 
 // renderLaunchPlistArgs builds a macOS LaunchAgent plist with XML-escaped strings.
