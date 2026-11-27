@@ -633,7 +633,7 @@ func TestQueryBinaryVersionLineAndPensOutsidePlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := queryBinaryVersionLine(multi); got != "hogman 2026.11.26 darwin/arm64; extra trailing line" {
-		t.Fatalf("queryBinaryVersionLine(multi) = %q, want all lines joined by '; '", got)
+		t.Fatalf("queryBinaryVersionLine(multi) = %q, want all lines joined", got)
 	}
 	if got := queryBinaryVersion(multi); got != "2026.11.26" {
 		t.Fatalf("queryBinaryVersion(multi) = %q, want 2026.11.26", got)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,15 +10,29 @@ import (
 	"strings"
 	"testing"
 
+	"hogman/join/internal/agent"
 	"hogman/join/internal/penapi"
+	"hogman/join/internal/platform"
 	"hogman/join/internal/state"
 )
 
+func listenInHogmanRange(t *testing.T) (net.Listener, int) {
+	t.Helper()
+	for port := state.PortMin; port <= state.PortMax; port++ {
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err == nil {
+			return ln, port
+		}
+	}
+	t.Fatalf("no free port in %d-%d", state.PortMin, state.PortMax)
+	return nil, 0
+}
+
 func TestAuditAgentBlocksBrowserProbesAndSetsSecurityHeaders(t *testing.T) {
 	cfg := &state.AgentConfig{Zone: "farm.pens.hogman.network", ProxyAddr: "127.0.0.1:22111"}
-	a := newAgent(cfg, nil)
-	a.up = true
-	a.statusToken = "abcdef0123456789abcdef0123456789"
+	a := agent.New(cfg, nil)
+	a.SetReady(true, nil)
+	a.StatusToken = "abcdef0123456789abcdef0123456789"
 
 	for _, path := range []string{"/proxy.pac", "/status"} {
 		// Clean local request succeeds with hardening headers.
@@ -91,24 +106,24 @@ func TestAuditDuplicateAgentBindFailurePreservesRunningToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := newAgent(cfg, nil)
-	a.up = true
-	a.statusToken = tok
+	a := agent.New(cfg, nil)
+	a.SetReady(true, nil)
+	a.StatusToken = tok
 	srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: a}}
 	srv.Start()
 	defer srv.Close()
 
-	// A second runAgent pointing at the same directory fails to bind ProxyAddr
+	// A second agent.Run pointing at the same directory fails to bind ProxyAddr
 	// and MUST NOT overwrite or delete the running agent's status.token.
-	if err := runAgent(dir); err == nil {
-		t.Fatal("duplicate runAgent unexpectedly succeeded on an occupied port")
+	if err := agent.Run(dir); err == nil {
+		t.Fatal("duplicate agent.Run unexpectedly succeeded on an occupied port")
 	}
-	st, err := agentStateInDir(dir, cfg)
+	st, err := agent.StateInDir(dir, cfg)
 	if err != nil || !st.Up {
 		t.Fatalf("running agent failed verification after duplicate bind failure: st=%+v err=%v", st, err)
 	}
-	if ep := verifyAgentEndpoint(dir, cfg); ep != agentEndpointUp {
-		t.Fatalf("verifyAgentEndpoint after duplicate bind failure = %v, want agentEndpointUp", ep)
+	if ep := agent.VerifyEndpoint(dir, cfg); ep != agent.EndpointUp {
+		t.Fatalf("agent.VerifyEndpoint after duplicate bind failure = %v, want agent.EndpointUp", ep)
 	}
 }
 
@@ -116,15 +131,15 @@ func TestAuditAgentStateVerifiesStatusTokenHMAC(t *testing.T) {
 	dir := t.TempDir()
 	ln, port := listenInHogmanRange(t)
 	cfg := &state.AgentConfig{Zone: "verify.pens.hogman.network", ProxyAddr: fmt.Sprintf("127.0.0.1:%d", port)}
-	a := newAgent(cfg, nil)
-	a.up = true
+	a := agent.New(cfg, nil)
+	a.SetReady(true, nil)
 	srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: a}}
 	srv.Start()
 	defer srv.Close()
 
-	// Without status.token on disk, agentStateInDir must fail closed.
-	if _, err := agentStateInDir(dir, cfg); err == nil {
-		t.Fatal("agentStateInDir succeeded with missing status.token")
+	// Without status.token on disk, agent.StateInDir must fail closed.
+	if _, err := agent.StateInDir(dir, cfg); err == nil {
+		t.Fatal("agent.StateInDir succeeded with missing status.token")
 	}
 
 	tok, err := state.WriteStatusToken(dir)
@@ -136,15 +151,15 @@ func TestAuditAgentStateVerifiesStatusTokenHMAC(t *testing.T) {
 		t.Fatalf("status.token mode = %v (err=%v), want 0600", info.Mode(), err)
 	}
 	// Wrong token in agent -> rejected.
-	a.statusToken = "wrong-token"
-	if _, err := agentStateInDir(dir, cfg); err == nil {
-		t.Fatal("agentStateInDir accepted mismatched HMAC proof")
+	a.StatusToken = "wrong-token"
+	if _, err := agent.StateInDir(dir, cfg); err == nil {
+		t.Fatal("agent.StateInDir accepted mismatched HMAC proof")
 	}
 	// Matching token -> accepted.
-	a.statusToken = tok
-	st, err := agentStateInDir(dir, cfg)
+	a.StatusToken = tok
+	st, err := agent.StateInDir(dir, cfg)
 	if err != nil || !st.Up || st.Zone != cfg.Zone {
-		t.Fatalf("agentStateInDir valid token = (%+v, %v), want up", st, err)
+		t.Fatalf("agent.StateInDir valid token = (%+v, %v), want up", st, err)
 	}
 }
 
@@ -214,15 +229,15 @@ func TestAuditControlClientBlocksCrossHostRedirect(t *testing.T) {
 }
 
 func TestAuditSystemdQuoteEscapesPercentAndNewlines(t *testing.T) {
-	got := systemdQuote("/tmp/foo%h/$HOME/bar\nExecStart=/evil\r")
-	if strings.ContainsAny(got, "\r\n") {
-		t.Fatalf("systemdQuote left newline: %q", got)
+	unit := platform.RenderSystemdUnit("farm.pens.hogman.network", "/tmp/foo%h/$HOME/bar\nExecStart=/evil\r", "/tmp/dir")
+	if strings.Contains(unit, "\nExecStart=/evil") {
+		t.Fatalf("RenderSystemdUnit allowed injected ExecStart line:\n%s", unit)
 	}
-	if !strings.Contains(got, "%%h") {
-		t.Fatalf("systemdQuote did not escape %%: %q", got)
+	if !strings.Contains(unit, "%%h") {
+		t.Fatalf("RenderSystemdUnit did not escape %%:\n%s", unit)
 	}
-	if !strings.Contains(got, "$$HOME") {
-		t.Fatalf("systemdQuote did not escape $: %q", got)
+	if !strings.Contains(unit, "$$HOME") {
+		t.Fatalf("RenderSystemdUnit did not escape $:\n%s", unit)
 	}
 }
 

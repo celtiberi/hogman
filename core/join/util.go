@@ -2,17 +2,13 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 
 	"golang.org/x/term"
 )
-
-var verbose bool
 
 func say(f string, a ...any)  { fmt.Printf(f+"\n", a...) }
 func step(f string, a ...any) { fmt.Fprintf(os.Stderr, "\n• "+f+"\n", a...) }
@@ -44,46 +40,4 @@ func ask(prompt string) string {
 func confirm(prompt string) bool {
 	a := strings.ToLower(ask(prompt + " [y/N] "))
 	return a == "y" || a == "yes"
-}
-
-// redactCommandArgs hides secret flag values (such as Tailscale --authkey) before
-// logging a command line under --verbose.
-func redactCommandArgs(args []string) []string {
-	out := make([]string, len(args))
-	redactNext := false
-	for i, a := range args {
-		if redactNext {
-			out[i] = "[redacted]"
-			redactNext = false
-			continue
-		}
-		lower := strings.ToLower(a)
-		if lower == "--authkey" || lower == "-authkey" {
-			out[i] = a
-			redactNext = true
-			continue
-		}
-		if eq := strings.IndexByte(lower, '='); eq > 0 {
-			flag := lower[:eq]
-			if flag == "--authkey" || flag == "-authkey" {
-				out[i] = a[:eq+1] + "[redacted]"
-				continue
-			}
-		}
-		out[i] = a
-	}
-	return out
-}
-
-// run executes a command unprivileged, returning combined output. Hogman never
-// invokes sudo or prompts for the computer's administrator password (D-41).
-func run(name string, args ...string) (string, error) {
-	if verbose {
-		note("$ %s %s", name, strings.Join(redactCommandArgs(args), " "))
-	}
-	cmd := exec.Command(name, args...)
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	err := cmd.Run()
-	return strings.TrimSpace(out.String()), err
 }

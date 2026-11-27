@@ -12,8 +12,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"hogman/join/internal/agent"
 	"hogman/join/internal/bridge"
 	"hogman/join/internal/link"
+	"hogman/join/internal/platform"
 )
 
 func init() {
@@ -125,8 +127,8 @@ func defaultCLIHandlers() cliHandlers {
 		shareList:    shareList,
 		shareStop:    shareStop,
 		bridge:       bridge.RunCommand,
-		agent:        runAgent,
-		agentLogout:  agentLogout,
+		agent:        agent.Run,
+		agentLogout:  agent.Logout,
 		shareRun:     runShareProcess,
 	}
 }
@@ -164,6 +166,7 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 	var (
 		o             options
 		showVersion   bool
+		verboseFlag   bool
 		goneTailscale bool
 	)
 
@@ -196,6 +199,7 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 		SilenceErrors: true,
 		Args:          cobra.ArbitraryArgs,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			platform.SetVerbose(verboseFlag)
 			return checkRemovedFlags()
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -233,7 +237,7 @@ func newRootCmd(h cliHandlers) *cobra.Command {
 	// Harmless global flags accepted across subcommands (preserves test harnesses
 	// and scripts that prefix --no-open, --verbose, --yes, or --control-ca).
 	pf := root.PersistentFlags()
-	pf.BoolVar(&verbose, "verbose", false, "show the commands being run")
+	pf.BoolVar(&verboseFlag, "verbose", false, "show the commands being run")
 	pf.BoolVar(&o.noOpen, "no-open", false, "don't open the portal in a browser at the end")
 	pf.BoolVar(&o.yes, "yes", false, "answer prompts automatically where supported")
 	pf.StringVar(&o.controlCA, "control-ca", "", "extra certificate to trust for the public control server (test networks only)")

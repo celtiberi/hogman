@@ -7,6 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"hogman/join/internal/agent"
+	"hogman/join/internal/nativehost"
+	"hogman/join/internal/platform"
 	"hogman/join/internal/state"
 )
 
@@ -44,21 +47,21 @@ type statusOutputJSON struct {
 	CorruptPenConfigs []string              `json:"corrupt_pen_configs"`
 }
 
-func penStateLabel(p nativePenEntry) string {
+func penStateLabel(p nativehost.PenEntry) string {
 	switch {
 	case p.Squatted:
 		return "port squatted by another process"
 	case p.Up:
 		return "up"
-	case p.statusReason != "":
-		return "down (" + p.statusReason + ")"
+	case p.StatusReason() != "":
+		return "down (" + p.StatusReason() + ")"
 	default:
 		return "down"
 	}
 }
 
 func buildStatusOutput(base, sharesDir string) statusOutputJSON {
-	pens, configs := collectNativePens(base)
+	pens, configs := nativehost.CollectPens(base)
 	outPens := make([]statusPenJSON, 0, len(pens))
 	for _, p := range pens {
 		outPens = append(outPens, statusPenJSON{
@@ -70,8 +73,8 @@ func buildStatusOutput(base, sharesDir string) statusOutputJSON {
 			State:    penStateLabel(p),
 		})
 	}
-	sys := detectSystemProxyState(configs)
-	hostPath := nativeHostBinaryPath(base)
+	sys := platform.DetectSystemProxyState(configs)
+	hostPath := nativehost.BinaryPath(base)
 	_, hostErr := os.Stat(hostPath)
 	bad := state.CorruptPenConfigs(base)
 	if bad == nil {
@@ -84,7 +87,7 @@ func buildStatusOutput(base, sharesDir string) statusOutputJSON {
 		Shares:   collectShareListItems(state.AllSharesIn(sharesDir, "")),
 		NativeHost: statusNativeHostJSON{
 			Installed: hostErr == nil,
-			Active:    hostErr == nil && extensionRecentlySeen(base, 7*24*time.Hour),
+			Active:    hostErr == nil && nativehost.ExtensionRecentlySeen(base, 7*24*time.Hour),
 			Path:      hostPath,
 		},
 		SystemProxy: statusSystemProxyJSON{
@@ -104,7 +107,7 @@ func statusCmd(o options) error {
 	if o.jsonOut {
 		return writeJSON(os.Stdout, buildStatusOutput(base, state.SharesBase()))
 	}
-	pens, configs := collectNativePens(base)
+	pens, configs := nativehost.CollectPens(base)
 	if len(pens) == 0 {
 		say("No pens installed on this computer.")
 		if shares := state.AllShares(""); len(shares) > 0 {
@@ -124,14 +127,14 @@ func statusCmd(o options) error {
 		say("\n! Unreadable or invalid pen settings in %s: %s", base, strings.Join(bad, ", "))
 	}
 
-	sys := detectSystemProxyState(configs)
-	_, hostErr := os.Stat(nativeHostBinaryPath(base))
-	if line := extensionHostLine(hostErr == nil, extensionRecentlySeen(base, 7*24*time.Hour), sys.VPNOverride); line != "" {
+	sys := platform.DetectSystemProxyState(configs)
+	_, hostErr := os.Stat(nativehost.BinaryPath(base))
+	if line := extensionHostLine(hostErr == nil, nativehost.ExtensionRecentlySeen(base, 7*24*time.Hour), sys.VPNOverride); line != "" {
 		say("\n%s", line)
 	}
 	if sys.StalePAC != "" {
 		say("\n! A proxy setting left by a pen this computer no longer runs is still on: %s", sys.StalePAC)
-		if host := pickPACHost(configs); host != nil {
+		if host := agent.PickPACHost(configs); host != nil {
 			say("  Update \"Automatic proxy configuration\" in System Settings → Network → Wi-Fi (or Ethernet) → Details… → Proxies to: %s", host.PACURL())
 		} else {
 			say("  Turn off \"Automatic proxy configuration\" in System Settings → Network → Wi-Fi (or Ethernet) → Details… → Proxies.")
@@ -139,7 +142,7 @@ func statusCmd(o options) error {
 	}
 	if sys.VPNOverride {
 		say("\n! VPN override detected (%s): macOS system PAC is hidden while this VPN is connected.", sys.VPNInterface)
-		if !extensionRecentlySeen(base, 7*24*time.Hour) {
+		if !nativehost.ExtensionRecentlySeen(base, 7*24*time.Hour) {
 			say("  To browse pen sites with your VPN on, use the Hogman browser extension (Chrome, Brave, Edge, or Firefox) or pause the VPN (Safari requires pausing the VPN).")
 		}
 	}
@@ -147,12 +150,46 @@ func statusCmd(o options) error {
 		say("\n! Non-Hogman system proxy active: %s", sys.OSProxyDetail)
 	}
 	if len(sys.MissingProxyServices) > 0 {
-		if host := pickPACHost(configs); host != nil {
-			svcList := formatServiceList(sys.MissingProxyServices)
+		if host := agent.PickPACHost(configs); host != nil {
+			svcList := platform.FormatServiceList(sys.MissingProxyServices)
 			say("\n! Automatic proxy configuration is not set on: %s", svcList)
 			say("  In System Settings → Network → %s → Details… → Proxies, turn on \"Automatic proxy configuration\" and paste:", svcList)
 			say("    %s", host.PACURL())
 		}
+	}
+	return nil
+}
+
+func browserSetupCmd(args []string, o options) error {
+	var extraChrome, extraFirefox []string
+	if o.chromeID != "" {
+		id := strings.ToLower(strings.TrimSpace(o.chromeID))
+		if !nativehost.ValidChromeExtID(id) {
+			return errorf("invalid --chrome-id %q (expected 32 lowercase letters a-p)", o.chromeID)
+		}
+		extraChrome = append(extraChrome, id)
+	}
+	if o.firefoxID != "" {
+		id := strings.TrimSpace(o.firefoxID)
+		if !nativehost.ValidFirefoxExtID(id) {
+			return errorf("invalid --firefox-id %q (expected Gecko add-on ID like name@domain or {uuid})", o.firefoxID)
+		}
+		extraFirefox = append(extraFirefox, id)
+	}
+	if len(args) > 0 {
+		return errorf("usage: hogman browser-setup [--chrome-id <32-char-id>] [--firefox-id <gecko-id>]")
+	}
+	base := state.ConfigBase()
+	hostPath, n, err := nativehost.Install(base, ensureCanonicalBinary, extraChrome, extraFirefox, note)
+	if err != nil {
+		return errorf("could not set up browser extension host: %v", err)
+	}
+	say("✓ Installed Hogman browser native host at %s (%d browser manifest(s) written).", hostPath, n)
+	saved := nativehost.LoadSavedBrowserIDs(base)
+	if len(nativehost.DefaultChromeExtIDs) == 0 && len(saved.ChromeIDs) == 0 && len(nativehost.DefaultFirefoxExtIDs) == 0 && len(saved.FirefoxIDs) == 0 {
+		note("No published extension IDs are built in yet. For developer testing, pass --chrome-id <32-char-id> and/or --firefox-id <gecko-id>.")
+	} else if n == 0 {
+		note("No supported browser profile directories were found yet; re-run hogman browser-setup after launching your browser.")
 	}
 	return nil
 }

@@ -14,7 +14,9 @@ import (
 	"strings"
 
 	"hogman/join/internal/link"
+	"hogman/join/internal/nativehost"
 	"hogman/join/internal/penapi"
+	"hogman/join/internal/platform"
 )
 
 var version = "dev"
@@ -45,8 +47,8 @@ type options struct {
 }
 
 func main() {
-	if isNativeHostBinary(os.Args[0]) {
-		runNativeHostMain()
+	if nativehost.IsBinary(os.Args[0]) {
+		nativehost.RunMain()
 		return
 	}
 	os.Exit(runCLI(os.Args[1:], defaultCLIHandlers()))
@@ -78,7 +80,7 @@ func join(raw string, o options) error {
 	// Tailscale app was removed: it put every program on the pen and gave the
 	// pen's control server this computer's DNS, a choice that should never be
 	// one member's to make for the whole pen.
-	if ts, err := findTailscale(); err == nil {
+	if ts, err := platform.FindTailscale(); err == nil {
 		if st, err := ts.Status(); err == nil && st.BackendState == "Running" && st.OnNetwork(n.Zone) {
 			return errorf("this computer is on %s through its Tailscale app, which Hogman no longer uses.\n"+
 				"  First get a fresh one-time link: open %s, press Add a device, copy the link.\n"+

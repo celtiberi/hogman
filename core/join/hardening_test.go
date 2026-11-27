@@ -23,15 +23,17 @@ import (
 
 	"github.com/caddyserver/certmagic"
 
+	"hogman/join/internal/agent"
 	"hogman/join/internal/fsutil"
 	"hogman/join/internal/link"
 	"hogman/join/internal/penapi"
+	"hogman/join/internal/platform"
 	"hogman/join/internal/state"
 )
 
 func TestRedTeamLoopbackStatusTransportNoLeak(t *testing.T) {
-	if !loopbackStatusTransport.DisableKeepAlives {
-		t.Fatal("loopbackStatusTransport must disable keep-alives to avoid loopback FD leaks")
+	if !agent.LoopbackStatusTransport.DisableKeepAlives {
+		t.Fatal("agent.LoopbackStatusTransport must disable keep-alives to avoid loopback FD leaks")
 	}
 	dir := t.TempDir()
 	zone := "bobo.pens.example.com"
@@ -44,7 +46,7 @@ func TestRedTeamLoopbackStatusTransportNoLeak(t *testing.T) {
 		if nonce != "" {
 			w.Header().Set("X-Hogman-Proof", state.ComputeStatusProof(token, nonce, zone))
 		}
-		_ = json.NewEncoder(w).Encode(agentStatus{Zone: zone, Up: true, IPs: []string{"100.64.0.1"}})
+		_ = json.NewEncoder(w).Encode(agent.Status{Zone: zone, Up: true, IPs: []string{"100.64.0.1"}})
 	}))
 	defer srv.Close()
 
@@ -52,18 +54,18 @@ func TestRedTeamLoopbackStatusTransportNoLeak(t *testing.T) {
 	cfg := &state.AgentConfig{Zone: zone, ProxyAddr: u.Host}
 
 	// Warm up runtime goroutines, then run 40 status probes.
-	if _, err := agentStateInDir(dir, cfg); err != nil {
+	if _, err := agent.StateInDir(dir, cfg); err != nil {
 		t.Fatal(err)
 	}
 	baseG := runtime.NumGoroutine()
 	for i := 0; i < 40; i++ {
-		st, err := agentStateInDir(dir, cfg)
+		st, err := agent.StateInDir(dir, cfg)
 		if err != nil || !st.Up {
-			t.Fatalf("iter %d: agentStateInDir = (%v, %v)", i, st, err)
+			t.Fatalf("iter %d: agent.StateInDir = (%v, %v)", i, st, err)
 		}
-		state, detail := verifyAgentEndpointDetail(dir, cfg)
-		if state != agentEndpointUp || !detail.verified {
-			t.Fatalf("iter %d: verifyAgentEndpointDetail = (%v, %+v)", i, state, detail)
+		epState, detail := agent.VerifyEndpointDetail(dir, cfg)
+		if epState != agent.EndpointUp || !detail.Verified {
+			t.Fatalf("iter %d: agent.VerifyEndpointDetail = (%v, %+v)", i, epState, detail)
 		}
 	}
 	// Give short-lived closed sockets a moment to settle.
@@ -293,8 +295,8 @@ func TestRedTeamJoinRollbackAndReenrollPreserveInvite(t *testing.T) {
 	if shouldRollbackFreshJoin(true, dir, errorf("cancelled before the pen connection came up")) {
 		t.Fatal("shouldRollbackFreshJoin must not wipe an unspent authkey on Ctrl-C or timeout")
 	}
-	if !shouldRollbackFreshJoin(true, dir, &agentJoinError{msg: "rejected"}) {
-		t.Fatal("shouldRollbackFreshJoin should roll back on definite agentJoinError")
+	if !shouldRollbackFreshJoin(true, dir, &agent.JoinError{Msg: "rejected"}) {
+		t.Fatal("shouldRollbackFreshJoin should roll back on definite agent.JoinError")
 	}
 	// Once authkey is spent (removed), the device has enrolled on the server:
 	// follow-up check failures must NOT log it out and leave an orphan device (I-21).
@@ -514,8 +516,8 @@ func TestRedTeamACMEFallbackUsedWhenPrimaryExpired(t *testing.T) {
 }
 
 func TestRedTeamNonPositivePIDGuards(t *testing.T) {
-	if processAlive(0) || processAlive(-1) {
-		t.Fatal("processAlive must return false for pid <= 0")
+	if platform.ProcessAlive(0) || platform.ProcessAlive(-1) {
+		t.Fatal("platform.ProcessAlive must return false for pid <= 0")
 	}
 	dir := t.TempDir()
 	for _, raw := range []string{"0", "-1", "not-a-pid"} {
@@ -529,9 +531,9 @@ func TestRedTeamNonPositivePIDGuards(t *testing.T) {
 		if err := os.WriteFile(pidPath, []byte(raw), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		stopDetached(dir)
+		platform.StopDetached(dir)
 		if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
-			t.Fatalf("stopDetached(%q) did not remove stale agent.pid", raw)
+			t.Fatalf("platform.StopDetached(%q) did not remove stale agent.pid", raw)
 		}
 	}
 }
@@ -545,7 +547,7 @@ func TestRedTeamTailscaleStatusNonJSONNoPanic(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\necho 'tailscaled is not running'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ts := &Tailscale{bin: script}
+	ts := platform.NewTailscale(script)
 	if _, err := ts.Status(); err == nil {
 		t.Fatal("expected error for non-JSON tailscale status output")
 	}
@@ -617,8 +619,8 @@ func TestRedTeamShareTargetReservedNamesAndSystemdSingleLine(t *testing.T) {
 		}
 	}
 
-	got := systemdSingleLine("line1\nExecStart=/bin/evil\rline2")
-	if strings.ContainsAny(got, "\r\n") {
-		t.Fatalf("systemdSingleLine retained newline: %q", got)
+	unit := platform.RenderSystemdUnit("line1\nExecStart=/bin/evil\rline2", "/bin/hogman", "/tmp/dir")
+	if strings.Contains(unit, "\nExecStart=/bin/evil") || !strings.Contains(unit, "Description=Hogman pen connection (line1ExecStart=/bin/evilline2)\n") {
+		t.Fatalf("RenderSystemdUnit retained injected newline:\n%s", unit)
 	}
 }

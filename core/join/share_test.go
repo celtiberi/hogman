@@ -17,6 +17,7 @@ import (
 
 	"hogman/join/internal/mesh"
 	"hogman/join/internal/penapi"
+	"hogman/join/internal/platform"
 	"hogman/join/internal/state"
 )
 
@@ -139,16 +140,16 @@ func TestShareNoteResolutionAndFlags(t *testing.T) {
 
 func TestShareServiceTemplates(t *testing.T) {
 	c := &state.ShareConfig{Name: "blog", Zone: "bobo.hogman"}
-	if got, pen := shareLaunchLabel(c), launchLabel(c.Zone); got == pen || got != "network.hogman.share.blog.bobo.hogman" {
-		t.Fatalf("shareLaunchLabel = %q, pen label = %q", got, pen)
+	if got, pen := platform.ShareLaunchLabel(c), platform.LaunchLabel(c.Zone); got == pen || got != "network.hogman.share.blog.bobo.hogman" {
+		t.Fatalf("ShareLaunchLabel = %q, pen label = %q", got, pen)
 	}
-	if got, pen := shareUnitName(c), unitName(c.Zone); got == pen || got != "hogman-share-blog.bobo.hogman.service" {
-		t.Fatalf("shareUnitName = %q, pen unit = %q", got, pen)
+	if got, pen := platform.ShareUnitName(c), platform.UnitName(c.Zone); got == pen || got != "hogman-share-blog.bobo.hogman.service" {
+		t.Fatalf("ShareUnitName = %q, pen unit = %q", got, pen)
 	}
 
 	bin := "/tmp/a & b/hogman"
 	dir := "/tmp/dir <1> & 2/shares/blog"
-	plist, err := renderShareLaunchPlist(c, bin, dir)
+	plist, err := platform.RenderShareLaunchPlist(c, bin, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +175,7 @@ func TestShareServiceTemplates(t *testing.T) {
 		t.Fatalf("share plist must not keep restarting on exit 0:\n%s", plist)
 	}
 
-	unit := renderShareSystemdUnit(c, `/tmp/bin "q"`, `/tmp/dir "x"\y`)
+	unit := platform.RenderShareSystemdUnit(c, `/tmp/bin "q"`, `/tmp/dir "x"\y`)
 	for _, want := range []string{
 		"Description=Hogman share (blog.bobo.hogman)",
 		"StartLimitIntervalSec=300",
