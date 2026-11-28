@@ -1,1 +1,1 @@
-Update `/join` and `home.<pen>` mobile onboarding copy so phones opening invite or device links get a direct Copy-and-Paste flow for the Hogman mobile app (without custom `hogman://` schemes), share links remain desktop-only, and portal QR instructions note single-use 1-hour expiry.
+- Update `/join` and `home.<pen>` mobile onboarding copy so phones opening invite or device links get a direct Copy-and-Paste flow for the Hogman mobile app (without custom `hogman://` schemes), share links remain desktop-only, and portal QR instructions note single-use 1-hour expiry.
