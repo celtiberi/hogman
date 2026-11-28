@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Hogman</string>
+    <string name="vpn_channel_name">Hogman Tunnel</string>
+    <string name="vpn_channel_description">Shows when your device is connected to a private Hogman pen.</string>
+</resources>

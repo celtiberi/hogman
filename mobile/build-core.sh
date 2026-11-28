@@ -71,6 +71,12 @@ build_android() {
   )
   rm -f "$out_dir/jniLibs/x86_64/libhogman.h"
 
+  if [ "${HOGMAN_MOBILE_DEBUG:-0}" = "1" ]; then
+    echo "debug" >"$out_dir/build-mode.txt"
+  else
+    echo "release" >"$out_dir/build-mode.txt"
+  fi
+
   ls -lh "$out_dir/jniLibs/arm64-v8a/libhogman.so" "$out_dir/jniLibs/x86_64/libhogman.so"
 }
 
