@@ -44,60 +44,81 @@ type StartOptions struct {
 type EnsureBinaryFunc func(configBase string) (string, error)
 
 func Start(name, what, rawLink string, o StartOptions, u *ui.UI, ensureBin EnsureBinaryFunc) error {
-	name = strings.ToLower(strings.TrimSpace(name))
-	if o.PrivateName {
-		if name != "" {
-			return link.Errorf("cannot pass both a share name (%q) and --private-name", name)
-		}
-	} else {
-		if !NameRE.MatchString(name) || name == "list" || name == "stop" {
-			return link.Errorf("%q can't be a name: use lowercase letters, digits and dashes, like blog or my-notes", name)
-		}
-		if IsReservedName(name) {
-			return link.Errorf("%q is reserved by the network and can't be used as a share name", name)
-		}
-	}
-	target, folder, err := ParseTarget(what)
+	cleanName, target, folder, explicitDir, err := validateStartArgs(name, what, o)
 	if err != nil {
 		return err
 	}
+	cfg, key, err := resolveStartConfig(cleanName, what, rawLink, target, folder, explicitDir, o, u)
+	if err != nil {
+		return err
+	}
+	dir, fresh, err := prepareShareDir(cfg, key, rawLink, explicitDir, o, u)
+	if err != nil {
+		return err
+	}
+	if cfg.IdentityHeaders {
+		if warn := FormatIdentityTCPWarning(cfg.Target); warn != "" {
+			u.Say("\n⚠ Warning: %s", warn)
+		}
+	}
+	return runStartMode(dir, what, explicitDir, cfg, fresh, o, u, ensureBin)
+}
 
+func validateStartArgs(name, what string, o StartOptions) (cleanName, target string, folder bool, explicitDir string, err error) {
+	cleanName = strings.ToLower(strings.TrimSpace(name))
+	if o.PrivateName {
+		if cleanName != "" {
+			return "", "", false, "", link.Errorf("cannot pass both a share name (%q) and --private-name", cleanName)
+		}
+	} else {
+		if !NameRE.MatchString(cleanName) || cleanName == "list" || cleanName == "stop" {
+			return "", "", false, "", link.Errorf("%q can't be a name: use lowercase letters, digits and dashes, like blog or my-notes", cleanName)
+		}
+		if IsReservedName(cleanName) {
+			return "", "", false, "", link.Errorf("%q is reserved by the network and can't be used as a share name", cleanName)
+		}
+	}
+	target, folder, err = ParseTarget(what)
+	if err != nil {
+		return "", "", false, "", err
+	}
 	if o.Background && o.Foreground {
-		return link.Errorf("cannot combine --background and --foreground")
+		return "", "", false, "", link.Errorf("cannot combine --background and --foreground")
 	}
 	if o.EnrollOnly && o.Background {
-		return link.Errorf("--enroll-only cannot be combined with --background")
+		return "", "", false, "", link.Errorf("--enroll-only cannot be combined with --background")
 	}
-	if strings.TrimSpace(o.StateDir) != "" && o.Background {
-		return link.Errorf("--background is not supported with --state-dir; run the container in the foreground")
+	explicitDir = strings.TrimSpace(o.StateDir)
+	if explicitDir != "" && o.Background {
+		return "", "", false, "", link.Errorf("--background is not supported with --state-dir; run the container in the foreground")
 	}
-
-	var cfg *state.ShareConfig
-	key := ""
-	explicitDir := strings.TrimSpace(o.StateDir)
 	if explicitDir != "" {
 		absDir, err := filepath.Abs(explicitDir)
 		if err != nil {
-			return err
+			return "", "", false, "", err
 		}
 		explicitDir = absDir
 	}
+	return cleanName, target, folder, explicitDir, nil
+}
 
+func resolveStartConfig(name, what, rawLink, target string, folder bool, explicitDir string, o StartOptions, u *ui.UI) (*state.ShareConfig, string, error) {
+	var cfg *state.ShareConfig
+	key := ""
 	if explicitDir != "" && rawLink == "" {
 		if old, err := state.LoadShare(explicitDir); err == nil {
 			if o.PrivateName {
 				if !old.PrivateName {
-					return link.Errorf("state directory %s is enrolled for share %q (not --private-name)", explicitDir, old.Name)
+					return nil, "", link.Errorf("state directory %s is enrolled for share %q (not --private-name)", explicitDir, old.Name)
 				}
 				if old.Name == "" {
-					return link.Errorf("state directory %s has no assigned private name yet; re-enroll with a share link", explicitDir)
+					return nil, "", link.Errorf("state directory %s has no assigned private name yet; re-enroll with a share link", explicitDir)
 				}
 				cfgCopy := *old
 				cfg = &cfgCopy
-				name = old.Name
 			} else {
 				if old.Name != "" && old.Name != name {
-					return link.Errorf("state directory %s is enrolled for share %q, not %q", explicitDir, old.Name, name)
+					return nil, "", link.Errorf("state directory %s is enrolled for share %q, not %q", explicitDir, old.Name, name)
 				}
 				cfgCopy := *old
 				cfg = &cfgCopy
@@ -106,19 +127,20 @@ func Start(name, what, rawLink string, o StartOptions, u *ui.UI, ensureBin Ensur
 		}
 	}
 	if cfg == nil {
+		var err error
 		switch {
 		case rawLink != "":
 			cfg, key, err = fromLink(name, rawLink, o, u)
 		case explicitDir != "":
 			if o.PrivateName {
-				return link.Errorf("state directory %s is not enrolled yet. Enroll once with a share link:\n  hogman share --private-name %s --state-dir %s --enroll-only --link-stdin", explicitDir, what, explicitDir)
+				return nil, "", link.Errorf("state directory %s is not enrolled yet. Enroll once with a share link:\n  hogman share --private-name %s --state-dir %s --enroll-only --link-stdin", explicitDir, what, explicitDir)
 			}
-			return link.Errorf("state directory %s is not enrolled yet. Enroll once with a share link:\n  hogman share %s %s --state-dir %s --enroll-only --link-stdin", explicitDir, name, what, explicitDir)
+			return nil, "", link.Errorf("state directory %s is not enrolled yet. Enroll once with a share link:\n  hogman share %s %s --state-dir %s --enroll-only --link-stdin", explicitDir, name, what, explicitDir)
 		default:
 			cfg, key, err = fromMembership(name, o, u)
 		}
 		if err != nil {
-			return err
+			return nil, "", err
 		}
 	}
 	if o.PrivateName {
@@ -128,133 +150,141 @@ func Start(name, what, rawLink string, o StartOptions, u *ui.UI, ensureBin Ensur
 	cfg.IdentityHeaders = o.IdentityHeaders
 	if cfg.IdentityHeaders {
 		if err := ValidateIdentityTarget(cfg.Target, cfg.Folder); err != nil {
-			return err
+			return nil, "", err
 		}
 	}
 	if uh := strings.TrimSpace(o.UpstreamHost); uh != "" {
 		if strings.ContainsAny(uh, " \t\r\n/\\@") || strings.Contains(uh, "://") {
-			return link.Errorf("invalid --upstream-host %q (expected a bare hostname or host:port)", uh)
+			return nil, "", link.Errorf("invalid --upstream-host %q (expected a bare hostname or host:port)", uh)
 		}
 		cfg.UpstreamHost = uh
 	}
+	return cfg, key, nil
+}
 
-	var dir string
+func prepareShareDir(cfg *state.ShareConfig, key, rawLink, explicitDir string, o StartOptions, u *ui.UI) (string, bool, error) {
+	if o.PrivateName && explicitDir == "" && cfg.Name == "" {
+		dir, err := bootstrapPrivateShareDir(cfg, key, o, u)
+		return dir, true, err
+	}
+	return prepareNamedShareDir(cfg, key, rawLink, explicitDir, o, u)
+}
+
+func bootstrapPrivateShareDir(cfg *state.ShareConfig, key string, o StartOptions, u *ui.UI) (string, error) {
+	if key == "" {
+		return "", link.Errorf("no way to add a device for this share")
+	}
+	randHex, err := state.GenerateHexToken(4)
+	if err != nil {
+		return "", err
+	}
+	cfg.BootstrapHostname = "site-" + randHex
+	cfg.Note = ResolveNote(nil, o.Note, o.NoteSet)
+	stagingDir := filepath.Join(state.SharesBase(), cfg.Zone, ".pending-"+randHex)
+	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+		return "", err
+	}
+	if err := cfg.Save(stagingDir); err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(stagingDir, "authkey"), []byte(key), 0o600); err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return "", err
+	}
+	if cfg.Note == "" {
+		u.Say("%s", FormatPrivateNoteTip())
+	}
+	u.Step("Claiming a private hostname on %s", cfg.Zone)
+	bctx, bstop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err = ClaimPrivateNameBootstrap(bctx, stagingDir, cfg)
+	bstop()
+	if err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return "", err
+	}
+	dir := state.ShareDir(cfg.Zone, cfg.Name)
+	if err := os.Rename(stagingDir, dir); err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return "", link.Errorf("could not move private share state into %s: %v", dir, err)
+	}
+	u.Say("%s", FormatPrivateNameNotice(cfg.FQDN()))
+	return dir, nil
+}
+
+func prepareNamedShareDir(cfg *state.ShareConfig, key, rawLink, explicitDir string, o StartOptions, u *ui.UI) (string, bool, error) {
+	dir := state.ShareDir(cfg.Zone, cfg.Name)
+	if explicitDir != "" {
+		dir = explicitDir
+	}
 	var prev *state.ShareConfig
 	fresh := true
-	if o.PrivateName && explicitDir == "" && cfg.Name == "" {
-		if key == "" {
-			return link.Errorf("no way to add a device for this share")
-		}
-		randHex, err := state.GenerateHexToken(4)
-		if err != nil {
-			return err
-		}
-		cfg.BootstrapHostname = "site-" + randHex
-		cfg.Note = ResolveNote(nil, o.Note, o.NoteSet)
-		stagingDir := filepath.Join(state.SharesBase(), cfg.Zone, ".pending-"+randHex)
-		if err := os.MkdirAll(stagingDir, 0o700); err != nil {
-			return err
-		}
-		if err := cfg.Save(stagingDir); err != nil {
-			_ = os.RemoveAll(stagingDir)
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(stagingDir, "authkey"), []byte(key), 0o600); err != nil {
-			_ = os.RemoveAll(stagingDir)
-			return err
-		}
-		if cfg.Note == "" {
-			u.Say("%s", FormatPrivateNoteTip())
-		}
-		u.Step("Claiming a private hostname on %s", cfg.Zone)
-		bctx, bstop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		err = ClaimPrivateNameBootstrap(bctx, stagingDir, cfg)
-		bstop()
-		if err != nil {
-			_ = os.RemoveAll(stagingDir)
-			return err
-		}
-		dir = state.ShareDir(cfg.Zone, cfg.Name)
-		if err := os.Rename(stagingDir, dir); err != nil {
-			_ = os.RemoveAll(stagingDir)
-			return link.Errorf("could not move private share state into %s: %v", dir, err)
-		}
-		u.Say("%s", FormatPrivateNameNotice(cfg.FQDN()))
-	} else {
-		dir = state.ShareDir(cfg.Zone, cfg.Name)
-		if explicitDir != "" {
-			dir = explicitDir
-		}
-		if old, err := state.LoadShare(dir); err == nil {
-			if explicitDir == "" {
-				if pid := PID(dir); pid != 0 && pid != os.Getpid() {
-					return link.Errorf("%s is already being shared from this computer (process %d). Stop it first: hogman share stop %s", old.URL(), pid, cfg.Name)
-				}
+	if old, err := state.LoadShare(dir); err == nil {
+		if explicitDir == "" {
+			if pid := PID(dir); pid != 0 && pid != os.Getpid() {
+				return "", false, link.Errorf("%s is already being shared from this computer (process %d). Stop it first: hogman share stop %s", old.URL(), pid, cfg.Name)
 			}
-			_, hasUnspentKey := os.Stat(filepath.Join(dir, "authkey"))
-			st := state.ReadShareStatus(dir)
-			staleDevice := hasUnspentKey == nil || (st.State == "error" && st.Error != "" && IsPermanentNodeError(false, "", errors.New(st.Error)))
-			if rawLink != "" && key != "" && staleDevice {
-				// Replacing a dead/aborted share with a fresh server link.
-				_ = os.RemoveAll(filepath.Join(dir, "node"))
-				_ = os.RemoveAll(filepath.Join(dir, "acme"))
-				_ = os.RemoveAll(filepath.Join(dir, "authkey"))
-				if cfg.ControlCA == "" {
-					cfg.ControlCA = old.ControlCA
-				}
-				prev = old
-			} else {
-				key = "" // this share already has its device; reuse it
+		}
+		_, hasUnspentKey := os.Stat(filepath.Join(dir, "authkey"))
+		st := state.ReadShareStatus(dir)
+		staleDevice := hasUnspentKey == nil || (st.State == "error" && st.Error != "" && IsPermanentNodeError(false, "", errors.New(st.Error)))
+		if rawLink != "" && key != "" && staleDevice {
+			// Replacing a dead/aborted share with a fresh server link.
+			_ = os.RemoveAll(filepath.Join(dir, "node"))
+			_ = os.RemoveAll(filepath.Join(dir, "acme"))
+			_ = os.RemoveAll(filepath.Join(dir, "authkey"))
+			if cfg.ControlCA == "" {
 				cfg.ControlCA = old.ControlCA
-				if cfg.UpstreamHost == "" {
-					cfg.UpstreamHost = old.UpstreamHost
-				}
-				if old.PrivateName {
-					cfg.PrivateName = true
-				}
-				if cfg.Name == "" {
-					cfg.Name = old.Name
-				}
-				prev = old
-				fresh = false
 			}
-		} else if key == "" {
-			return link.Errorf("no way to add a device for this share")
-		}
-		if cfg.PrivateName && cfg.Name == "" && cfg.BootstrapHostname == "" {
-			if randHex, rerr := state.GenerateHexToken(4); rerr == nil {
-				cfg.BootstrapHostname = "site-" + randHex
+			prev = old
+		} else {
+			key = "" // this share already has its device; reuse it
+			cfg.ControlCA = old.ControlCA
+			if cfg.UpstreamHost == "" {
+				cfg.UpstreamHost = old.UpstreamHost
 			}
-		}
-		cfg.Note = ResolveNote(prev, o.Note, o.NoteSet)
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
-		}
-		if err := cfg.Save(dir); err != nil {
-			return err
-		}
-		if key != "" {
-			if err := os.WriteFile(filepath.Join(dir, "authkey"), []byte(key), 0o600); err != nil {
-				return err
+			if old.PrivateName {
+				cfg.PrivateName = true
 			}
-		}
-		if fresh {
-			if cfg.PrivateName {
-				if cfg.Note == "" {
-					u.Say("%s", FormatPrivateNoteTip())
-				}
-			} else {
-				u.Say("%s", FormatCertLogNotice(cfg.FQDN()))
+			if cfg.Name == "" {
+				cfg.Name = old.Name
 			}
+			prev = old
+			fresh = false
+		}
+	} else if key == "" {
+		return "", false, link.Errorf("no way to add a device for this share")
+	}
+	if cfg.PrivateName && cfg.Name == "" && cfg.BootstrapHostname == "" {
+		if randHex, rerr := state.GenerateHexToken(4); rerr == nil {
+			cfg.BootstrapHostname = "site-" + randHex
 		}
 	}
-
-	if cfg.IdentityHeaders {
-		if warn := FormatIdentityTCPWarning(cfg.Target); warn != "" {
-			u.Say("\n⚠ Warning: %s", warn)
+	cfg.Note = ResolveNote(prev, o.Note, o.NoteSet)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", false, err
+	}
+	if err := cfg.Save(dir); err != nil {
+		return "", false, err
+	}
+	if key != "" {
+		if err := os.WriteFile(filepath.Join(dir, "authkey"), []byte(key), 0o600); err != nil {
+			return "", false, err
 		}
 	}
+	if fresh {
+		if cfg.PrivateName {
+			if cfg.Note == "" {
+				u.Say("%s", FormatPrivateNoteTip())
+			}
+		} else {
+			u.Say("%s", FormatCertLogNotice(cfg.FQDN()))
+		}
+	}
+	return dir, fresh, nil
+}
 
+func runStartMode(dir, what, explicitDir string, cfg *state.ShareConfig, fresh bool, o StartOptions, u *ui.UI, ensureBin EnsureBinaryFunc) error {
 	if o.EnrollOnly {
 		if cfg.Name != "" {
 			u.Step("Enrolling %s into %s", cfg.URL(), dir)

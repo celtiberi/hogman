@@ -1,0 +1,1 @@
+- `core/join`, `core/registrar`: broke up the four longest orchestration functions (`updater.Run`, `share.Start`, `registrar` `cli`, and `runDoctor`) into focused stage/domain helpers without changing behavior.
