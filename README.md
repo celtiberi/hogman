@@ -210,8 +210,7 @@ Read the step-by-step map in [How Hogman works](docs/how-hogman-works.md) or the
   region or store group to limit blast radius. Until `pens.hogman.network` is listed on the Public
   Suffix List, use a separate browser profile for any pen you don't fully trust so cookies stay
   isolated.
-- **Current limits & platforms:** macOS and Linux work today; Windows (AMD64 and ARM64) has a
-  PowerShell installer and automated Windows CI coverage (interactive browser QA in progress); a
+- **Current limits & platforms:** macOS, Linux, and Windows (AMD64 and ARM64) work today; a
   mobile app is in the works. Free and Personal pens default to **25 members** and **50 devices**,
   and Work pens default to **500 members** and **500 devices** (configurable by the host operator;
   active owners retain personal-device lockout headroom so a full pen cannot lock out an owner).

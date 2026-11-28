@@ -459,7 +459,11 @@ func (r *leaveRunner) uninstallCmd(args []string, o options) error {
 	nativehost.Remove(cfgBase)
 	for _, dir := range []string{cfgBase, shBase} {
 		if err := os.RemoveAll(dir); err != nil {
-			r.ui.Note("could not remove %s: %v", dir, err)
+			if runtime.GOOS == "windows" {
+				r.ui.Note("could not remove %s (close any open browser or Explorer windows using it, then delete it): %v", dir, err)
+			} else {
+				r.ui.Note("could not remove %s: %v", dir, err)
+			}
 		} else {
 			r.ui.Note("removed %s", dir)
 		}
@@ -507,7 +511,7 @@ func leftoverHogmanBinaries(self, home string) []string {
 		addUnique(self)
 	}
 	if home != "" {
-		candidates := []string{cliBinaryName(), state.LegacyBinaryName(runtime.GOOS)}
+		candidates := []string{state.InstalledBinaryName(runtime.GOOS), state.LegacyBinaryName(runtime.GOOS)}
 		for _, name := range candidates {
 			p := filepath.Join(home, name)
 			if fi, err := os.Stat(p); err == nil && !fi.IsDir() {

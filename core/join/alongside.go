@@ -302,11 +302,9 @@ func joinAlongside(l *link.Link, n *penapi.NetworkInfo, client *http.Client, o o
 			u.Say("    Install the Hogman browser extension (%s; Firefox: coming soon), then open its popup and turn on %s to browse pen sites with your VPN on (Safari requires pausing the VPN).", platform.ChromeExtensionStoreURL, n.Zone)
 		}
 	}
-	u.Say("  Other tools reach the pen through its proxy, %s", cfg.ProxyURL())
-	u.Say("    curl / most CLIs:  https_proxy=%s curl https://<site>.%s", cfg.ProxyURL(), n.Zone)
-	u.Say("    git:               git config --global http.https://%s/.proxy %s   (per site)", "<site>."+n.Zone, cfg.ProxyURL())
-	u.Say("  The pen carries HTTPS only.")
-	u.Say("  To leave: hogman leave '<this link>'")
+	for _, line := range joinSummaryCLILines(runtime.GOOS, cfg.ProxyURL(), n.Zone) {
+		u.Say("%s", line)
+	}
 	if !o.noOpen {
 		shouldOpen := runtime.GOOS != "darwin" || proxyConfigured || nativehost.ExtensionRecentlySeen(state.ConfigBase(), 7*24*time.Hour)
 		if shouldOpen {
@@ -314,6 +312,26 @@ func joinAlongside(l *link.Link, n *penapi.NetworkInfo, client *http.Client, o o
 		}
 	}
 	return nil
+}
+
+func joinSummaryCLILines(goos, proxyURL, zone string) []string {
+	if goos == "windows" {
+		return []string{
+			fmt.Sprintf("  Other tools reach the pen through its proxy, %s", proxyURL),
+			fmt.Sprintf("    curl:              curl.exe --proxy %s https://<site>.%s", proxyURL, zone),
+			fmt.Sprintf("    PowerShell CLIs:   $env:HTTPS_PROXY=%q", proxyURL),
+			fmt.Sprintf("    git:               git config --global http.https://%s/.proxy %s   (per site)", "<site>."+zone, proxyURL),
+			"  The pen carries HTTPS only.",
+			`  To leave: ~\hogman.exe leave '<this link>'`,
+		}
+	}
+	return []string{
+		fmt.Sprintf("  Other tools reach the pen through its proxy, %s", proxyURL),
+		fmt.Sprintf("    curl / most CLIs:  https_proxy=%s curl https://<site>.%s", proxyURL, zone),
+		fmt.Sprintf("    git:               git config --global http.https://%s/.proxy %s   (per site)", "<site>."+zone, proxyURL),
+		"  The pen carries HTTPS only.",
+		"  To leave: hogman leave '<this link>'",
+	}
 }
 
 const maxPortalMeResponseBytes = 1 << 20

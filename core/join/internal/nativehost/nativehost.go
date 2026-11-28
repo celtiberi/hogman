@@ -520,8 +520,22 @@ func Install(configBase string, ensureCanonical func(string) (string, error), ex
 
 func Remove(configBase string) {
 	unregisterNativeManifests(configBase)
-	_ = os.Remove(BinaryPath(configBase))
+	hostPath := BinaryPath(configBase)
+	if err := os.Remove(hostPath); err != nil && !os.IsNotExist(err) {
+		stopRunningNativeHosts(hostPath)
+		removeFileWithRetry(hostPath)
+	}
 	_ = os.Remove(filepath.Join(configBase, state.ExtensionHeartbeatFile))
 	_ = os.Remove(filepath.Join(configBase, state.BrowserIDsFile))
 	_ = os.Remove(filepath.Join(configBase, "bin"))
+}
+
+func removeFileWithRetry(path string) {
+	for i := 0; i < 20; i++ {
+		err := os.Remove(path)
+		if err == nil || os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }

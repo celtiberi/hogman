@@ -1,0 +1,2 @@
+- `core/join`: stop verified running `hogman-native-host.exe` processes matching the target config directory during `hogman uninstall` on Windows (after unregistering browser Native Messaging keys) so `%APPDATA%\hogman` removes cleanly even while a browser is open, include `hogman.exe` in Windows leftover-binary cleanup hints, and print PowerShell-native proxy and command hints on Windows.
+- `README.md`: update platform support to list Windows (AMD64 and ARM64) alongside macOS and Linux following live Windows 11 ARM64 verification.
