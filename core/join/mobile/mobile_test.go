@@ -299,3 +299,88 @@ func TestSelfDeleteOverTunnelFailsClosedWithoutConfirmedRoutesOrTUN(t *testing.T
 		t.Fatalf("expected fail-closed error when TUN interface does not exist")
 	}
 }
+
+func TestComputeTunnelPlanEnforces10064CGNATRange(t *testing.T) {
+	infraKey := key.NewNode().Public()
+	serverKey := key.NewNode().Public()
+	infraTags := views.SliceOf([]string{"tag:infra"})
+	serverTags := views.SliceOf([]string{"tag:server"})
+
+	// 1. Public/LAN peer IPs and non-CGNAT configured DNS must never enter routes or allowed set.
+	st := &ipnstate.Status{
+		BackendState: "Running",
+		Self: &ipnstate.PeerStatus{
+			TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.12")},
+		},
+		Peer: map[key.NodePublic]*ipnstate.PeerStatus{
+			infraKey: {
+				Online: true,
+				Tags:   &infraTags,
+				TailscaleIPs: []netip.Addr{
+					netip.MustParseAddr("8.8.8.8"),
+					netip.MustParseAddr("100.64.0.1"),
+				},
+			},
+			serverKey: {
+				Online: true,
+				Tags:   &serverTags,
+				TailscaleIPs: []netip.Addr{
+					netip.MustParseAddr("1.1.1.1"),
+					netip.MustParseAddr("192.168.1.50"),
+					netip.MustParseAddr("100.127.255.254"),
+					netip.MustParseAddr("100.128.0.1"), // just outside 100.64.0.0/10
+				},
+			},
+		},
+	}
+
+	selfIP, penDNS, routes, allowed := ComputeTunnelPlan(st, "8.8.8.8")
+	if selfIP != netip.MustParseAddr("100.64.0.12") {
+		t.Fatalf("selfIP = %v, want 100.64.0.12", selfIP)
+	}
+	if penDNS.IsValid() {
+		t.Fatalf("non-CGNAT configuredDNS 8.8.8.8 must be rejected, got %v", penDNS)
+	}
+	wantRoutes := []string{
+		"100.64.0.1/32",
+		"100.100.100.100/32",
+		"100.127.255.254/32",
+	}
+	if !slices.Equal(routes, wantRoutes) {
+		t.Fatalf("routes = %v, want %v", routes, wantRoutes)
+	}
+	for _, bad := range []string{"8.8.8.8", "1.1.1.1", "192.168.1.50", "100.128.0.1"} {
+		if allowed[netip.MustParseAddr(bad)] {
+			t.Fatalf("non-CGNAT IP %s must not enter allowed DNS set", bad)
+		}
+	}
+
+	// 2. Non-CGNAT self IP must invalidate the entire tunnel plan.
+	stBadSelf := &ipnstate.Status{
+		BackendState: "Running",
+		Self: &ipnstate.PeerStatus{
+			TailscaleIPs: []netip.Addr{netip.MustParseAddr("8.8.4.4")},
+		},
+		Peer: st.Peer,
+	}
+	badSelf, badDNS, badRoutes, badAllowed := ComputeTunnelPlan(stBadSelf, "100.64.0.1")
+	if badSelf.IsValid() || badDNS.IsValid() || len(badRoutes) != 0 || len(badAllowed) != 0 {
+		t.Fatalf("expected empty plan for non-CGNAT self IP, got self=%v dns=%v routes=%v allowed=%v",
+			badSelf, badDNS, badRoutes, badAllowed)
+	}
+}
+
+func TestLoadPenMetaCanonicalizesPortalFromZone(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"zone":"bobo.pens.example.com","login_server":"https://bobo.gate.example.com","portal":"market://details?id=evil","dns_server":"100.64.0.1","hostname":"phone"}`
+	if err := os.WriteFile(filepath.Join(dir, penMetaFilename), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := loadPenMeta(dir)
+	if err != nil {
+		t.Fatalf("loadPenMeta: %v", err)
+	}
+	if meta.Portal != "https://home.bobo.pens.example.com" {
+		t.Fatalf("Portal = %q, want canonical https://home.bobo.pens.example.com", meta.Portal)
+	}
+}

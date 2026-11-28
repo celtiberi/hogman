@@ -45,6 +45,19 @@ const (
 	iosGCPercent    = 25
 )
 
+// meshCGNATPrefix is RFC 6598 (100.64.0.0/10), the only IPv4 range permitted
+// for Hogman WireGuard self addresses, pen DNS, and per-peer /32 tunnel routes.
+var meshCGNATPrefix = netip.MustParsePrefix("100.64.0.0/10")
+
+func isMeshCGNATIPv4(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	return ip.Is4() && meshCGNATPrefix.Contains(ip)
+}
+
+func canonicalPortalURL(zone string) string {
+	return "https://home." + zone
+}
+
 // PenMeta stores one enrolled mobile pen's non-secret metadata on disk.
 // WireGuard/Tailscale keys and pending authkeys are stored encrypted separately.
 type PenMeta struct {
@@ -152,6 +165,12 @@ func loadPenMeta(dir string) (*PenMeta, error) {
 	var m PenMeta
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, err
+	}
+	if zone, err := validateZoneName(m.Zone); err == nil {
+		m.Zone = zone
+		// Always derive Portal from the validated zone rather than trusting a
+		// server-supplied URL (prevents tel:/market:/intent: scheme injection).
+		m.Portal = canonicalPortalURL(zone)
 	}
 	return &m, nil
 }
@@ -271,7 +290,7 @@ func (c *Controller) Join(dataDir string, stateKey []byte, rawLink, handle, devi
 	meta := &PenMeta{
 		Zone:        zone,
 		LoginServer: netInfo.LoginServer,
-		Portal:      netInfo.Portal,
+		Portal:      canonicalPortalURL(zone),
 		DNSServer:   netInfo.DNSServer,
 		Hostname:    hostname,
 		Handle:      resolvedHandle,
@@ -696,6 +715,8 @@ func (c *Controller) setStatusIfActive(at *activeTunnel, st TunnelStatus) {
 // ComputeTunnelPlan extracts the device's IPv4 mesh address, the verified
 // tag:infra DNS server IPv4, sorted exact /32 routes for active tag:infra and
 // tag:server peers plus SplitDNSStubIP, and the allowed-peer set for DNS filtering.
+// Every accepted address is strictly constrained to RFC 6598 (100.64.0.0/10)
+// so a compromised control plane cannot hijack public internet or LAN IPs.
 func ComputeTunnelPlan(st *ipnstate.Status, configuredDNS string) (selfIPv4, penDNS netip.Addr, routes []string, allowed map[netip.Addr]bool) {
 	allowed = make(map[netip.Addr]bool)
 	if st == nil {
@@ -704,13 +725,16 @@ func ComputeTunnelPlan(st *ipnstate.Status, configuredDNS string) (selfIPv4, pen
 	if st.Self != nil {
 		for _, ip := range st.Self.TailscaleIPs {
 			ip = ip.Unmap()
-			if ip.Is4() {
+			if isMeshCGNATIPv4(ip) {
 				selfIPv4 = ip
 				break
 			}
 		}
 	}
-	if ip, ok := peerstatus.ResolvePenDNSIP(st, configuredDNS); ok {
+	if !isMeshCGNATIPv4(selfIPv4) {
+		return netip.Addr{}, netip.Addr{}, nil, allowed
+	}
+	if ip, ok := peerstatus.ResolvePenDNSIP(st, configuredDNS); ok && isMeshCGNATIPv4(ip) {
 		penDNS = ip.Unmap()
 		allowed[penDNS] = true
 	}
@@ -723,7 +747,7 @@ func ComputeTunnelPlan(st *ipnstate.Status, configuredDNS string) (selfIPv4, pen
 		}
 		for _, raw := range p.TailscaleIPs {
 			ip := raw.Unmap()
-			if ip.Is4() {
+			if isMeshCGNATIPv4(ip) {
 				allowed[ip] = true
 			}
 		}
@@ -804,7 +828,7 @@ func (c *Controller) StopTunnel() {
 	at.cancel()
 	select {
 	case <-at.done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(6 * time.Second):
 	}
 	if at.lb != nil {
 		at.lb.Shutdown()
