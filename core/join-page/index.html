@@ -41,6 +41,22 @@
 
   <p class="callout danger" id="err" role="alert" hidden></p>
 
+  <div id="mobile-panel" class="panel" hidden>
+    <p id="mobile-lead" class="lead">Join from the Hogman mobile app on iOS or Android:</p>
+    <div class="step-card">
+      <div class="step-head">
+        <span class="step-title">Copy this one-time link</span>
+      </div>
+      <p class="muted">Tap <strong>Copy join link</strong>, open the <strong>Hogman</strong> app, tap <strong>Join a pen</strong>, and tap <strong>Paste link</strong> (or scan the QR code from a computer already in the pen).</p>
+      <p class="action-row">
+        <button id="mobile-copy" class="primary" type="button">Copy join link</button>
+        <span class="ok-msg" id="mobile-copied" aria-live="polite"></span>
+      </p>
+    </div>
+    <p class="callout warn" id="mobile-key-warn">This link embeds a one-time key — treat it like a password and don't share it.</p>
+    <p class="muted">Joining from a computer instead? Open this link on macOS, Linux, or Windows.</p>
+  </div>
+
   <div id="main" class="panel" hidden>
     <div class="tabs" role="group" aria-label="Operating system">
       <button data-os="unix" type="button">Mac / Linux</button>
