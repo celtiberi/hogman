@@ -1,0 +1,1 @@
+- Restrict mobile `ComputeTunnelPlan` self, DNS, and peer `/32` routes strictly to RFC 6598 (`100.64.0.0/10`) and canonicalize `PenMeta.Portal` to `https://home.<zone>` from the validated zone (`I-51`).
