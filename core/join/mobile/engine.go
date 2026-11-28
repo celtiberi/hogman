@@ -27,13 +27,10 @@ import (
 	"tailscale.com/ipn/ipnstate"
 	tsdns "tailscale.com/net/dns"
 	"tailscale.com/net/netmon"
-	"tailscale.com/net/packet"
 	"tailscale.com/net/tsdial"
-	"tailscale.com/net/tstun"
 	"tailscale.com/tsd"
 	"tailscale.com/types/logid"
 	"tailscale.com/wgengine"
-	"tailscale.com/wgengine/filter"
 	"tailscale.com/wgengine/router"
 
 	"hogman/join/internal/fsutil"
@@ -127,10 +124,11 @@ type activeTunnel struct {
 	protectFn  func(int) error
 	reconfigFn func(TunnelReconfig) int
 
-	mu           sync.Mutex
-	lastReconfig TunnelReconfig
-	penDNS       netip.Addr
-	selfIPv4     netip.Addr
+	mu              sync.Mutex
+	lastReconfig    TunnelReconfig
+	penDNS          netip.Addr
+	selfIPv4        netip.Addr
+	routesConfirmed bool
 }
 
 // NewController creates a mobile controller with disconnected initial state.
@@ -368,7 +366,7 @@ func (c *Controller) StartTunnel(dataDir string, stateKey []byte, zone string, m
 		extraCAs = pool
 	}
 
-	encStore, err := NewEncryptedStateStore(dir, stateKey)
+	encStore, err := NewEncryptedStateStore(dir, zone, stateKey)
 	if err != nil {
 		return err
 	}
@@ -434,16 +432,7 @@ func (c *Controller) StartTunnel(dataDir string, stateKey []byte, zone string, m
 	dnsStub.UpdateUpstream(upstreamDNS)
 
 	tundev := sys.Tun.Get()
-	prevIntercept := tundev.PreFilterPacketOutboundToWireGuardEngineIntercept
-	tundev.PreFilterPacketOutboundToWireGuardEngineIntercept = func(p *packet.Parsed, t *tstun.Wrapper) filter.Response {
-		if dnsStub.HandlePacket(p, t) {
-			return filter.DropSilently
-		}
-		if prevIntercept != nil {
-			return prevIntercept(p, t)
-		}
-		return filter.Accept
-	}
+	dnsStub.AttachTunnel(tundev)
 	tundev.Start()
 
 	privLogID, err := logid.NewPrivateID()
@@ -586,7 +575,6 @@ func (c *Controller) watchTunnel(at *activeTunnel, meta *PenMeta, hadAuthKey boo
 		if !selfIPv4.IsValid() {
 			return true
 		}
-		at.dnsStub.UpdatePen(penDNS, allowedPeers)
 
 		reconfig := TunnelReconfig{
 			Zone:       at.zone,
@@ -599,36 +587,59 @@ func (c *Controller) watchTunnel(at *activeTunnel, meta *PenMeta, hadAuthKey boo
 
 		at.mu.Lock()
 		changed := !reconfigEqual(at.lastReconfig, reconfig)
+		confirmed := at.routesConfirmed
+		at.mu.Unlock()
+
+		if changed {
+			// Fail closed while OS VPN routes are being applied or updated.
+			confirmed = false
+			at.dnsStub.UpdatePen(selfIPv4, penDNS, allowedPeers, false)
+			if at.reconfigFn != nil {
+				fd := at.reconfigFn(reconfig)
+				switch {
+				case fd >= 0:
+					if err := at.swappable.AttachFD(fd); err != nil {
+						at.mu.Lock()
+						at.routesConfirmed = false
+						at.mu.Unlock()
+						c.setStatusIfActive(at, TunnelStatus{
+							State:  "error",
+							Zone:   at.zone,
+							Portal: at.portal,
+							Error:  fmt.Sprintf("attach TUN fd: %v", err),
+						})
+						return false
+					}
+					confirmed = true
+				case fd == -1:
+					confirmed = true
+				default:
+					at.mu.Lock()
+					at.routesConfirmed = false
+					at.mu.Unlock()
+					c.setStatusIfActive(at, TunnelStatus{
+						State:  "error",
+						Zone:   at.zone,
+						Portal: at.portal,
+						Error:  "platform VPN configuration failed",
+					})
+					return false
+				}
+			} else {
+				confirmed = true
+			}
+		}
+
+		at.mu.Lock()
 		if changed {
 			at.lastReconfig = reconfig
 		}
 		at.penDNS = penDNS
 		at.selfIPv4 = selfIPv4
+		at.routesConfirmed = confirmed
 		at.mu.Unlock()
 
-		if changed && at.reconfigFn != nil {
-			fd := at.reconfigFn(reconfig)
-			switch {
-			case fd >= 0:
-				if err := at.swappable.AttachFD(fd); err != nil {
-					c.setStatusIfActive(at, TunnelStatus{
-						State:  "error",
-						Zone:   at.zone,
-						Portal: at.portal,
-						Error:  fmt.Sprintf("attach TUN fd: %v", err),
-					})
-					return false
-				}
-			case fd == -2:
-				c.setStatusIfActive(at, TunnelStatus{
-					State:  "error",
-					Zone:   at.zone,
-					Portal: at.portal,
-					Error:  "platform VPN configuration failed",
-				})
-				return false
-			}
-		}
+		at.dnsStub.UpdatePen(selfIPv4, penDNS, allowedPeers, confirmed)
 
 		c.setStatusIfActive(at, TunnelStatus{
 			State:      "connected",
@@ -808,8 +819,11 @@ func (c *Controller) Leave(dataDir string, stateKey []byte, zone string, force b
 	if at != nil && at.zone == zone && stat.State == "connected" && !stat.NeedsLogin {
 		at.mu.Lock()
 		penDNS := at.penDNS
+		selfIPv4 := at.selfIPv4
+		routesConfirmed := at.routesConfirmed
 		at.mu.Unlock()
-		if err := selfDeleteOverTunnel(zone, penDNS, force); err != nil && !force {
+		tunName, _ := at.swappable.Name()
+		if err := selfDeleteOverTunnel(zone, selfIPv4, penDNS, tunName, routesConfirmed, force); err != nil && !force {
 			return err
 		}
 		c.StopTunnel()
@@ -822,11 +836,17 @@ func (c *Controller) Leave(dataDir string, stateKey []byte, zone string, force b
 	return os.RemoveAll(dir)
 }
 
-func selfDeleteOverTunnel(zone string, homeIP netip.Addr, force bool) error {
+func selfDeleteOverTunnel(zone string, selfIPv4, homeIP netip.Addr, tunName string, routesConfirmed, force bool) error {
+	if !routesConfirmed {
+		return errors.New("pen tunnel routes are not confirmed yet")
+	}
 	if !homeIP.IsValid() || !homeIP.Is4() {
 		return errors.New("pen home server IP is not available")
 	}
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	dialer, err := newTunnelBoundDialer(selfIPv4, tunName, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("bind leave request to pen tunnel: %w", err)
+	}
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return dialer.DialContext(ctx, "tcp4", net.JoinHostPort(homeIP.String(), "443"))

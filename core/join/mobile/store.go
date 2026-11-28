@@ -35,6 +35,7 @@ type encryptedEnvelope struct {
 type EncryptedStateStore struct {
 	mu   sync.Mutex
 	path string
+	zone string
 	key  []byte
 	aead cipher.AEAD
 	data map[string][]byte
@@ -43,10 +44,14 @@ type EncryptedStateStore struct {
 var _ ipn.StateStore = (*EncryptedStateStore)(nil)
 
 // NewEncryptedStateStore opens (or initializes) an encrypted ipn.StateStore at
-// <dir>/tailscaled.state.enc using a private copy of key (32 bytes).
-func NewEncryptedStateStore(dir string, key []byte) (*EncryptedStateStore, error) {
+// <dir>/tailscaled.state.enc using a private copy of key (32 bytes), binding
+// every entry's GCM AAD to both zone and its ipn.StateKey.
+func NewEncryptedStateStore(dir, zone string, key []byte) (*EncryptedStateStore, error) {
 	if err := validateStateKey(key); err != nil {
 		return nil, err
+	}
+	if zone == "" {
+		return nil, errors.New("state store zone is required")
 	}
 	keyCopy := make([]byte, StateKeyLen)
 	copy(keyCopy, key)
@@ -62,6 +67,7 @@ func NewEncryptedStateStore(dir string, key []byte) (*EncryptedStateStore, error
 	}
 	s := &EncryptedStateStore{
 		path: filepath.Join(dir, encryptedStoreFilename),
+		zone: zone,
 		key:  keyCopy,
 		aead: aead,
 		data: make(map[string][]byte),
@@ -101,13 +107,17 @@ func (s *EncryptedStateStore) loadLocked() error {
 		return fmt.Errorf("unsupported encrypted state version %d", env.Version)
 	}
 	for id, enc := range env.Entries {
-		plain, err := openGCM(s.aead, enc, []byte("hogman-state:"+id))
+		plain, err := openGCM(s.aead, enc, s.entryAAD(id))
 		if err != nil {
 			return fmt.Errorf("decrypt state entry %q: %w", id, err)
 		}
 		s.data[id] = plain
 	}
 	return nil
+}
+
+func (s *EncryptedStateStore) entryAAD(id string) []byte {
+	return []byte("hogman-state:" + s.zone + ":" + id)
 }
 
 func (s *EncryptedStateStore) persistLocked() error {
@@ -119,7 +129,7 @@ func (s *EncryptedStateStore) persistLocked() error {
 		Entries: make(map[string]string, len(s.data)),
 	}
 	for id, plain := range s.data {
-		enc, err := sealGCM(s.aead, plain, []byte("hogman-state:"+id))
+		enc, err := sealGCM(s.aead, plain, s.entryAAD(id))
 		if err != nil {
 			return err
 		}

@@ -21,9 +21,10 @@ func testKey(seed byte) []byte {
 
 func TestEncryptedStateStoreLifecycleAndSecurity(t *testing.T) {
 	dir := t.TempDir()
+	zone := "bobo.pens.example.com"
 	key := testKey(1)
 
-	st, err := NewEncryptedStateStore(dir, key)
+	st, err := NewEncryptedStateStore(dir, zone, key)
 	if err != nil {
 		t.Fatalf("NewEncryptedStateStore: %v", err)
 	}
@@ -67,8 +68,8 @@ func TestEncryptedStateStoreLifecycleAndSecurity(t *testing.T) {
 		t.Fatalf("expected error reading closed store")
 	}
 
-	// Re-open with same key succeeds and returns exact plaintext.
-	st2, err := NewEncryptedStateStore(dir, key)
+	// Re-open with same key and zone succeeds and returns exact plaintext.
+	st2, err := NewEncryptedStateStore(dir, zone, key)
 	if err != nil {
 		t.Fatalf("re-open with same key: %v", err)
 	}
@@ -79,8 +80,13 @@ func TestEncryptedStateStoreLifecycleAndSecurity(t *testing.T) {
 	}
 
 	// Re-open with wrong key must fail authentication.
-	if _, err := NewEncryptedStateStore(dir, testKey(99)); err == nil {
+	if _, err := NewEncryptedStateStore(dir, zone, testKey(99)); err == nil {
 		t.Fatalf("expected decryption failure with wrong key")
+	}
+
+	// Re-open with same key under a different pen zone must fail zone-bound AAD check.
+	if _, err := NewEncryptedStateStore(dir, "other.pens.example.com", key); err == nil {
+		t.Fatalf("expected AAD mismatch failure when state file opened under a different zone")
 	}
 
 	// Swapping ciphertext to a different StateKey ID must fail AAD check.
@@ -95,7 +101,7 @@ func TestEncryptedStateStoreLifecycleAndSecurity(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(swappedDir, encryptedStoreFilename), swappedBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewEncryptedStateStore(swappedDir, key); err == nil {
+	if _, err := NewEncryptedStateStore(swappedDir, zone, key); err == nil {
 		t.Fatalf("expected AAD mismatch failure when ciphertext moved across StateKey IDs")
 	}
 

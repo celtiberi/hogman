@@ -2,11 +2,14 @@ package mobile
 
 import (
 	"context"
+	"encoding/binary"
 	"net"
 	"net/netip"
 	"testing"
 
 	"github.com/miekg/dns"
+	"tailscale.com/net/packet"
+	"tailscale.com/types/ipproto"
 )
 
 func packQuery(t *testing.T, name string, qtype uint16) []byte {
@@ -20,14 +23,15 @@ func packQuery(t *testing.T, name string, qtype uint16) []byte {
 	return b
 }
 
-func TestSplitDNSStubFiltersNonPeerAndAAAAForPenZone(t *testing.T) {
+func TestSplitDNSStubStrictAllowlistBlocksBypassRecords(t *testing.T) {
 	stub := NewSplitDNSStub("bobo.pens.example.com", nil)
+	selfIP := netip.MustParseAddr("100.64.0.12")
 	penDNS := netip.MustParseAddr("100.64.0.1")
 	peerIP := netip.MustParseAddr("100.64.0.9")
-	stub.UpdatePen(penDNS, map[netip.Addr]bool{
+	stub.UpdatePen(selfIP, penDNS, map[netip.Addr]bool{
 		penDNS: true,
 		peerIP: true,
-	})
+	}, true)
 	stub.UpdateUpstream([]netip.Addr{netip.MustParseAddr("1.1.1.1"), SplitDNSStubIP})
 
 	penCalls := 0
@@ -40,19 +44,48 @@ func TestSplitDNSStubFiltersNonPeerAndAAAAForPenZone(t *testing.T) {
 		}
 		var req dns.Msg
 		_ = req.Unpack(raw)
+		qname := req.Question[0].Name
 		resp := new(dns.Msg)
 		resp.SetReply(&req)
 		resp.Answer = []dns.RR{
-			// Legitimate netmap peer (must be KEPT)
-			&dns.A{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("100.64.0.9")},
+			// Legitimate netmap peer for exact QNAME (must be KEPT)
+			&dns.A{Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("100.64.0.9")},
+			// Mismatched owner name pointing at a real peer (must be DROPPED)
+			&dns.A{Hdr: dns.RR_Header{Name: "other.bobo.pens.example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("100.64.0.1")},
 			// Spoofed public IP (must be DROPPED)
-			&dns.A{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("8.8.8.8")},
+			&dns.A{Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("8.8.8.8")},
 			// Spoofed LAN IP (must be DROPPED)
-			&dns.A{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("192.168.1.50")},
+			&dns.A{Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("192.168.1.50")},
 			// Non-peer CGNAT IP (must be DROPPED)
-			&dns.A{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("100.64.99.99")},
+			&dns.A{Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("100.64.99.99")},
 			// IPv6 AAAA record (must be DROPPED)
-			&dns.AAAA{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 60}, AAAA: net.ParseIP("fd7a:115c:a1e0::9")},
+			&dns.AAAA{Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 60}, AAAA: net.ParseIP("fd7a:115c:a1e0::9")},
+			// CNAME off-mesh redirect (must be DROPPED)
+			&dns.CNAME{Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60}, Target: "attacker.example.net."},
+			// DNAME redirect (must be DROPPED)
+			&dns.DNAME{Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeDNAME, Class: dns.ClassINET, Ttl: 60}, Target: "attacker.example.net."},
+			// HTTPS record with off-mesh ipv4hint (must be DROPPED)
+			&dns.HTTPS{
+				SVCB: dns.SVCB{
+					Hdr:      dns.RR_Header{Name: qname, Rrtype: dns.TypeHTTPS, Class: dns.ClassINET, Ttl: 60},
+					Priority: 1,
+					Target:   ".",
+					Value:    []dns.SVCBKeyValue{&dns.SVCBIPv4Hint{Hint: []net.IP{net.ParseIP("93.184.216.34")}}},
+				},
+			},
+			// SVCB record (must be DROPPED)
+			&dns.SVCB{
+				Hdr:      dns.RR_Header{Name: qname, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 60},
+				Priority: 1,
+				Target:   "attacker.example.net.",
+			},
+		}
+		// Authority and Additional sections must be cleared completely.
+		resp.Ns = []dns.RR{
+			&dns.NS{Hdr: dns.RR_Header{Name: "bobo.pens.example.com.", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 60}, Ns: "ns.attacker.example.net."},
+		}
+		resp.Extra = []dns.RR{
+			&dns.A{Hdr: dns.RR_Header{Name: "ns.attacker.example.net.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("93.184.216.34")},
 		}
 		return resp.Pack()
 	}
@@ -74,7 +107,7 @@ func TestSplitDNSStubFiltersNonPeerAndAAAAForPenZone(t *testing.T) {
 		return resp.Pack()
 	}
 
-	// 1. Pen A query: only netmap peer 100.64.0.9 survives.
+	// 1. Pen A query: ONLY exact-QNAME live-peer A record 100.64.0.9 survives; Ns/Extra cleared.
 	out, err := stub.ResolveWire(context.Background(), packQuery(t, "photos.bobo.pens.example.com", dns.TypeA))
 	if err != nil {
 		t.Fatalf("ResolveWire(pen A): %v", err)
@@ -90,25 +123,42 @@ func TestSplitDNSStubFiltersNonPeerAndAAAAForPenZone(t *testing.T) {
 	if !ok || aRec.A.String() != "100.64.0.9" {
 		t.Fatalf("unexpected surviving record: %v", resp.Answer[0])
 	}
+	if len(resp.Ns) != 0 || len(resp.Extra) != 0 {
+		t.Fatalf("expected empty Ns/Extra, got Ns=%d Extra=%d", len(resp.Ns), len(resp.Extra))
+	}
 	if penCalls != 1 || upstreamCalls != 0 {
 		t.Fatalf("calls = (pen:%d, upstream:%d), want (1, 0)", penCalls, upstreamCalls)
 	}
 
-	// 2. Pen AAAA query: answered locally with NOERROR empty answer (no wire query).
-	outAAAA, err := stub.ResolveWire(context.Background(), packQuery(t, "photos.bobo.pens.example.com", dns.TypeAAAA))
-	if err != nil {
-		t.Fatalf("ResolveWire(pen AAAA): %v", err)
-	}
-	var respAAAA dns.Msg
-	_ = respAAAA.Unpack(outAAAA)
-	if respAAAA.Rcode != dns.RcodeSuccess || len(respAAAA.Answer) != 0 {
-		t.Fatalf("pen AAAA = (rcode=%d, answers=%d), want NOERROR empty", respAAAA.Rcode, len(respAAAA.Answer))
+	// 2. Every non-A Qtype for a pen name returns empty NOERROR locally without forwarding.
+	for _, qt := range []uint16{
+		dns.TypeAAAA,
+		dns.TypeCNAME,
+		dns.TypeDNAME,
+		dns.TypeHTTPS,
+		dns.TypeSVCB,
+		dns.TypeTXT,
+		dns.TypeSRV,
+		dns.TypeANY,
+	} {
+		rawOut, err := stub.ResolveWire(context.Background(), packQuery(t, "photos.bobo.pens.example.com", qt))
+		if err != nil {
+			t.Fatalf("ResolveWire(qtype=%d): %v", qt, err)
+		}
+		var r dns.Msg
+		if err := r.Unpack(rawOut); err != nil {
+			t.Fatalf("Unpack(qtype=%d): %v", qt, err)
+		}
+		if r.Rcode != dns.RcodeSuccess || len(r.Answer) != 0 || len(r.Ns) != 0 || len(r.Extra) != 0 {
+			t.Fatalf("qtype=%d returned rcode=%d ans=%d ns=%d extra=%d, want empty NOERROR",
+				qt, r.Rcode, len(r.Answer), len(r.Ns), len(r.Extra))
+		}
 	}
 	if penCalls != 1 {
-		t.Fatalf("pen AAAA should not invoke forwardPen (penCalls=%d)", penCalls)
+		t.Fatalf("non-A pen queries must never invoke forwardPen (penCalls=%d)", penCalls)
 	}
 
-	// 3. Lookalike suffix ("evil-bobo.pens.example.com") and public domain go ONLY to upstream.
+	// 3. Lookalike suffix and public domain go ONLY to upstream.
 	for _, host := range []string{"example.com", "evil-bobo.pens.example.com"} {
 		outPub, err := stub.ResolveWire(context.Background(), packQuery(t, host, dns.TypeA))
 		if err != nil {
@@ -137,5 +187,88 @@ func TestSplitDNSStubFiltersNonPeerAndAAAAForPenZone(t *testing.T) {
 	_ = respLogin.Unpack(outLogin)
 	if len(respLogin.Answer) != 1 || upstreamCalls != 3 || penCalls != 1 {
 		t.Fatalf("loginHost routed wrongly: answers=%d pen=%d upstream=%d", len(respLogin.Answer), penCalls, upstreamCalls)
+	}
+}
+
+func TestSplitDNSStubFailsClosedUntilRoutesConfirmed(t *testing.T) {
+	stub := NewSplitDNSStub("bobo.pens.example.com", nil)
+	selfIP := netip.MustParseAddr("100.64.0.12")
+	penDNS := netip.MustParseAddr("100.64.0.1")
+	stub.UpdatePen(selfIP, penDNS, map[netip.Addr]bool{penDNS: true}, false)
+
+	called := false
+	stub.forwardPen = func(_ context.Context, _ []byte, _ netip.Addr) ([]byte, error) {
+		called = true
+		return nil, nil
+	}
+
+	out, err := stub.ResolveWire(context.Background(), packQuery(t, "home.bobo.pens.example.com", dns.TypeA))
+	if err != nil {
+		t.Fatalf("ResolveWire unconfirmed: %v", err)
+	}
+	var resp dns.Msg
+	_ = resp.Unpack(out)
+	if resp.Rcode != dns.RcodeServerFailure || called {
+		t.Fatalf("expected SERVFAIL without forwarding when routes unconfirmed, got rcode=%d called=%v", resp.Rcode, called)
+	}
+
+	// defaultForwardPen itself also refuses when no tunnel is attached or routes are unconfirmed.
+	if _, err := stub.defaultForwardPen(context.Background(), packQuery(t, "home.bobo.pens.example.com", dns.TypeA), penDNS); err == nil {
+		t.Fatal("expected defaultForwardPen to fail closed without confirmed tunnel")
+	}
+}
+
+func TestSplitDNSStubHandleInboundPacketMatchesTXIDAndPeer(t *testing.T) {
+	stub := NewSplitDNSStub("bobo.pens.example.com", nil)
+	selfIP := netip.MustParseAddr("100.64.0.12")
+	penDNS := netip.MustParseAddr("100.64.0.1")
+	stub.UpdatePen(selfIP, penDNS, map[netip.Addr]bool{penDNS: true}, true)
+
+	req := packQuery(t, "home.bobo.pens.example.com", dns.TypeA)
+	txid := binary.BigEndian.Uint16(req[:2])
+	port, ch, err := stub.allocPendingPort(txid, penDNS)
+	if err != nil {
+		t.Fatalf("allocPendingPort: %v", err)
+	}
+	defer stub.releasePendingPort(port)
+
+	parseRaw := func(srcIP netip.Addr, dstPort uint16, payload []byte) *packet.Parsed {
+		raw := packet.Generate(packet.UDP4Header{
+			IP4Header: packet.IP4Header{
+				IPProto: ipproto.UDP,
+				Src:     srcIP,
+				Dst:     selfIP,
+			},
+			SrcPort: 53,
+			DstPort: dstPort,
+		}, payload)
+		var p packet.Parsed
+		p.Decode(raw)
+		return &p
+	}
+
+	// Wrong source IP must NOT match or consume the waiter.
+	if stub.HandleInboundPacket(parseRaw(netip.MustParseAddr("100.64.0.99"), port, req)) {
+		t.Fatal("spoofed source IP must not match pending pen DNS waiter")
+	}
+
+	// Wrong TXID must NOT match.
+	badTX := append([]byte(nil), req...)
+	badTX[0] ^= 0xff
+	if stub.HandleInboundPacket(parseRaw(penDNS, port, badTX)) {
+		t.Fatal("mismatched TXID must not match pending pen DNS waiter")
+	}
+
+	// Matching penDNS + port + TXID is captured and delivered.
+	if !stub.HandleInboundPacket(parseRaw(penDNS, port, req)) {
+		t.Fatal("expected legitimate pen DNS reply to be captured")
+	}
+	select {
+	case got := <-ch:
+		if len(got) != len(req) {
+			t.Fatalf("captured payload len = %d, want %d", len(got), len(req))
+		}
+	default:
+		t.Fatal("expected captured DNS reply on channel")
 	}
 }

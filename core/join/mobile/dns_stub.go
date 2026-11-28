@@ -15,6 +15,7 @@ import (
 	"tailscale.com/net/packet"
 	"tailscale.com/net/tstun"
 	"tailscale.com/types/ipproto"
+	"tailscale.com/wgengine/filter"
 )
 
 // SplitDNSStubIP is the single /32 link-local-style resolver address inside
@@ -25,24 +26,42 @@ const (
 	dnsQueryTimeout     = 3 * time.Second
 	maxDNSWireBytes     = 4096
 	maxConcurrentDNSOps = 64
+	ephemeralPortMin    = 50000
+	ephemeralPortSpan   = 10000
 )
 
+type penPendingQuery struct {
+	txid   uint16
+	server netip.Addr
+	ch     chan []byte
+}
+
 // SplitDNSStub intercepts IPv4 UDP DNS queries sent to SplitDNSStubIP:53:
-//   - Queries in the active pen's zone forward to the pen's tag:infra DNS over
-//     the tunnel, dropping all AAAA records and any A record whose IP is not a
-//     live peer in the pen's Headscale netmap ("dial only pen devices").
+//   - Queries in the active pen's zone (excluding the public LoginServer host)
+//     allow ONLY A records for the exact query name pointing at live Headscale
+//     netmap peers ("dial only pen devices"), answer all other Qtypes with an
+//     empty NOERROR, and clear Ns/Extra. Pen queries are injected directly into
+//     the WireGuard tstun engine so zero 100.64/10 packets ever touch OS sockets
+//     or physical/carrier interfaces.
 //   - All other queries (Android catch-all mode) forward directly to the active
 //     network's upstream DNS servers via protected sockets with zero logging,
 //     zero counting, and zero post-TTL caching.
 type SplitDNSStub struct {
-	mu        sync.RWMutex
-	zone      string // lowercase, no trailing dot
-	loginHost string // lowercase control/login host exempted from pen-internal DNS
-	penDNS    netip.Addr
-	peers     map[netip.Addr]bool
-	upstream  []netip.Addr
-	protect   func(fd int) error
-	sem       chan struct{}
+	mu              sync.RWMutex
+	zone            string // lowercase, no trailing dot
+	loginHost       string // lowercase control/login host exempted from pen-internal DNS
+	selfIP          netip.Addr
+	penDNS          netip.Addr
+	peers           map[netip.Addr]bool
+	routesConfirmed bool
+	upstream        []netip.Addr
+	tun             *tstun.Wrapper
+	protect         func(fd int) error
+	sem             chan struct{}
+
+	pendingMu sync.Mutex
+	pending   map[uint16]penPendingQuery
+	nextPort  uint16
 
 	// Optional hooks for deterministic unit testing.
 	forwardPen      func(ctx context.Context, raw []byte, server netip.Addr) ([]byte, error)
@@ -51,24 +70,61 @@ type SplitDNSStub struct {
 
 func NewSplitDNSStub(zone string, protect func(fd int) error) *SplitDNSStub {
 	s := &SplitDNSStub{
-		zone:    strings.ToLower(strings.TrimSuffix(strings.TrimSpace(zone), ".")),
-		peers:   make(map[netip.Addr]bool),
-		protect: protect,
-		sem:     make(chan struct{}, maxConcurrentDNSOps),
+		zone:     strings.ToLower(strings.TrimSuffix(strings.TrimSpace(zone), ".")),
+		peers:    make(map[netip.Addr]bool),
+		protect:  protect,
+		sem:      make(chan struct{}, maxConcurrentDNSOps),
+		pending:  make(map[uint16]penPendingQuery),
+		nextPort: ephemeralPortMin,
 	}
 	s.forwardPen = s.defaultForwardPen
 	s.forwardUpstream = s.defaultForwardUpstream
 	return s
 }
 
-func (s *SplitDNSStub) UpdatePen(penDNS netip.Addr, allowedPeers map[netip.Addr]bool) {
+// AttachTunnel wires the DNS stub directly into tstun's outbound and inbound
+// hooks so pen DNS traffic travels exclusively through the WireGuard engine.
+func (s *SplitDNSStub) AttachTunnel(t *tstun.Wrapper) {
+	if t == nil {
+		return
+	}
+	s.mu.Lock()
+	s.tun = t
+	s.mu.Unlock()
+
+	prevOut := t.PreFilterPacketOutboundToWireGuardEngineIntercept
+	t.PreFilterPacketOutboundToWireGuardEngineIntercept = func(p *packet.Parsed, w *tstun.Wrapper) filter.Response {
+		if s.HandlePacket(p, w) {
+			return filter.DropSilently
+		}
+		if prevOut != nil {
+			return prevOut(p, w)
+		}
+		return filter.Accept
+	}
+
+	prevIn := t.PreFilterPacketInboundFromWireGuard
+	t.PreFilterPacketInboundFromWireGuard = func(p *packet.Parsed, w *tstun.Wrapper) filter.Response {
+		if s.HandleInboundPacket(p) {
+			return filter.DropSilently
+		}
+		if prevIn != nil {
+			return prevIn(p, w)
+		}
+		return filter.Accept
+	}
+}
+
+func (s *SplitDNSStub) UpdatePen(selfIP, penDNS netip.Addr, allowedPeers map[netip.Addr]bool, routesConfirmed bool) {
 	cp := make(map[netip.Addr]bool, len(allowedPeers))
 	for ip := range allowedPeers {
 		cp[ip.Unmap()] = true
 	}
 	s.mu.Lock()
+	s.selfIP = selfIP.Unmap()
 	s.penDNS = penDNS.Unmap()
 	s.peers = cp
+	s.routesConfirmed = routesConfirmed
 	s.mu.Unlock()
 }
 
@@ -164,8 +220,49 @@ func (s *SplitDNSStub) HandlePacket(p *packet.Parsed, t *tstun.Wrapper) bool {
 	return true
 }
 
+// HandleInboundPacket captures replies to engine-injected pen DNS queries
+// coming back from WireGuard before they reach the OS TUN interface.
+func (s *SplitDNSStub) HandleInboundPacket(p *packet.Parsed) bool {
+	if p == nil || p.IPVersion != 4 || p.IPProto != ipproto.UDP || p.Src.Port() != 53 {
+		return false
+	}
+	payload := p.Payload()
+	if len(payload) < 2 {
+		return false
+	}
+	s.mu.RLock()
+	selfIP := s.selfIP
+	penDNS := s.penDNS
+	s.mu.RUnlock()
+
+	if !selfIP.Is4() || !penDNS.Is4() {
+		return false
+	}
+	if p.Src.Addr() != penDNS || p.Dst.Addr() != selfIP {
+		return false
+	}
+	txid := binary.BigEndian.Uint16(payload[:2])
+
+	s.pendingMu.Lock()
+	entry, ok := s.pending[p.Dst.Port()]
+	if !ok || entry.txid != txid || entry.server != p.Src.Addr() {
+		s.pendingMu.Unlock()
+		return false
+	}
+	delete(s.pending, p.Dst.Port())
+	s.pendingMu.Unlock()
+
+	cp := make([]byte, len(payload))
+	copy(cp, payload)
+	select {
+	case entry.ch <- cp:
+	default:
+	}
+	return true
+}
+
 // ResolveWire resolves a single DNS wire message, enforcing split-DNS routing
-// and peer filtering for pen names.
+// and strict A-only live-peer allowlisting for pen names.
 func (s *SplitDNSStub) ResolveWire(ctx context.Context, raw []byte) ([]byte, error) {
 	if len(raw) == 0 || len(raw) > maxDNSWireBytes {
 		return nil, errors.New("invalid DNS wire message size")
@@ -184,11 +281,12 @@ func (s *SplitDNSStub) ResolveWire(ctx context.Context, raw []byte) ([]byte, err
 	loginHost := s.loginHost
 	penDNS := s.penDNS
 	peers := s.peers
+	routesConfirmed := s.routesConfirmed
 	upstream := s.upstream
 	s.mu.RUnlock()
 
 	if hostInPenDNS(q.Name, zone, loginHost) {
-		return s.resolvePenQuery(ctx, &req, raw, penDNS, peers)
+		return s.resolvePenQuery(ctx, &req, raw, penDNS, peers, routesConfirmed)
 	}
 	// Non-pen query: forward directly to upstream without logging, counting,
 	// or caching.
@@ -198,13 +296,16 @@ func (s *SplitDNSStub) ResolveWire(ctx context.Context, raw []byte) ([]byte, err
 	return s.forwardUpstream(ctx, raw, upstream)
 }
 
-func (s *SplitDNSStub) resolvePenQuery(ctx context.Context, req *dns.Msg, raw []byte, penDNS netip.Addr, peers map[netip.Addr]bool) ([]byte, error) {
-	// Pen mesh policy is IPv4-only: answer AAAA directly with NOERROR empty
-	// answer so dual-stack clients immediately use the A record.
-	if req.Question[0].Qtype == dns.TypeAAAA {
+func (s *SplitDNSStub) resolvePenQuery(ctx context.Context, req *dns.Msg, raw []byte, penDNS netip.Addr, peers map[netip.Addr]bool, routesConfirmed bool) ([]byte, error) {
+	q := req.Question[0]
+	// Strict allowlist: pen services are IPv4 A records only. Every other query
+	// type (AAAA, HTTPS, SVCB, CNAME, DNAME, TXT, SRV, ANY, ...) returns an
+	// empty NOERROR locally so a compromised registrar cannot redirect pen names
+	// off-mesh via CNAME/DNAME/HTTPS ipv4hint.
+	if q.Qtype != dns.TypeA {
 		return packRcode(req, dns.RcodeSuccess)
 	}
-	if !penDNS.IsValid() || !penDNS.Is4() {
+	if !routesConfirmed || !penDNS.IsValid() || !penDNS.Is4() {
 		return packRcode(req, dns.RcodeServerFailure)
 	}
 	replyWire, err := s.forwardPen(ctx, raw, penDNS)
@@ -215,35 +316,38 @@ func (s *SplitDNSStub) resolvePenQuery(ctx context.Context, req *dns.Msg, raw []
 	if err := resp.Unpack(replyWire); err != nil {
 		return packRcode(req, dns.RcodeServerFailure)
 	}
-	resp.Answer = filterPenRRs(resp.Answer, peers)
-	resp.Extra = filterPenRRs(resp.Extra, peers)
+	resp.Answer = filterPenAOnly(resp.Answer, q.Name, peers)
+	resp.Ns = nil
+	resp.Extra = nil
 	return resp.Pack()
 }
 
-// filterPenRRs enforces desktop's "dial only pen devices" invariant on mobile
-// DNS responses: drop every AAAA record and drop any A record whose address is
-// not an active peer in the pen's live Headscale netmap.
-func filterPenRRs(rrs []dns.RR, peers map[netip.Addr]bool) []dns.RR {
+// filterPenAOnly enforces a strict allowlist on pen DNS responses: keep ONLY
+// IPv4 A records whose owner name matches qname and whose address is a live
+// peer in the pen's Headscale netmap. CNAME, DNAME, HTTPS/SVCB, AAAA, mismatched
+// owner names, and off-mesh A records are all dropped.
+func filterPenAOnly(rrs []dns.RR, qname string, peers map[netip.Addr]bool) []dns.RR {
 	if len(rrs) == 0 {
-		return rrs
+		return nil
 	}
+	wantName := strings.ToLower(dns.Fqdn(qname))
 	out := make([]dns.RR, 0, len(rrs))
 	for _, rr := range rrs {
-		switch v := rr.(type) {
-		case *dns.AAAA:
+		a, ok := rr.(*dns.A)
+		if !ok {
 			continue
-		case *dns.A:
-			addr, ok := netip.AddrFromSlice(v.A)
-			if !ok {
-				continue
-			}
-			if !peers[addr.Unmap()] {
-				continue
-			}
-			out = append(out, rr)
-		default:
-			out = append(out, rr)
 		}
+		if strings.ToLower(dns.Fqdn(a.Hdr.Name)) != wantName {
+			continue
+		}
+		addr, ok := netip.AddrFromSlice(a.A)
+		if !ok {
+			continue
+		}
+		if !peers[addr.Unmap()] {
+			continue
+		}
+		out = append(out, a)
 	}
 	return out
 }
@@ -255,11 +359,69 @@ func packRcode(req *dns.Msg, rcode int) ([]byte, error) {
 	return resp.Pack()
 }
 
+func (s *SplitDNSStub) allocPendingPort(txid uint16, server netip.Addr) (uint16, chan []byte, error) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	for i := 0; i < ephemeralPortSpan; i++ {
+		port := ephemeralPortMin + uint16((int(s.nextPort-ephemeralPortMin)+i)%ephemeralPortSpan)
+		if _, busy := s.pending[port]; !busy {
+			s.nextPort = ephemeralPortMin + uint16((int(port-ephemeralPortMin)+1)%ephemeralPortSpan)
+			ch := make(chan []byte, 1)
+			s.pending[port] = penPendingQuery{txid: txid, server: server, ch: ch}
+			return port, ch, nil
+		}
+	}
+	return 0, nil, errors.New("no ephemeral port available for pen DNS query")
+}
+
+func (s *SplitDNSStub) releasePendingPort(port uint16) {
+	s.pendingMu.Lock()
+	delete(s.pending, port)
+	s.pendingMu.Unlock()
+}
+
+// defaultForwardPen injects the DNS UDP query straight into the WireGuard
+// tstun engine (zero OS sockets) so pen-bound packets can never leak onto
+// physical or cellular carrier networks on iOS or Android.
 func (s *SplitDNSStub) defaultForwardPen(ctx context.Context, raw []byte, server netip.Addr) ([]byte, error) {
-	// Unprotected dialer so packets to the pen's tag:infra DNS route through the
-	// WireGuard TUN interface.
-	d := &net.Dialer{}
-	return exchangeDNS(ctx, d, netip.AddrPortFrom(server, 53), raw)
+	if len(raw) < 12 {
+		return nil, errors.New("truncated DNS query")
+	}
+	s.mu.RLock()
+	tun := s.tun
+	selfIP := s.selfIP
+	routesConfirmed := s.routesConfirmed
+	s.mu.RUnlock()
+
+	if tun == nil || !selfIP.Is4() || !server.Is4() || !routesConfirmed {
+		return nil, errors.New("pen tunnel is not ready")
+	}
+
+	txid := binary.BigEndian.Uint16(raw[:2])
+	port, ch, err := s.allocPendingPort(txid, server)
+	if err != nil {
+		return nil, err
+	}
+	defer s.releasePendingPort(port)
+
+	hdr := packet.UDP4Header{
+		IP4Header: packet.IP4Header{
+			IPProto: ipproto.UDP,
+			Src:     selfIP,
+			Dst:     server,
+		},
+		SrcPort: port,
+		DstPort: 53,
+	}
+	if err := tun.InjectOutbound(packet.Generate(hdr, raw)); err != nil {
+		return nil, err
+	}
+	select {
+	case resp := <-ch:
+		return resp, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (s *SplitDNSStub) defaultForwardUpstream(ctx context.Context, raw []byte, servers []netip.Addr) ([]byte, error) {

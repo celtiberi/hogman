@@ -284,3 +284,18 @@ func TestSwappableTUNAttachSwapAndClose(t *testing.T) {
 		t.Fatal("timed out reading pkt-2 after swap")
 	}
 }
+
+func TestSelfDeleteOverTunnelFailsClosedWithoutConfirmedRoutesOrTUN(t *testing.T) {
+	selfIP := netip.MustParseAddr("100.64.0.12")
+	homeIP := netip.MustParseAddr("100.64.0.1")
+
+	// Unconfirmed routes must refuse immediately before creating any socket.
+	if err := selfDeleteOverTunnel("bobo.pens.example.com", selfIP, homeIP, "utun99", false, false); err == nil || !strings.Contains(err.Error(), "not confirmed") {
+		t.Fatalf("expected unconfirmed-routes error, got: %v", err)
+	}
+
+	// Confirmed routes with a nonexistent TUN interface / inactive IP must fail closed.
+	if err := selfDeleteOverTunnel("bobo.pens.example.com", selfIP, homeIP, "nonexistent_tun_99", true, false); err == nil {
+		t.Fatalf("expected fail-closed error when TUN interface does not exist")
+	}
+}
