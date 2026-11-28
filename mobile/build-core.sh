@@ -54,7 +54,7 @@ build_android() {
     cd "$JOIN_DIR"
     CGO_ENABLED=1 GOOS=android GOARCH=arm64 \
       CC="$tc/aarch64-linux-android${api}-clang" \
-      CGO_LDFLAGS="-Wl,-z,max-page-size=16384" \
+      CGO_LDFLAGS="-Wl,-soname,libhogman.so -Wl,-z,max-page-size=16384" \
       go build -trimpath -ldflags="-s -w" -tags "$MOBILE_TAGS" -buildmode=c-shared \
       -o "$out_dir/jniLibs/arm64-v8a/libhogman.so" ./mobile/cabi
   )
@@ -65,7 +65,7 @@ build_android() {
     cd "$JOIN_DIR"
     CGO_ENABLED=1 GOOS=android GOARCH=amd64 \
       CC="$tc/x86_64-linux-android${api}-clang" \
-      CGO_LDFLAGS="-Wl,-z,max-page-size=16384" \
+      CGO_LDFLAGS="-Wl,-soname,libhogman.so -Wl,-z,max-page-size=16384" \
       go build -trimpath -ldflags="-s -w" -tags "$MOBILE_TAGS" -buildmode=c-shared \
       -o "$out_dir/jniLibs/x86_64/libhogman.so" ./mobile/cabi
   )

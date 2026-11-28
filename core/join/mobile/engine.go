@@ -348,6 +348,20 @@ func (c *Controller) StartTunnel(dataDir string, stateKey []byte, zone string, m
 		debug.SetMemoryLimit(iosMemoryLimit)
 		debug.SetGCPercent(iosGCPercent)
 	}
+	// Android and iOS app sandboxes leave HOME, XDG_CACHE_HOME, and TMPDIR unset
+	// (with cwd="/"), which causes Tailscale's logpolicy to panic when probing
+	// for a writable state directory. Point them inside the app's private dataDir.
+	if runtime.GOOS == "android" || runtime.GOOS == "ios" {
+		runtimeDir := filepath.Join(dataDir, "runtime")
+		if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+			return fmt.Errorf("create runtime dir: %w", err)
+		}
+		for _, k := range []string{"TS_LOGS_DIR", "TMPDIR", "XDG_CACHE_HOME", "HOME"} {
+			if os.Getenv(k) == "" {
+				_ = os.Setenv(k, runtimeDir)
+			}
+		}
+	}
 
 	c.StopTunnel()
 
@@ -473,6 +487,17 @@ func (c *Controller) StartTunnel(dataDir string, stateKey []byte, zone string, m
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	if authKey != "" && lb.State() == ipn.NeedsLogin {
+		if err := lb.StartLoginInteractive(ctx); err != nil {
+			cancel()
+			lb.Shutdown()
+			eng.Close()
+			_ = swappable.Close()
+			_ = netMon.Close()
+			encStore.Close()
+			return fmt.Errorf("start login: %w", err)
+		}
+	}
 	at := &activeTunnel{
 		zone:       zone,
 		portal:     meta.Portal,
@@ -508,7 +533,10 @@ func (c *Controller) StartTunnel(dataDir string, stateKey []byte, zone string, m
 func (c *Controller) watchTunnel(at *activeTunnel, meta *PenMeta, hadAuthKey bool) {
 	defer close(at.done)
 
-	sawStarting := hadAuthKey
+	// Freshly enrolled devices start in NeedsLogin while Headscale exchanges the
+	// one-time authkey; already-enrolled devices start authorized, so NeedsLogin
+	// immediately indicates removal.
+	sawStarting := !hadAuthKey
 	at.lb.WatchNotifications(at.ctx, ipn.NotifyInitialState, nil, func(n *ipn.Notify) bool {
 		if at.ctx.Err() != nil {
 			return false
@@ -539,13 +567,17 @@ func (c *Controller) watchTunnel(at *activeTunnel, meta *PenMeta, hadAuthKey boo
 				}
 			}
 		}
-		if n.BrowseToURL != nil && *n.BrowseToURL != "" && !hadAuthKey {
+		if n.BrowseToURL != nil && *n.BrowseToURL != "" {
+			errMsg := peerstatus.ErrDeviceRemoved.Error()
+			if hadAuthKey && !sawStarting {
+				errMsg = "enrollment key was rejected or expired; create a new link on home." + at.zone
+			}
 			c.setStatusIfActive(at, TunnelStatus{
 				State:      "removed",
 				Zone:       at.zone,
 				Portal:     at.portal,
 				NeedsLogin: true,
-				Error:      peerstatus.ErrDeviceRemoved.Error(),
+				Error:      errMsg,
 			})
 			return false
 		}
