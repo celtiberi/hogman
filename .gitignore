@@ -8,3 +8,8 @@
 __pycache__/
 *.pyc
 mobile/build/
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/app/.cxx/
+mobile/android/local.properties
