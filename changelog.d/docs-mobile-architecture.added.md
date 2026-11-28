@@ -1,0 +1,1 @@
+- `docs/mobile.md`: added architecture specification for Hogman Mobile (iOS and Android), covering per-peer `/32` IPv4 split-tunnel VPN routing, peer-filtered split DNS, non-cloneable Keychain/Keystore device-key protection, the iOS 50 MB Network Extension memory budget (`ts_omit_netstack` + direct kernel TUN), the shared `core/join/mobile` C-ABI engine, and staged delivery plan.
