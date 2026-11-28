@@ -1,4 +1,4 @@
-//go:build cgo && (android || ios || darwin || linux)
+//go:build cgo && (android || ios || hogman_mobile_cabi)
 
 package main
 

@@ -1,7 +1,6 @@
 package mobile
 
 import (
-	"errors"
 	"io"
 	"os"
 	"sync"
@@ -182,5 +181,3 @@ func (s *SwappableTUN) Close() error {
 	}
 	return nil
 }
-
-var errTUNFDUnsupported = errors.New("TUN file descriptors are unsupported on this platform")
