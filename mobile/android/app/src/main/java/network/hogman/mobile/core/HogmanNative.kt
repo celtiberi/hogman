@@ -2,7 +2,7 @@ package network.hogman.mobile.core
 
 interface TunnelCallbackTarget {
     fun protectFd(fd: Int): Int
-    fun onTunnelReconfig(reconfigJson: String): Int
+    fun onTunnelReconfig(reconfigUtf8: ByteArray): Int
 }
 
 object HogmanNative {
@@ -12,7 +12,7 @@ object HogmanNative {
     }
 
     @JvmStatic
-    private external fun nativeParseLink(rawLink: String): String
+    private external fun nativeParseLink(rawLink: String): ByteArray?
 
     @JvmStatic
     private external fun nativeJoin(
@@ -22,10 +22,10 @@ object HogmanNative {
         handle: String,
         deviceName: String,
         controlCAPEM: String,
-    ): String
+    ): ByteArray?
 
     @JvmStatic
-    private external fun nativeListPens(dataDir: String): String
+    private external fun nativeListPens(dataDir: String): ByteArray?
 
     @JvmStatic
     private external fun nativeStartTunnel(
@@ -35,19 +35,19 @@ object HogmanNative {
         mtu: Int,
         upstreamDNSJSON: String,
         callbackTarget: TunnelCallbackTarget,
-    ): String
+    ): ByteArray?
 
     @JvmStatic
     private external fun nativeUpdateNetwork(
         upstreamDNSJSON: String,
         linkChanged: Boolean,
-    ): String
+    ): ByteArray?
 
     @JvmStatic
-    private external fun nativeStatus(): String
+    private external fun nativeStatus(): ByteArray?
 
     @JvmStatic
-    private external fun nativeStopTunnel(): String
+    private external fun nativeStopTunnel(): ByteArray?
 
     @JvmStatic
     private external fun nativeLeave(
@@ -55,10 +55,17 @@ object HogmanNative {
         stateKey: ByteArray,
         zone: String,
         force: Boolean,
-    ): String
+    ): ByteArray?
+
+    private fun decodeUtf8(raw: ByteArray?): String =
+        if (raw == null) {
+            """{"ok":false,"error":"null native response"}"""
+        } else {
+            String(raw, Charsets.UTF_8)
+        }
 
     fun parseLink(rawLink: String): ApiResult<ParsedLink> =
-        HogmanModels.decodeParsedLink(nativeParseLink(rawLink))
+        HogmanModels.decodeParsedLink(decodeUtf8(nativeParseLink(rawLink)))
 
     fun join(
         dataDir: String,
@@ -69,11 +76,11 @@ object HogmanNative {
         controlCAPEM: String = "",
     ): ApiResult<PenMeta> =
         HogmanModels.decodePenMeta(
-            nativeJoin(dataDir, stateKey, rawLink, handle, deviceName, controlCAPEM),
+            decodeUtf8(nativeJoin(dataDir, stateKey, rawLink, handle, deviceName, controlCAPEM)),
         )
 
     fun listPens(dataDir: String): ApiResult<List<PenMeta>> =
-        HogmanModels.decodePenList(nativeListPens(dataDir))
+        HogmanModels.decodePenList(decodeUtf8(nativeListPens(dataDir)))
 
     fun startTunnel(
         dataDir: String,
@@ -84,20 +91,20 @@ object HogmanNative {
         callbackTarget: TunnelCallbackTarget,
     ): ApiResult<TunnelStatus> =
         HogmanModels.decodeTunnelStatus(
-            nativeStartTunnel(dataDir, stateKey, zone, mtu, upstreamDNSJSON, callbackTarget),
+            decodeUtf8(nativeStartTunnel(dataDir, stateKey, zone, mtu, upstreamDNSJSON, callbackTarget)),
         )
 
     fun updateNetwork(upstreamDNSJSON: String, linkChanged: Boolean): ApiResult<Unit> =
-        HogmanModels.decodeUnit(nativeUpdateNetwork(upstreamDNSJSON, linkChanged))
+        HogmanModels.decodeUnit(decodeUtf8(nativeUpdateNetwork(upstreamDNSJSON, linkChanged)))
 
     fun status(): TunnelStatus =
-        when (val res = HogmanModels.decodeTunnelStatus(nativeStatus())) {
+        when (val res = HogmanModels.decodeTunnelStatus(decodeUtf8(nativeStatus()))) {
             is ApiResult.Ok -> res.data
             is ApiResult.Err -> TunnelStatus(state = "error", error = res.message)
         }
 
     fun stopTunnel(): TunnelStatus =
-        when (val res = HogmanModels.decodeTunnelStatus(nativeStopTunnel())) {
+        when (val res = HogmanModels.decodeTunnelStatus(decodeUtf8(nativeStopTunnel()))) {
             is ApiResult.Ok -> res.data
             is ApiResult.Err -> TunnelStatus.Disconnected
         }
@@ -108,5 +115,5 @@ object HogmanNative {
         zone: String,
         force: Boolean,
     ): ApiResult<Unit> =
-        HogmanModels.decodeUnit(nativeLeave(dataDir, stateKey, zone, force))
+        HogmanModels.decodeUnit(decodeUtf8(nativeLeave(dataDir, stateKey, zone, force)))
 }

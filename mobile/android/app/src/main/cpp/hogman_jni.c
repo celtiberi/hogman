@@ -28,11 +28,39 @@ static void secure_zero(void *ptr, size_t len) {
     }
 }
 
-static jstring take_go_json(JNIEnv *env, char *raw) {
-    if (raw == NULL) {
-        return (*env)->NewStringUTF(env, "{\"ok\":false,\"error\":\"null native response\"}");
+/*
+ * Return raw UTF-8 bytes as jbyteArray instead of JNI NewStringUTF so standard
+ * 4-byte UTF-8 sequences (e.g. emoji in error messages) never trigger ART
+ * CheckJNI Modified-UTF-8 aborts.
+ */
+static jbyteArray make_utf8_bytes(JNIEnv *env, const char *utf8) {
+    if (utf8 == NULL) {
+        utf8 = "{\"ok\":false,\"error\":\"null native response\"}";
     }
-    jstring out = (*env)->NewStringUTF(env, raw);
+    size_t len = strlen(utf8);
+    jbyteArray arr = (*env)->NewByteArray(env, (jsize)len);
+    if (arr == NULL) {
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+        }
+        return NULL;
+    }
+    if (len > 0) {
+        (*env)->SetByteArrayRegion(env, arr, 0, (jsize)len, (const jbyte *)utf8);
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            (*env)->DeleteLocalRef(env, arr);
+            return NULL;
+        }
+    }
+    return arr;
+}
+
+static jbyteArray take_go_json_bytes(JNIEnv *env, char *raw) {
+    if (raw == NULL) {
+        return make_utf8_bytes(env, "{\"ok\":false,\"error\":\"null native response\"}");
+    }
+    jbyteArray out = make_utf8_bytes(env, raw);
     hogman_free(raw);
     return out;
 }
@@ -54,18 +82,28 @@ static int copy_state_key(JNIEnv *env, jbyteArray arr, uint8_t out[HOGMAN_STATE_
     return 1;
 }
 
-static const char *get_utf_or_empty(JNIEnv *env, jstring s, int *needs_release) {
+/*
+ * Acquires UTF-8 chars for a jstring. Returns 1 on success, or 0 if JNI threw
+ * (e.g. OutOfMemoryError), clearing the pending exception so callers abort
+ * cleanly without making further JNI calls or passing "" as real input.
+ */
+static int acquire_utf(JNIEnv *env, jstring s, const char **out_c, int *needs_release) {
+    *needs_release = 0;
     if (s == NULL) {
-        *needs_release = 0;
-        return "";
+        *out_c = "";
+        return 1;
     }
     const char *c = (*env)->GetStringUTFChars(env, s, NULL);
     if (c == NULL) {
-        *needs_release = 0;
-        return "";
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+        }
+        *out_c = NULL;
+        return 0;
     }
+    *out_c = c;
     *needs_release = 1;
-    return c;
+    return 1;
 }
 
 static void release_utf(JNIEnv *env, jstring s, const char *c, int needs_release) {
@@ -159,14 +197,14 @@ static int jni_reconfig_cb(const char *reconfig_json, void *user_data) {
 
     int rc = -2;
     if (local_target != NULL && mid != NULL) {
-        jstring jjson = (*env)->NewStringUTF(env, reconfig_json != NULL ? reconfig_json : "{}");
-        if (jjson != NULL) {
-            rc = (int)(*env)->CallIntMethod(env, local_target, mid, jjson);
+        jbyteArray jbytes = make_utf8_bytes(env, reconfig_json != NULL ? reconfig_json : "{}");
+        if (jbytes != NULL) {
+            rc = (int)(*env)->CallIntMethod(env, local_target, mid, jbytes);
             if ((*env)->ExceptionCheck(env)) {
                 (*env)->ExceptionClear(env);
                 rc = -2;
             }
-            (*env)->DeleteLocalRef(env, jjson);
+            (*env)->DeleteLocalRef(env, jbytes);
         }
         (*env)->DeleteLocalRef(env, local_target);
     }
@@ -181,18 +219,21 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     return JNI_VERSION_1_6;
 }
 
-JNIEXPORT jstring JNICALL
+JNIEXPORT jbyteArray JNICALL
 Java_network_hogman_mobile_core_HogmanNative_nativeParseLink(
     JNIEnv *env, jclass clazz, jstring rawLink) {
     (void)clazz;
+    const char *c_link = NULL;
     int rel_link = 0;
-    const char *c_link = get_utf_or_empty(env, rawLink, &rel_link);
+    if (!acquire_utf(env, rawLink, &c_link, &rel_link)) {
+        return make_utf8_bytes(env, "{\"ok\":false,\"error\":\"failed to decode link string\"}");
+    }
     char *res = hogman_parse_link((char *)c_link);
     release_utf(env, rawLink, c_link, rel_link);
-    return take_go_json(env, res);
+    return take_go_json_bytes(env, res);
 }
 
-JNIEXPORT jstring JNICALL
+JNIEXPORT jbyteArray JNICALL
 Java_network_hogman_mobile_core_HogmanNative_nativeJoin(
     JNIEnv *env,
     jclass clazz,
@@ -205,16 +246,25 @@ Java_network_hogman_mobile_core_HogmanNative_nativeJoin(
     (void)clazz;
     uint8_t key_buf[HOGMAN_STATE_KEY_LEN];
     if (!copy_state_key(env, stateKey, key_buf)) {
-        return (*env)->NewStringUTF(
+        return make_utf8_bytes(
             env, "{\"ok\":false,\"error\":\"state_key must be exactly 32 bytes\"}");
     }
 
+    const char *c_dir = NULL, *c_link = NULL, *c_handle = NULL, *c_dev = NULL, *c_ca = NULL;
     int rel_dir = 0, rel_link = 0, rel_handle = 0, rel_dev = 0, rel_ca = 0;
-    const char *c_dir = get_utf_or_empty(env, dataDir, &rel_dir);
-    const char *c_link = get_utf_or_empty(env, rawLink, &rel_link);
-    const char *c_handle = get_utf_or_empty(env, handle, &rel_handle);
-    const char *c_dev = get_utf_or_empty(env, deviceName, &rel_dev);
-    const char *c_ca = get_utf_or_empty(env, controlCAPEM, &rel_ca);
+    if (!acquire_utf(env, dataDir, &c_dir, &rel_dir) ||
+        !acquire_utf(env, rawLink, &c_link, &rel_link) ||
+        !acquire_utf(env, handle, &c_handle, &rel_handle) ||
+        !acquire_utf(env, deviceName, &c_dev, &rel_dev) ||
+        !acquire_utf(env, controlCAPEM, &c_ca, &rel_ca)) {
+        secure_zero(key_buf, sizeof(key_buf));
+        release_utf(env, dataDir, c_dir, rel_dir);
+        release_utf(env, rawLink, c_link, rel_link);
+        release_utf(env, handle, c_handle, rel_handle);
+        release_utf(env, deviceName, c_dev, rel_dev);
+        release_utf(env, controlCAPEM, c_ca, rel_ca);
+        return make_utf8_bytes(env, "{\"ok\":false,\"error\":\"failed to decode join arguments\"}");
+    }
 
     char *res = hogman_join(
         (char *)c_dir,
@@ -232,21 +282,24 @@ Java_network_hogman_mobile_core_HogmanNative_nativeJoin(
     release_utf(env, deviceName, c_dev, rel_dev);
     release_utf(env, controlCAPEM, c_ca, rel_ca);
 
-    return take_go_json(env, res);
+    return take_go_json_bytes(env, res);
 }
 
-JNIEXPORT jstring JNICALL
+JNIEXPORT jbyteArray JNICALL
 Java_network_hogman_mobile_core_HogmanNative_nativeListPens(
     JNIEnv *env, jclass clazz, jstring dataDir) {
     (void)clazz;
+    const char *c_dir = NULL;
     int rel_dir = 0;
-    const char *c_dir = get_utf_or_empty(env, dataDir, &rel_dir);
+    if (!acquire_utf(env, dataDir, &c_dir, &rel_dir)) {
+        return make_utf8_bytes(env, "{\"ok\":false,\"error\":\"failed to decode data_dir\"}");
+    }
     char *res = hogman_list_pens((char *)c_dir);
     release_utf(env, dataDir, c_dir, rel_dir);
-    return take_go_json(env, res);
+    return take_go_json_bytes(env, res);
 }
 
-JNIEXPORT jstring JNICALL
+JNIEXPORT jbyteArray JNICALL
 Java_network_hogman_mobile_core_HogmanNative_nativeStartTunnel(
     JNIEnv *env,
     jclass clazz,
@@ -259,32 +312,53 @@ Java_network_hogman_mobile_core_HogmanNative_nativeStartTunnel(
     (void)clazz;
     uint8_t key_buf[HOGMAN_STATE_KEY_LEN];
     if (!copy_state_key(env, stateKey, key_buf)) {
-        return (*env)->NewStringUTF(
+        return make_utf8_bytes(
             env, "{\"ok\":false,\"error\":\"state_key must be exactly 32 bytes\"}");
     }
 
     if (callbackTarget == NULL) {
         secure_zero(key_buf, sizeof(key_buf));
-        return (*env)->NewStringUTF(
+        return make_utf8_bytes(
             env, "{\"ok\":false,\"error\":\"tunnel callback target is required\"}");
+    }
+
+    const char *c_dir = NULL, *c_zone = NULL, *c_dns = NULL;
+    int rel_dir = 0, rel_zone = 0, rel_dns = 0;
+    if (!acquire_utf(env, dataDir, &c_dir, &rel_dir) ||
+        !acquire_utf(env, zone, &c_zone, &rel_zone) ||
+        !acquire_utf(env, upstreamDNSJSON, &c_dns, &rel_dns)) {
+        secure_zero(key_buf, sizeof(key_buf));
+        release_utf(env, dataDir, c_dir, rel_dir);
+        release_utf(env, zone, c_zone, rel_zone);
+        release_utf(env, upstreamDNSJSON, c_dns, rel_dns);
+        return make_utf8_bytes(env, "{\"ok\":false,\"error\":\"failed to decode tunnel arguments\"}");
     }
 
     jclass cb_cls = (*env)->GetObjectClass(env, callbackTarget);
     if (cb_cls == NULL) {
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+        }
         secure_zero(key_buf, sizeof(key_buf));
-        return (*env)->NewStringUTF(
+        release_utf(env, dataDir, c_dir, rel_dir);
+        release_utf(env, zone, c_zone, rel_zone);
+        release_utf(env, upstreamDNSJSON, c_dns, rel_dns);
+        return make_utf8_bytes(
             env, "{\"ok\":false,\"error\":\"could not resolve callback class\"}");
     }
     jmethodID protect_mid = (*env)->GetMethodID(env, cb_cls, "protectFd", "(I)I");
     jmethodID reconfig_mid =
-        (*env)->GetMethodID(env, cb_cls, "onTunnelReconfig", "(Ljava/lang/String;)I");
+        (*env)->GetMethodID(env, cb_cls, "onTunnelReconfig", "([B)I");
     (*env)->DeleteLocalRef(env, cb_cls);
     if (protect_mid == NULL || reconfig_mid == NULL) {
         if ((*env)->ExceptionCheck(env)) {
             (*env)->ExceptionClear(env);
         }
         secure_zero(key_buf, sizeof(key_buf));
-        return (*env)->NewStringUTF(
+        release_utf(env, dataDir, c_dir, rel_dir);
+        release_utf(env, zone, c_zone, rel_zone);
+        release_utf(env, upstreamDNSJSON, c_dns, rel_dns);
+        return make_utf8_bytes(
             env, "{\"ok\":false,\"error\":\"callback target missing required methods\"}");
     }
 
@@ -296,8 +370,14 @@ Java_network_hogman_mobile_core_HogmanNative_nativeStartTunnel(
 
     jobject new_global = (*env)->NewGlobalRef(env, callbackTarget);
     if (new_global == NULL) {
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+        }
         secure_zero(key_buf, sizeof(key_buf));
-        return (*env)->NewStringUTF(
+        release_utf(env, dataDir, c_dir, rel_dir);
+        release_utf(env, zone, c_zone, rel_zone);
+        release_utf(env, upstreamDNSJSON, c_dns, rel_dns);
+        return make_utf8_bytes(
             env, "{\"ok\":false,\"error\":\"failed to allocate callback global ref\"}");
     }
 
@@ -308,11 +388,6 @@ Java_network_hogman_mobile_core_HogmanNative_nativeStartTunnel(
     g_cb.reconfig_mid = reconfig_mid;
     g_cb.active = 1;
     pthread_mutex_unlock(&g_cb_mu);
-
-    int rel_dir = 0, rel_zone = 0, rel_dns = 0;
-    const char *c_dir = get_utf_or_empty(env, dataDir, &rel_dir);
-    const char *c_zone = get_utf_or_empty(env, zone, &rel_zone);
-    const char *c_dns = get_utf_or_empty(env, upstreamDNSJSON, &rel_dns);
 
     char *res = hogman_start_tunnel(
         (char *)c_dir,
@@ -330,32 +405,40 @@ Java_network_hogman_mobile_core_HogmanNative_nativeStartTunnel(
     release_utf(env, zone, c_zone, rel_zone);
     release_utf(env, upstreamDNSJSON, c_dns, rel_dns);
 
-    return take_go_json(env, res);
+    // If start failed synchronously, release the callback GlobalRef right away.
+    if (res == NULL || strstr(res, "\"ok\":false") != NULL) {
+        pthread_mutex_lock(&g_cb_mu);
+        clear_callback_state_locked(env);
+        pthread_mutex_unlock(&g_cb_mu);
+    }
+
+    return take_go_json_bytes(env, res);
 }
 
-JNIEXPORT jstring JNICALL
+JNIEXPORT jbyteArray JNICALL
 Java_network_hogman_mobile_core_HogmanNative_nativeUpdateNetwork(
     JNIEnv *env, jclass clazz, jstring upstreamDNSJSON, jboolean linkChanged) {
     (void)clazz;
+    const char *c_dns = NULL;
     int rel_dns = 0;
-    const char *c_dns = get_utf_or_empty(env, upstreamDNSJSON, &rel_dns);
+    if (!acquire_utf(env, upstreamDNSJSON, &c_dns, &rel_dns)) {
+        return make_utf8_bytes(env, "{\"ok\":false,\"error\":\"failed to decode upstream DNS\"}");
+    }
     char *res = hogman_update_network((char *)c_dns, linkChanged ? 1 : 0);
     release_utf(env, upstreamDNSJSON, c_dns, rel_dns);
-    return take_go_json(env, res);
+    return take_go_json_bytes(env, res);
 }
 
-JNIEXPORT jstring JNICALL
+JNIEXPORT jbyteArray JNICALL
 Java_network_hogman_mobile_core_HogmanNative_nativeStatus(JNIEnv *env, jclass clazz) {
     (void)clazz;
     char *res = hogman_status();
-    return take_go_json(env, res);
+    return take_go_json_bytes(env, res);
 }
 
-JNIEXPORT jstring JNICALL
+JNIEXPORT jbyteArray JNICALL
 Java_network_hogman_mobile_core_HogmanNative_nativeStopTunnel(JNIEnv *env, jclass clazz) {
     (void)clazz;
-    // Mark callbacks inactive before stopping Go goroutines, then delete the GlobalRef
-    // only after hogman_stop_tunnel() has joined watchTunnel and shut down wgengine.
     pthread_mutex_lock(&g_cb_mu);
     g_cb.active = 0;
     pthread_mutex_unlock(&g_cb_mu);
@@ -366,10 +449,10 @@ Java_network_hogman_mobile_core_HogmanNative_nativeStopTunnel(JNIEnv *env, jclas
     clear_callback_state_locked(env);
     pthread_mutex_unlock(&g_cb_mu);
 
-    return take_go_json(env, res);
+    return take_go_json_bytes(env, res);
 }
 
-JNIEXPORT jstring JNICALL
+JNIEXPORT jbyteArray JNICALL
 Java_network_hogman_mobile_core_HogmanNative_nativeLeave(
     JNIEnv *env,
     jclass clazz,
@@ -380,13 +463,19 @@ Java_network_hogman_mobile_core_HogmanNative_nativeLeave(
     (void)clazz;
     uint8_t key_buf[HOGMAN_STATE_KEY_LEN];
     if (!copy_state_key(env, stateKey, key_buf)) {
-        return (*env)->NewStringUTF(
+        return make_utf8_bytes(
             env, "{\"ok\":false,\"error\":\"state_key must be exactly 32 bytes\"}");
     }
 
+    const char *c_dir = NULL, *c_zone = NULL;
     int rel_dir = 0, rel_zone = 0;
-    const char *c_dir = get_utf_or_empty(env, dataDir, &rel_dir);
-    const char *c_zone = get_utf_or_empty(env, zone, &rel_zone);
+    if (!acquire_utf(env, dataDir, &c_dir, &rel_dir) ||
+        !acquire_utf(env, zone, &c_zone, &rel_zone)) {
+        secure_zero(key_buf, sizeof(key_buf));
+        release_utf(env, dataDir, c_dir, rel_dir);
+        release_utf(env, zone, c_zone, rel_zone);
+        return make_utf8_bytes(env, "{\"ok\":false,\"error\":\"failed to decode leave arguments\"}");
+    }
 
     char *res = hogman_leave(
         (char *)c_dir,
@@ -399,5 +488,5 @@ Java_network_hogman_mobile_core_HogmanNative_nativeLeave(
     release_utf(env, dataDir, c_dir, rel_dir);
     release_utf(env, zone, c_zone, rel_zone);
 
-    return take_go_json(env, res);
+    return take_go_json_bytes(env, res);
 }

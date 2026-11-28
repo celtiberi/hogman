@@ -51,7 +51,10 @@ data class TunnelStatus(
 }
 
 object HogmanModels {
+    const val SPLIT_DNS_STUB_IP = "100.100.100.100"
+
     private val ipv4Regex = Regex("""^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$""")
+    private val dnsLabelRegex = Regex("""^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$""")
 
     fun decodeParsedLink(rawJson: String): ApiResult<ParsedLink> =
         decodeObjectEnvelope(rawJson) { obj ->
@@ -75,7 +78,7 @@ object HogmanModels {
         for (i in 0 until arr.length()) {
             val item = arr.optJSONObject(i) ?: continue
             val meta = parsePenMeta(item)
-            if (meta.zone.isNotBlank()) {
+            if (isValidZone(meta.zone)) {
                 out.add(meta)
             }
         }
@@ -84,10 +87,11 @@ object HogmanModels {
 
     fun decodeTunnelStatus(rawJson: String): ApiResult<TunnelStatus> =
         decodeObjectEnvelope(rawJson) { obj ->
+            val zone = obj.optString("zone", "").trim().lowercase()
             TunnelStatus(
                 state = obj.optString("state", "disconnected"),
-                zone = obj.optString("zone", ""),
-                portal = obj.optString("portal", ""),
+                zone = zone,
+                portal = homeUrlForZone(zone).orEmpty(),
                 selfIpv4 = obj.optString("self_ipv4", ""),
                 dnsIp = obj.optString("dns_ip", ""),
                 peerRoutes = readStringList(obj.optJSONArray("peer_routes")),
@@ -104,17 +108,36 @@ object HogmanModels {
         return ApiResult.Ok(Unit)
     }
 
+    /**
+     * Strictly validates a TunnelReconfig before applying OS VPN settings.
+     * Rejects the entire reconfig if:
+     *  - zone is invalid,
+     *  - selfIpv4 is outside RFC 6598 (100.64.0.0/10),
+     *  - dnsStubIp is not exactly 100.100.100.100,
+     *  - mtu is outside [1280, 9000], or
+     *  - peerRoutes is empty or contains ANY route that is not an exact /32
+     *    inside 100.64.0.0/10.
+     */
     fun decodeTunnelReconfig(rawJson: String): TunnelReconfig? {
         val obj = parseEnvelope(rawJson) ?: return null
-        val zone = obj.optString("zone", "").trim()
+        val zone = obj.optString("zone", "").trim().lowercase()
         val selfIpv4 = obj.optString("self_ipv4", "").trim()
         val dnsStubIp = obj.optString("dns_stub_ip", "").trim()
         val mtu = obj.optInt("mtu", 1280)
-        if (zone.isEmpty() || !isValidIpv4(selfIpv4) || !isValidIpv4(dnsStubIp)) {
+        if (!isValidZone(zone) || !isInCgnat10064(selfIpv4) || dnsStubIp != SPLIT_DNS_STUB_IP) {
             return null
         }
         if (mtu < 1280 || mtu > 9000) {
             return null
+        }
+        val rawRoutes = readStringList(obj.optJSONArray("peer_routes"))
+        if (rawRoutes.isEmpty()) {
+            return null
+        }
+        for (cidr in rawRoutes) {
+            if (parseHost32Route(cidr) == null) {
+                return null
+            }
         }
         return TunnelReconfig(
             zone = zone,
@@ -122,13 +145,13 @@ object HogmanModels {
             dnsIp = obj.optString("dns_ip", "").trim(),
             dnsStubIp = dnsStubIp,
             mtu = mtu,
-            peerRoutes = readStringList(obj.optJSONArray("peer_routes")),
+            peerRoutes = rawRoutes,
         )
     }
 
     /**
-     * Strictly accepts exact IPv4 /32 host routes only (defense-in-depth against
-     * broader prefixes like 0.0.0.0/0 or 100.64.0.0/10).
+     * Strictly accepts exact IPv4 /32 host routes inside RFC 6598 (100.64.0.0/10)
+     * only, rejecting broad prefixes and public/LAN addresses.
      */
     fun parseHost32Route(cidr: String): String? {
         val trimmed = cidr.trim()
@@ -136,7 +159,18 @@ object HogmanModels {
             return null
         }
         val ip = trimmed.removeSuffix("/32")
-        return if (isValidIpv4(ip)) ip else null
+        return if (isInCgnat10064(ip)) ip else null
+    }
+
+    fun isInCgnat10064(ip: String): Boolean {
+        val m = ipv4Regex.matchEntire(ip) ?: return false
+        val octets = IntArray(4) { idx ->
+            val v = m.groupValues[idx + 1].toIntOrNull() ?: return false
+            if (v !in 0..255) return false
+            v
+        }
+        // RFC 6598: 100.64.0.0/10 -> first octet 100, second octet 64..127.
+        return octets[0] == 100 && octets[1] in 64..127
     }
 
     fun isValidIpv4(ip: String): Boolean {
@@ -145,6 +179,27 @@ object HogmanModels {
             val octet = m.groupValues[idx].toIntOrNull()
             octet != null && octet in 0..255
         }
+    }
+
+    fun isValidZone(zone: String): Boolean {
+        val norm = zone.trim().lowercase()
+        if (norm.isEmpty() || norm.length > 253 || !norm.contains('.')) {
+            return false
+        }
+        val labels = norm.split('.')
+        return labels.size >= 2 && labels.all { dnsLabelRegex.matches(it) }
+    }
+
+    /**
+     * Always constructs https://home.<zone> from a strictly validated zone name
+     * instead of launching an untrusted server-supplied portal URL.
+     */
+    fun homeUrlForZone(zone: String): String? {
+        val norm = zone.trim().lowercase()
+        if (!isValidZone(norm)) {
+            return null
+        }
+        return "https://home.$norm"
     }
 
     fun encodeUpstreamDnsJson(servers: List<String>): String {
@@ -158,15 +213,17 @@ object HogmanModels {
         return arr.toString()
     }
 
-    private fun parsePenMeta(obj: JSONObject): PenMeta =
-        PenMeta(
-            zone = obj.optString("zone", ""),
+    private fun parsePenMeta(obj: JSONObject): PenMeta {
+        val zone = obj.optString("zone", "").trim().lowercase()
+        return PenMeta(
+            zone = zone,
             loginServer = obj.optString("login_server", ""),
-            portal = obj.optString("portal", ""),
+            portal = homeUrlForZone(zone).orEmpty(),
             dnsServer = obj.optString("dns_server", ""),
             hostname = obj.optString("hostname", ""),
             handle = obj.optString("handle", ""),
         )
+    }
 
     private fun readStringList(arr: JSONArray?): List<String> {
         if (arr == null) return emptyList()

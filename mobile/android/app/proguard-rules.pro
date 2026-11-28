@@ -3,5 +3,5 @@
 -keep interface network.hogman.mobile.core.TunnelCallbackTarget { *; }
 -keep class * implements network.hogman.mobile.core.TunnelCallbackTarget {
     public int protectFd(int);
-    public int onTunnelReconfig(java.lang.String);
+    public int onTunnelReconfig(byte[]);
 }

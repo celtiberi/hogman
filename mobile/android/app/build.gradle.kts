@@ -76,6 +76,29 @@ android {
     }
 }
 
+val verifyReleaseCoreNotDebug by tasks.registering {
+    doLast {
+        val marker = file("../../build/android/build-mode.txt")
+        if (!marker.exists()) {
+            throw GradleException(
+                "Missing ${marker.path}. Rebuild the Android Go core in release mode with: " +
+                    "HOGMAN_MOBILE_DEBUG=0 mobile/build-core.sh android",
+            )
+        }
+        val mode = marker.readText().trim()
+        if (mode != "release") {
+            throw GradleException(
+                "Refusing to package a non-release libhogman.so ($mode) into a release build. " +
+                    "Rebuild with: HOGMAN_MOBILE_DEBUG=0 mobile/build-core.sh android",
+            )
+        }
+    }
+}
+
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    dependsOn(verifyReleaseCoreNotDebug)
+}
+
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2025.04.00")
     implementation(composeBom)

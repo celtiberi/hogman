@@ -114,8 +114,13 @@ class HogmanVpnService : VpnService(), TunnelCallbackTarget {
     override fun protectFd(fd: Int): Int = if (protect(fd)) 0 else -1
 
     // Invoked by libhogman via hogman_jni.c whenever self IP or active /32 peer routes change.
-    override fun onTunnelReconfig(reconfigJson: String): Int {
+    override fun onTunnelReconfig(reconfigUtf8: ByteArray): Int {
+        val reconfigJson = String(reconfigUtf8, Charsets.UTF_8)
         val cfg = HogmanModels.decodeTunnelReconfig(reconfigJson) ?: return -2
+        val expectedZone = activeZone?.trim()?.lowercase()
+        if (expectedZone.isNullOrEmpty() || cfg.zone != expectedZone) {
+            return -2
+        }
         val routes = ArrayList<String>(cfg.peerRoutes.size)
         for (cidr in cfg.peerRoutes) {
             val hostIp = HogmanModels.parseHost32Route(cidr) ?: return -2

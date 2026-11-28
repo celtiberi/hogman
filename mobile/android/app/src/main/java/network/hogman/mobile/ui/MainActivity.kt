@@ -11,6 +11,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -49,6 +50,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -60,15 +62,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import network.hogman.mobile.core.ApiResult
 import network.hogman.mobile.core.DeviceKeyStore
+import network.hogman.mobile.core.HogmanModels
 import network.hogman.mobile.core.HogmanNative
 import network.hogman.mobile.core.ParsedLink
 import network.hogman.mobile.core.PenMeta
@@ -155,6 +160,20 @@ private fun HogmanAppScreen() {
         refreshPens()
     }
 
+    // Protect secret join/invite links from Android screenshots and recents thumbnails.
+    val protectSecrets = showJoinDialog || showQrScanner
+    DisposableEffect(protectSecrets) {
+        val win = (context as? Activity)?.window
+        if (protectSecrets) {
+            win?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+        onDispose {
+            if (protectSecrets) {
+                win?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
+        }
+    }
+
     if (showQrScanner) {
         QrScannerScreen(
             onScanned = { text ->
@@ -225,7 +244,7 @@ private fun HogmanAppScreen() {
                     pens = pens,
                     onConnect = { requestConnect(it) },
                     onDisconnect = { HogmanVpnService.disconnect(context) },
-                    onOpenHome = { openUrl(context, it) },
+                    onOpenHome = { openHomeForZone(context, it) },
                 )
             }
 
@@ -345,7 +364,7 @@ private fun HogmanAppScreen() {
                         isConnected = isThisPenConnected,
                         onConnect = { requestConnect(pen.zone) },
                         onDisconnect = { HogmanVpnService.disconnect(context) },
-                        onOpenHome = { openUrl(context, pen.portal.ifBlank { "https://home.${pen.zone}" }) },
+                        onOpenHome = { openHomeForZone(context, pen.zone) },
                         onLeave = { leaveTarget = pen },
                     )
                 }
@@ -475,10 +494,9 @@ private fun ActiveTunnelCard(
                     ) {
                         Text("Disconnect")
                     }
-                    if (status.state == "connected") {
-                        val portalUrl = status.portal.ifBlank { "https://home.${status.zone}" }
+                    if (status.state == "connected" && HogmanModels.isValidZone(status.zone)) {
                         Button(
-                            onClick = { onOpenHome(portalUrl) },
+                            onClick = { onOpenHome(status.zone) },
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = HogmanColors.Accent,
@@ -646,7 +664,6 @@ private fun JoinPenDialog(
     val scope = rememberCoroutineScope()
 
     var rawLink by remember(initialLink) { mutableStateOf(initialLink) }
-    var pastedFromClipboard by remember { mutableStateOf(false) }
     var parsed by remember { mutableStateOf<ParsedLink?>(null) }
     var parseErr by remember { mutableStateOf<String?>(null) }
     var handle by remember { mutableStateOf("") }
@@ -676,9 +693,27 @@ private fun JoinPenDialog(
     }
 
     AlertDialog(
-        onDismissRequest = { if (!submitting) onDismiss() },
+        onDismissRequest = {
+            if (!submitting) {
+                if (parsed != null || rawLink.contains("#t=") || rawLink.contains("#k=")) {
+                    clearClipboardIfMatches(context, rawLink.trim())
+                }
+                onDismiss()
+            }
+        },
         containerColor = HogmanColors.Surface,
-        title = { Text("Join a pen", color = HogmanColors.Ink) },
+        title = {
+            // Also secure the AlertDialog's own window against screenshots and recents.
+            val dialogView = LocalView.current
+            DisposableEffect(dialogView) {
+                val dlgWindow = (dialogView.parent as? DialogWindowProvider)?.window
+                dlgWindow?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                onDispose {
+                    dlgWindow?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                }
+            }
+            Text("Join a pen", color = HogmanColors.Ink)
+        },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(
@@ -699,7 +734,6 @@ private fun JoinPenDialog(
                                 submitErr = "Clipboard is empty."
                             } else {
                                 rawLink = clip.trim()
-                                pastedFromClipboard = true
                             }
                         },
                         enabled = !submitting,
@@ -781,13 +815,12 @@ private fun JoinPenDialog(
                             }
                         }
                         submitting = false
+                        // Always clear the clipboard if it still holds this secret link
+                        // (handles both Paste button and long-press paste, success or failure,
+                        // without wiping anything unrelated copied afterward).
+                        clearClipboardIfMatches(context, linkCopy)
                         when (res) {
-                            is ApiResult.Ok -> {
-                                if (pastedFromClipboard) {
-                                    clearClipboard(context)
-                                }
-                                onJoined(res.data)
-                            }
+                            is ApiResult.Ok -> onJoined(res.data)
                             is ApiResult.Err -> submitErr = res.message
                         }
                     }
@@ -797,7 +830,15 @@ private fun JoinPenDialog(
             }
         },
         dismissButton = {
-            TextButton(enabled = !submitting, onClick = onDismiss) {
+            TextButton(
+                enabled = !submitting,
+                onClick = {
+                    if (parsed != null || rawLink.contains("#t=") || rawLink.contains("#k=")) {
+                        clearClipboardIfMatches(context, rawLink.trim())
+                    }
+                    onDismiss()
+                },
+            ) {
                 Text("Cancel")
             }
         },
@@ -896,7 +937,8 @@ private fun LeavePenDialog(
 private fun defaultDeviceName(): String {
     val raw = Build.MODEL?.trim().orEmpty()
     val clean = raw.lowercase().replace(Regex("[^a-z0-9-]+"), "-").trim('-')
-    return clean.ifBlank { "android" }.take(32)
+    // Never truncate (D-56): fall back to "android" if model exceeds hostname limit.
+    return if (clean.length in 1..32) clean else "android"
 }
 
 private fun readClipboardExplicit(context: Context): String? {
@@ -906,15 +948,25 @@ private fun readClipboardExplicit(context: Context): String? {
     return clip.getItemAt(0).coerceToText(context)?.toString()
 }
 
-private fun clearClipboard(context: Context) {
+private fun clearClipboardIfMatches(context: Context, expectedSecretLink: String) {
+    if (expectedSecretLink.isEmpty()) return
     val cm = context.getSystemService(ClipboardManager::class.java) ?: return
     try {
-        cm.clearPrimaryClip()
+        val current = cm.primaryClip
+            ?.takeIf { it.itemCount > 0 }
+            ?.getItemAt(0)
+            ?.coerceToText(context)
+            ?.toString()
+            ?.trim()
+        if (current == expectedSecretLink) {
+            cm.clearPrimaryClip()
+        }
     } catch (_: Throwable) {
     }
 }
 
-private fun openUrl(context: Context, url: String) {
+private fun openHomeForZone(context: Context, zone: String) {
+    val url = HogmanModels.homeUrlForZone(zone) ?: return
     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
     context.startActivity(intent)
 }

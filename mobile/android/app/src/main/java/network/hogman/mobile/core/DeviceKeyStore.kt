@@ -1,8 +1,10 @@
 package network.hogman.mobile.core
 
 import android.content.Context
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.security.keystore.StrongBoxUnavailableException
 import java.io.File
 import java.io.FileOutputStream
 import java.security.KeyStore
@@ -75,16 +77,33 @@ object DeviceKeyStore {
             return existing
         }
         val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        val spec = KeyGenParameterSpec.Builder(
-            KEK_ALIAS,
-            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-        )
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setKeySize(256)
-            .setRandomizedEncryptionRequired(true)
-            .build()
-        gen.init(spec)
+        fun buildSpec(strongBox: Boolean): KeyGenParameterSpec =
+            KeyGenParameterSpec.Builder(
+                KEK_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .setRandomizedEncryptionRequired(true)
+                .apply {
+                    if (strongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        setIsStrongBoxBacked(true)
+                    }
+                }
+                .build()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            try {
+                gen.init(buildSpec(strongBox = true))
+                return gen.generateKey()
+            } catch (_: StrongBoxUnavailableException) {
+                // Fall back to standard TEE-backed Android Keystore when StrongBox is absent.
+            } catch (_: Exception) {
+                // Some devices throw ProviderException instead of StrongBoxUnavailableException.
+            }
+        }
+        gen.init(buildSpec(strongBox = false))
         return gen.generateKey()
     }
 
