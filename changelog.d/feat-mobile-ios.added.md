@@ -1,0 +1,1 @@
+- Add the native iOS Hogman Mobile app (`mobile/ios`) with SwiftUI UI, `NEPacketTunnelProvider` split-tunnel extension linked against `HogmanCore.xcframework`, device-bound Keychain DEK (`AfterFirstUnlockThisDeviceOnly`), backup-excluded App Group storage, native `AVCaptureSession` QR scanner, and XCTest unit suite.
