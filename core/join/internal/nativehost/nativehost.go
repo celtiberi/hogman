@@ -136,17 +136,18 @@ func WriteFrame(w io.Writer, v any) error {
 
 // RunMain is the browser Native Messaging entrypoint. It isolates fd 1
 // immediately so no stray log or stdout write can corrupt length-prefixed frames.
-func RunMain() {
+func RunMain() int {
 	out, err := isolateNativeStdout()
 	if err != nil {
-		os.Exit(1)
+		return 1
 	}
 	defer out.Close()
 	log.SetOutput(os.Stderr)
 	if err := Serve(os.Stdin, out, state.ConfigBase(), time.Second); err != nil && !errors.Is(err, io.EOF) {
 		fmt.Fprintf(os.Stderr, "hogman-native-host: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 type Session struct {

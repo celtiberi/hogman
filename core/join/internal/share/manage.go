@@ -106,14 +106,15 @@ func Start(name, what, rawLink string, o StartOptions, u *ui.UI, ensureBin Ensur
 		}
 	}
 	if cfg == nil {
-		if rawLink != "" {
+		switch {
+		case rawLink != "":
 			cfg, key, err = fromLink(name, rawLink, o, u)
-		} else if explicitDir != "" {
+		case explicitDir != "":
 			if o.PrivateName {
 				return link.Errorf("state directory %s is not enrolled yet. Enroll once with a share link:\n  hogman share --private-name %s --state-dir %s --enroll-only --link-stdin", explicitDir, what, explicitDir)
 			}
 			return link.Errorf("state directory %s is not enrolled yet. Enroll once with a share link:\n  hogman share %s %s --state-dir %s --enroll-only --link-stdin", explicitDir, name, what, explicitDir)
-		} else {
+		default:
 			cfg, key, err = fromMembership(name, o, u)
 		}
 		if err != nil {
@@ -291,7 +292,7 @@ func Start(name, what, rawLink string, o StartOptions, u *ui.UI, ensureBin Ensur
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return Serve(ctx, dir, u, func(c *state.ShareConfig) {
-		printReady(u, c, false, false)
+		printReady(u, c, shareForeground)
 		if c.PrivateName && explicitDir == "" {
 			u.Say("  Stop: Ctrl-C. The name stays yours: run 'hogman share %s %s --foreground' to bring it back.", c.Name, what)
 		} else {
@@ -300,16 +301,23 @@ func Start(name, what, rawLink string, o StartOptions, u *ui.UI, ensureBin Ensur
 	})
 }
 
-func printReady(u *ui.UI, c *state.ShareConfig, background, managed bool) {
+type shareRunMode int
+
+const (
+	shareForeground shareRunMode = iota + 1
+	shareBackgroundDetached
+	shareBackgroundManaged
+)
+
+func printReady(u *ui.UI, c *state.ShareConfig, mode shareRunMode) {
 	u.Say("\n✓ %s is up.", c.URL())
 	u.Say("  Everyone in the pen can open it.")
 	u.Say("  It shows %s.", c.Showing())
-	if background {
-		if managed {
-			u.Say("  It runs in the background and starts by itself when you log in.")
-		} else {
-			u.Say("  It runs in the background until this computer restarts.")
-		}
+	switch mode {
+	case shareBackgroundManaged:
+		u.Say("  It runs in the background and starts by itself when you log in.")
+	case shareBackgroundDetached:
+		u.Say("  It runs in the background until this computer restarts.")
 	}
 	stopCmd := shareStopCommand(runtime.GOOS, c.Name)
 	if c.PrivateName {
@@ -465,7 +473,11 @@ func WaitBackground(dir string, c *state.ShareConfig, managed bool, pid int, tim
 		}
 		switch st.State {
 		case "up":
-			printReady(u, c, true, managed)
+			mode := shareBackgroundDetached
+			if managed {
+				mode = shareBackgroundManaged
+			}
+			printReady(u, c, mode)
 			return nil
 		case "error":
 			if stopFn != nil {

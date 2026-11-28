@@ -18,15 +18,28 @@ import (
 )
 
 const (
-	DefaultMaxMembers             = 500
-	DefaultMaxDevices             = 500
-	defaultMaxOpenDeviceKeys      = 3
-	defaultMaxAdminOpenDeviceKeys = 10
+	DefaultMaxMembers              = 500
+	DefaultMaxDevices              = 500
+	defaultMaxOpenDeviceKeys       = 3
+	defaultMaxAdminOpenDeviceKeys  = 10
+	defaultMaxNamesPerMember       = 50
+	defaultMaxOpenInvites          = 25
+	defaultMaxInviteNoteLen        = 256
+	defaultMaxServerEABPerDay      = 2
+	defaultMaxMemberEABPerDay      = 4
+	defaultMaxMemberACMETXTPerHour = 60
+	defaultPresenceTTL             = 5 * time.Second
 	// OwnerDeviceReserve is the number of extra personal-device slots above
 	// MaxDevices reserved strictly for active owners so an owner can replace or
 	// add a personal device to manage the pen even when the pen is at MAX_DEVICES.
 	OwnerDeviceReserve = 2
 )
+
+func defaultPositive[T ~int | ~int64](v *T, def T) {
+	if *v <= 0 {
+		*v = def
+	}
+}
 
 func addDeviceReserve(maxDevices int) int {
 	if maxDevices <= 0 {
@@ -231,48 +244,29 @@ func (s *Service) clock() time.Time {
 	return time.Now()
 }
 
+func (c Config) withDefaults() Config {
+	defaultPositive(&c.MaxMembers, DefaultMaxMembers)
+	defaultPositive(&c.MaxDevices, DefaultMaxDevices)
+	defaultPositive(&c.MaxOpenDeviceKeys, defaultMaxOpenDeviceKeys)
+	defaultPositive(&c.MaxAdminOpenDeviceKeys, defaultMaxAdminOpenDeviceKeys)
+	c.MaxAdminOpenDeviceKeys = max(c.MaxAdminOpenDeviceKeys, c.MaxOpenDeviceKeys)
+	defaultPositive(&c.MaxNamesPerMember, defaultMaxNamesPerMember)
+	defaultPositive(&c.MaxOpenInvites, defaultMaxOpenInvites)
+	defaultPositive(&c.MaxInviteNoteLen, defaultMaxInviteNoteLen)
+	defaultPositive(&c.MaxServerEABPerDay, defaultMaxServerEABPerDay)
+	defaultPositive(&c.MaxMemberEABPerDay, defaultMaxMemberEABPerDay)
+	defaultPositive(&c.MaxMemberACMETXTPerHour, defaultMaxMemberACMETXTPerHour)
+	defaultPositive(&c.PresenceTTL, defaultPresenceTTL)
+	return c
+}
+
 func NewService(cfg Config, st *store.Store, hs *headscale.Client) (*Service, error) {
 	theme, err := normaliseTheme(cfg.Theme)
 	if err != nil {
 		return nil, err
 	}
 	cfg.Theme = theme
-	if cfg.MaxMembers <= 0 {
-		cfg.MaxMembers = DefaultMaxMembers
-	}
-	if cfg.MaxDevices <= 0 {
-		cfg.MaxDevices = DefaultMaxDevices
-	}
-	if cfg.MaxOpenDeviceKeys <= 0 {
-		cfg.MaxOpenDeviceKeys = defaultMaxOpenDeviceKeys
-	}
-	if cfg.MaxAdminOpenDeviceKeys <= 0 {
-		cfg.MaxAdminOpenDeviceKeys = defaultMaxAdminOpenDeviceKeys
-	}
-	if cfg.MaxAdminOpenDeviceKeys < cfg.MaxOpenDeviceKeys {
-		cfg.MaxAdminOpenDeviceKeys = cfg.MaxOpenDeviceKeys
-	}
-	if cfg.MaxNamesPerMember <= 0 {
-		cfg.MaxNamesPerMember = 50
-	}
-	if cfg.MaxOpenInvites <= 0 {
-		cfg.MaxOpenInvites = 25
-	}
-	if cfg.MaxInviteNoteLen <= 0 {
-		cfg.MaxInviteNoteLen = 256
-	}
-	if cfg.MaxServerEABPerDay <= 0 {
-		cfg.MaxServerEABPerDay = 2
-	}
-	if cfg.MaxMemberEABPerDay <= 0 {
-		cfg.MaxMemberEABPerDay = 4
-	}
-	if cfg.MaxMemberACMETXTPerHour <= 0 {
-		cfg.MaxMemberACMETXTPerHour = 60
-	}
-	if cfg.PresenceTTL <= 0 {
-		cfg.PresenceTTL = 5 * time.Second
-	}
+	cfg = cfg.withDefaults()
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()

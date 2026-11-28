@@ -725,12 +725,12 @@ func (m *CertManager) EnsureWithBackoff(ctx context.Context) error {
 
 	var last error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if err := m.Ensure(ctx); err == nil {
+		err := m.Ensure(ctx)
+		if err == nil {
 			m.clearRetryState()
 			return nil
-		} else {
-			last = err
 		}
+		last = err
 		if ctx.Err() != nil {
 			return last
 		}

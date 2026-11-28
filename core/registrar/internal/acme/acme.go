@@ -85,6 +85,8 @@ type ChallengeDNSClient struct {
 	http    *http.Client
 }
 
+var _ Backend = (*ChallengeDNSClient)(nil)
+
 // NewChallengeDNSClient builds a client from CHALLENGE_DNS_URL and token.
 func NewChallengeDNSClient(baseURL, token string) (*ChallengeDNSClient, error) {
 	baseURL = strings.TrimSpace(baseURL)

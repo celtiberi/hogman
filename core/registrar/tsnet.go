@@ -29,6 +29,8 @@ import (
 
 const embeddedHealthAddr = "127.0.0.1:8089"
 
+var _ dns.NameLookup = (*registrar.Service)(nil)
+
 type embeddedMesh struct {
 	srv       *tsnet.Server
 	dns       *dns.Server

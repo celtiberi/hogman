@@ -23,6 +23,8 @@ type staticEABMinter struct {
 	hmacB64URL string
 }
 
+var _ EABMinter = (*staticEABMinter)(nil)
+
 func newStaticEABMinter(path string) (*staticEABMinter, error) {
 	f, err := os.Open(path)
 	if err != nil {

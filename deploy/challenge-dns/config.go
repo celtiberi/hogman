@@ -34,32 +34,24 @@ func DefaultCapsConfig() CapsConfig {
 	}
 }
 
+func defaultPositive[T ~int | ~int64](v *T, def T) {
+	if *v <= 0 {
+		*v = def
+	}
+}
+
 // resolved fills zero fields with defaults and applies consistent ordering
 // clamps so partial struct literals in tests behave predictably.
 func (c CapsConfig) resolved() CapsConfig {
 	out := c
-	if out.WeeklyCap <= 0 {
-		out.WeeklyCap = defaultCapNames
-	}
-	if out.HourlyCap <= 0 {
-		out.HourlyCap = defaultHourlyCap
-	}
-	if out.HourlyCap > out.WeeklyCap {
-		out.HourlyCap = out.WeeklyCap
-	}
-	if out.WorkWeeklyCap <= 0 {
-		out.WorkWeeklyCap = defaultWorkWeeklyCap
-	}
-	if out.WorkHourlyCap <= 0 {
-		out.WorkHourlyCap = defaultWorkHourlyCap
-	}
-	if out.WorkHourlyCap > out.WorkWeeklyCap {
-		out.WorkHourlyCap = out.WorkWeeklyCap
-	}
+	defaultPositive(&out.WeeklyCap, defaultCapNames)
+	defaultPositive(&out.HourlyCap, defaultHourlyCap)
+	out.HourlyCap = min(out.HourlyCap, out.WeeklyCap)
+	defaultPositive(&out.WorkWeeklyCap, defaultWorkWeeklyCap)
+	defaultPositive(&out.WorkHourlyCap, defaultWorkHourlyCap)
+	out.WorkHourlyCap = min(out.WorkHourlyCap, out.WorkWeeklyCap)
 	softWasSet := out.GlobalHourlyCap > 0
-	if !softWasSet {
-		out.GlobalHourlyCap = defaultGlobalHourlyCap
-	}
+	defaultPositive(&out.GlobalHourlyCap, defaultGlobalHourlyCap)
 	if out.GlobalHardHourlyCap <= 0 {
 		if softWasSet {
 			out.GlobalHardHourlyCap = out.GlobalHourlyCap
@@ -67,21 +59,17 @@ func (c CapsConfig) resolved() CapsConfig {
 			out.GlobalHardHourlyCap = defaultGlobalHardHourlyCap
 		}
 	}
-	if out.GlobalHardHourlyCap < out.GlobalHourlyCap {
-		out.GlobalHardHourlyCap = out.GlobalHourlyCap
-	}
-	if out.LEWeeklyAllowance <= 0 {
-		out.LEWeeklyAllowance = defaultLEWeeklyAllowance
-	}
+	out.GlobalHardHourlyCap = max(out.GlobalHardHourlyCap, out.GlobalHourlyCap)
+	defaultPositive(&out.LEWeeklyAllowance, defaultLEWeeklyAllowance)
 	return out
 }
 
 // Validate checks bounds and cross-field ordering invariants on a fully
 // populated CapsConfig.
 func (c CapsConfig) Validate() error {
-	checkRange := func(name string, v, max int) error {
-		if v < 1 || v > max {
-			return fmt.Errorf("%s must be an integer between 1 and %d (got %d)", name, max, v)
+	checkRange := func(name string, v, maxVal int) error {
+		if v < 1 || v > maxVal {
+			return fmt.Errorf("%s must be an integer between 1 and %d (got %d)", name, maxVal, v)
 		}
 		return nil
 	}

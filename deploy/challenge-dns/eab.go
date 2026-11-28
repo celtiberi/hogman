@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,6 +35,8 @@ type gcpMinter struct {
 	base    string // https://publicca.googleapis.com
 	client  *http.Client
 }
+
+var _ EABMinter = (*gcpMinter)(nil)
 
 // newGCPMinter reads a service-account key file. The account should hold
 // only roles/publicca.externalAccountKeyCreator.
@@ -116,7 +119,7 @@ func parseEAB(body []byte) (string, string, error) {
 		return "", "", fmt.Errorf("publicca reply: %w", err)
 	}
 	if out.KeyID == "" || len(out.B64MacKey) == 0 {
-		return "", "", fmt.Errorf("publicca reply has no key")
+		return "", "", errors.New("publicca reply has no key")
 	}
 	return out.KeyID, string(out.B64MacKey), nil
 }
