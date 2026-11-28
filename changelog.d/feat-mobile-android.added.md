@@ -1,0 +1,1 @@
+- Add the native Android Hogman Mobile app (`mobile/android`) with Kotlin/Jetpack Compose UI, 16 KB page-aligned JNI bridge to `libhogman.so`, Android Keystore-wrapped DEK with backup/device-transfer exclusions, per-peer `/32` split-tunnel `HogmanVpnService`, Android Private DNS strict-mode detection, and on-device CameraX+ZXing QR scanning.
