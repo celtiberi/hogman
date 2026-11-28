@@ -51,8 +51,7 @@ type options struct {
 
 func main() {
 	if nativehost.IsBinary(os.Args[0]) {
-		nativehost.RunMain()
-		return
+		os.Exit(nativehost.RunMain())
 	}
 	os.Exit(runCLI(os.Args[1:], defaultCLIHandlers()))
 }

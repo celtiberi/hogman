@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -320,7 +321,7 @@ func (a *Agent) Dial(ctx context.Context, hostport string) (net.Conn, error) {
 		}
 	}
 	// Whatever the pen's DNS answered, dial only its own devices.
-	var ordered []string
+	ordered := make([]string, 0, len(ips))
 	for _, raw := range orderIPs(ips) {
 		if ip, err := netip.ParseAddr(raw); err == nil && a.allowed(ctx, ip) {
 			ordered = append(ordered, ip.Unmap().String())
@@ -340,9 +341,9 @@ func (a *Agent) Dial(ctx context.Context, hostport string) (net.Conn, error) {
 	return nil, lastErr
 }
 
-var errOutside = fmt.Errorf("this proxy only serves the pen")
+var errOutside = errors.New("this proxy only serves the pen")
 
-var errPort = fmt.Errorf("this proxy only carries HTTPS (port 443) to the pen")
+var errPort = errors.New("this proxy only carries HTTPS (port 443) to the pen")
 
 // webPort: Hogman carries HTTPS to pen names and nothing else (D-11).
 func webPort(hostport string) bool {

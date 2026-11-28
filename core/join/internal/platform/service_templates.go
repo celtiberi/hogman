@@ -2,6 +2,7 @@ package platform
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -31,10 +32,10 @@ func WindowsShareRunValueName(c *state.ShareConfig) string { return "Hogman.shar
 
 func winQuoteArg(s string) (string, error) {
 	if s == "" {
-		return "", fmt.Errorf("empty windows command argument")
+		return "", errors.New("empty windows command argument")
 	}
 	if strings.ContainsAny(s, "\r\n\x00\"") {
-		return "", fmt.Errorf("windows command argument contains disallowed control or quote characters")
+		return "", errors.New("windows command argument contains disallowed control or quote characters")
 	}
 	// Per Win32 CommandLineToArgvW rules, backslashes immediately preceding the
 	// closing double-quote must be doubled so the closing quote is not escaped.

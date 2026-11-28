@@ -117,7 +117,7 @@ func ProbePenLoginServer(p *PenTarget, o Options) error {
 		return nil
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
-		return fmt.Errorf("pen server returned HTTP 503 (sleeping or stopped)")
+		return errors.New("pen server returned HTTP 503 (sleeping or stopped)")
 	}
 	return fmt.Errorf("pen server returned HTTP %d", resp.StatusCode)
 }

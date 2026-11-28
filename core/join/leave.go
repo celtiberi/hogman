@@ -474,13 +474,13 @@ func (r *leaveRunner) uninstallCmd(args []string, o options) error {
 	r.ui.Say("\n✓ Hogman is off this computer.")
 	if len(leftovers) > 0 {
 		if runtime.GOOS == "windows" {
-			var parts []string
+			parts := make([]string, 0, len(leftovers))
 			for _, p := range leftovers {
 				parts = append(parts, fmt.Sprintf(`"%s"`, p))
 			}
 			r.ui.Say("  Last step: delete the program itself:  del %s", strings.Join(parts, " "))
 		} else {
-			var parts []string
+			parts := make([]string, 0, len(leftovers))
 			for _, p := range leftovers {
 				parts = append(parts, fmt.Sprintf("'%s'", p))
 			}

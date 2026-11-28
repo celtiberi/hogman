@@ -216,17 +216,15 @@ func (s *Service) claimLocked(a Actor, handle, rawName string, deviceID int64, r
 			return "", err
 		}
 		existing, err = s.st.NameByName(name)
-		if err == nil {
-			if existing.RetiredAt != nil {
-				return "", conflict("%s is retired and cannot be reused", name)
-			}
-			if existing.MemberID != m.ID && !a.IsOwner() {
-				return "", conflict("%s belongs to %s", name, existing.Member)
-			}
-		} else if !errors.Is(err, ErrNotFound) {
-			return "", err
-		} else {
+		switch {
+		case errors.Is(err, ErrNotFound):
 			existing = nil
+		case err != nil:
+			return "", err
+		case existing.RetiredAt != nil:
+			return "", conflict("%s is retired and cannot be reused", name)
+		case existing.MemberID != m.ID && !a.IsOwner():
+			return "", conflict("%s belongs to %s", name, existing.Member)
 		}
 		// If claiming an unclaimed top-level name, refuse if another member (or a
 		// retired record) already owns a subdomain under it.

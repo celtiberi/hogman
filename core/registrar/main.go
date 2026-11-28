@@ -18,52 +18,55 @@ import (
 )
 
 func main() {
+	os.Exit(run(os.Args[1:]))
+}
+
+func run(args []string) int {
 	log.SetFlags(0)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	slog.SetDefault(logger)
 
 	configureTestCA()
-	args := os.Args[1:]
 	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
 		fmt.Print(usage)
-		return
+		return 0
 	}
 	switch args[0] {
 	case "health":
 		if err := healthCmd(); err != nil {
 			fmt.Fprintln(os.Stderr, "unhealthy:", err)
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	case "derp-map":
 		if err := derpMapCmd(); err != nil {
 			fmt.Fprintln(os.Stderr, "derp-map:", err)
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	case "gate-cert":
 		if err := gateCertCmd(args[1:], logger); err != nil {
 			fmt.Fprintln(os.Stderr, "gate-cert:", err)
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	case "serve":
 		s, closeStore := setup()
 		defer closeStore()
 		serve(s, logger)
-		return
+		return 0
 	}
 
 	s, closeStore := setup()
-	err := cli(context.Background(), s, args)
-	_ = closeStore()
-	if err != nil {
+	defer closeStore()
+	if err := cli(context.Background(), s, args); err != nil {
 		var de *registrar.Error
 		if errors.As(err, &de) {
 			fmt.Fprintln(os.Stderr, "error:", de.Msg)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(2)
+		return 2
 	}
+	return 0
 }

@@ -71,23 +71,18 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 func waitForInitialSync(ctx context.Context, s *registrar.Service, logger *slog.Logger) bool {
 	backoff := time.Second
 	for {
-		if err := s.Sync(ctx); err == nil {
+		err := s.Sync(ctx)
+		if err == nil {
 			logger.Info("in sync with headscale", "zone", s.Zone())
 			return true
-		} else {
-			logger.Warn("waiting for headscale", "err", err)
 		}
+		logger.Warn("waiting for headscale", "err", err)
 		select {
 		case <-ctx.Done():
 			return false
 		case <-time.After(backoff):
 		}
-		if backoff < 5*time.Second {
-			backoff *= 2
-			if backoff > 5*time.Second {
-				backoff = 5 * time.Second
-			}
-		}
+		backoff = min(backoff*2, 5*time.Second)
 	}
 }
 

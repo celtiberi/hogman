@@ -113,22 +113,29 @@ func (l *eabLimiter) Allow(kind, credID string) (ok bool, reason string) {
 		return true, ""
 	}
 	now := l.now()
-	l.mu.Lock()
-	if lim := l.credFails[credID]; lim != nil {
-		if lim.exceeded(now) {
-			l.mu.Unlock()
-			return false, "fallback account key requests are cooling down after upstream errors; try later"
-		}
-		if lim.empty(now) {
-			delete(l.credFails, credID)
-		}
+	if l.inCooldown(credID, now) {
+		return false, "fallback account key requests are cooling down after upstream errors; try later"
 	}
-	l.mu.Unlock()
-
 	if !l.global.allow(now) {
 		return false, "fallback account keys are rate-limited; try later"
 	}
 	return true, ""
+}
+
+func (l *eabLimiter) inCooldown(credID string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	lim := l.credFails[credID]
+	if lim == nil {
+		return false
+	}
+	if lim.exceeded(now) {
+		return true
+	}
+	if lim.empty(now) {
+		delete(l.credFails, credID)
+	}
+	return false
 }
 
 // RecordFailure records an upstream EAB mint error for a pen credential and

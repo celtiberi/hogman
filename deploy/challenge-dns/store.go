@@ -505,6 +505,13 @@ func (s *Store) InScope(c Cred, fqdn string) bool {
 	return false
 }
 
+type weeklyAlert struct {
+	used      int
+	allowance int
+	threshold int
+	fn        func(used, allowance, threshold int)
+}
+
 // PutTXT adds or refreshes a challenge value. Idempotent for a live value.
 func (s *Store) PutTXT(c Cred, fqdn, value string) error {
 	fqdn = normalize(fqdn)
@@ -514,11 +521,22 @@ func (s *Store) PutTXT(c Cred, fqdn, value string) error {
 	if !valueRE.MatchString(value) {
 		return errValue
 	}
+	alert, err := s.recordTXT(c, fqdn, value)
+	if err != nil {
+		return err
+	}
+	if alert.fn != nil {
+		alert.fn(alert.used, alert.allowance, alert.threshold)
+	}
+	return nil
+}
+
+func (s *Store) recordTXT(c Cred, fqdn, value string) (weeklyAlert, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	liveCred, ok := s.credLocked(c.ID)
 	if !ok {
-		s.mu.Unlock()
-		return errRevoked
+		return weeklyAlert{}, errRevoked
 	}
 	c = liveCred
 	now := s.now()
@@ -527,36 +545,29 @@ func (s *Store) PutTXT(c Cred, fqdn, value string) error {
 		if live[i].value == value {
 			live[i].expires = now.Add(txtTTL)
 			s.txt[fqdn] = live
-			s.mu.Unlock()
-			return nil
+			return weeklyAlert{}, nil
 		}
 	}
 	if len(live) >= maxLivePer {
-		s.mu.Unlock()
-		return errFull
+		return weeklyAlert{}, errFull
 	}
-	var alertNeeded bool
-	var alertUsed, alertAllowance, alertThreshold int
-	var alertFn func(used, allowance, threshold int)
+	var alert weeklyAlert
 	if c.Kind == "pen" {
-		var err error
-		alertNeeded, alertUsed, err = s.countLocked(c, fqdn, now)
+		alertNeeded, alertUsed, err := s.countLocked(c, fqdn, now)
 		if err != nil {
-			s.mu.Unlock()
-			return err
+			return weeklyAlert{}, err
 		}
-		if alertNeeded {
-			alertAllowance = s.caps.LEWeekly()
-			alertThreshold = s.caps.WeeklyAlertThreshold()
-			alertFn = s.onWeeklyAlert
+		if alertNeeded && s.onWeeklyAlert != nil {
+			alert = weeklyAlert{
+				used:      alertUsed,
+				allowance: s.caps.LEWeekly(),
+				threshold: s.caps.WeeklyAlertThreshold(),
+				fn:        s.onWeeklyAlert,
+			}
 		}
 	}
 	s.txt[fqdn] = append(live, txtValue{value: value, expires: now.Add(txtTTL)})
-	s.mu.Unlock()
-	if alertNeeded && alertFn != nil {
-		alertFn(alertUsed, alertAllowance, alertThreshold)
-	}
-	return nil
+	return alert, nil
 }
 
 // countLocked applies the per-pen weekly cap, per-pen hourly burst cap, and

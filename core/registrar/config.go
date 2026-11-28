@@ -69,8 +69,9 @@ func parseCSV(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
-	var out []string
-	for _, p := range strings.Split(raw, ",") {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
 		}
