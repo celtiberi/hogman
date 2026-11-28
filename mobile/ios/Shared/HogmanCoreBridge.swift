@@ -93,28 +93,39 @@ public enum HogmanCoreBridge {
         lock.unlock()
         oldBox?.release()
 
-        let json: String = try DeviceKeyStore.withStateKey { keyPtr, keyLen in
-            dataDir.withCString { cDir in
-                zone.withCString { cZone in
-                    upstreamDNSJSON.withCString { cDNS in
-                        takeCString(
-                            hogman_start_tunnel(
-                                UnsafeMutablePointer(mutating: cDir),
-                                UnsafeMutablePointer(mutating: keyPtr),
-                                keyLen,
-                                UnsafeMutablePointer(mutating: cZone),
-                                mtu,
-                                UnsafeMutablePointer(mutating: cDNS),
-                                nil,
-                                cReconfigTrampoline,
-                                newBox.toOpaque()
+        do {
+            let json: String = try DeviceKeyStore.withStateKey { keyPtr, keyLen in
+                dataDir.withCString { cDir in
+                    zone.withCString { cZone in
+                        upstreamDNSJSON.withCString { cDNS in
+                            takeCString(
+                                hogman_start_tunnel(
+                                    UnsafeMutablePointer(mutating: cDir),
+                                    UnsafeMutablePointer(mutating: keyPtr),
+                                    keyLen,
+                                    UnsafeMutablePointer(mutating: cZone),
+                                    mtu,
+                                    UnsafeMutablePointer(mutating: cDNS),
+                                    nil,
+                                    cReconfigTrampoline,
+                                    newBox.toOpaque()
+                                )
                             )
-                        )
+                        }
                     }
                 }
             }
+            return try decodeEnvelope(json, as: TunnelStatus.self)
+        } catch {
+            // Stop any partially started tunnel before releasing the callback context.
+            _ = takeCString(hogman_stop_tunnel())
+            lock.lock()
+            let failedBox = activeReconfigBox
+            activeReconfigBox = nil
+            lock.unlock()
+            failedBox?.release()
+            throw error
         }
-        return try decodeEnvelope(json, as: TunnelStatus.self)
     }
 
     public static func updateNetwork(upstreamDNSJSON: String = "[]", linkChanged: Bool) throws {

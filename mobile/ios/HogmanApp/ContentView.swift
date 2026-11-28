@@ -219,7 +219,7 @@ struct ContentView: View {
                     }
                     if manager.status.state == "connected",
                        let zone = manager.status.zone,
-                       let url = URL(string: manager.status.portal ?? "https://home.\(zone)") {
+                       let url = HogmanValidation.homeURL(forZone: zone) {
                         Button {
                             openURL(url)
                         } label: {
@@ -304,7 +304,7 @@ struct ContentView: View {
                             .cornerRadius(16)
                     }
                 }
-                if isConnected, let url = URL(string: pen.portal.isEmpty ? "https://home.\(pen.zone)" : pen.portal) {
+                if isConnected, let url = HogmanValidation.homeURL(forZone: pen.zone) {
                     Button("Open Home") {
                         openURL(url)
                     }
@@ -329,7 +329,7 @@ private struct JoinPenSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var rawLink = ""
-    @State private var pastedFromClipboard = false
+    @State private var pasteChangeCount: Int?
     @State private var parsed: ParsedLink?
     @State private var parseErr: String?
     @State private var handle = ""
@@ -350,10 +350,11 @@ private struct JoinPenSheet: View {
                         .disabled(submitting)
 
                         Button("Paste link") {
+                            let count = UIPasteboard.general.changeCount
                             if let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
                                !clip.isEmpty {
                                 rawLink = clip
-                                pastedFromClipboard = true
+                                pasteChangeCount = count
                                 submitErr = nil
                             } else {
                                 submitErr = "Clipboard is empty."
@@ -410,8 +411,11 @@ private struct JoinPenSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                        .disabled(submitting)
+                    Button("Cancel") {
+                        clearClipboardIfUnchanged()
+                        dismiss()
+                    }
+                    .disabled(submitting)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(submitting ? "Joining…" : "Join") {
@@ -422,10 +426,14 @@ private struct JoinPenSheet: View {
             }
         }
         .preferredColorScheme(.dark)
+        .onDisappear {
+            clearClipboardIfUnchanged()
+        }
         .fullScreenCover(isPresented: $showScanner) {
             QrScannerSheet(
                 onScanned: { text in
                     rawLink = text
+                    pasteChangeCount = nil
                     showScanner = false
                     validate(text)
                 },
@@ -454,6 +462,14 @@ private struct JoinPenSheet: View {
         }
     }
 
+    private func clearClipboardIfUnchanged() {
+        guard let count = pasteChangeCount else { return }
+        if UIPasteboard.general.changeCount == count {
+            UIPasteboard.general.items = []
+        }
+        pasteChangeCount = nil
+    }
+
     private func submit() {
         submitting = true
         submitErr = nil
@@ -464,12 +480,11 @@ private struct JoinPenSheet: View {
         Task {
             do {
                 let meta = try await manager.join(rawLink: linkCopy, handle: handleCopy, deviceName: devCopy)
-                if pastedFromClipboard {
-                    UIPasteboard.general.items = []
-                }
+                clearClipboardIfUnchanged()
                 submitting = false
                 onJoined(meta)
             } catch {
+                clearClipboardIfUnchanged()
                 submitting = false
                 submitErr = error.localizedDescription
             }
@@ -571,5 +586,6 @@ private func defaultIOSDeviceName() -> String {
     let collapsed = String(allowed)
         .split(separator: "-")
         .joined(separator: "-")
-    return collapsed.isEmpty ? "iphone" : String(collapsed.prefix(32))
+    // Never truncate (D-56): fall back to "iphone" if device name exceeds 32 chars.
+    return (!collapsed.isEmpty && collapsed.count <= 32) ? collapsed : "iphone"
 }

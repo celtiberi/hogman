@@ -111,31 +111,91 @@ public enum HogmanError: LocalizedError, Equatable {
 }
 
 public enum HogmanValidation {
-    /// Strictly accepts exact IPv4 /32 host routes only (rejects 0.0.0.0/0,
-    /// 100.64.0.0/10, /24, IPv6, and malformed strings).
+    public static let splitDNSStubIP = "100.100.100.100"
+
+    /// Strictly accepts exact IPv4 /32 host routes inside RFC 6598 100.64.0.0/10
+    /// (rejects public IPs like 8.8.8.8/32, LAN ranges, 0.0.0.0/0, 100.64.0.0/10,
+    /// /24, IPv6, and malformed strings).
     public static func parseHost32Route(_ cidr: String) -> String? {
         let trimmed = cidr.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasSuffix("/32") else { return nil }
         let ip = String(trimmed.dropLast(3))
-        return isValidIPv4(ip) ? ip : nil
+        return isInCgnat10064(ip) ? ip : nil
     }
 
     public static func isValidIPv4(_ ip: String) -> Bool {
+        parseIPv4Octets(ip) != nil
+    }
+
+    public static func isInCgnat10064(_ ip: String) -> Bool {
+        guard let (a, b, _, _) = parseIPv4Octets(ip) else { return false }
+        return a == 100 && (64...127).contains(b)
+    }
+
+    private static func parseIPv4Octets(_ ip: String) -> (Int, Int, Int, Int)? {
         let parts = ip.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 4 else { return false }
+        guard parts.count == 4 else { return nil }
+        var octets: [Int] = []
+        octets.reserveCapacity(4)
         for part in parts {
-            guard !part.isEmpty, part.allSatisfy(\.isASCII), part.allSatisfy(\.isNumber),
-                  let val = Int(part), (0...255).contains(val) else {
+            guard !part.isEmpty,
+                  part.allSatisfy(\.isASCII),
+                  part.allSatisfy(\.isNumber),
+                  !(part.count > 1 && part.first == "0"),
+                  let val = Int(part),
+                  (0...255).contains(val) else {
+                return nil
+            }
+            octets.append(val)
+        }
+        return (octets[0], octets[1], octets[2], octets[3])
+    }
+
+    public static func isValidZone(_ zone: String) -> Bool {
+        let z = zone.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard (1...253).contains(z.count),
+              !z.hasPrefix("."),
+              !z.hasSuffix(".") else {
+            return false
+        }
+        let labels = z.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count >= 2 else { return false }
+        for label in labels {
+            guard (1...63).contains(label.count),
+                  label.first != "-",
+                  label.last != "-" else {
                 return false
+            }
+            for ch in label {
+                guard ch.isASCII && (ch.isLowercase || ch.isNumber || ch == "-") else {
+                    return false
+                }
             }
         }
         return true
     }
 
-    public static func validateTunnelReconfig(_ cfg: TunnelReconfig) -> [String]? {
-        guard !cfg.zone.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              isValidIPv4(cfg.selfIpv4),
-              isValidIPv4(cfg.dnsStubIp),
+    /// Always constructs the canonical `https://home.<zone>` URL from a strictly
+    /// validated pen zone, ignoring any untrusted server-supplied portal URL.
+    public static func homeURL(forZone zone: String) -> URL? {
+        let normalized = zone.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard isValidZone(normalized) else { return nil }
+        return URL(string: "https://home.\(normalized)")
+    }
+
+    public static func validateTunnelReconfig(
+        _ cfg: TunnelReconfig,
+        expectedZone: String? = nil
+    ) -> [String]? {
+        let zone = cfg.zone.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard isValidZone(zone) else { return nil }
+        if let expected = expectedZone?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           !expected.isEmpty,
+           zone != expected {
+            return nil
+        }
+        guard isInCgnat10064(cfg.selfIpv4),
+              cfg.dnsStubIp == splitDNSStubIP,
               (1280...9000).contains(cfg.mtu) else {
             return nil
         }
@@ -146,5 +206,13 @@ public enum HogmanValidation {
             routes.append(host)
         }
         return routes.isEmpty ? nil : routes
+    }
+
+    /// Accepts only Darwin kernel utun interface names ("utun" + 1..6 ASCII digits).
+    public static func isValidUtunName(_ name: String) -> Bool {
+        guard name.hasPrefix("utun") else { return false }
+        let suffix = name.dropFirst(4)
+        guard (1...6).contains(suffix.count) else { return false }
+        return suffix.allSatisfy { $0.isASCII && $0.isNumber }
     }
 }

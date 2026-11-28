@@ -11,17 +11,22 @@ public enum DeviceKeyStore {
     private static let lock = NSLock()
 
     /// Returns the backup-excluded directory storing encrypted pen state.
-    /// Uses the shared App Group container when provisioned, falling back to
-    /// Application Support for unsigned Simulator builds.
+    /// Uses the shared App Group container on physical devices; falls back to
+    /// Application Support only on Simulator builds where App Groups are unsigned.
     public static func dataDir() throws -> String {
         let fm = FileManager.default
         let baseURL: URL
         if let groupURL = fm.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) {
             baseURL = groupURL
-        } else if let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-            baseURL = appSupport
         } else {
-            throw HogmanError.storage("Unable to resolve app storage directory.")
+            #if targetEnvironment(simulator)
+            guard let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+                throw HogmanError.storage("Unable to resolve simulator storage directory.")
+            }
+            baseURL = appSupport
+            #else
+            throw HogmanError.storage("Shared App Group container \(appGroupID) is unavailable.")
+            #endif
         }
 
         var dirURL = baseURL.appendingPathComponent("hogman-data", isDirectory: true)
@@ -33,7 +38,9 @@ public enum DeviceKeyStore {
     }
 
     /// Loads (or creates) the 32-byte device-bound DEK, passes a raw pointer to
-    /// `body`, and explicitly zeroes the temporary key buffer before returning.
+    /// `body`, and zeroes the local `[UInt8]` buffer before returning.
+    /// (Note: Keychain bridging allocates transient Foundation `Data` values
+    /// outside our mutable buffer.)
     public static func withStateKey<T>(_ body: (UnsafePointer<UInt8>, Int) throws -> T) throws -> T {
         var key = try loadOrCreateDEK()
         defer {
@@ -66,8 +73,17 @@ public enum DeviceKeyStore {
             throw HogmanError.keychain(rc)
         }
         do {
-            try saveKeychain(dek)
-            return dek
+            let inserted = try saveKeychain(dek)
+            if inserted {
+                return dek
+            }
+            // Another process (app or NetworkExtension) won the Keychain race.
+            // Wipe our losing candidate and load the winning stored key instead.
+            for i in dek.indices { dek[i] = 0 }
+            guard let winner = try queryKeychain() else {
+                throw HogmanError.storage("Device key race detected but Keychain item could not be read.")
+            }
+            return winner
         } catch {
             for i in dek.indices { dek[i] = 0 }
             throw error
@@ -107,7 +123,8 @@ public enum DeviceKeyStore {
         return [UInt8](data)
     }
 
-    private static func saveKeychain(_ dek: [UInt8]) throws {
+    /// Returns true if inserted, false if another process already inserted it.
+    private static func saveKeychain(_ dek: [UInt8]) throws -> Bool {
         var attrs = baseQuery()
         attrs[kSecValueData as String] = Data(dek)
         // Non-cloneable: stays bound to this physical device and never migrates
@@ -116,10 +133,11 @@ public enum DeviceKeyStore {
 
         let status = SecItemAdd(attrs as CFDictionary, nil)
         if status == errSecDuplicateItem {
-            return
+            return false
         }
         guard status == errSecSuccess else {
             throw HogmanError.keychain(status)
         }
+        return true
     }
 }
