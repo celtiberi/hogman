@@ -168,3 +168,5 @@ func unregisterNativeManifests(_ string) {
 		_ = os.Remove(filepath.Join(t.dir, HostName+".json"))
 	}
 }
+
+func stopRunningNativeHosts(_ string) {}

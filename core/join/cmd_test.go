@@ -492,6 +492,32 @@ func TestLinkStdinWithArgErrorsAndDefaults(t *testing.T) {
 	}
 }
 
+func TestJoinSummaryCLILines(t *testing.T) {
+	win := strings.Join(joinSummaryCLILines("windows", "http://127.0.0.1:22413", "acme.pens.example.com"), "\n")
+	for _, want := range []string{
+		"curl.exe --proxy http://127.0.0.1:22413 https://<site>.acme.pens.example.com",
+		`$env:HTTPS_PROXY="http://127.0.0.1:22413"`,
+		`~\hogman.exe leave '<this link>'`,
+	} {
+		if !strings.Contains(win, want) {
+			t.Errorf("windows summary missing %q:\n%s", want, win)
+		}
+	}
+	if strings.Contains(win, "https_proxy=") {
+		t.Errorf("windows summary must not print Unix env-prefix syntax:\n%s", win)
+	}
+
+	unix := strings.Join(joinSummaryCLILines("darwin", "http://127.0.0.1:22413", "acme.pens.example.com"), "\n")
+	for _, want := range []string{
+		"https_proxy=http://127.0.0.1:22413 curl https://<site>.acme.pens.example.com",
+		"To leave: hogman leave '<this link>'",
+	} {
+		if !strings.Contains(unix, want) {
+			t.Errorf("unix summary missing %q:\n%s", want, unix)
+		}
+	}
+}
+
 func TestStartDetachedHiddenCommand(t *testing.T) {
 	var errBuf bytes.Buffer
 	var gotKind, gotDir string

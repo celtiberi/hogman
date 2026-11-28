@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -310,11 +311,19 @@ func printReady(u *ui.UI, c *state.ShareConfig, background, managed bool) {
 			u.Say("  It runs in the background until this computer restarts.")
 		}
 	}
+	stopCmd := shareStopCommand(runtime.GOOS, c.Name)
 	if c.PrivateName {
-		u.Say("  Take it down and retire the private name: hogman share stop %s", c.Name)
+		u.Say("  Take it down and retire the private name: %s", stopCmd)
 	} else {
-		u.Say("  Take it down and give the name back: hogman share stop %s", c.Name)
+		u.Say("  Take it down and give the name back: %s", stopCmd)
 	}
+}
+
+func shareStopCommand(goos, name string) string {
+	if goos == "windows" {
+		return fmt.Sprintf(`~\hogman.exe share stop %s`, name)
+	}
+	return fmt.Sprintf("hogman share stop %s", name)
 }
 
 func fromLink(name, raw string, o StartOptions, u *ui.UI) (*state.ShareConfig, string, error) {

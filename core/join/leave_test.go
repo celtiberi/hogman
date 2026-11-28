@@ -608,8 +608,9 @@ func TestLeaveBareTypoNoNetwork(t *testing.T) {
 func TestLeftoverHogmanBinariesListsHomeCopies(t *testing.T) {
 	home := t.TempDir()
 	other := t.TempDir()
-	self := filepath.Join(other, cliBinaryName())
-	homeCopy := filepath.Join(home, cliBinaryName())
+	binName := state.InstalledBinaryName(runtime.GOOS)
+	self := filepath.Join(other, binName)
+	homeCopy := filepath.Join(home, binName)
 	legacyCopy := filepath.Join(home, state.LegacyBinaryName(runtime.GOOS))
 	for _, p := range []string{self, homeCopy, legacyCopy} {
 		if err := os.WriteFile(p, []byte("bin"), 0o700); err != nil {

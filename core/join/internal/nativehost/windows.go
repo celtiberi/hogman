@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"unsafe"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
 	"hogman/join/internal/fsutil"
@@ -120,4 +123,58 @@ func unregisterNativeManifestsUnder(regPrefix, configBase string) {
 	binDir := filepath.Join(configBase, "bin")
 	_ = os.Remove(filepath.Join(binDir, HostName+".chrome.json"))
 	_ = os.Remove(filepath.Join(binDir, HostName+".firefox.json"))
+}
+
+// stopRunningNativeHosts terminates any running native messaging host process
+// whose executable image resolves to hostPath so Windows releases its file
+// lock during `hogman uninstall`. Called only after unregisterNativeManifests
+// has deleted the registry entries and manifests, so an open browser cannot
+// immediately respawn the host.
+func stopRunningNativeHosts(hostPath string) {
+	if _, err := os.Stat(hostPath); err != nil {
+		return
+	}
+	wantBase := filepath.Base(hostPath)
+	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return
+	}
+	defer windows.CloseHandle(snap)
+
+	selfPID := uint32(os.Getpid())
+	var entry windows.ProcessEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	for err := windows.Process32First(snap, &entry); err == nil; err = windows.Process32Next(snap, &entry) {
+		if entry.ProcessID == 0 || entry.ProcessID == selfPID {
+			continue
+		}
+		if !strings.EqualFold(windows.UTF16ToString(entry.ExeFile[:]), wantBase) {
+			continue
+		}
+		stopVerifiedExeHandle(entry.ProcessID, hostPath)
+	}
+}
+
+func stopVerifiedExeHandle(pid uint32, hostPath string) {
+	access := uint32(windows.PROCESS_QUERY_LIMITED_INFORMATION | windows.PROCESS_TERMINATE | windows.SYNCHRONIZE)
+	h, err := windows.OpenProcess(access, false, pid)
+	if err != nil {
+		return
+	}
+	defer windows.CloseHandle(h)
+
+	if event, err := windows.WaitForSingleObject(h, 0); err != nil || event != uint32(windows.WAIT_TIMEOUT) {
+		return
+	}
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	size := uint32(len(buf))
+	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &size); err != nil || size == 0 {
+		return
+	}
+	gotExe := windows.UTF16ToString(buf[:size])
+	if !fsutil.SameFilePath(gotExe, hostPath) {
+		return
+	}
+	_ = windows.TerminateProcess(h, 0)
+	_, _ = windows.WaitForSingleObject(h, 3000)
 }
