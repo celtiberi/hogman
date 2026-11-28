@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -427,6 +428,9 @@ func (c *Controller) StartTunnel(dataDir string, stateKey []byte, zone string, m
 	sys.Set(encStore)
 
 	dnsStub := NewSplitDNSStub(zone, cb.ProtectFD)
+	if u, err := url.Parse(meta.LoginServer); err == nil && u.Hostname() != "" {
+		dnsStub.SetLoginHost(u.Hostname())
+	}
 	dnsStub.UpdateUpstream(upstreamDNS)
 
 	tundev := sys.Tun.Get()

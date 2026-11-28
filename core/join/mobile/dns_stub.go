@@ -35,13 +35,14 @@ const (
 //     network's upstream DNS servers via protected sockets with zero logging,
 //     zero counting, and zero post-TTL caching.
 type SplitDNSStub struct {
-	mu       sync.RWMutex
-	zone     string // lowercase, no trailing dot
-	penDNS   netip.Addr
-	peers    map[netip.Addr]bool
-	upstream []netip.Addr
-	protect  func(fd int) error
-	sem      chan struct{}
+	mu        sync.RWMutex
+	zone      string // lowercase, no trailing dot
+	loginHost string // lowercase control/login host exempted from pen-internal DNS
+	penDNS    netip.Addr
+	peers     map[netip.Addr]bool
+	upstream  []netip.Addr
+	protect   func(fd int) error
+	sem       chan struct{}
 
 	// Optional hooks for deterministic unit testing.
 	forwardPen      func(ctx context.Context, raw []byte, server netip.Addr) ([]byte, error)
@@ -85,20 +86,34 @@ func (s *SplitDNSStub) UpdateUpstream(servers []netip.Addr) {
 	s.mu.Unlock()
 }
 
+// SetLoginHost registers the pen's public control/login hostname so self-hosted
+// pens whose PUBLIC_HOST lives inside or at the apex of ZONE still resolve via
+// public upstream DNS while the split tunnel is active.
+func (s *SplitDNSStub) SetLoginHost(host string) {
+	norm := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	s.mu.Lock()
+	s.loginHost = norm
+	s.mu.Unlock()
+}
+
 // InZone reports whether qname (with or without trailing dot) belongs strictly
-// to the pen's zone (exact zone or subdomain label boundary).
+// to the pen's internal zone (excluding the public control/login host).
 func (s *SplitDNSStub) InZone(qname string) bool {
 	s.mu.RLock()
 	zone := s.zone
+	loginHost := s.loginHost
 	s.mu.RUnlock()
-	return hostInZone(qname, zone)
+	return hostInPenDNS(qname, zone, loginHost)
 }
 
-func hostInZone(qname, zone string) bool {
+func hostInPenDNS(qname, zone, loginHost string) bool {
 	if zone == "" {
 		return false
 	}
 	name := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(qname), "."))
+	if loginHost != "" && name == loginHost {
+		return false
+	}
 	return name == zone || strings.HasSuffix(name, "."+zone)
 }
 
@@ -166,12 +181,13 @@ func (s *SplitDNSStub) ResolveWire(ctx context.Context, raw []byte) ([]byte, err
 
 	s.mu.RLock()
 	zone := s.zone
+	loginHost := s.loginHost
 	penDNS := s.penDNS
 	peers := s.peers
 	upstream := s.upstream
 	s.mu.RUnlock()
 
-	if hostInZone(q.Name, zone) {
+	if hostInPenDNS(q.Name, zone, loginHost) {
 		return s.resolvePenQuery(ctx, &req, raw, penDNS, peers)
 	}
 	// Non-pen query: forward directly to upstream without logging, counting,

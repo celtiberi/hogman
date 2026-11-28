@@ -123,4 +123,19 @@ func TestSplitDNSStubFiltersNonPeerAndAAAAForPenZone(t *testing.T) {
 	if penCalls != 1 || upstreamCalls != 2 {
 		t.Fatalf("calls after public queries = (pen:%d, upstream:%d), want (1, 2)", penCalls, upstreamCalls)
 	}
+
+	// 4. Self-hosted login/control host inside or at apex of zone must resolve via upstream.
+	stub.SetLoginHost("join.bobo.pens.example.com")
+	if stub.InZone("join.bobo.pens.example.com") {
+		t.Fatal("loginHost must be exempted from pen-internal DNS")
+	}
+	outLogin, err := stub.ResolveWire(context.Background(), packQuery(t, "join.bobo.pens.example.com", dns.TypeA))
+	if err != nil {
+		t.Fatalf("ResolveWire(loginHost): %v", err)
+	}
+	var respLogin dns.Msg
+	_ = respLogin.Unpack(outLogin)
+	if len(respLogin.Answer) != 1 || upstreamCalls != 3 || penCalls != 1 {
+		t.Fatalf("loginHost routed wrongly: answers=%d pen=%d upstream=%d", len(respLogin.Answer), penCalls, upstreamCalls)
+	}
 }
