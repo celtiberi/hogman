@@ -261,4 +261,86 @@ test('join-page extension install button and copy use same-origin icon and offic
   assert.ok(html.includes('open its popup and turn on <code id="vpn-zone">this pen</code>'));
   assert.ok(html.includes('open its popup and turn on <code id="win-proxy-zone">this pen</code>. No proxy settings needed'));
   assert.ok(html.includes('open its popup and turn on <code id="win-vpn-zone">this pen</code>'));
+  assert.ok(!html.includes('hogman://'), 'join-page must never use custom hogman:// URL schemes for secrets');
+});
+
+test('initJoinPage shows mobile copy-and-paste instructions on phones and refuses share links on phones', async () => {
+  const makeFixture = () => {
+    const elems = new Map();
+    for (const id of [
+      'err', 'what', 'title', 'main', 'mobile-panel', 'mobile-copy', 'mobile-copied',
+      'brand-link', 'brand-name', 'brand-tag', 'gate-pill', 'nav-links', 'vpn-note',
+      'win-vpn-note', 'foot-tagline', 'foot-links', 'lead',
+    ]) {
+      elems.set(id, {
+        id,
+        textContent: '',
+        hidden: id === 'err' || id === 'main' || id === 'mobile-panel',
+        dataset: {},
+        onclick: null,
+        setAttribute() {},
+        replaceChildren() {},
+      });
+    }
+    const doc = {
+      documentElement: { dataset: {} },
+      title: '',
+      getElementById: id => elems.get(id) || null,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      createElement: tag => ({ tag }),
+      createTextNode: text => ({ text }),
+    };
+    return { elems, doc };
+  };
+
+  // Invite link on iPhone shows mobile panel and copies cleanLink (never uses hogman://).
+  const f1 = makeFixture();
+  let copied = '';
+  await initJoinPage({
+    doc: f1.doc,
+    loc: { hash: '#t=mob123', host: HOST, pathname: '/join' },
+    nav: {
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)',
+      clipboard: { writeText: async text => { copied = text; } },
+    },
+    storage: null,
+    hist: { replaceState() {} },
+    fetchFn: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ zone: 'demo.pens.hogman.network', cert_mode: 'public', theme: '' }),
+    }),
+  });
+  assert.equal(f1.elems.get('err').hidden, true);
+  assert.equal(f1.elems.get('main').hidden, true);
+  assert.equal(f1.elems.get('mobile-panel').hidden, false);
+  assert.equal(f1.elems.get('title').textContent, 'Join demo.pens.hogman.network');
+  await f1.elems.get('mobile-copy').onclick();
+  assert.equal(copied, `https://${HOST}/join#t=mob123`);
+  assert.ok(f1.elems.get('mobile-copied').textContent.includes('Paste link'));
+
+  // Server share link on Android is refused cleanly.
+  const f2 = makeFixture();
+  await initJoinPage({
+    doc: f2.doc,
+    loc: { hash: '#k=srv123&for=share', host: HOST, pathname: '/join' },
+    nav: {
+      userAgent: 'Mozilla/5.0 (Linux; Android 16; Pixel 9)',
+      clipboard: { writeText: async () => {} },
+    },
+    storage: null,
+    hist: { replaceState() {} },
+    fetchFn: async () => { throw new Error('should not fetch for share link on mobile'); },
+  });
+  assert.equal(f2.elems.get('err').hidden, false);
+  assert.ok(f2.elems.get('err').textContent.includes('Share links are for computers'));
+  assert.equal(f2.elems.get('mobile-panel').hidden, true);
+});
+
+test('portal QR onboarding copy reflects mobile app support and single-use 1-hour expiry', () => {
+  const html = fs.readFileSync(new URL('../../portal/index.html', import.meta.url), 'utf8');
+  assert.ok(!html.includes('(coming soon)'), 'portal phone QR copy should not say coming soon');
+  assert.ok(html.includes('works once, valid for 1 hour'));
+  assert.ok(!html.includes('hogman://'), 'portal must never emit custom hogman:// links');
 });

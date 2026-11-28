@@ -123,14 +123,49 @@ export function initJoinPage({
     return Promise.resolve();
   }
 
-  // Phones can't run the join command. Say so plainly instead of showing it.
-  if (/iPhone|iPad|iPod|Android/i.test(nav.userAgent)) {
-    err('Phones can\'t join yet: the Hogman phone app is coming soon. ' +
-        'For now, open this link on a macOS, Linux, or Windows computer.');
-    return Promise.resolve();
+  const { kind, forShare, cleanLink } = parsed;
+  const isMobile = /iPhone|iPad|iPod|Android/i.test(nav.userAgent);
+  if (isMobile) {
+    if (forShare) {
+      err('Share links are for computers hosting a site or folder. ' +
+          'Open this link on a macOS, Linux, or Windows computer.');
+      return Promise.resolve();
+    }
+    if ($('mobile-copy')) {
+      $('mobile-copy').onclick = async () => {
+        try {
+          await nav.clipboard.writeText(cleanLink);
+          if ($('mobile-copied')) {
+            $('mobile-copied').textContent = 'Copied. Open the Hogman app and tap Paste link.';
+          }
+        } catch (_) {
+          if ($('mobile-copied')) {
+            $('mobile-copied').textContent = 'Copy failed — copy the link from where it was sent and paste it into the Hogman app.';
+          }
+        }
+      };
+    }
+    return fetchFn('/hogman/v1/network').then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(n => {
+      if (!n || !n.zone) throw new Error('missing zone');
+      if (n.cert_mode && n.cert_mode !== 'public') {
+        err('This network returned an unrecognized certificate mode.');
+        return;
+      }
+      const isWork = n.theme === 'work';
+      $('title').textContent = 'Join ' + n.zone;
+      if (isWork) {
+        applyWorkTheme(doc, n.zone, false);
+      }
+      $('what').textContent = kind === 'invite'
+        ? (isWork ? 'You have been invited to join this private network. This link works once.' : 'You have been invited. This link works once.')
+        : 'Add another device. This link works once, for an hour.';
+      if ($('mobile-panel')) $('mobile-panel').hidden = false;
+    }).catch(() => err('Could not reach the network. Try again shortly.'));
   }
 
-  const { kind, forShare, cleanLink } = parsed;
   const host = loc.host;
   let isWorkTheme = false;
   let activeOS = /Windows/.test(nav.userAgent) ? 'win' : 'unix';
