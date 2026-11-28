@@ -145,13 +145,13 @@ All string returns are heap-allocated UTF-8 JSON (`{"ok":true,...}` or `{"ok":fa
 | Function | Purpose |
 |---|---|
 | `hogman_parse_link(raw_link)` | Validates `#t=` / `#k=` link using `internal/link`; rejects `for=share` server links; returns `{host, kind, for_share}`. |
-| `hogman_join(data_dir, state_key_hex, raw_link, handle, device_name, control_ca_pem)` | Fetches `/hogman/v1/network`, redeems `#t=` invite (or validates `#k=`), persists `<data_dir>/pens/<zone>/config.json` + AEAD-encrypted one-time `authkey`, returns pen metadata (`zone`, `portal`, `handle`, `hostname`). `control_ca_pem` is rejected/ignored in release builds. |
+| `hogman_join(data_dir, state_key, state_key_len, raw_link, handle, device_name, control_ca_pem)` | Validates `state_key_len == 32` (`const uint8_t*`, copied into a mutable `[]byte` and zeroed on return), fetches `/hogman/v1/network`, redeems `#t=` invite (or validates `#k=`), persists `<data_dir>/pens/<zone>/pen.json` + AEAD-encrypted one-time `authkey.enc`, returns pen metadata (`zone`, `portal`, `handle`, `hostname`). `control_ca_pem` is rejected/ignored in release builds. |
 | `hogman_list_pens(data_dir)` | Lists enrolled pens (`zone`, `portal`, `hostname`, `dns_server`). |
-| `hogman_start_tunnel(data_dir, state_key_hex, zone, tun_fd, mtu, upstream_dns_json, protect_cb, reconfig_cb)` | Starts `wgengine` + `ipnlocal` backed by the AEAD-encrypted `ipn.StateStore` on `tun_fd`, registers `protect_cb` (Android `VpnService.protect`), deletes the one-time `authkey` once enrolled, resolves `tag:infra` DNS IP, and invokes `reconfig_cb` with `{self_ipv4, dns_ip, zone, mtu, peer_routes}` whenever IP, DNS peer, or `tag:infra`/`tag:server` netmap peers change. |
+| `hogman_start_tunnel(data_dir, state_key, state_key_len, zone, mtu, upstream_dns_json, protect_cb, reconfig_cb, user_data)` | Validates `state_key_len == 32`, starts `wgengine` + `ipnlocal` backed by the AEAD-encrypted `ipn.StateStore` on `SwappableTUN`, registers `protect_cb` (Android `VpnService.protect`), deletes `authkey.enc` once enrolled, resolves `tag:infra` DNS IP, and invokes `reconfig_cb` with `{self_ipv4, dns_ip, dns_stub_ip, zone, mtu, peer_routes}` (`reconfig_cb` returns a new TUN fd `>= 0`, `-1` to keep existing TUN, or `-2` on fatal OS VPN error). |
 | `hogman_update_network(upstream_dns_json, link_changed)` | Refreshes Android split-DNS upstream resolvers and triggers `netmon` / WireGuard rebind on Wi-Fi ↔ cellular switches. |
-| `hogman_status()` | Returns `{state, zone, portal, self_ipv4, dns_ip, needs_login, error}`. |
-| `hogman_stop_tunnel()` | Gracefully shuts down the active tunnel engine and releases resources. |
-| `hogman_leave(data_dir, state_key_hex, zone, force)` | Calls self-delete when reachable (enforcing sole-owner safety unless `force`), stops the tunnel if active for `zone`, and deletes `<data_dir>/pens/<zone>`. UI must require typing the exact pen name before passing `force=true` (matching D-39). |
+| `hogman_status()` | Returns `{state, zone, portal, self_ipv4, dns_ip, peer_routes, needs_login, error}`. |
+| `hogman_stop_tunnel()` | Gracefully shuts down the active tunnel engine, releases resources, and zeroes the in-memory DEK `[]byte`. |
+| `hogman_leave(data_dir, state_key, state_key_len, zone, force)` | Calls self-delete over the active tunnel when reachable (enforcing sole-owner safety unless `force`), stops the tunnel if active for `zone`, and deletes `<data_dir>/pens/<zone>`. UI must require typing the exact pen name before passing `force=true` (matching D-39). |
 | `hogman_free(ptr)` | Frees a C string returned by any `hogman_*` call. |
 
 ---
