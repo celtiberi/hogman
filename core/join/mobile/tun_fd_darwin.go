@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/tailscale/wireguard-go/tun"
@@ -35,15 +36,42 @@ func openTUNFromFD(fd, mtu int) (tun.Device, error) {
 	if fd < 0 {
 		return nil, fmt.Errorf("invalid TUN fd %d", fd)
 	}
+	rawName, err := unix.GetsockoptString(fd, darwinSysprotoControl, darwinUtunOptIfname)
+	if err != nil {
+		return nil, fmt.Errorf("resolve utun interface name for fd %d: %w", fd, err)
+	}
+	name := strings.TrimRight(rawName, "\x00")
+	if !isValidDarwinUtunName(name) {
+		return nil, fmt.Errorf("fd %d did not resolve to a valid utun interface name", fd)
+	}
+	return wrapDarwinTUNFD(fd, mtu, name)
+}
+
+func isValidDarwinUtunName(name string) bool {
+	suffix, ok := strings.CutPrefix(name, "utun")
+	if !ok || len(suffix) == 0 || len(suffix) > 6 {
+		return false
+	}
+	for i := 0; i < len(suffix); i++ {
+		if suffix[i] < '0' || suffix[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func wrapDarwinTUNFD(fd, mtu int, name string) (tun.Device, error) {
+	if fd < 0 {
+		return nil, fmt.Errorf("invalid TUN fd %d", fd)
+	}
+	if name == "" {
+		return nil, errors.New("utun interface name is required")
+	}
 	if mtu < MinTunnelMTU || mtu > MaxTunnelMTU {
 		mtu = DefaultTunnelMTU
 	}
 	if err := unix.SetNonblock(fd, true); err != nil {
 		return nil, fmt.Errorf("set nonblock on utun fd %d: %w", fd, err)
-	}
-	name, err := unix.GetsockoptString(fd, darwinSysprotoControl, darwinUtunOptIfname)
-	if err != nil || name == "" {
-		name = "utun0"
 	}
 	f := os.NewFile(uintptr(fd), name)
 	if f == nil {

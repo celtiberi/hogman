@@ -4,11 +4,38 @@ package mobile
 
 import (
 	"bytes"
+	"os"
 	"testing"
 
 	"github.com/tailscale/wireguard-go/tun"
 	"golang.org/x/sys/unix"
 )
+
+func TestOpenTUNFromFDRejectsNonUtunFDNoFallback(t *testing.T) {
+	// 1. Non-socket fd (pipe): UTUN_OPT_IFNAME fails with ENOTSOCK.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+	if dev, err := openTUNFromFD(int(r.Fd()), 1280); err == nil {
+		_ = dev.Close()
+		t.Fatal("openTUNFromFD succeeded on pipe fd; expected error with no utun0 fallback")
+	}
+
+	// 2. Non-utun socketpair fd: must also reject invalid non-"utun<N>" name.
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatalf("Socketpair: %v", err)
+	}
+	defer unix.Close(fds[0])
+	defer unix.Close(fds[1])
+	if dev, err := openTUNFromFD(fds[0], 1280); err == nil {
+		_ = dev.Close()
+		t.Fatal("openTUNFromFD succeeded on AF_UNIX socketpair; expected error with no utun0 fallback")
+	}
+}
 
 func TestDarwinUnmonitoredTUNRoundTrip(t *testing.T) {
 	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
@@ -17,13 +44,16 @@ func TestDarwinUnmonitoredTUNRoundTrip(t *testing.T) {
 	}
 	defer unix.Close(fds[1])
 
-	dev, err := openTUNFromFD(fds[0], 1280)
+	dev, err := wrapDarwinTUNFD(fds[0], 1280, "utun_test")
 	if err != nil {
 		unix.Close(fds[0])
-		t.Fatalf("openTUNFromFD: %v", err)
+		t.Fatalf("wrapDarwinTUNFD: %v", err)
 	}
 	defer dev.Close()
 
+	if name, err := dev.Name(); err != nil || name != "utun_test" {
+		t.Fatalf("Name = (%q, %v), want (utun_test, nil)", name, err)
+	}
 	if mtu, err := dev.MTU(); err != nil || mtu != 1280 {
 		t.Fatalf("MTU = (%d, %v), want (1280, nil)", mtu, err)
 	}
