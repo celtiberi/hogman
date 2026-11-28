@@ -8,3 +8,6 @@
 __pycache__/
 *.pyc
 mobile/build/
+mobile/ios/DerivedData/
+mobile/ios/build/
+mobile/ios/Hogman.xcodeproj/xcuserdata/
