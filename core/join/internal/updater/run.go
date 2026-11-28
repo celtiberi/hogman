@@ -57,16 +57,58 @@ func Run(args []string, o Options, u *ui.UI) error {
 		return err
 	}
 
-	metaClient, err := HTTPClient(o.ControlCA, plan.ControlCA, plan.Host, 30*time.Second)
+	binURL, wantHex, err := fetchUpdateTarget(plan, binName, o, u)
 	if err != nil {
 		return err
 	}
-	var sumsURL, binURL string
+
+	st := assessUpdateState(plan, configBase, selfPath, wantHex)
+	if st.selfNeedsUpdate && st.pkgManaged && !o.DryRun {
+		return link.Errorf("%s is managed by %s — upgrade with: %s\n"+
+			"  (after upgrading, run '%s update' if any background agents need syncing)",
+			selfPath, st.pkgMgr, st.pkgUpgradeCmd, o.binaryName())
+	}
+
+	if !st.anyUpdate() {
+		u.Say("\n✓ %s is already up to date (%s).", o.binaryName(), wantHex)
+		if !o.DryRun {
+			WarnMissingSystemProxyServices(state.LoadInstalledPenConfigs(configBase), u)
+		}
+		return nil
+	}
+
+	if o.DryRun {
+		printDryRun(plan, &st, selfPath, wantHex, u)
+		return nil
+	}
+
+	if err := stageUpdatedBinaries(plan, &st, configBase, selfPath, binName, binURL, wantHex, o, u); err != nil {
+		return err
+	}
+	if err := migrateTargets(plan, &st, configBase, selfPath, wantHex, o, u); err != nil {
+		return err
+	}
+
+	if verLine := QueryBinaryVersionLine(selfPath); verLine != "" {
+		u.Say("\n✓ Updated %s (SHA-256 %s).", verLine, wantHex)
+	} else {
+		u.Say("\n✓ Updated hogman (SHA-256 %s).", wantHex)
+	}
+	WarnMissingSystemProxyServices(state.LoadInstalledPenConfigs(configBase), u)
+	return nil
+}
+
+func fetchUpdateTarget(plan *Plan, binName string, o Options, u *ui.UI) (binURL, wantHex string, err error) {
+	metaClient, err := HTTPClient(o.ControlCA, plan.ControlCA, plan.Host, 30*time.Second)
+	if err != nil {
+		return "", "", err
+	}
+	var sumsURL string
 	if plan.FromRelease {
 		u.Step("Checking GitHub Releases for updates (%s)", binName)
 		ver, tag, dlBase, err := FetchLatestReleaseTag(metaClient, plan.ReleaseBase)
 		if err != nil {
-			return err
+			return "", "", err
 		}
 		u.Note("latest release: %s (%s)", ver, tag)
 		sumsURL = dlBase + "/hogman-SHA256SUMS"
@@ -76,30 +118,65 @@ func Run(args []string, o Options, u *ui.UI) error {
 		sumsURL = plan.BaseURL + "/join/dl/SHA256SUMS"
 		binURL = plan.BaseURL + "/join/dl/" + binName
 	}
-	wantHex, err := FetchExpectedSHA256URL(metaClient, sumsURL, binName)
+	wantHex, err = FetchExpectedSHA256URL(metaClient, sumsURL, binName)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	u.Note("expected SHA-256: %s", wantHex)
+	return binURL, wantHex, nil
+}
 
-	selfHash, _ := fsutil.FileSHA256(selfPath)
-	selfNeedsUpdate := !DigestEqualHex(selfHash, wantHex)
+type updateAssessment struct {
+	selfPath             string
+	selfHash             string
+	selfNeedsUpdate      bool
+	pkgMgr               string
+	pkgUpgradeCmd        string
+	pkgManaged           bool
+	instName             string
+	oldInstName          string
+	canonicalBin         string
+	canonicalNeeded      bool
+	canonicalNeedsUpdate bool
+	nhBin                string
+	nhNeedsUpdate        bool
+	oldBinCanonical      string
+	hasOldBinCanonical   bool
+	anyLegacy            bool
+	anyInterrupted       bool
+	anyStaleAgent        bool
+}
 
-	pkgMgr, pkgUpgradeCmd, pkgManaged := DetectPackageManager(selfPath, runtime.GOOS)
-	if selfNeedsUpdate && pkgManaged && !o.DryRun {
-		return link.Errorf("%s is managed by %s — upgrade with: %s\n"+
-			"  (after upgrading, run '%s update' if any background agents need syncing)",
-			selfPath, pkgMgr, pkgUpgradeCmd, o.binaryName())
+func (a *updateAssessment) legacyCopyIn(dir string) string {
+	for _, name := range []string{a.instName, a.oldInstName} {
+		p := filepath.Join(dir, name)
+		if fsutil.SameFilePath(p, a.selfPath) || fsutil.SameFilePath(p, a.canonicalBin) {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
 	}
+	return ""
+}
 
+func (a *updateAssessment) anyUpdate() bool {
+	return a.selfNeedsUpdate || a.canonicalNeedsUpdate || a.nhNeedsUpdate ||
+		a.anyLegacy || a.anyInterrupted || a.anyStaleAgent
+}
+
+func assessUpdateState(plan *Plan, configBase, selfPath, wantHex string) updateAssessment {
+	selfHash, _ := fsutil.FileSHA256(selfPath)
+	pkgMgr, pkgUpgradeCmd, pkgManaged := DetectPackageManager(selfPath, runtime.GOOS)
 	instName := state.InstalledBinaryName(runtime.GOOS)
 	oldInstName := state.LegacyBinaryName(runtime.GOOS)
 	canonicalBin := state.CanonicalBinaryPath(configBase)
+	nhBin := nativehost.BinaryPath(configBase)
+
 	canonicalNeeded := len(plan.Pens) > 0 || len(plan.Shares) > 0
 	if _, err := os.Stat(canonicalBin); err == nil {
 		canonicalNeeded = true
 	}
-	nhBin := nativehost.BinaryPath(configBase)
 	if _, err := os.Lstat(nhBin); err == nil {
 		canonicalNeeded = true
 	}
@@ -121,20 +198,6 @@ func Run(args []string, o Options, u *ui.UI) error {
 		}
 	}
 
-	legacyCopyIn := func(dir string) string {
-		for _, name := range []string{instName, oldInstName} {
-			p := filepath.Join(dir, name)
-			if fsutil.SameFilePath(p, selfPath) || fsutil.SameFilePath(p, canonicalBin) {
-				continue
-			}
-			if _, err := os.Stat(p); err == nil {
-				return p
-			}
-		}
-		return ""
-	}
-	hasLegacyCopy := func(dir string) bool { return legacyCopyIn(dir) != "" }
-
 	oldBinCanonical := filepath.Join(configBase, "bin", oldInstName)
 	hasOldBinCanonical := false
 	if !fsutil.SameFilePath(oldBinCanonical, selfPath) && !fsutil.SameFilePath(oldBinCanonical, canonicalBin) {
@@ -143,92 +206,101 @@ func Run(args []string, o Options, u *ui.UI) error {
 		}
 	}
 
-	anyLegacy := hasOldBinCanonical
-	anyInterrupted := false
-	anyStaleAgent := false
+	st := updateAssessment{
+		selfPath:             selfPath,
+		selfHash:             selfHash,
+		selfNeedsUpdate:      !DigestEqualHex(selfHash, wantHex),
+		pkgMgr:               pkgMgr,
+		pkgUpgradeCmd:        pkgUpgradeCmd,
+		pkgManaged:           pkgManaged,
+		instName:             instName,
+		oldInstName:          oldInstName,
+		canonicalBin:         canonicalBin,
+		canonicalNeeded:      canonicalNeeded,
+		canonicalNeedsUpdate: canonicalNeedsUpdate,
+		nhBin:                nhBin,
+		nhNeedsUpdate:        nhNeedsUpdate,
+		oldBinCanonical:      oldBinCanonical,
+		hasOldBinCanonical:   hasOldBinCanonical,
+		anyLegacy:            hasOldBinCanonical,
+	}
+
 	for i := range plan.Pens {
-		if hasLegacyCopy(plan.Pens[i].Dir) {
-			anyLegacy = true
+		if st.legacyCopyIn(plan.Pens[i].Dir) != "" {
+			st.anyLegacy = true
 		}
 		if interrupted, _ := state.ReadUpdatingMarker(plan.Pens[i].Dir); interrupted {
-			anyInterrupted = true
+			st.anyInterrupted = true
 		}
 		if AgentRunningStaleBinary(&plan.Pens[i], wantHex) {
-			anyStaleAgent = true
+			st.anyStaleAgent = true
 		}
 	}
 	for i := range plan.Shares {
-		if hasLegacyCopy(plan.Shares[i].Dir) {
-			anyLegacy = true
+		if st.legacyCopyIn(plan.Shares[i].Dir) != "" {
+			st.anyLegacy = true
 		}
 		if interrupted, _ := state.ReadUpdatingMarker(plan.Shares[i].Dir); interrupted {
-			anyInterrupted = true
+			st.anyInterrupted = true
 		}
 	}
+	return st
+}
 
-	anyUpdate := selfNeedsUpdate || canonicalNeedsUpdate || nhNeedsUpdate || anyLegacy || anyInterrupted || anyStaleAgent
-	if !anyUpdate {
-		u.Say("\n✓ %s is already up to date (%s).", o.binaryName(), wantHex)
-		if !o.DryRun {
-			WarnMissingSystemProxyServices(state.LoadInstalledPenConfigs(configBase), u)
+func printDryRun(plan *Plan, st *updateAssessment, selfPath, wantHex string, u *ui.UI) {
+	u.Step("Dry run: nothing changed. Would update to %s:", wantHex)
+	if st.selfNeedsUpdate {
+		if st.pkgManaged {
+			u.Note("%s is managed by %s (upgrade with: %s)", selfPath, st.pkgMgr, st.pkgUpgradeCmd)
+		} else {
+			u.Note("%s (current %s)", selfPath, FormatDigest(st.selfHash))
 		}
-		return nil
 	}
-
-	if o.DryRun {
-		u.Step("Dry run: nothing changed. Would update to %s:", wantHex)
-		if selfNeedsUpdate {
-			if pkgManaged {
-				u.Note("%s is managed by %s (upgrade with: %s)", selfPath, pkgMgr, pkgUpgradeCmd)
-			} else {
-				u.Note("%s (current %s)", selfPath, FormatDigest(selfHash))
-			}
-		}
-		if canonicalNeedsUpdate {
-			u.Note("%s", canonicalBin)
-		}
-		if nhNeedsUpdate {
-			u.Note("%s", nhBin)
-		}
-		for i := range plan.Pens {
-			if legacy := legacyCopyIn(plan.Pens[i].Dir); legacy != "" {
-				u.Note("consolidate %s -> %s", legacy, canonicalBin)
-			} else if AgentRunningStaleBinary(&plan.Pens[i], wantHex) {
-				u.Note("restart stale %s agent onto %s", plan.Pens[i].Zone, canonicalBin)
-			}
-		}
-		for i := range plan.Shares {
-			if legacy := legacyCopyIn(plan.Shares[i].Dir); legacy != "" {
-				u.Note("consolidate %s -> %s", legacy, canonicalBin)
-			}
-		}
-		if hasOldBinCanonical {
-			u.Note("consolidate %s -> %s", oldBinCanonical, canonicalBin)
-		}
-		return nil
+	if st.canonicalNeedsUpdate {
+		u.Note("%s", st.canonicalBin)
 	}
+	if st.nhNeedsUpdate {
+		u.Note("%s", st.nhBin)
+	}
+	for i := range plan.Pens {
+		if legacy := st.legacyCopyIn(plan.Pens[i].Dir); legacy != "" {
+			u.Note("consolidate %s -> %s", legacy, st.canonicalBin)
+		} else if AgentRunningStaleBinary(&plan.Pens[i], wantHex) {
+			u.Note("restart stale %s agent onto %s", plan.Pens[i].Zone, st.canonicalBin)
+		}
+	}
+	for i := range plan.Shares {
+		if legacy := st.legacyCopyIn(plan.Shares[i].Dir); legacy != "" {
+			u.Note("consolidate %s -> %s", legacy, st.canonicalBin)
+		}
+	}
+	if st.hasOldBinCanonical {
+		u.Note("consolidate %s -> %s", st.oldBinCanonical, st.canonicalBin)
+	}
+}
 
-	if selfNeedsUpdate {
+func stageUpdatedBinaries(plan *Plan, st *updateAssessment, configBase, selfPath, binName, binURL, wantHex string, o Options, u *ui.UI) error {
+	if st.selfNeedsUpdate {
 		if err := CheckDirWritable(filepath.Dir(selfPath)); err != nil {
 			return link.Errorf("cannot update %s (%v). Move hogman to a writable folder or re-run with write permission", selfPath, err)
 		}
 	}
-	if canonicalNeedsUpdate {
-		if err := os.MkdirAll(filepath.Dir(canonicalBin), 0o700); err != nil {
-			return link.Errorf("cannot prepare %s: %v", filepath.Dir(canonicalBin), err)
+	if st.canonicalNeedsUpdate {
+		if err := os.MkdirAll(filepath.Dir(st.canonicalBin), 0o700); err != nil {
+			return link.Errorf("cannot prepare %s: %v", filepath.Dir(st.canonicalBin), err)
 		}
-		if err := CheckDirWritable(filepath.Dir(canonicalBin)); err != nil {
-			return link.Errorf("cannot update %s (%v)", canonicalBin, err)
+		if err := CheckDirWritable(filepath.Dir(st.canonicalBin)); err != nil {
+			return link.Errorf("cannot update %s (%v)", st.canonicalBin, err)
 		}
 	}
-	if nhNeedsUpdate {
-		if err := CheckDirWritable(filepath.Dir(nhBin)); err != nil {
-			return link.Errorf("cannot update %s (%v)", nhBin, err)
+	if st.nhNeedsUpdate {
+		if err := CheckDirWritable(filepath.Dir(st.nhBin)); err != nil {
+			return link.Errorf("cannot update %s (%v)", st.nhBin, err)
 		}
 	}
 
 	verifiedSrc := selfPath
-	if selfNeedsUpdate {
+	if st.selfNeedsUpdate {
 		tmpDir, err := os.MkdirTemp("", "hogman-update-*")
 		if err != nil {
 			return err
@@ -250,44 +322,48 @@ func Run(args []string, o Options, u *ui.UI) error {
 		u.Note("updated %s", selfPath)
 	}
 
-	if canonicalNeedsUpdate {
+	if st.canonicalNeedsUpdate {
 		if !plan.FromRelease {
 			if otherPens := PensOutsidePlan(configBase, plan.Pens); len(otherPens) > 0 {
-				curVer := QueryBinaryVersion(canonicalBin)
+				curVer := QueryBinaryVersion(st.canonicalBin)
 				newVer := QueryBinaryVersion(verifiedSrc)
 				if cmp, ok := CompareReleaseVersions(newVer, curVer); ok && cmp < 0 {
 					return link.Errorf("refusing to downgrade shared binary %s (%s -> %s) from %s while other pens (%s) share it.\n"+
 						"  Run 'hogman update' (without --pen) to update all pens from GitHub Releases.",
-						canonicalBin, curVer, newVer, plan.Host, strings.Join(otherPens, ", "))
+						st.canonicalBin, curVer, newVer, plan.Host, strings.Join(otherPens, ", "))
 				}
 			}
 		}
-		if err := StageAndVerify(verifiedSrc, canonicalBin, wantHex); err != nil {
-			return link.Errorf("could not update %s: %v", canonicalBin, err)
+		if err := StageAndVerify(verifiedSrc, st.canonicalBin, wantHex); err != nil {
+			return link.Errorf("could not update %s: %v", st.canonicalBin, err)
 		}
-		u.Note("updated %s", canonicalBin)
-	}
-	if nhNeedsUpdate {
-		srcForNH := canonicalBin
-		if !canonicalNeeded {
-			srcForNH = verifiedSrc
-		}
-		if err := nativehost.InstallBinary(srcForNH, nhBin); err != nil {
-			u.Note("could not update %s: %v", nhBin, err)
-		} else {
-			u.Note("updated %s", nhBin)
-		}
+		u.Note("updated %s", st.canonicalBin)
 	}
 
-	serviceBin := canonicalBin
-	if fsutil.SameFilePath(selfPath, canonicalBin) || !canonicalNeeded {
+	if st.nhNeedsUpdate {
+		srcForNH := st.canonicalBin
+		if !st.canonicalNeeded {
+			srcForNH = verifiedSrc
+		}
+		if err := nativehost.InstallBinary(srcForNH, st.nhBin); err != nil {
+			u.Note("could not update %s: %v", st.nhBin, err)
+		} else {
+			u.Note("updated %s", st.nhBin)
+		}
+	}
+	return nil
+}
+
+func migrateTargets(plan *Plan, st *updateAssessment, configBase, selfPath, wantHex string, o Options, u *ui.UI) error {
+	serviceBin := st.canonicalBin
+	if fsutil.SameFilePath(selfPath, st.canonicalBin) || !st.canonicalNeeded {
 		serviceBin = selfPath
 	}
 	ops := DefaultPenOps(u)
 	ops.RunningStale = func(p *PenTarget) bool { return AgentRunningStaleBinary(p, wantHex) }
 	shareOps := DefaultShareOps(u)
-	forceAll := selfNeedsUpdate || canonicalNeedsUpdate || hasOldBinCanonical
-	penResults := MigratePens(plan.Pens, serviceBin, selfPath, legacyCopyIn, forceAll, o, ops, u)
+	forceAll := st.selfNeedsUpdate || st.canonicalNeedsUpdate || st.hasOldBinCanonical
+	penResults := MigratePens(plan.Pens, serviceBin, selfPath, st.legacyCopyIn, forceAll, o, ops, u)
 	var failedZones []string
 	var failedShares []string
 	for _, res := range penResults {
@@ -297,7 +373,7 @@ func Run(args []string, o Options, u *ui.UI) error {
 	}
 	for i := range plan.Shares {
 		s := &plan.Shares[i]
-		legacy := legacyCopyIn(s.Dir)
+		legacy := st.legacyCopyIn(s.Dir)
 		interrupted, _ := state.ReadUpdatingMarker(s.Dir)
 		if !forceAll && legacy == "" && !interrupted {
 			continue
@@ -309,15 +385,15 @@ func Run(args []string, o Options, u *ui.UI) error {
 			u.Note("✓ share %s migrated to %s", s.Cfg.FQDN(), serviceBin)
 		}
 	}
-	if hasOldBinCanonical && len(failedZones) == 0 && len(failedShares) == 0 {
-		if err := os.Remove(oldBinCanonical); err == nil {
-			u.Note("consolidated %s -> %s", oldBinCanonical, canonicalBin)
+	if st.hasOldBinCanonical && len(failedZones) == 0 && len(failedShares) == 0 {
+		if err := os.Remove(st.oldBinCanonical); err == nil {
+			u.Note("consolidated %s -> %s", st.oldBinCanonical, st.canonicalBin)
 		}
 	}
 
 	if skipped := PensOutsidePlan(configBase, plan.Pens); len(skipped) > 0 {
 		u.Note("shared binary %s updated from %s; other pens (%s) will use it on next restart (run 'hogman update' to update and restart all pens from GitHub Releases)",
-			canonicalBin, plan.Host, strings.Join(skipped, ", "))
+			st.canonicalBin, plan.Host, strings.Join(skipped, ", "))
 	}
 
 	if len(failedZones) > 0 || len(failedShares) > 0 {
@@ -330,13 +406,6 @@ func Run(args []string, o Options, u *ui.UI) error {
 		}
 		return link.Errorf("updated binary (%s), but %s did not come back online", wantHex, strings.Join(parts, "; "))
 	}
-
-	if verLine := QueryBinaryVersionLine(selfPath); verLine != "" {
-		u.Say("\n✓ Updated %s (SHA-256 %s).", verLine, wantHex)
-	} else {
-		u.Say("\n✓ Updated hogman (SHA-256 %s).", wantHex)
-	}
-	WarnMissingSystemProxyServices(state.LoadInstalledPenConfigs(configBase), u)
 	return nil
 }
 
