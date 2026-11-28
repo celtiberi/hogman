@@ -1,0 +1,1 @@
+- `core/join/mobile`: added shared Go mobile engine (`EncryptedStateStore`, `SwappableTUN`, peer-filtered `SplitDNSStub`, `Controller`, JSON API, and 9-function C-ABI under `core/join/mobile/cabi`) plus `mobile/build-core.sh` for 16 KB page-aligned Android `libhogman.so` and iOS `HogmanCore.xcframework`.
